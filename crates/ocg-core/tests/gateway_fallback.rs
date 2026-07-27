@@ -20,6 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+type DelayedChunks = Vec<(StdDuration, &'static str)>;
+type DelayedResponses = Arc<Mutex<VecDeque<DelayedChunks>>>;
+
 #[derive(Clone)]
 struct MockReply {
     status: u16,
@@ -47,7 +50,7 @@ struct MockState {
 struct DelayedReply {
     status: StatusCode,
     content_type: &'static str,
-    chunks: Vec<(StdDuration, &'static str)>,
+    responses: DelayedResponses,
     calls: Arc<AtomicUsize>,
 }
 
@@ -130,7 +133,7 @@ async fn start_mock_upstream(
 
 async fn start_delayed_messages_upstream(
     content_type: &'static str,
-    chunks: Vec<(StdDuration, &'static str)>,
+    chunks: DelayedChunks,
 ) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
     start_delayed_upstream(StatusCode::OK, content_type, chunks).await
 }
@@ -138,8 +141,17 @@ async fn start_delayed_messages_upstream(
 async fn start_delayed_upstream(
     status: StatusCode,
     content_type: &'static str,
-    chunks: Vec<(StdDuration, &'static str)>,
+    chunks: DelayedChunks,
 ) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
+    start_sequenced_delayed_upstream(status, content_type, vec![chunks]).await
+}
+
+async fn start_sequenced_delayed_upstream(
+    status: StatusCode,
+    content_type: &'static str,
+    responses: Vec<DelayedChunks>,
+) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
+    assert!(!responses.is_empty());
     let calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/v1/chat/completions", post(delayed_reply))
@@ -148,7 +160,7 @@ async fn start_delayed_upstream(
         .with_state(DelayedReply {
             status,
             content_type,
-            chunks,
+            responses: Arc::new(Mutex::new(VecDeque::from(responses))),
             calls: calls.clone(),
         });
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -195,15 +207,22 @@ async fn start_raw_disconnect_upstream(
 
 async fn delayed_reply(State(state): State<DelayedReply>) -> Response {
     state.calls.fetch_add(1, Ordering::Relaxed);
-    let stream =
-        futures_util::stream::unfold(VecDeque::from(state.chunks), |mut chunks| async move {
-            let (delay, chunk) = chunks.pop_front()?;
-            tokio::time::sleep(delay).await;
-            Some((
-                Ok::<_, Infallible>(bytes::Bytes::from_static(chunk.as_bytes())),
-                chunks,
-            ))
-        });
+    let chunks = {
+        let mut responses = state.responses.lock().unwrap();
+        if responses.len() > 1 {
+            responses.pop_front().unwrap()
+        } else {
+            responses.front().unwrap().clone()
+        }
+    };
+    let stream = futures_util::stream::unfold(VecDeque::from(chunks), |mut chunks| async move {
+        let (delay, chunk) = chunks.pop_front()?;
+        tokio::time::sleep(delay).await;
+        Some((
+            Ok::<_, Infallible>(bytes::Bytes::from_static(chunk.as_bytes())),
+            chunks,
+        ))
+    });
     Response::builder()
         .status(state.status)
         .header("content-type", state.content_type)
@@ -1535,6 +1554,94 @@ async fn interrupted_stream_is_outcome_unknown_and_not_replayed() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.status, "outcome_unknown");
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn stream_ending_before_downstream_output_retries_same_account_once() {
+    let (base_url, calls, stop_mock) = start_sequenced_delayed_upstream(
+        StatusCode::OK,
+        "text/event-stream",
+        vec![Vec::new(), vec![(StdDuration::ZERO, CHAT_STREAM_BODY)]],
+    )
+    .await;
+    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = tokio::time::timeout(
+        StdDuration::from_secs(5),
+        protocol_stream_call(port, "/v1/chat/completions", "deepseek-v4-flash"),
+    )
+    .await
+    .expect("the zero-output retry should complete before the watchdog");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"content\":\"ok\""), "{body}");
+    assert!(!body.contains("upstream_outcome_unknown"), "{body}");
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
+    logs.sort_by_key(|log| log.attempt);
+    assert_eq!(logs.len(), 2);
+    assert!(logs.iter().all(|log| log.account_id == "acct-1"));
+    assert_eq!(logs[0].status, "outcome_unknown");
+    assert!(
+        logs[1].status.starts_with("success"),
+        "unexpected successful retry status: {}",
+        logs[1].status
+    );
+    assert_eq!(logs[0].request_id, logs[1].request_id);
+    assert_eq!(
+        logs[0]
+            .diagnostic
+            .as_ref()
+            .and_then(|value| value.get("retry_action"))
+            .and_then(serde_json::Value::as_str),
+        Some("retry_same_account")
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn stream_ending_twice_before_downstream_output_stops_after_one_retry() {
+    let (base_url, calls, stop_mock) = start_sequenced_delayed_upstream(
+        StatusCode::OK,
+        "text/event-stream",
+        vec![Vec::new(), Vec::new()],
+    )
+    .await;
+    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = tokio::time::timeout(
+        StdDuration::from_secs(5),
+        protocol_stream_call(port, "/v1/chat/completions", "deepseek-v4-flash"),
+    )
+    .await
+    .expect("the bounded retry should finish before the watchdog");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("upstream_outcome_unknown"), "{body}");
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
+    logs.sort_by_key(|log| log.attempt);
+    assert_eq!(logs.len(), 2);
+    assert!(logs.iter().all(|log| log.account_id == "acct-1"));
+    let retry_actions = logs
+        .iter()
+        .map(|log| {
+            log.diagnostic
+                .as_ref()
+                .and_then(|value| value.get("retry_action"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(retry_actions, [Some("retry_same_account"), Some("return")]);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());

@@ -805,8 +805,150 @@ async fn forward_request_impl(
         };
 
         let stream_idle_timeout = StdDuration::from_secs(config.stream_idle_timeout_secs);
+        let mut upstream_stream = Box::pin(upstream_resp.bytes_stream());
+        let st = Arc::new(Mutex::new(StreamState::default()));
+        let converter = Arc::new(Mutex::new(StreamConverter::new(plan)));
+        let upstream_format = plan.upstream;
+        let stream_idle_timeout_secs = config.stream_idle_timeout_secs;
+
+        // Keep the retry decision in the request handler, before ForwardResult is
+        // returned. We pre-read only until the converter has data for the client.
+        // If the upstream dies before that point, replaying once cannot duplicate
+        // downstream SSE events. The upstream outcome and quota charge can still
+        // be ambiguous, so the retry remains bounded to the same account.
+        let (initial_chunks, upstream_finished) = loop {
+            let preflight = tokio::time::timeout(stream_idle_timeout, upstream_stream.next()).await;
+            match preflight {
+                Ok(Some(Ok(chunk))) => {
+                    process_chunk_for_usage(&mut st.lock(), upstream_format, &chunk, Some(&model));
+                    let (converted, terminal) = {
+                        let mut converter = converter.lock();
+                        let converted = converter.process_chunk(chunk);
+                        let terminal = converter.is_terminal();
+                        (converted, terminal)
+                    };
+                    match converted {
+                        Ok(chunks) => {
+                            if !chunks.is_empty() || terminal {
+                                break (chunks, terminal);
+                            }
+                        }
+                        Err(error) => {
+                            let detail = format!("stream conversion failed: {}", error.message);
+                            match handle_pre_output_stream_failure(
+                                state,
+                                &st,
+                                &converter,
+                                initial_id,
+                                &pricing_snapshot,
+                                &attempt_context,
+                                plan,
+                                status,
+                                upstream_wait_ms,
+                                StatusCode::BAD_GATEWAY,
+                                "gateway",
+                                "response_transform",
+                                &detail,
+                                false,
+                                allow_same_account_retry,
+                            ) {
+                                PreOutputFailure::Retry(result) => return Ok(result),
+                                PreOutputFailure::Return(chunks) => break (chunks, true),
+                            }
+                        }
+                    }
+                }
+                Ok(Some(Err(error))) => {
+                    let detail = format!("upstream stream interrupted: {error}");
+                    match handle_pre_output_stream_failure(
+                        state,
+                        &st,
+                        &converter,
+                        initial_id,
+                        &pricing_snapshot,
+                        &attempt_context,
+                        plan,
+                        status,
+                        upstream_wait_ms,
+                        StatusCode::BAD_GATEWAY,
+                        "transport",
+                        "stream",
+                        &detail,
+                        true,
+                        allow_same_account_retry,
+                    ) {
+                        PreOutputFailure::Retry(result) => return Ok(result),
+                        PreOutputFailure::Return(chunks) => break (chunks, true),
+                    }
+                }
+                Ok(None) => {
+                    let finished = {
+                        let mut converter = converter.lock();
+                        converter.finish()
+                    };
+                    match finished {
+                        Ok(chunks) => {
+                            break (chunks, true);
+                        }
+                        Err(error) => {
+                            let detail = format!(
+                                "upstream stream ended before a complete response: {}",
+                                error.message
+                            );
+                            match handle_pre_output_stream_failure(
+                                state,
+                                &st,
+                                &converter,
+                                initial_id,
+                                &pricing_snapshot,
+                                &attempt_context,
+                                plan,
+                                status,
+                                upstream_wait_ms,
+                                StatusCode::BAD_GATEWAY,
+                                "gateway",
+                                "response_transform",
+                                &detail,
+                                true,
+                                allow_same_account_retry,
+                            ) {
+                                PreOutputFailure::Retry(result) => return Ok(result),
+                                PreOutputFailure::Return(chunks) => break (chunks, true),
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    let detail = format!(
+                        "upstream stream idle timeout after {}s",
+                        stream_idle_timeout_secs
+                    );
+                    match handle_pre_output_stream_failure(
+                        state,
+                        &st,
+                        &converter,
+                        initial_id,
+                        &pricing_snapshot,
+                        &attempt_context,
+                        plan,
+                        status,
+                        upstream_wait_ms,
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "transport",
+                        "stream",
+                        &detail,
+                        false,
+                        allow_same_account_retry,
+                    ) {
+                        PreOutputFailure::Retry(result) => return Ok(result),
+                        PreOutputFailure::Return(chunks) => break (chunks, true),
+                    }
+                }
+            }
+        };
+
         let stream = futures_util::stream::unfold(
-            (Box::pin(upstream_resp.bytes_stream()), false),
+            (upstream_stream, upstream_finished),
             move |(mut stream, finished)| async move {
                 if finished {
                     return None;
@@ -820,10 +962,6 @@ async fn forward_request_impl(
             },
         );
         let state_h = state.clone();
-        let st = Arc::new(Mutex::new(StreamState::default()));
-        let converter = Arc::new(Mutex::new(StreamConverter::new(plan)));
-        let upstream_format = plan.upstream;
-        let stream_idle_timeout_secs = config.stream_idle_timeout_secs;
 
         let st_map = st.clone();
         let converter_map = converter.clone();
@@ -1174,8 +1312,15 @@ async fn forward_request_impl(
             )
         };
 
+        let initial = futures_util::stream::iter(
+            initial_chunks
+                .into_iter()
+                .map(Ok::<bytes::Bytes, std::io::Error>),
+        );
+
         Ok(ForwardResult {
-            response: response_builder.body(Body::from_stream(mapped.chain(finalizer)))?,
+            response: response_builder
+                .body(Body::from_stream(initial.chain(mapped).chain(finalizer)))?,
             action: ForwardAction::Return,
             error_message: None,
         })
@@ -1532,6 +1677,85 @@ enum StreamRead {
     IdleTimeout,
 }
 
+enum PreOutputFailure {
+    Retry(ForwardResult),
+    Return(Vec<bytes::Bytes>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_pre_output_stream_failure(
+    state: &CoreState,
+    stream_state: &Arc<Mutex<StreamState>>,
+    converter: &Arc<Mutex<StreamConverter>>,
+    log_id: i64,
+    pricing: &PricingSnapshot,
+    attempt: &ForwardAttemptContext,
+    plan: &RequestPlan,
+    upstream_status: StatusCode,
+    upstream_wait_ms: u64,
+    failure_status: StatusCode,
+    error_source: &'static str,
+    error_stage: &'static str,
+    detail: &str,
+    retryable: bool,
+    allow_retry: bool,
+) -> PreOutputFailure {
+    let retry = retryable && allow_retry;
+    let message = if retry {
+        outcome_unknown_retry_message(detail)
+    } else {
+        outcome_unknown_message(detail)
+    };
+    {
+        let mut stream = stream_state.lock();
+        stream.error = true;
+        stream.outcome_unknown = true;
+        stream.error_message = Some(message.clone());
+        stream.diagnostic_recorded = true;
+    }
+    let chunks = converter.lock().outcome_unknown_event(&message);
+    let failure = attempt.failure(FailureSpec {
+        error_source,
+        error_stage,
+        downstream_status: Some(upstream_status.as_u16()),
+        upstream_status: Some(upstream_status.as_u16()),
+        upstream_wait_ms: Some(upstream_wait_ms),
+        retry_action: Some(if retry {
+            "retry_same_account"
+        } else {
+            "return"
+        }),
+        upstream_headers: None,
+        upstream_error: Some(detail),
+        request_body: None,
+    });
+    let diagnostic = failure.update();
+    let db = state.db.lock();
+    if let Err(error) = db.update_forward_log(
+        log_id,
+        "outcome_unknown",
+        None,
+        metadata_metrics(pricing, plan.service_tier.as_deref(), "outcome_unknown"),
+        Some(&message),
+        Some(&diagnostic),
+    ) {
+        let _ = db.log_gateway(
+            "warn",
+            "forwarder",
+            &format!("failed to update streaming row {log_id}: {error}"),
+        );
+    }
+    if retry {
+        PreOutputFailure::Retry(ForwardResult {
+            response: outcome_unknown_response_with_message(plan.client, failure_status, &message),
+            action: ForwardAction::RetrySameAccount,
+            error_message: Some(message),
+        })
+    } else {
+        PreOutputFailure::Return(chunks)
+    }
+}
+
 fn join_chunks(chunks: Vec<bytes::Bytes>) -> bytes::Bytes {
     let capacity = chunks.iter().map(bytes::Bytes::len).sum();
     let mut joined = BytesMut::with_capacity(capacity);
@@ -1813,9 +2037,23 @@ fn outcome_unknown_message(detail: &str) -> String {
     )
 }
 
+fn outcome_unknown_retry_message(detail: &str) -> String {
+    format!(
+        "upstream outcome is unknown: {detail}; the request may have completed and consumed quota; the gateway is retrying it once because no downstream SSE data was emitted"
+    )
+}
+
 fn outcome_unknown_response(format: ApiFormat, status: StatusCode, detail: &str) -> Response {
     let message = outcome_unknown_message(detail);
-    let mut body = error_body(format, "upstream_outcome_unknown", &message);
+    outcome_unknown_response_with_message(format, status, &message)
+}
+
+fn outcome_unknown_response_with_message(
+    format: ApiFormat,
+    status: StatusCode,
+    message: &str,
+) -> Response {
+    let mut body = error_body(format, "upstream_outcome_unknown", message);
     if format == ApiFormat::Gemini {
         body["error"]["code"] = serde_json::json!(status.as_u16());
         body["error"]["status"] = serde_json::json!("UPSTREAM_OUTCOME_UNKNOWN");

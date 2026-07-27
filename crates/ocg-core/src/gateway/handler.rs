@@ -545,13 +545,13 @@ async fn execute_plan(
                                 "warn",
                                 "gateway",
                                 &format!(
-                                    "account {} connection failed before the request was sent; retrying once: {:?}",
+                                    "account {} attempt ended before any downstream response data was emitted; retrying once: {:?}",
                                     account.name, result.error_message
                                 ),
                                 Some(&trace.request_id),
                                 Some(attempt as i64),
-                                Some("transport"),
-                                Some("connect"),
+                                Some("gateway"),
+                                Some("retry"),
                                 Some(trace.elapsed_ms() as i64),
                                 None,
                             );
