@@ -1,6 +1,6 @@
 [package]
 name = "ocg-manager"
-version = "1.5.4"
+version = "1.5.5"
 description = "OpenCode-Go multi-account key manager"
 authors = ["ocg-manager"]
 license-file = "../LICENSE"
