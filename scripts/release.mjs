@@ -322,7 +322,7 @@ async function main() {
       ...buildConfigArgs,
     ], { env: tauriBuildEnvironment });
     const appImage = onlyArtifact(join(bundleRoot, "appimage"), ".AppImage", "AppImage");
-    const prunedAppImage = pruneAppImageWaylandLibs(appImage);
+    const prunedAppImage = pruneAppImageWaylandLibs(appImage, { failClosed: true });
     const appImageName = `ocg-manager_${version}_linux-x64.AppImage`;
     if (updaterPlan.enabled) {
       rmSync(`${prunedAppImage}.sig`, { force: true });
