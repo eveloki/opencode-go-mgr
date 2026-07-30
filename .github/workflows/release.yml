@@ -129,6 +129,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf libfuse2 xvfb xauth xdg-utils dbus-x11
 
+      - name: Download appimagetool (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p .tools
+          curl -fSL -o .tools/appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x .tools/appimagetool
+          echo "APPIMAGETOOL=$(pwd)/.tools/appimagetool" >> "$GITHUB_ENV"
+
       - name: Install macOS Rust targets
         if: runner.os == 'macOS'
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
