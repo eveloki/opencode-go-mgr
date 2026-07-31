@@ -202,10 +202,19 @@ fn select_sticky_global(
     accounts: &[Account],
     exclude_ids: &[&str],
 ) -> Option<Account> {
-    if let Some(current_id) = state.global_account_id.clone()
-        && let Some(account) = AccountSelector::find_available(accounts, &current_id, exclude_ids)
-    {
-        return Some(account);
+    if let Some(current_id) = state.global_account_id.clone() {
+        if let Some(account) = AccountSelector::find_available(accounts, &current_id, exclude_ids) {
+            return Some(account);
+        }
+        // Request-local exclude (e.g. transient 403 failover): pick another account for
+        // this request only when the sticky account is still persistently available.
+        let persistently_available =
+            AccountSelector::find_available(accounts, &current_id, &[]).is_some();
+        let selected = AccountSelector::first_available(accounts, exclude_ids)?;
+        if !persistently_available {
+            state.global_account_id = Some(selected.id.clone());
+        }
+        return Some(selected);
     }
     let selected = AccountSelector::first_available(accounts, exclude_ids)?;
     state.global_account_id = Some(selected.id.clone());
@@ -522,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn sticky_global_switches_when_current_unavailable() {
+    fn sticky_global_transient_exclude_does_not_rewrite_global() {
         let runtime = RoutingRuntime::new();
         let accounts = vec![account("a", true), account("b", true)];
         assert_eq!(
@@ -532,9 +541,60 @@ mod tests {
                 .id,
             "a"
         );
+        // Request-local exclude (e.g. 403/preflight failover): use next account now,
+        // but keep the persistent global sticky on a.
         assert_eq!(
             runtime
                 .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &["a"])
+                .unwrap()
+                .id,
+            "b"
+        );
+        let (global, _, _, _) = runtime.snapshot();
+        assert_eq!(global.as_deref(), Some("a"));
+        assert_eq!(
+            runtime
+                .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &[])
+                .unwrap()
+                .id,
+            "a"
+        );
+    }
+
+    #[test]
+    fn sticky_global_switches_when_current_persistently_unavailable() {
+        let runtime = RoutingRuntime::new();
+        let accounts = vec![account("a", true), account("b", true)];
+        assert_eq!(
+            runtime
+                .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &[])
+                .unwrap()
+                .id,
+            "a"
+        );
+        let disabled = vec![account("a", false), account("b", true)];
+        assert_eq!(
+            runtime
+                .select_account(&disabled, RoutingMode::StickyGlobal, false, None, &[])
+                .unwrap()
+                .id,
+            "b"
+        );
+        let (global, _, _, _) = runtime.snapshot();
+        assert_eq!(global.as_deref(), Some("b"));
+
+        let runtime = RoutingRuntime::new();
+        assert_eq!(
+            runtime
+                .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &[])
+                .unwrap()
+                .id,
+            "a"
+        );
+        let cooled = vec![cooling("a"), account("b", true)];
+        assert_eq!(
+            runtime
+                .select_account(&cooled, RoutingMode::StickyGlobal, false, None, &[])
                 .unwrap()
                 .id,
             "b"

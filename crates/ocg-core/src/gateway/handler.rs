@@ -437,8 +437,11 @@ async fn execute_plan(
     // One logical client request, including safe retries and account fallback,
     // must use one immutable pricing revision from start to finish.
     let pricing_snapshot = state.pricing_snapshot();
-    let conversation_key =
-        resolve_conversation_key(client_format, &plan.model, &headers, &client_body);
+    let conversation_key = if config.conversation_sticky {
+        resolve_conversation_key(client_format, &plan.model, &headers, &client_body)
+    } else {
+        None
+    };
 
     let mut last_error: Option<String> = None;
     let mut failed_ids: Vec<String> = Vec::new();
