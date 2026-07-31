@@ -1318,11 +1318,7 @@ async fn converts_streams_across_chat_messages_and_responses() {
             model: "minimax-m2.7",
             upstream_path: "/v1/chat/completions",
             upstream_body: CHAT_STREAM_BODY,
-            expected_events: &[
-                "\"content\":\"ok\"",
-                "finish_reason",
-                "data: [DONE]",
-            ],
+            expected_events: &["\"content\":\"ok\"", "finish_reason", "data: [DONE]"],
         },
         Case {
             client_path: "/v1/responses",

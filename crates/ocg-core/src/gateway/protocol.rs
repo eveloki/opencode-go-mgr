@@ -1102,10 +1102,7 @@ fn model_protocol(model: &str) -> Option<&'static ModelProtocol> {
         .find(|profile| profile.id == normalized)
 }
 
-fn resolve_upstream_format(
-    client: ApiFormat,
-    model: &str,
-) -> Result<ApiFormat, ProtocolError> {
+fn resolve_upstream_format(client: ApiFormat, model: &str) -> Result<ApiFormat, ProtocolError> {
     match (client, model_protocol(model)) {
         (ApiFormat::Gemini, Some(profile)) => Ok(profile.preferred),
         (ApiFormat::Gemini, None) | (ApiFormat::Responses, None) => Err(ProtocolError::new(
@@ -3944,8 +3941,7 @@ mod tests {
             "tools": [{"type":"function","name":"f","parameters":{"type":"object"}}],
             "tool_choice": {"type":"function","name":"f"}
         });
-        let plan =
-            prepare_request(ApiFormat::Responses, bytes(request)).expect("request converts");
+        let plan = prepare_request(ApiFormat::Responses, bytes(request)).expect("request converts");
         assert_eq!(plan.upstream, ApiFormat::Messages);
         let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
         assert_eq!(body["system"], "system");
@@ -4249,7 +4245,8 @@ mod tests {
             "usage": {"input_tokens": 0, "output_tokens": 5, "cache_read_input_tokens": 40669}
         });
 
-        let responses = transform_response(&plan, &upstream_response).expect("Messages to Responses");
+        let responses =
+            transform_response(&plan, &upstream_response).expect("Messages to Responses");
         assert_eq!(responses["usage"]["input_tokens"], 40669);
         assert_eq!(
             responses["usage"]["input_tokens_details"]["cached_tokens"],

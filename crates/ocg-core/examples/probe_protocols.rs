@@ -183,8 +183,7 @@ async fn probe_responses(
         body,
         timeout,
         |v| {
-            v.get("object").and_then(Value::as_str) == Some("response")
-                || v.get("output").is_some()
+            v.get("object").and_then(Value::as_str) == Some("response") || v.get("output").is_some()
         },
     )
     .await
@@ -246,11 +245,7 @@ async fn send(
             let text = resp.text().await.unwrap_or_default();
             let ms = started.elapsed().as_millis();
             let parsed: Result<Value, _> = serde_json::from_str(&text);
-            let ok_shape = status < 300
-                && parsed
-                    .as_ref()
-                    .map(|v| ok_shape(v))
-                    .unwrap_or(false);
+            let ok_shape = status < 300 && parsed.as_ref().map(|v| ok_shape(v)).unwrap_or(false);
             let snippet = if ok_shape {
                 "ok".into()
             } else {
