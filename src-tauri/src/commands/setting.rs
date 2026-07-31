@@ -1,11 +1,15 @@
 use crate::state::AppState;
 use ocg_core::models::{AppConfig, GatewayStatus, normalize_client_root_url};
-use ocg_core::state::random_word;
+use ocg_core::state::{CoreState, random_word};
 use tauri::State;
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<AppConfig, String> {
-    Ok(state.core.settings_config())
+    get_settings_inner(&state.core)
+}
+
+pub(crate) fn get_settings_inner(core: &CoreState) -> Result<AppConfig, String> {
+    Ok(core.settings_config())
 }
 
 #[tauri::command]
@@ -13,7 +17,15 @@ pub fn update_settings(
     state: State<'_, AppState>,
     mut config: AppConfig,
 ) -> Result<GatewayStatus, String> {
-    let _settings_update = state.core.settings_update.lock();
+    update_settings_inner(&state.core, &mut config, true)
+}
+
+pub(crate) fn update_settings_inner(
+    core: &CoreState,
+    config: &mut AppConfig,
+    sync_auto_start: bool,
+) -> Result<GatewayStatus, String> {
+    let _settings_update = core.settings_update.lock();
     config.validate_timeouts()?;
     validate_upstream_url(&config.upstream_base_url)?;
     config.client_root_url = normalize_client_root_url(&config.client_root_url)?;
@@ -26,10 +38,10 @@ pub fn update_settings(
     // ponytail: probe-bind the new port BEFORE we touch the DB or in-memory
     // config. If the bind fails, the old config stays put and the gateway keeps
     // serving on the old port — no "save failed with gateway down" regression.
-    let old_port = state.core.config().gateway_port;
+    let old_port = core.config().gateway_port;
     let port_changed = old_port != config.gateway_port;
     let was_running = {
-        let gw = state.core.gateway.lock();
+        let gw = core.gateway.lock();
         gw.is_some()
     };
 
@@ -41,14 +53,16 @@ pub fn update_settings(
         // successful restart, so a failed bind leaves the in-memory and
         // on-disk configs on the old port.
         if was_running {
-            match crate::commands::gateway::restart_inner(&state.core, &config) {
+            match crate::commands::gateway::restart_inner(core, config) {
                 Ok(status) => {
-                    crate::autostart::sync(config.auto_start).map_err(|e| e.to_string())?;
-                    state.core.set_config(config).map_err(|e| e.to_string())?;
+                    if sync_auto_start {
+                        crate::autostart::sync(config.auto_start).map_err(|e| e.to_string())?;
+                    }
+                    core.set_config(config.clone()).map_err(|e| e.to_string())?;
                     return Ok(status);
                 }
                 Err(e) => {
-                    let _ = state.core.db.lock().log_gateway(
+                    let _ = core.db.lock().log_gateway(
                         "warn",
                         "settings",
                         &format!("port change to {} failed: {}", config.gateway_port, e),
@@ -59,20 +73,18 @@ pub fn update_settings(
         }
     }
 
-    crate::autostart::sync(config.auto_start).map_err(|e| e.to_string())?;
-    state
-        .core
-        .set_config(config.clone())
-        .map_err(|e| e.to_string())?;
-    let _ = state
-        .core
+    if sync_auto_start {
+        crate::autostart::sync(config.auto_start).map_err(|e| e.to_string())?;
+    }
+    core.set_config(config.clone()).map_err(|e| e.to_string())?;
+    let _ = core
         .db
         .lock()
         .log_gateway("info", "settings", "settings updated");
 
-    let snapshot = state.core.config();
+    let snapshot = core.config();
     Ok(crate::commands::gateway::status_from_config(
-        &state.core,
+        core,
         was_running,
         &snapshot,
     ))
@@ -80,15 +92,15 @@ pub fn update_settings(
 
 #[tauri::command]
 pub fn regenerate_gateway_key(state: State<'_, AppState>) -> Result<String, String> {
-    let _settings_update = state.core.settings_update.lock();
-    let mut config = state.core.config();
+    regenerate_gateway_key_inner(&state.core)
+}
+
+pub(crate) fn regenerate_gateway_key_inner(core: &CoreState) -> Result<String, String> {
+    let _settings_update = core.settings_update.lock();
+    let mut config = core.config();
     config.gateway_key = format!("ocg-{}-{}", random_word(), random_word());
-    state
-        .core
-        .set_config(config.clone())
-        .map_err(|e| e.to_string())?;
-    let _ = state
-        .core
+    core.set_config(config.clone()).map_err(|e| e.to_string())?;
+    let _ = core
         .db
         .lock()
         .log_gateway("info", "settings", "gateway key regenerated");
@@ -109,4 +121,97 @@ fn is_loopback(url: &tauri::Url) -> bool {
         url.host_str(),
         Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
+    use ocg_core::db::Database;
+    use ocg_core::gateway;
+    use ocg_core::state::CoreStateInner;
+    use std::fs;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+
+    fn temp_core() -> (std::path::PathBuf, CoreState) {
+        let dir = std::env::temp_dir().join(format!("ocg-tauri-set-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        (
+            dir.clone(),
+            Arc::new(CoreStateInner::new(db, dir, cipher).unwrap()),
+        )
+    }
+
+    fn free_port() -> u16 {
+        TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn validate_upstream_url_accepts_https_and_loopback_http() {
+        assert!(validate_upstream_url("https://opencode.ai/zen/go").is_ok());
+        assert!(validate_upstream_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_upstream_url("http://localhost/v1").is_ok());
+        assert!(validate_upstream_url("not a url").is_err());
+        assert!(validate_upstream_url("http://example.com").is_err());
+        assert!(validate_upstream_url("ftp://127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn settings_inners_update_and_regenerate_without_autostart_side_effects() {
+        let (dir, core) = temp_core();
+        let original = get_settings_inner(&core).unwrap();
+        let mut next = original.clone();
+        next.upstream_base_url = "https://example.com/go".into();
+        next.client_root_url = "https://client.example.com/".into();
+        next.gateway_port = free_port();
+
+        let status = update_settings_inner(&core, &mut next, false).unwrap();
+        assert!(!status.running);
+        assert_eq!(core.config().upstream_base_url, "https://example.com/go");
+        assert_eq!(core.config().client_root_url, "https://client.example.com");
+
+        let old_key = core.config().gateway_key;
+        let new_key = regenerate_gateway_key_inner(&core).unwrap();
+        assert_ne!(old_key, new_key);
+        assert_eq!(core.config().gateway_key, new_key);
+
+        let mut bad = core.config();
+        bad.upstream_base_url = "http://evil.example".into();
+        assert!(update_settings_inner(&core, &mut bad, false).is_err());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn settings_port_change_restarts_running_gateway_or_keeps_old_on_failure() {
+        let (dir, core) = temp_core();
+        let old_port = free_port();
+        let handle =
+            tauri::async_runtime::block_on(gateway::start_gateway(core.clone(), old_port)).unwrap();
+        *core.gateway.lock() = Some(handle);
+
+        let mut ok = core.config();
+        ok.gateway_port = free_port();
+        let status = update_settings_inner(&core, &mut ok, false).unwrap();
+        assert!(status.running);
+        assert_eq!(status.port, ok.gateway_port);
+        assert!(TcpStream::connect(("127.0.0.1", ok.gateway_port)).is_ok());
+
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut fail = core.config();
+        fail.gateway_port = occupied.local_addr().unwrap().port();
+        assert!(update_settings_inner(&core, &mut fail, false).is_err());
+        assert_eq!(core.active_gateway_port(), ok.gateway_port);
+
+        crate::commands::gateway::stop_and_wait(core.gateway.lock().take().unwrap());
+        drop(occupied);
+        let _ = fs::remove_dir_all(dir);
+    }
 }

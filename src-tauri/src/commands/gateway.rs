@@ -30,7 +30,7 @@ pub(super) fn status_from_config(
     }
 }
 
-fn stop_and_wait(handle: GatewayHandle) {
+pub(crate) fn stop_and_wait(handle: GatewayHandle) {
     let _ = handle.shutdown.send(());
     let _ = tauri::async_runtime::block_on(async {
         tokio::time::timeout(std::time::Duration::from_secs(5), handle.task)
@@ -133,6 +133,69 @@ mod tests {
 
         stop_and_wait(state.gateway.lock().take().unwrap());
         drop(occupied);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn status_from_config_reports_running_and_stopped_error() {
+        use super::status_from_config;
+
+        let dir = temp_data_dir();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+        state
+            .db
+            .lock()
+            .log_gateway("error", "gateway", "boom")
+            .unwrap();
+        let config = state.config();
+
+        let stopped = status_from_config(&state, false, &config);
+        assert!(!stopped.running);
+        assert_eq!(stopped.last_error.as_deref(), Some("boom"));
+        assert_eq!(stopped.key, config.gateway_key);
+
+        let port = free_port();
+        let handle =
+            tauri::async_runtime::block_on(gateway::start_gateway(state.clone(), port)).unwrap();
+        *state.gateway.lock() = Some(handle);
+        let running = status_from_config(&state, true, &config);
+        assert!(running.running);
+        assert!(running.last_error.is_none());
+        assert_eq!(running.port, port);
+
+        stop_and_wait(state.gateway.lock().take().unwrap());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restart_inner_same_port_and_new_port_succeed() {
+        let dir = temp_data_dir();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+        let first_port = free_port();
+        let mut config = state.config();
+        config.gateway_port = first_port;
+
+        let first = restart_inner(&state, &config).unwrap();
+        assert!(first.running);
+        assert_eq!(first.port, first_port);
+        assert!(TcpStream::connect(("127.0.0.1", first_port)).is_ok());
+
+        let same = restart_inner(&state, &config).unwrap();
+        assert!(same.running);
+        assert_eq!(same.port, first_port);
+
+        let second_port = free_port();
+        config.gateway_port = second_port;
+        let moved = restart_inner(&state, &config).unwrap();
+        assert!(moved.running);
+        assert_eq!(moved.port, second_port);
+        assert!(TcpStream::connect(("127.0.0.1", second_port)).is_ok());
+
+        stop_and_wait(state.gateway.lock().take().unwrap());
         let _ = fs::remove_dir_all(dir);
     }
 }
