@@ -21,6 +21,7 @@ import {
   verifyUpdaterPublicKeyContinuity,
   verifyUpdaterSignature,
 } from "./generate-updater-manifest.mjs";
+import { pruneAppImageWaylandLibs } from "./prune-appimage-wayland-libs.mjs";
 import { validateComposeVersion } from "./release-policy.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -321,11 +322,16 @@ async function main() {
       ...buildConfigArgs,
     ], { env: tauriBuildEnvironment });
     const appImage = onlyArtifact(join(bundleRoot, "appimage"), ".AppImage", "AppImage");
+    const prunedAppImage = pruneAppImageWaylandLibs(appImage, { failClosed: true });
     const appImageName = `ocg-manager_${version}_linux-x64.AppImage`;
     if (updaterPlan.enabled) {
-      stageUpdaterArtifact(appImage, appImageName, artifacts, updaterPlan.publicKey);
+      rmSync(`${prunedAppImage}.sig`, { force: true });
+      run(process.execPath, [tauriCli, "signer", "sign", prunedAppImage], {
+        env: resolveFileSignerEnvironment(),
+      });
+      stageUpdaterArtifact(prunedAppImage, appImageName, artifacts, updaterPlan.publicKey);
     }
-    else stageArtifact(appImage, appImageName, artifacts);
+    else stageArtifact(prunedAppImage, appImageName, artifacts);
 
     const deb = onlyArtifact(join(bundleRoot, "deb"), ".deb", "deb package");
     const debName = `ocg-manager_${version}_linux-x64.deb`;

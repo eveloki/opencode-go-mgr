@@ -94,7 +94,7 @@ jobs:
         shell: pwsh
         run: ./scripts/validate-windows-release-smoke.ps1
       - name: Test release helpers
-        run: node --test scripts/generate-updater-manifest.test.mjs scripts/release-policy.test.mjs scripts/verify-release-assets.test.mjs
+        run: node --test scripts/generate-updater-manifest.test.mjs scripts/release-policy.test.mjs scripts/verify-release-assets.test.mjs scripts/prune-appimage-wayland-libs.test.mjs
       - name: Validate version and unsigned candidate contract
         run: pnpm run release:check
 
@@ -128,6 +128,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf libfuse2 xvfb xauth xdg-utils dbus-x11
+
+      - name: Download appimagetool (Linux)
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGETOOL_VERSION: "1.9.1"
+          APPIMAGETOOL_SHA256: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+        run: |
+          mkdir -p .tools
+          curl -fSL -o .tools/appimagetool "https://github.com/AppImage/appimagetool/releases/download/v${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
+          actual=$(sha256sum .tools/appimagetool | cut -d' ' -f1)
+          if [ "$actual" != "$APPIMAGETOOL_SHA256" ]; then
+            echo "SHA-256 mismatch for appimagetool v${APPIMAGETOOL_VERSION}" >&2
+            echo "Expected: $APPIMAGETOOL_SHA256" >&2
+            echo "Actual:   $actual" >&2
+            exit 1
+          fi
+          echo "appimagetool v${APPIMAGETOOL_VERSION} SHA-256 verified."
+          chmod +x .tools/appimagetool
+          echo "APPIMAGETOOL=$(pwd)/.tools/appimagetool" >> "$GITHUB_ENV"
 
       - name: Install macOS Rust targets
         if: runner.os == 'macOS'
