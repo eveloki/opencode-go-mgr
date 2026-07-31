@@ -136,15 +136,16 @@ jobs:
           APPIMAGETOOL_SHA256: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
         run: |
           mkdir -p .tools
-          curl -fSL -o .tools/appimagetool "https://github.com/AppImage/appimagetool/releases/download/v${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
+          # AppImage/appimagetool tags are unprefixed (1.9.1), not v1.9.1.
+          curl -fSL -o .tools/appimagetool "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
           actual=$(sha256sum .tools/appimagetool | cut -d' ' -f1)
           if [ "$actual" != "$APPIMAGETOOL_SHA256" ]; then
-            echo "SHA-256 mismatch for appimagetool v${APPIMAGETOOL_VERSION}" >&2
+            echo "SHA-256 mismatch for appimagetool ${APPIMAGETOOL_VERSION}" >&2
             echo "Expected: $APPIMAGETOOL_SHA256" >&2
             echo "Actual:   $actual" >&2
             exit 1
           fi
-          echo "appimagetool v${APPIMAGETOOL_VERSION} SHA-256 verified."
+          echo "appimagetool ${APPIMAGETOOL_VERSION} SHA-256 verified."
           chmod +x .tools/appimagetool
           echo "APPIMAGETOOL=$(pwd)/.tools/appimagetool" >> "$GITHUB_ENV"
 
