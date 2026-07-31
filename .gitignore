@@ -30,6 +30,7 @@ ocg-data-backup*/
 .vscode
 .idea
 .agent/
+.kilo/
 *.sw?
 *.suo
 *.ntvs*
