@@ -37,6 +37,8 @@ export interface AccountUpdate {
   purchase_date?: string;
 }
 
+export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
+
 export interface AppConfig {
   revision: number;
   gateway_port: number;
@@ -51,6 +53,8 @@ export interface AppConfig {
   connect_timeout_secs: number;
   non_stream_timeout_secs: number;
   stream_idle_timeout_secs: number;
+  routing_mode: RoutingMode;
+  conversation_sticky: boolean;
 }
 
 export interface UpdateCheckResult {

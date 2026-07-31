@@ -169,6 +169,48 @@
             <template #unchecked>{{ t("关闭") }}</template>
           </n-switch>
         </section>
+        <section class="settings-subsection" aria-labelledby="routing-title">
+          <h3 id="routing-title">{{ t("账号路由") }}</h3>
+          <p class="field-caption routing-intro">
+            {{ t("基础路由方案同一时刻只能选一个；对话粘性是可叠加开关，不会替换基础方案。") }}
+          </p>
+          <n-radio-group
+            v-model:value="config.routing_mode"
+            name="routing-mode"
+            class="routing-mode-group"
+            :disabled="!loaded || regenerating || saving"
+          >
+            <div
+              v-for="option in routingModeOptions"
+              :key="option.value"
+              class="routing-option"
+              :class="{ 'routing-option--selected': config.routing_mode === option.value }"
+            >
+              <n-radio :value="option.value" :aria-label="t(option.label)">
+                <span class="routing-option-title">{{ t(option.label) }}</span>
+              </n-radio>
+              <p class="field-caption">{{ t(option.behavior) }}</p>
+              <p class="field-caption">{{ t(option.pros) }}</p>
+              <p class="field-caption">{{ t(option.cons) }}</p>
+            </div>
+          </n-radio-group>
+          <div class="routing-sticky">
+            <div class="routing-sticky-head">
+              <span class="routing-option-title">{{ t("对话粘性") }}</span>
+              <n-switch
+                v-model:value="config.conversation_sticky"
+                :aria-label="t('对话粘性')"
+                :disabled="!loaded || regenerating || saving"
+              >
+                <template #checked>{{ t("开启") }}</template>
+                <template #unchecked>{{ t("关闭") }}</template>
+              </n-switch>
+            </div>
+            <p class="field-caption">
+              {{ t("优先使用请求头 X-OCG-Conversation-Id；未提供时用 Prompt 指纹启发式（system/tools/首条 user）。无法生成会话 key 时回退基础路由。指纹可能把相似会话绑到同一账号。") }}
+            </p>
+          </div>
+        </section>
         <section class="settings-subsection" aria-labelledby="request-timeout-title">
           <h3 id="request-timeout-title">{{ t("请求超时") }}</h3>
           <n-form-item :label="t('连接超时')">
@@ -387,6 +429,8 @@ import {
   NInputNumber,
   NPopconfirm,
   NProgress,
+  NRadio,
+  NRadioGroup,
   NSwitch,
   NTooltip,
   useMessage,
@@ -401,7 +445,7 @@ import {
   CloudSyncOutlined,
 } from "@vicons/antd";
 import { DashboardRequestError, tauriApi } from "../api/tauri";
-import type { AppConfig, UpdateCheckResult, UpdateStatus } from "../api/tauri";
+import type { AppConfig, RoutingMode, UpdateCheckResult, UpdateStatus } from "../api/tauri";
 import { THEME_OPTIONS } from "../theme";
 import type { ResolvedTheme, ThemeName } from "../theme";
 import { t } from "../i18n/index.ts";
@@ -470,7 +514,39 @@ const config = ref<AppConfig>({
   connect_timeout_secs: 30,
   non_stream_timeout_secs: 900,
   stream_idle_timeout_secs: 300,
+  routing_mode: "strict-priority",
+  conversation_sticky: false,
 });
+
+const routingModeOptions: Array<{
+  value: RoutingMode;
+  label: MessageKey;
+  behavior: MessageKey;
+  pros: MessageKey;
+  cons: MessageKey;
+}> = [
+  {
+    value: "strict-priority",
+    label: "严格优先级",
+    behavior: "每次新请求按账号排序选择第一个可用账号。",
+    pros: "优点：行为确定，高优先级账号恢复后立即接管。",
+    cons: "缺点：冷却恢复可能切换账号，影响按凭据隔离的 prompt cache。",
+  },
+  {
+    value: "sticky-global",
+    label: "全局粘性",
+    behavior: "无对话绑定时优先沿用当前全局账号，不可用时再按排序切换。",
+    pros: "优点：低并发时更容易保持 prompt cache，不会因高优先级恢复而无谓抢切。",
+    cons: "缺点：所有并发对话共享一个账号，恢复后不会自动抢回流量。",
+  },
+  {
+    value: "round-robin",
+    label: "轮询",
+    behavior: "每个新请求从上次位置之后循环选择下一个可用账号。",
+    pros: "优点：多账号可用时分摊请求、额度和风险。",
+    cons: "缺点：账号切换最频繁，prompt cache 命中通常较差，且不是加权均衡。",
+  },
+];
 
 const themeLabel = computed(() => {
   const selected = t((THEME_OPTIONS.find((option) => option.value === themeName)?.label ?? "默认") as MessageKey);
@@ -614,12 +690,16 @@ async function saveSettings() {
   if (!validateTimeouts()) return;
   saving.value = true;
   const payload = { ...config.value };
+  const routingChanged = !!savedConfig.value && (
+    savedConfig.value.routing_mode !== payload.routing_mode
+    || savedConfig.value.conversation_sticky !== payload.conversation_sticky
+  );
   try {
     const result = await tauriApi.updateSettings(payload);
     payload.revision = result.revision;
     config.value.revision = result.revision;
     savedConfig.value = { ...payload };
-    message.success(t("设置已保存"));
+    message.success(routingChanged ? t("设置已保存；运行时路由状态已重置") : t("设置已保存"));
   } catch (e) {
     if (!(await reloadSettingsAfterConflict(e))) {
       message.error(t("保存失败: {error}", { error: String(e) }));
@@ -758,6 +838,12 @@ function mergeUnsavedSettingsAfterKeyRegeneration(
     stream_idle_timeout_secs: current.stream_idle_timeout_secs !== saved.stream_idle_timeout_secs
       ? current.stream_idle_timeout_secs
       : latest.stream_idle_timeout_secs,
+    routing_mode: current.routing_mode !== saved.routing_mode
+      ? current.routing_mode
+      : latest.routing_mode,
+    conversation_sticky: current.conversation_sticky !== saved.conversation_sticky
+      ? current.conversation_sticky
+      : latest.conversation_sticky,
   };
 }
 
@@ -1209,6 +1295,50 @@ onUnmounted(() => {
   font-size: var(--ocg-font-xs);
   color: var(--ocg-subtle);
   line-height: 1.4;
+}
+.routing-intro {
+  margin: 8px 0 12px;
+}
+.routing-mode-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+.routing-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 10px;
+  background: var(--ocg-panel-soft, transparent);
+}
+.routing-option--selected {
+  border-color: var(--ocg-accent, var(--ocg-border));
+}
+.routing-option-title {
+  color: var(--ocg-ink);
+  font-weight: 600;
+}
+.routing-option .field-caption {
+  margin: 0;
+  padding-left: 24px;
+}
+.routing-sticky {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 10px;
+}
+.routing-sticky-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 .theme-grid {
   display: grid;
