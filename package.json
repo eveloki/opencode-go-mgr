@@ -9,6 +9,7 @@
     "dev": "tauri dev",
     "build": "node scripts/release.mjs",
     "build:web": "vue-tsc && vite build",
+    "test:routing:live": "pwsh -NoProfile -File scripts/test-routing-live.ps1",
     "release:check": "node scripts/release.mjs --check",
     "test:rust": "cargo test --workspace --locked",
     "test:web": "node --experimental-strip-types --test scripts/generate-updater-manifest.test.mjs scripts/release-policy.test.mjs scripts/verify-release-assets.test.mjs scripts/prune-appimage-wayland-libs.test.mjs src/i18n.test.ts src/views/account-lifecycle.test.ts src/views/accounts-usage.test.ts src/views/dashboard-connection.test.ts src/views/pricing-view.test.ts src/views/settings-update.test.ts src/views/logs.test.ts src/components/stacked-bar-chart.test.ts src/theme.test.ts",
