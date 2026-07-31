@@ -9,6 +9,7 @@ use ocg_core::state::CoreStateInner;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "ocg-manager-cli")]
@@ -130,11 +131,21 @@ fn resolve_cipher(
     data_dir: &Path,
     encryption_key: Option<String>,
 ) -> Result<Arc<dyn KeyCipher + Send + Sync>> {
+    let env_key = std::env::var("OCG_MANAGER_ENCRYPTION_KEY").ok();
+    resolve_cipher_with(data_dir, encryption_key, env_key)
+}
+
+/// Priority: explicit encryption_key > env_key > on-disk key file.
+fn resolve_cipher_with(
+    data_dir: &Path,
+    encryption_key: Option<String>,
+    env_key: Option<String>,
+) -> Result<Arc<dyn KeyCipher + Send + Sync>> {
     let cipher = match encryption_key {
         Some(secret) => StaticKeyCipher::new(&secret),
-        None => match std::env::var("OCG_MANAGER_ENCRYPTION_KEY") {
-            Ok(secret) => StaticKeyCipher::new(&secret),
-            Err(_) => load_or_create_static_cipher(data_dir)?,
+        None => match env_key {
+            Some(secret) => StaticKeyCipher::new(&secret),
+            None => load_or_create_static_cipher(data_dir)?,
         },
     };
     Ok(Arc::new(cipher))
@@ -155,6 +166,21 @@ async fn serve(
     port: Option<u16>,
     dashboard_dir: Option<PathBuf>,
 ) -> Result<()> {
+    let state = start_serve(data_dir, cipher, host, port, dashboard_dir).await?;
+    println!("press Ctrl+C to stop");
+    tokio::signal::ctrl_c().await?;
+    println!("shutting down...");
+    stop_serve(&state).await;
+    Ok(())
+}
+
+async fn start_serve(
+    data_dir: PathBuf,
+    cipher: Arc<dyn KeyCipher + Send + Sync>,
+    host: IpAddr,
+    port: Option<u16>,
+    dashboard_dir: Option<PathBuf>,
+) -> Result<Arc<CoreStateInner>> {
     let state = build_state(data_dir, cipher)?;
     let executable = if dashboard_dir.is_none() {
         std::env::current_exe().ok()
@@ -177,9 +203,6 @@ async fn serve(
     println!("dashboard: http://{}:{}/dashboard/", host, handle.port);
     println!("upstream: {}", config.upstream_base_url);
 
-    println!("press Ctrl+C to stop");
-
-    // Hold the gateway handle so it stays alive
     {
         let mut gateway_lock = state.gateway.lock();
         *gateway_lock = Some(handle);
@@ -190,18 +213,18 @@ async fn serve(
         "gateway",
         &format!("cli gateway started on port {}", config.gateway_port),
     );
+    Ok(state)
+}
 
-    tokio::signal::ctrl_c().await?;
-    println!("shutting down...");
-
+async fn stop_serve(state: &CoreStateInner) {
     if let Some(handle) = state.gateway.lock().take() {
-        gateway::stop_gateway(handle);
+        let _ = handle.shutdown.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle.task).await;
     }
     let _ = state
         .db
         .lock()
         .log_gateway("info", "gateway", "cli gateway stopped");
-    Ok(())
 }
 
 fn resolve_dashboard_dir(explicit: Option<PathBuf>, executable: Option<&Path>) -> Option<PathBuf> {
@@ -481,8 +504,37 @@ async fn ping_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, resolve_dashboard_dir};
+    use super::{
+        Cli, Commands, KeyAction, build_state, key_command, ping_keys, resolve_cipher_with,
+        resolve_dashboard_dir, resolve_data_dir, start_serve, status_command, stop_serve,
+        toggle_account,
+    };
     use clap::{CommandFactory, Parser};
+    use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ocg-cli-test-{}-{}", label, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn free_port() -> u16 {
+        StdTcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    fn test_cipher() -> Arc<dyn KeyCipher + Send + Sync> {
+        Arc::new(StaticKeyCipher::new("cli-test-secret"))
+    }
 
     #[test]
     fn exposes_package_version() {
@@ -499,6 +551,97 @@ mod tests {
             panic!("expected serve command");
         };
         assert!(host.is_unspecified());
+    }
+
+    #[test]
+    fn cli_parses_key_and_status_subcommands() {
+        let list = Cli::try_parse_from(["ocg-manager-cli", "key", "list"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Commands::Key {
+                action: KeyAction::List
+            }
+        ));
+
+        let add = Cli::try_parse_from([
+            "ocg-manager-cli",
+            "key",
+            "add",
+            "main",
+            "sk-test",
+            "--username",
+            "user",
+            "--password",
+            "pass",
+        ])
+        .unwrap();
+        let Commands::Key {
+            action:
+                KeyAction::Add {
+                    name,
+                    key,
+                    username,
+                    password,
+                },
+        } = add.command
+        else {
+            panic!("expected key add");
+        };
+        assert_eq!((name.as_str(), key.as_str()), ("main", "sk-test"));
+        assert_eq!(username.as_deref(), Some("user"));
+        assert_eq!(password.as_deref(), Some("pass"));
+
+        assert!(matches!(
+            Cli::try_parse_from(["ocg-manager-cli", "status"])
+                .unwrap()
+                .command,
+            Commands::Status
+        ));
+    }
+
+    #[test]
+    fn resolve_data_dir_prefers_explicit_path() {
+        let explicit = PathBuf::from("/tmp/custom-ocg-data");
+        assert_eq!(resolve_data_dir(Some(explicit.clone())), explicit);
+        let fallback = resolve_data_dir(None);
+        assert!(fallback.ends_with(".ocg-mgr-cli"));
+    }
+
+    fn assert_cipher_matches_static(
+        cipher: &Arc<dyn KeyCipher + Send + Sync>,
+        secret: &str,
+        plaintext: &str,
+    ) {
+        let expected = StaticKeyCipher::new(secret);
+        let ciphertext = cipher.encrypt(plaintext).unwrap();
+        assert_eq!(expected.decrypt(&ciphertext).unwrap(), plaintext);
+        let ciphertext = expected.encrypt(plaintext).unwrap();
+        assert_eq!(cipher.decrypt(&ciphertext).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn resolve_cipher_uses_explicit_env_then_file() {
+        let dir = temp_dir("cipher");
+        let explicit = resolve_cipher_with(
+            &dir,
+            Some("explicit-secret".into()),
+            Some("env-secret".into()),
+        )
+        .unwrap();
+        assert_cipher_matches_static(&explicit, "explicit-secret", "plain-explicit");
+
+        let from_env = resolve_cipher_with(&dir, None, Some("env-secret".into())).unwrap();
+        assert_cipher_matches_static(&from_env, "env-secret", "plain-env");
+
+        let file_dir = temp_dir("cipher-file");
+        let first = resolve_cipher_with(&file_dir, None, None).unwrap();
+        let second = resolve_cipher_with(&file_dir, None, None).unwrap();
+        let ciphertext = first.encrypt("roundtrip").unwrap();
+        assert_eq!(second.decrypt(&ciphertext).unwrap(), "roundtrip");
+        assert!(file_dir.join(".encryption-key").is_file());
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(file_dir);
     }
 
     #[test]
@@ -521,5 +664,242 @@ mod tests {
         assert_eq!(resolve_dashboard_dir(None, Some(&executable)), None);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn key_lifecycle_and_status_cover_cli_account_commands() {
+        let dir = temp_dir("keys");
+        let cipher = test_cipher();
+
+        key_command(dir.clone(), cipher.clone(), KeyAction::List)
+            .await
+            .unwrap();
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Add {
+                name: "main".into(),
+                key: "sk-main".into(),
+                username: Some("  alice  ".into()),
+                password: Some("  secret  ".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Add {
+                name: "blank-creds".into(),
+                key: "sk-blank".into(),
+                username: Some("   ".into()),
+                password: Some("".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = build_state(dir.clone(), cipher.clone()).unwrap();
+        let accounts = state.db.lock().list_accounts().unwrap();
+        assert_eq!(accounts.len(), 2);
+        let main = accounts
+            .iter()
+            .find(|account| account.name == "main")
+            .unwrap();
+        assert_eq!(main.username.as_deref(), Some("alice"));
+        assert!(main.password_cipher.is_some());
+        let blank = accounts
+            .iter()
+            .find(|account| account.name == "blank-creds")
+            .unwrap();
+        assert!(blank.username.is_none());
+        assert!(blank.password_cipher.is_none());
+
+        key_command(dir.clone(), cipher.clone(), KeyAction::List)
+            .await
+            .unwrap();
+        status_command(dir.clone(), cipher.clone()).await.unwrap();
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Disable {
+                id: main.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let disabled = state.db.lock().get_account(&main.id).unwrap().unwrap();
+        assert!(!disabled.enabled);
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Enable {
+                id: main.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let enabled = state.db.lock().get_account(&main.id).unwrap().unwrap();
+        assert!(enabled.enabled);
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Remove {
+                id: blank.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(state.db.lock().get_account(&blank.id).unwrap().is_none());
+
+        let missing = key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Remove {
+                id: "missing-id".into(),
+            },
+        )
+        .await;
+        assert!(missing.is_err());
+
+        let missing_toggle = toggle_account(&state, "missing-id", true);
+        assert!(missing_toggle.is_err());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn spawn_json_upstream(
+        hits: Arc<AtomicUsize>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                hits.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0_u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let body = br#"{"id":"ping","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+            }
+        });
+        (addr, server)
+    }
+
+    #[tokio::test]
+    async fn ping_keys_hits_configured_upstream_and_handles_empty_targets() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (addr, server) = spawn_json_upstream(hits.clone()).await;
+
+        let dir = temp_dir("ping");
+        let cipher = test_cipher();
+        let state = build_state(dir.clone(), cipher.clone()).unwrap();
+        let mut config = state.config();
+        config.upstream_base_url = format!("http://{addr}");
+        config.non_stream_timeout_secs = 5;
+        state.set_config(config).unwrap();
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Add {
+                name: "pingable".into(),
+                key: "sk-ping".into(),
+                username: None,
+                password: None,
+            },
+        )
+        .await
+        .unwrap();
+        let account_id = state.db.lock().list_accounts().unwrap()[0].id.clone();
+
+        ping_keys(&state, None, "deepseek-v4-flash", "ping", 3)
+            .await
+            .unwrap();
+        ping_keys(
+            &state,
+            Some(account_id.as_str()),
+            "deepseek-v4-flash",
+            "ping",
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(hits.load(Ordering::SeqCst) >= 2);
+
+        toggle_account(&state, &account_id, false).unwrap();
+        ping_keys(&state, None, "deepseek-v4-flash", "ping", 3)
+            .await
+            .unwrap();
+
+        let missing = ping_keys(&state, Some("nope"), "deepseek-v4-flash", "ping", 3).await;
+        assert!(missing.is_err());
+
+        // Reopen with a different cipher so decrypt fails while the account still exists.
+        let wrong_cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("other-secret"));
+        let wrong_state = build_state(dir.clone(), wrong_cipher).unwrap();
+        let wrong_id = wrong_state.db.lock().list_accounts().unwrap()[0].id.clone();
+        ping_keys(
+            &wrong_state,
+            Some(wrong_id.as_str()),
+            "deepseek-v4-flash",
+            "ping",
+            3,
+        )
+        .await
+        .unwrap();
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn start_serve_binds_port_persists_override_and_stops_cleanly() {
+        let dir = temp_dir("serve");
+        let dash = dir.join("custom-dist");
+        std::fs::create_dir_all(&dash).unwrap();
+        let port = free_port();
+        let cipher = test_cipher();
+
+        let state = start_serve(
+            dir.clone(),
+            cipher.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Some(port),
+            Some(dash.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.active_gateway_port(), port);
+        assert_eq!(state.config().gateway_port, port);
+        assert_eq!(state.dashboard_dir(), Some(dash.clone()));
+        assert!(std::net::TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).is_ok());
+
+        stop_serve(&state).await;
+        assert!(state.gateway.lock().is_none());
+        assert!(
+            std::net::TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).is_err(),
+            "gateway port should reject connections after graceful stop"
+        );
+
+        // Reopen and ensure the port override was persisted for the next start.
+        let reopened = build_state(dir.clone(), cipher).unwrap();
+        assert_eq!(reopened.config().gateway_port, port);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
