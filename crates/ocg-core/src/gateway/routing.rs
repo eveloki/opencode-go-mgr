@@ -362,13 +362,10 @@ fn prompt_seed(format: ApiFormat, body: &Value) -> Option<Value> {
 fn chat_system_seed(body: &Value) -> Option<Value> {
     let mut parts = Vec::new();
     for message in json_array(body, "messages") {
-        match message.get("role").and_then(Value::as_str) {
-            Some("system" | "developer") => {
-                if let Some(content) = message.get("content") {
-                    parts.push(content.clone());
-                }
-            }
-            _ => {}
+        if let Some("system" | "developer") = message.get("role").and_then(Value::as_str)
+            && let Some(content) = message.get("content")
+        {
+            parts.push(content.clone());
         }
     }
     if parts.is_empty() {

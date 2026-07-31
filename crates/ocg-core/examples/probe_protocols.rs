@@ -106,11 +106,11 @@ struct ProbeResult {
 
 fn fmt_cell(r: &ProbeResult) -> String {
     if r.status == 0 {
-        format!("ERR")
+        "ERR".to_string()
     } else if r.ok_shape {
-        format!("OK")
+        "OK".to_string()
     } else {
-        format!("{}", r.status)
+        r.status.to_string()
     }
 }
 
@@ -245,7 +245,7 @@ async fn send(
             let text = resp.text().await.unwrap_or_default();
             let ms = started.elapsed().as_millis();
             let parsed: Result<Value, _> = serde_json::from_str(&text);
-            let ok_shape = status < 300 && parsed.as_ref().map(|v| ok_shape(v)).unwrap_or(false);
+            let ok_shape = status < 300 && parsed.as_ref().is_ok_and(ok_shape);
             let snippet = if ok_shape {
                 "ok".into()
             } else {

@@ -217,7 +217,8 @@ async fn start_serve(
 }
 
 async fn stop_serve(state: &CoreStateInner) {
-    if let Some(handle) = state.gateway.lock().take() {
+    let handle = state.gateway.lock().take();
+    if let Some(handle) = handle {
         let _ = handle.shutdown.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle.task).await;
     }
