@@ -1727,7 +1727,7 @@ fn sanitize_passthrough_sse_frame(format: ApiFormat, frame: &[u8], model_hint: &
                 sanitize_minimax_anthropic_usage(model.as_deref(), Some(model_hint), usage);
             }
         }
-        ApiFormat::Responses | ApiFormat::Gemini => unreachable!(),
+        ApiFormat::Responses | ApiFormat::Gemini => return Bytes::copy_from_slice(frame),
     }
     if value == original {
         return Bytes::copy_from_slice(frame);

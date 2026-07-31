@@ -57,11 +57,17 @@ struct DelayedReply {
 
 const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
 const SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+const RESPONSES_SUCCESS_BODY: &str = r#"{"id":"resp_ok","object":"response","status":"completed","model":"deepseek-v4-flash","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":10,"output_tokens":2,"input_tokens_details":{"cached_tokens":0}}}"#;
 const MESSAGES_SUCCESS_BODY: &str = r#"{"id":"msg-ok","type":"message","role":"assistant","model":"minimax-m2.7","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":0}}"#;
 const CHAT_STREAM_BODY: &str = concat!(
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
     "data: [DONE]\n\n"
+);
+const RESPONSES_STREAM_BODY: &str = concat!(
+    "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream\",\"model\":\"deepseek-v4-flash\",\"status\":\"in_progress\"}}\n\n",
+    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n",
+    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream\",\"model\":\"deepseek-v4-flash\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
 );
 const MESSAGES_STREAM_BODY: &str = concat!(
     "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-stream\",\"model\":\"minimax-m2.7\",\"usage\":{\"input_tokens\":6,\"cache_read_input_tokens\":4}}}\n\n",
@@ -1043,14 +1049,20 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         Case {
             client_path: "/v1/chat/completions",
             model: "minimax-m2.7",
-            upstream_path: "/v1/messages",
-            upstream_body: MESSAGES_SUCCESS_BODY,
+            upstream_path: "/v1/chat/completions",
+            upstream_body: SUCCESS_BODY,
         },
         Case {
             client_path: "/v1/responses",
             model: "deepseek-v4-flash",
             upstream_path: "/v1/chat/completions",
             upstream_body: SUCCESS_BODY,
+        },
+        Case {
+            client_path: "/v1/responses",
+            model: "glm-5.2",
+            upstream_path: "/v1/responses",
+            upstream_body: RESPONSES_SUCCESS_BODY,
         },
         Case {
             client_path: "/v1/responses",
@@ -1067,6 +1079,12 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         Case {
             client_path: "/v1/messages",
             model: "minimax-m2.7",
+            upstream_path: "/v1/messages",
+            upstream_body: MESSAGES_SUCCESS_BODY,
+        },
+        Case {
+            client_path: "/v1/messages",
+            model: "glm-5.2",
             upstream_path: "/v1/messages",
             upstream_body: MESSAGES_SUCCESS_BODY,
         },
@@ -1106,7 +1124,17 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         }
         let upstream_request: serde_json::Value = serde_json::from_str(&call.body).unwrap();
         assert_eq!(upstream_request["model"], case.model);
-        assert!(upstream_request["messages"].is_array());
+        match case.upstream_path {
+            "/v1/responses" => {
+                assert!(
+                    upstream_request.get("input").is_some(),
+                    "Responses upstream should keep input: {}",
+                    call.body
+                );
+                assert!(upstream_request.get("messages").is_none());
+            }
+            _ => assert!(upstream_request["messages"].is_array()),
+        }
 
         match case.client_path {
             "/v1/chat/completions" => {
@@ -1275,13 +1303,24 @@ async fn converts_streams_across_chat_messages_and_responses() {
             ],
         },
         Case {
+            client_path: "/v1/responses",
+            model: "glm-5.2",
+            upstream_path: "/v1/responses",
+            upstream_body: RESPONSES_STREAM_BODY,
+            expected_events: &[
+                "event: response.created",
+                "response.output_text.delta",
+                "event: response.completed",
+            ],
+        },
+        Case {
             client_path: "/v1/chat/completions",
             model: "minimax-m2.7",
-            upstream_path: "/v1/messages",
-            upstream_body: MESSAGES_STREAM_BODY,
+            upstream_path: "/v1/chat/completions",
+            upstream_body: CHAT_STREAM_BODY,
             expected_events: &[
-                "chat.completion.chunk",
                 "\"content\":\"ok\"",
+                "finish_reason",
                 "data: [DONE]",
             ],
         },

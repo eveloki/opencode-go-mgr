@@ -405,10 +405,12 @@ Gateway API 必须携带 **Gateway Key**，可使用 `Authorization: Bearer <key
 
 ### 协议转换
 
-每个已知模型都映射到自己的原生 OpenCode-Go 协议。客户端用别的协议访问时，
-Gateway 会把 **请求体** 转换到上游协议，把 **响应体**（或 SSE 流）再转换回客户
-端协议，覆盖文本、system、图像、工具调用与工具结果、推理内容、完成状态、错误、
-usage 字段。
+每个已知模型有硬编码的 **推荐协议** 与 **已验证可用协议集合**（由维护者测试账号
+探测后写入代码，请求路径不做协议试探）。客户端协议在集合内时透传；否则把
+**请求体** 转到推荐上游协议，再把 **响应体**（或 SSE 流）转回客户端协议，覆盖
+文本、system、图像、工具调用与工具结果、推理内容、完成状态、错误、usage 字段。
+例如 `glm-5.2` 对 Chat Completions / Responses / Messages 均透传；
+`deepseek-v4-flash` 仅 Chat，其他客户端协议转到 Chat Completions。
 
 Chat Completions 与 Messages 的未知模型保留客户端选择的协议；Responses 与
 Gemini 上的未知模型、未知 Claude Desktop 别名直接 `400` 拒绝——Gateway 不会靠
@@ -580,7 +582,7 @@ GHCR 上的公开无头镜像无需登录即可拉取。它是 Linux 容器，�
 与 `.env.example` 的仓库目录中运行（建议检出对应 Release tag）：
 
 ```bash
-git clone --branch v1.5.6 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.7 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell：Copy-Item .env.example .env
@@ -596,7 +598,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`；Release 中的 `compose.example.yaml`
   默认固定对应的完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:1.5.6`。
+  `ghcr.io/klarkxy/opencode-go-mgr:1.5.7`。
 - 完整版本与 `sha-<commit>` 标签用于标识单次发布，按发布策略不应移动；`1.5`
   与 `latest` 会继续移动。技术上只有
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` digest 真正不可变。
@@ -675,9 +677,9 @@ curl --fail http://127.0.0.1:9042/dashboard/
 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.6
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.7
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.6 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.7 \
   --repo klarkxy/opencode-go-mgr
 ```
 

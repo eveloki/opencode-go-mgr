@@ -168,9 +168,31 @@ impl PricingSnapshot {
 
 pub fn embedded_seed() -> PricingSnapshot {
     let mut models = vec![
-        seed_model("grok-4.5", "Grok 4.5", 2.0, 6.0, 0.5, None, 15.0),
+        seed_model("grok-4.5", "Grok 4.5", 2.0, 6.0, 0.3, None, 15.0),
         seed_model("glm-5.2", "GLM-5.2", 1.4, 4.4, 0.26, None, 60.0),
         seed_model("glm-5.1", "GLM-5.1", 1.4, 4.4, 0.26, None, 60.0),
+        seed_tier_with_usage(
+            "gpt-5.6-luna",
+            "GPT 5.6 Luna (≤ 272K tokens)",
+            0.2,
+            1.2,
+            0.02,
+            Some(0.25),
+            15.0,
+            None,
+            Some(272_000),
+        ),
+        seed_tier_with_usage(
+            "gpt-5.6-luna",
+            "GPT 5.6 Luna (> 272K tokens)",
+            0.4,
+            1.8,
+            0.04,
+            Some(0.5),
+            15.0,
+            Some(272_001),
+            None,
+        ),
         seed_model("kimi-k3", "Kimi K3", 3.0, 15.0, 0.3, None, 15.0),
         seed_model(
             "kimi-k2.7-code",
@@ -278,15 +300,16 @@ pub fn embedded_seed() -> PricingSnapshot {
             None,
             60.0,
         ),
+        seed_model("hy3", "Hy3", 0.14, 0.58, 0.035, None, 60.0),
     ];
     apply_official_pricing_policy(&mut models, MONTHLY_LIMIT);
     sort_models(&mut models);
     PricingSnapshot {
-        revision: format!("seed-2026-07-17-{ADJUSTMENT_POLICY_VERSION}"),
+        revision: format!("seed-2026-07-31-{ADJUSTMENT_POLICY_VERSION}"),
         activated_at: Utc::now().to_rfc3339(),
-        document_updated_at: "2026-07-17T15:53:00.000Z".to_string(),
+        document_updated_at: "2026-07-31T00:00:00.000Z".to_string(),
         source_url: SOURCE_URL.to_string(),
-        content_hash: "embedded-opencode-go-2026-07-17".to_string(),
+        content_hash: "embedded-opencode-go-2026-07-31".to_string(),
         limits: PricingLimits {
             window_5h: 12.0,
             window_week: 30.0,
@@ -365,7 +388,32 @@ fn seed_tier(
     min_input_tokens: Option<i64>,
     max_input_tokens: Option<i64>,
 ) -> PricingModel {
-    let mut model = seed_model(id, name, input, output, cache_read, Some(cache_write), 60.0);
+    seed_tier_with_usage(
+        id,
+        name,
+        input,
+        output,
+        cache_read,
+        Some(cache_write),
+        60.0,
+        min_input_tokens,
+        max_input_tokens,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_tier_with_usage(
+    id: &str,
+    name: &str,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: Option<f64>,
+    usage: f64,
+    min_input_tokens: Option<i64>,
+    max_input_tokens: Option<i64>,
+) -> PricingModel {
+    let mut model = seed_model(id, name, input, output, cache_read, cache_write, usage);
     model.min_input_tokens = min_input_tokens;
     model.max_input_tokens = max_input_tokens;
     model
@@ -540,8 +588,11 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
     }
     for id in ["qwen3.7-plus", "qwen3.6-plus"] {
         if covered.contains(id) {
-            validate_qwen_tiers(&models, id)?;
+            validate_token_tiers(&models, id, 256_000)?;
         }
+    }
+    if covered.contains("gpt-5.6-luna") {
+        validate_token_tiers(&models, "gpt-5.6-luna", 272_000)?;
     }
 
     let document_updated_at = parse_document_updated_at(html)?;
@@ -565,20 +616,21 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
     })
 }
 
-fn validate_qwen_tiers(models: &[PricingModel], id: &str) -> Result<()> {
+fn validate_token_tiers(models: &[PricingModel], id: &str, boundary: i64) -> Result<()> {
     let tiers = models
         .iter()
         .filter(|model| model.model_id == id)
         .collect::<Vec<_>>();
+    let label = format!("{}K", boundary / 1000);
     if tiers.len() != 2
         || !tiers
             .iter()
-            .any(|tier| tier.max_input_tokens == Some(256_000))
+            .any(|tier| tier.max_input_tokens == Some(boundary))
         || !tiers
             .iter()
-            .any(|tier| tier.min_input_tokens == Some(256_001))
+            .any(|tier| tier.min_input_tokens == Some(boundary + 1))
     {
-        bail!("OpenCode Go {id} must contain complete 256K pricing tiers");
+        bail!("OpenCode Go {id} must contain complete {label} pricing tiers");
     }
     Ok(())
 }
@@ -663,12 +715,18 @@ fn canonical_display_name(name: &str) -> String {
 }
 
 fn parse_token_tier(name: &str) -> Result<(Option<i64>, Option<i64>)> {
-    if name.contains("256K") || name.contains("256k") {
+    // Official Go docs use ≤ / > token tiers (256K for Qwen, 272K for Luna).
+    for boundary in [272_000_i64, 256_000, 200_000] {
+        let label = format!("{}K", boundary / 1000);
+        let label_lower = label.to_ascii_lowercase();
+        if !(name.contains(&label) || name.contains(&label_lower)) {
+            continue;
+        }
         if name.contains('≤') || name.contains("<=") {
-            return Ok((None, Some(256_000)));
+            return Ok((None, Some(boundary)));
         }
         if name.contains('>') {
-            return Ok((Some(256_001), None));
+            return Ok((Some(boundary + 1), None));
         }
         bail!("unrecognized token tier in {name}");
     }
@@ -1050,14 +1108,14 @@ mod tests {
         assert_eq!(snapshot.limits.window_5h, 12.0);
         assert_eq!(snapshot.limits.window_week, 30.0);
         assert_eq!(snapshot.limits.window_month, 60.0);
-        assert_eq!(snapshot.models.len(), 18);
+        assert_eq!(snapshot.models.len(), 21);
         assert!(
             snapshot
                 .models
                 .iter()
                 .any(|entry| entry.model_id == "kimi-k3" && entry.quota_multiplier == 4.0)
         );
-        for model_id in ["deepseek-v4-pro", "mimo-v2.5-pro"] {
+        for model_id in ["deepseek-v4-pro", "mimo-v2.5-pro", "gpt-5.6-luna"] {
             let model = snapshot
                 .models
                 .iter()
@@ -1065,12 +1123,27 @@ mod tests {
                 .unwrap();
             assert_eq!(model.quota_multiplier, 4.0);
         }
+        assert!(
+            snapshot
+                .models
+                .iter()
+                .any(|entry| entry.model_id == "hy3" && entry.quota_multiplier == 1.0)
+        );
+        let luna_tiers = snapshot
+            .models
+            .iter()
+            .filter(|entry| entry.model_id == "gpt-5.6-luna")
+            .count();
+        assert_eq!(luna_tiers, 2);
     }
 
     #[test]
     fn rejects_model_id_without_a_matching_price_row() {
         let fixture = include_str!("../tests/fixtures/opencode-go.html");
-        let incomplete = fixture.replace("<tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.50</td><td>-</td><td>$15</td></tr>", "");
+        let incomplete = fixture.replace(
+            "<tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.30</td><td>-</td><td>$15</td></tr>",
+            "",
+        );
         assert!(
             parse_official_html(&incomplete)
                 .unwrap_err()
@@ -1083,7 +1156,7 @@ mod tests {
     fn accepts_official_model_removal_when_both_tables_still_match() {
         let fixture = include_str!("../tests/fixtures/opencode-go.html")
             .replace(
-                "<tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.50</td><td>-</td><td>$15</td></tr>",
+                "<tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.30</td><td>-</td><td>$15</td></tr>",
                 "",
             )
             .replace(
@@ -1201,8 +1274,8 @@ mod tests {
     #[test]
     fn rejects_duplicate_price_rows() {
         let fixture = include_str!("../tests/fixtures/opencode-go.html").replace(
-            "<tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.50</td><td>-</td><td>$15</td></tr>",
-            "<tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.50</td><td>-</td><td>$15</td></tr><tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.50</td><td>-</td><td>$15</td></tr>",
+            "<tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.30</td><td>-</td><td>$15</td></tr>",
+            "<tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.30</td><td>-</td><td>$15</td></tr><tr><td>Grok 4.5</td><td>$2.00</td><td>$6.00</td><td>$0.30</td><td>-</td><td>$15</td></tr>",
         );
         assert!(
             parse_official_html(&fixture)

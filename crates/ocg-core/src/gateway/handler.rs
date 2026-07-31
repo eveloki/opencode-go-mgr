@@ -822,6 +822,7 @@ mod tests {
             .expect("rewritten request should use the existing preparation path");
 
         assert_eq!(plan.model, "glm-5.2");
-        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
+        // glm-5.2 supports Messages natively (live probe); alias rewrite keeps Messages.
+        assert_eq!(plan.upstream, ApiFormat::Messages);
     }
 }

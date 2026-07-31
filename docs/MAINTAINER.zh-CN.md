@@ -151,7 +151,9 @@ Desktop 三个角色模型的持久化行为。
   转换链，`countTokens`、`embedContent` 返回 `501`。
 - `protocol.rs`、`protocol_stream.rs` 在 Chat Completions、Responses、
   Anthropic Messages 与客户端 Gemini generateContent 之间转换。Gemini 不能成为
-  上游格式，只能路由到已知模型的 Chat/Messages 原生协议；未知模型直接 `400`。
+  上游格式。已知模型用硬编码 `MODEL_PROTOCOLS`（`preferred` + `supported`）：
+  客户端协议在 `supported` 内则透传，否则转到 `preferred`；Responses/Gemini
+  未知模型直接 `400`，请求路径禁止试探协议。
   非空 `safetySettings` 必须 `400` 拒绝，不能静默丢弃安全策略；空数组可以接受。
   `topK`、`thinkingConfig` 这两个 Gemini 专属字段只作为跨协议兼容提示，不得在
   文档或测试中宣称与 Google Gemini 等价。

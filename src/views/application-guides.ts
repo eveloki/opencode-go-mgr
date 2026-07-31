@@ -202,7 +202,7 @@ function posixShellLiteral(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-// Effective OpenCode Go limits and capabilities, verified 2026-07-21; not generic vendor defaults.
+// Effective OpenCode Go limits and capabilities, verified 2026-07-31; not generic vendor defaults.
 // Source of truth: https://github.com/anomalyco/models.dev/tree/dev/providers/opencode-go/models
 // Keep this exhaustive for every model that application_models can return. Unknown IDs must fail
 // visibly instead of inheriting Pi/Kimi Code's misleading 128K defaults.
@@ -216,6 +216,16 @@ export const APPLICATION_MODEL_METADATA: Readonly<Record<string, ApplicationMode
     toolUse: true,
     efforts: ["low", "medium", "high"],
     defaultEffort: "high",
+  },
+  "gpt-5.6-luna": {
+    // models.dev opencode-go/gpt-5.6-luna: context 1_050_000, output 128_000; image+pdf input.
+    contextWindow: 1_050_000,
+    maxOutputTokens: 128_000,
+    input: ["text", "image"],
+    reasoning: true,
+    toolUse: true,
+    efforts: ["low", "medium", "high", "max"],
+    defaultEffort: "medium",
   },
   "glm-5.2": {
     contextWindow: 1_000_000,
@@ -397,6 +407,16 @@ export const APPLICATION_MODEL_METADATA: Readonly<Record<string, ApplicationMode
       requiresReasoningContentOnAssistantMessages: true,
       thinkingFormat: "deepseek",
     },
+  },
+  hy3: {
+    // models.dev opencode-go/hy3: context 256_000, output 64_000; text-only.
+    contextWindow: 256_000,
+    maxOutputTokens: 64_000,
+    input: ["text"],
+    reasoning: true,
+    toolUse: true,
+    efforts: ["low", "high"],
+    defaultEffort: "high",
   },
 };
 

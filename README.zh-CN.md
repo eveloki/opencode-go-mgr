@@ -85,10 +85,10 @@ curl http://127.0.0.1:9042/v1/chat/completions \
 `compose.yaml`，并按需在同目录创建 `.env`。也可以在仓库检出中直接运行：
 
 ```bash
-git clone --branch v1.5.6 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.7 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
-# 编辑 .env：选择首次管理员创建方式，并把 OCG_IMAGE 固定到 1.5.6。
+# 编辑 .env：选择首次管理员创建方式，并把 OCG_IMAGE 固定到 1.5.7。
 docker compose pull
 docker compose up -d --no-build
 docker compose ps
@@ -100,17 +100,24 @@ docker compose ps
 
 ## 模型与协议
 
-每个已知模型都映射到自己的原生 OpenCode-Go 协议；用其他协议访问时，Gateway 会
-自动转换文本、system、图像、工具调用与结果、推理内容、完成状态、错误和 usage
-字段。
+每个已知模型有硬编码的 **推荐协议**（对齐官方 docs endpoint 表）与 **已验证可用
+协议集合**。客户端协议落在集合内时 **透传**；否则转换到推荐协议（文本、system、
+图像、工具调用与结果、推理内容、完成状态、错误和 usage）。
 
-| 客户端协议 | 模型 |
+| 推荐上游协议 | 模型 |
 | --- | --- |
-| OpenAI Chat Completions | `glm-5.2`、`glm-5.1`、`kimi-k2.7-code`、`kimi-k2.6`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro` |
-| Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.5`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus` |
+| OpenAI Chat Completions | `grok-4.5`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3` |
+| OpenAI Responses | `gpt-5.6-luna` |
+| Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.5`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
+
+多协议透传（测试账号实测；推荐协议仍如上表）：
+
+- 三协议皆可：`glm-5.2`、`glm-5.1`、`glm-5`
+- Chat + Responses：`grok-4.5`、`gpt-5.6-luna`
+- Chat + Messages：上表 MiniMax / Qwen 系列
 
 - **Gemini 只是客户端格式**：`/v1beta/models/{model}:generateContent` 与
-  `:streamGenerateContent`（也接受 `/v1/models/...`）会转换到所选模型的原生
+  `:streamGenerateContent`（也接受 `/v1/models/...`）会转换到所选模型的推荐
   协议；客户端可用 `x-goog-api-key` 鉴权。请求不会发往 Google。
 - **Claude Desktop** 使用 `/claude-desktop/v1/...`，公布
   `claude-sonnet-4-6`、`claude-opus-4-6`、`claude-haiku-4-5-20251001` 三个

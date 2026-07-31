@@ -89,33 +89,150 @@ pub struct UsageCounts {
     pub cache_creation_tokens: u64,
 }
 
-const CHAT_MODELS: &[&str] = &[
-    "grok-4.5",
-    "glm-5.2",
-    "glm-5.1",
-    "kimi-k3",
-    "kimi-k2.7-code",
-    "kimi-k2.6",
-    "deepseek-v4-pro",
-    "deepseek-v4-flash",
-    "mimo-v2.5",
-    "mimo-v2.5-pro",
+/// Hardcoded OpenCode-Go protocol profiles.
+///
+/// `preferred` matches the official Go docs endpoint table. `supported` is the
+/// set of upstream protocols verified with a test account; update only after a
+/// fresh probe. Request paths never trial protocols (double-billing risk).
+#[derive(Debug, Clone, Copy)]
+struct ModelProtocol {
+    id: &'static str,
+    preferred: ApiFormat,
+    supported: &'static [ApiFormat],
+}
+
+// Probe matrix (direct OpenCode-Go, 2026-07-31, test account):
+// preferred stays on the official docs endpoint; supported is live 2xx shape.
+const CHAT_ONLY: &[ApiFormat] = &[ApiFormat::ChatCompletions];
+const CHAT_AND_RESPONSES: &[ApiFormat] = &[ApiFormat::ChatCompletions, ApiFormat::Responses];
+const CHAT_AND_MESSAGES: &[ApiFormat] = &[ApiFormat::ChatCompletions, ApiFormat::Messages];
+const ALL_THREE: &[ApiFormat] = &[
+    ApiFormat::ChatCompletions,
+    ApiFormat::Responses,
+    ApiFormat::Messages,
 ];
 
-const MESSAGE_MODELS: &[&str] = &[
-    "minimax-m3",
-    "minimax-m2.7",
-    "minimax-m2.7-highspeed",
-    "minimax-m2.5",
-    "minimax-m2.5-highspeed",
-    "qwen3.7-max",
-    "qwen3.7-plus",
-    "qwen3.6-plus",
+const MODEL_PROTOCOLS: &[ModelProtocol] = &[
+    ModelProtocol {
+        id: "grok-4.5",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_AND_RESPONSES,
+    },
+    ModelProtocol {
+        id: "glm-5.2",
+        preferred: ApiFormat::ChatCompletions,
+        supported: ALL_THREE,
+    },
+    ModelProtocol {
+        id: "glm-5.1",
+        preferred: ApiFormat::ChatCompletions,
+        supported: ALL_THREE,
+    },
+    ModelProtocol {
+        id: "glm-5",
+        preferred: ApiFormat::ChatCompletions,
+        supported: ALL_THREE,
+    },
+    ModelProtocol {
+        id: "gpt-5.6-luna",
+        preferred: ApiFormat::Responses,
+        supported: CHAT_AND_RESPONSES,
+    },
+    ModelProtocol {
+        id: "kimi-k3",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "kimi-k2.7-code",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "kimi-k2.6",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "kimi-k2.5",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "deepseek-v4-pro",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "deepseek-v4-flash",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "mimo-v2.5",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "mimo-v2.5-pro",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "hy3",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "minimax-m3",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "minimax-m2.7",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "minimax-m2.7-highspeed",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "minimax-m2.5",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "minimax-m2.5-highspeed",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "qwen3.7-max",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "qwen3.7-plus",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "qwen3.6-plus",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "qwen3.5-plus",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
 ];
 
-/// Returns every model ID with a known native upstream protocol.
+/// Returns every model ID with a known preferred upstream protocol.
 pub fn supported_model_ids() -> impl Iterator<Item = &'static str> {
-    CHAT_MODELS.iter().chain(MESSAGE_MODELS).copied()
+    MODEL_PROTOCOLS.iter().map(|profile| profile.id)
 }
 
 const ANTHROPIC_THINKING_ENCRYPTED_PREFIX: &str = "ocg-anthropic-thinking-v1:";
@@ -162,13 +279,7 @@ fn prepare_parsed_request(
     model: String,
     stream: bool,
 ) -> Result<RequestPlan, ProtocolError> {
-    let upstream = native_format(&model).unwrap_or(client);
-    if matches!(client, ApiFormat::Responses | ApiFormat::Gemini) && native_format(&model).is_none()
-    {
-        return Err(ProtocolError::new(format!(
-            "unknown model `{model}` cannot be routed from this endpoint"
-        )));
-    }
+    let upstream = resolve_upstream_format(client, &model)?;
     validate_request_features(client, upstream, &parsed)?;
     let tool_context = if client == ApiFormat::Responses {
         responses_tool_context(&parsed)?
@@ -984,14 +1095,25 @@ pub fn merge_stream_usage(
     counts.cache_creation_tokens = counts.cache_creation_tokens.max(next.cache_creation_tokens);
 }
 
-fn native_format(model: &str) -> Option<ApiFormat> {
+fn model_protocol(model: &str) -> Option<&'static ModelProtocol> {
     let normalized = normalize_model_name(model);
-    if CHAT_MODELS.contains(&normalized.as_str()) {
-        Some(ApiFormat::ChatCompletions)
-    } else if MESSAGE_MODELS.contains(&normalized.as_str()) {
-        Some(ApiFormat::Messages)
-    } else {
-        None
+    MODEL_PROTOCOLS
+        .iter()
+        .find(|profile| profile.id == normalized)
+}
+
+fn resolve_upstream_format(
+    client: ApiFormat,
+    model: &str,
+) -> Result<ApiFormat, ProtocolError> {
+    match (client, model_protocol(model)) {
+        (ApiFormat::Gemini, Some(profile)) => Ok(profile.preferred),
+        (ApiFormat::Gemini, None) | (ApiFormat::Responses, None) => Err(ProtocolError::new(
+            format!("unknown model `{model}` cannot be routed from this endpoint"),
+        )),
+        (client, Some(profile)) if profile.supported.contains(&client) => Ok(client),
+        (_, Some(profile)) => Ok(profile.preferred),
+        (client, None) => Ok(client),
     }
 }
 
@@ -1023,6 +1145,9 @@ fn convert_request(
         (ApiFormat::Gemini, ApiFormat::Messages) => gemini_request_to_messages(body)?,
         (ApiFormat::Gemini, ApiFormat::ChatCompletions) => {
             messages_request_to_chat(gemini_request_to_messages(body)?)?
+        }
+        (ApiFormat::Gemini, ApiFormat::Responses) => {
+            messages_request_to_responses(gemini_request_to_messages(body)?)?
         }
         _ => {
             return Err(ProtocolError::new(
@@ -1793,6 +1918,8 @@ fn messages_request_to_responses(body: Value) -> Result<Value, ProtocolError> {
             json!({ "effort": effort, "summary": "auto" }),
         );
     }
+    // OpenCode-Go Responses is used statelessly from this gateway.
+    out.insert("store".into(), json!(false));
     Ok(Value::Object(out))
 }
 
@@ -3142,13 +3269,17 @@ mod tests {
                 "grok-4.5",
                 "glm-5.2",
                 "glm-5.1",
+                "glm-5",
+                "gpt-5.6-luna",
                 "kimi-k3",
                 "kimi-k2.7-code",
                 "kimi-k2.6",
+                "kimi-k2.5",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
                 "mimo-v2.5",
                 "mimo-v2.5-pro",
+                "hy3",
                 "minimax-m3",
                 "minimax-m2.7",
                 "minimax-m2.7-highspeed",
@@ -3157,8 +3288,99 @@ mod tests {
                 "qwen3.7-max",
                 "qwen3.7-plus",
                 "qwen3.6-plus",
+                "qwen3.5-plus",
             ]
         );
+    }
+
+    #[test]
+    fn multi_protocol_models_passthrough_supported_formats() {
+        // deepseek-v4-flash: live probe is Chat-only; Responses converts to preferred Chat.
+        let flash_responses = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "deepseek-v4-flash",
+                "input": "hi",
+                "store": false
+            })),
+        )
+        .expect("flash routes Responses via preferred Chat");
+        assert_eq!(flash_responses.upstream, ApiFormat::ChatCompletions);
+
+        let glm_responses = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "glm-5.2",
+                "input": "hi",
+                "store": false
+            })),
+        )
+        .unwrap();
+        assert_eq!(glm_responses.upstream, ApiFormat::Responses);
+
+        let glm_messages = prepare_request(
+            ApiFormat::Messages,
+            bytes(json!({
+                "model": "glm-5.2",
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .unwrap();
+        assert_eq!(glm_messages.upstream, ApiFormat::Messages);
+
+        let minimax_chat = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "minimax-m3",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .unwrap();
+        assert_eq!(minimax_chat.upstream, ApiFormat::ChatCompletions);
+
+        let minimax_messages = prepare_request(
+            ApiFormat::Messages,
+            bytes(json!({
+                "model": "minimax-m3",
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .unwrap();
+        assert_eq!(minimax_messages.upstream, ApiFormat::Messages);
+
+        let luna_chat = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "gpt-5.6-luna",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .unwrap();
+        assert_eq!(luna_chat.upstream, ApiFormat::ChatCompletions);
+
+        let luna_responses = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "gpt-5.6-luna",
+                "input": "hi",
+                "store": false
+            })),
+        )
+        .unwrap();
+        assert_eq!(luna_responses.upstream, ApiFormat::Responses);
+
+        let grok_responses = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "grok-4.5",
+                "input": "hi",
+                "store": false
+            })),
+        )
+        .unwrap();
+        assert_eq!(grok_responses.upstream, ApiFormat::Responses);
     }
 
     #[test]
@@ -3195,7 +3417,23 @@ mod tests {
 
     #[test]
     fn chat_request_to_messages_preserves_string_service_tier() {
+        // MiniMax accepts Chat natively; force Messages conversion via Responses client.
         let plan = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "minimax-m3",
+                "input": "hi",
+                "store": false,
+                "service_tier": "priority"
+            })),
+        )
+        .expect("Responses request should convert to Messages");
+        let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
+        assert_eq!(plan.upstream, ApiFormat::Messages);
+        assert_eq!(body["service_tier"], "priority");
+        assert_eq!(plan.service_tier.as_deref(), Some("priority"));
+
+        let chat = prepare_request(
             ApiFormat::ChatCompletions,
             bytes(json!({
                 "model": "minimax-m3",
@@ -3203,24 +3441,10 @@ mod tests {
                 "service_tier": "priority"
             })),
         )
-        .expect("Chat request should convert");
-        let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
-        assert_eq!(plan.upstream, ApiFormat::Messages);
-        assert_eq!(body["service_tier"], "priority");
-        assert_eq!(plan.service_tier.as_deref(), Some("priority"));
-
-        let ignored = prepare_request(
-            ApiFormat::ChatCompletions,
-            bytes(json!({
-                "model": "minimax-m3",
-                "messages": [{"role": "user", "content": "hi"}],
-                "service_tier": 1
-            })),
-        )
-        .expect("non-string service tier should retain compatibility");
-        let body: Value = serde_json::from_slice(&ignored.body).expect("body is JSON");
-        assert!(body.get("service_tier").is_none());
-        assert_eq!(ignored.service_tier, None);
+        .expect("Chat request should passthrough");
+        assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
+        let chat_body: Value = serde_json::from_slice(&chat.body).expect("body is JSON");
+        assert_eq!(chat_body["service_tier"], "priority");
     }
 
     #[test]
@@ -3521,13 +3745,14 @@ mod tests {
         let plan = prepare_request(
             ApiFormat::Responses,
             bytes(json!({
-                "model":"deepseek-v4-flash",
+                "model":"deepseek-v4-pro",
                 "input":"hello",
                 "store":false,
                 "reasoning":{"effort":"none"}
             })),
         )
         .expect("Responses request converts");
+        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
         let body: Value = serde_json::from_slice(&plan.body).unwrap();
         assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body.get("reasoning_effort").is_none());
@@ -3578,13 +3803,14 @@ mod tests {
                 }),
                 "text.format",
             ),
+            // Chat is native for minimax; use Responses→Chat conversion instead.
             (
-                ApiFormat::ChatCompletions,
+                ApiFormat::Responses,
                 json!({
-                    "model":"minimax-m2.7","messages":[{"role":"user","content":"hi"}],
-                    "response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"}}}
+                    "model":"deepseek-v4-flash","input":"hi","store":false,
+                    "text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object"}}}
                 }),
-                "response_format",
+                "text.format",
             ),
             (
                 ApiFormat::Messages,
@@ -3608,6 +3834,17 @@ mod tests {
                 .expect_err("structured conversion must not silently downgrade");
             assert!(error.message.contains(field), "{}", error.message);
         }
+
+        // Same-protocol structured formats may passthrough (not conversion).
+        prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model":"minimax-m2.7",
+                "messages":[{"role":"user","content":"hi"}],
+                "response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"}}}
+            })),
+        )
+        .expect("Chat-native structured format may passthrough");
 
         prepare_request(
             ApiFormat::Responses,
@@ -3640,7 +3877,7 @@ mod tests {
             (
                 ApiFormat::Messages,
                 json!({
-                    "model":"deepseek-v4-flash",
+                    "model":"deepseek-v4-pro",
                     "messages":[
                         {"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"f","input":{}}]},
                         {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"}]}
@@ -3650,7 +3887,7 @@ mod tests {
             (
                 ApiFormat::Responses,
                 json!({
-                    "model":"deepseek-v4-flash",
+                    "model":"deepseek-v4-pro",
                     "store":false,
                     "input":[
                         {"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},
@@ -3678,26 +3915,37 @@ mod tests {
 
     #[test]
     fn chat_request_routes_minimax_to_messages_with_image_and_tool_result() {
+        // Live probe: MiniMax accepts Chat natively, so Chat client passthroughs.
+        let chat = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "minimax-m2.7",
+                "max_tokens": 5000,
+                "messages": [{"role":"user","content":"hi"}]
+            })),
+        )
+        .expect("Chat request passthroughs");
+        assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
+
+        // Conversion to preferred Messages still runs for unsupported client formats.
         let request = json!({
             "model": "minimax-m2.7",
-            "max_tokens": 5000,
-            "stop": "END",
-            "messages": [
-                {"role":"system","content":"system"},
-                {"role":"user","content":[
-                    {"type":"text","text":"look"},
-                    {"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}
+            "store": false,
+            "max_output_tokens": 5000,
+            "instructions": "system",
+            "input": [
+                {"type":"message","role":"user","content":[
+                    {"type":"input_text","text":"look"},
+                    {"type":"input_image","image_url":"data:image/png;base64,abc"}
                 ]},
-                {"role":"assistant","content":null,"reasoning_content":"r","tool_calls":[
-                    {"id":"c1","type":"function","function":{"name":"f","arguments":"{\"x\":1}"}}
-                ]},
-                {"role":"tool","tool_call_id":"c1","content":"done"}
+                {"type":"function_call","call_id":"c1","name":"f","arguments":"{\"x\":1}"},
+                {"type":"function_call_output","call_id":"c1","output":"done"}
             ],
-            "tools": [{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],
-            "tool_choice": {"type":"function","function":{"name":"f"}}
+            "tools": [{"type":"function","name":"f","parameters":{"type":"object"}}],
+            "tool_choice": {"type":"function","name":"f"}
         });
         let plan =
-            prepare_request(ApiFormat::ChatCompletions, bytes(request)).expect("request converts");
+            prepare_request(ApiFormat::Responses, bytes(request)).expect("request converts");
         assert_eq!(plan.upstream, ApiFormat::Messages);
         let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
         assert_eq!(body["system"], "system");
@@ -3709,7 +3957,6 @@ mod tests {
         assert_eq!(body["messages"][1]["content"][0]["input"]["x"], 1);
         assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(body["tool_choice"], json!({"type":"tool","name":"f"}));
-        assert_eq!(body["stop_sequences"], json!(["END"]));
     }
 
     #[test]
@@ -3978,20 +4225,19 @@ mod tests {
 
     #[test]
     fn chat_to_messages_minimax_end_to_end_sanitizes_bogus_all_cache() {
-        // Simulates the user-reported scenario: an OpenAI Chat Completions client calls
-        // MiniMax-M3, the gateway routes it to the Anthropic Messages upstream, and
-        // OpenCode Go returns a bogus all-cache signature with the response model rewritten
-        // to an internal identifier. Both the client-facing response and the internal
-        // usage accounting must show the tokens as ordinary input, not cache hits.
+        // MiniMax accepts Chat natively; exercise Messages→Chat conversion via a client
+        // that still needs preferred Messages (Responses). OpenCode may rewrite the
+        // response model to an internal id while returning a bogus all-cache signature.
         let plan = prepare_request(
-            ApiFormat::ChatCompletions,
+            ApiFormat::Responses,
             bytes(json!({
                 "model": "MiniMax-M3",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 8
+                "input": "hi",
+                "store": false,
+                "max_output_tokens": 8
             })),
         )
-        .expect("MiniMax-M3 should route to Messages");
+        .expect("MiniMax-M3 Responses should route to Messages");
         assert_eq!(plan.upstream, ApiFormat::Messages);
 
         let upstream_response = json!({
@@ -4003,9 +4249,12 @@ mod tests {
             "usage": {"input_tokens": 0, "output_tokens": 5, "cache_read_input_tokens": 40669}
         });
 
-        let chat = transform_response(&plan, &upstream_response).expect("Messages to Chat");
-        assert_eq!(chat["usage"]["prompt_tokens"], 40669);
-        assert_eq!(chat["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+        let responses = transform_response(&plan, &upstream_response).expect("Messages to Responses");
+        assert_eq!(responses["usage"]["input_tokens"], 40669);
+        assert_eq!(
+            responses["usage"]["input_tokens_details"]["cached_tokens"],
+            0
+        );
 
         let counts = extract_usage(plan.upstream, &upstream_response, Some(&plan.model));
         assert_eq!(counts.input_tokens, 40669);
@@ -4168,11 +4417,11 @@ mod tests {
             })),
         )
         .expect("MiniMax-M3 should be routable");
-        assert_eq!(plan.upstream, ApiFormat::Messages);
+        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
         assert_eq!(plan.model, "MiniMax-M3");
 
         let plan = prepare_request(
-            ApiFormat::ChatCompletions,
+            ApiFormat::Messages,
             bytes(json!({
                 "model": "MiniMax_M2.7",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -4337,9 +4586,10 @@ mod tests {
         ]);
         let chat = prepare_request(
             ApiFormat::Responses,
-            bytes(json!({"model":"deepseek-v4-flash","input":input,"store":false})),
+            bytes(json!({"model":"deepseek-v4-pro","input":input,"store":false})),
         )
         .expect("Chat-native history converts");
+        assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
         let chat_body: Value = serde_json::from_slice(&chat.body).unwrap();
         assert_eq!(chat_body["messages"][1]["reasoning_content"], "check first");
 

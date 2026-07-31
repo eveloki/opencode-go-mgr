@@ -163,9 +163,11 @@ difference, and the Claude Desktop three-role persistence behavior.
   `generateContent` and `streamGenerateContent` enter the conversion chain,
   while `countTokens` and `embedContent` return `501`.
 - `protocol.rs` and `protocol_stream.rs` convert between Chat Completions,
-  Responses, Anthropic Messages, and the client-side Gemini format. Gemini is
-  never an upstream protocol; it only routes to a known model's native
-  Chat/Messages protocol, and unknown models are rejected with `400`.
+  Responses, Messages, and Gemini client formats. Gemini is client-only and
+  never an upstream protocol. Known models use hardcoded `MODEL_PROTOCOLS`
+  (`preferred` + `supported`); client protocol in `supported` passthroughs,
+  otherwise converts to `preferred`. Unknown Responses/Gemini models are
+  rejected with `400` — never trial protocols on the request path.
   Non-empty `safetySettings` must be rejected with `400` rather than silently
   dropped; an empty array is acceptable. `topK` and `thinkingConfig` are
   cross-protocol compatibility hints — never claim Gemini-equivalent behavior

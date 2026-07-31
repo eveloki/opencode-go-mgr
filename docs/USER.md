@@ -476,12 +476,16 @@ Dashboard authentication depends on the listener bind:
 
 ### Protocol Conversion
 
-Each known model is mapped to its native OpenCode-Go protocol. When a request
-arrives in a different protocol, the gateway converts the **request body** to
-the upstream protocol and the **response body** (or SSE stream) back to the
-client protocol. Conversion covers text, system instructions, images, tool
+Each known model has a hardcoded **preferred** OpenCode-Go protocol and a
+**supported** set (maintained after test-account probes; not discovered at
+request time). When the client protocol is supported, the gateway passthroughs
+the request and response. Otherwise it converts the **request body** to the
+preferred upstream protocol and the **response body** (or SSE stream) back to
+the client protocol. Conversion covers text, system instructions, images, tool
 calls and tool results, reasoning content, completion status, errors, and
-usage fields.
+usage fields. Example: `glm-5.2` passthroughs Chat Completions, Responses, and
+Messages; `deepseek-v4-flash` is Chat-only and converts other client formats to
+Chat Completions.
 
 Unknown models keep the request's native Chat Completions or Messages
 protocol. Unknown models requested through Responses or Gemini, and unknown
@@ -691,7 +695,7 @@ checkout containing `compose.yaml` and `.env.example` (preferably the
 matching release tag):
 
 ```bash
-git clone --branch v1.5.6 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.7 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -707,7 +711,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`; the Release
   `compose.example.yaml` defaults to its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.5.6`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.5.7`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `1.5` and `latest` move forward. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is technically immutable.
@@ -802,9 +806,9 @@ Each stable image includes an SPDX SBOM, BuildKit SLSA provenance, and a
 GitHub signed provenance attestation. Inspect and verify a release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.6
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.7
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.6 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.7 \
   --repo klarkxy/opencode-go-mgr
 ```
 

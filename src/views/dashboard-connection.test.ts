@@ -515,6 +515,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
     kimiCapabilities: readonly string[];
   }>([
     ["grok-4.5", { contextWindow: 500_000, maxOutputTokens: 500_000, piInput: ["text", "image"], kimiCapabilities: ["thinking", "always_thinking", "image_in", "tool_use"] }],
+    ["gpt-5.6-luna", { contextWindow: 1_050_000, maxOutputTokens: 128_000, piInput: ["text", "image"], kimiCapabilities: ["thinking", "image_in", "tool_use"] }],
     ["glm-5.2", { contextWindow: 1_000_000, maxOutputTokens: 131_072, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
     ["glm-5.1", { contextWindow: 202_752, maxOutputTokens: 32_768, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
     ["kimi-k3", { contextWindow: 1_048_576, maxOutputTokens: 131_072, piInput: ["text", "image"], kimiCapabilities: ["thinking", "always_thinking", "image_in", "video_in", "tool_use"] }],
@@ -532,6 +533,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
     ["qwen3.6-plus", { contextWindow: 1_000_000, maxOutputTokens: 65_536, piInput: ["text", "image"], kimiCapabilities: ["thinking", "image_in", "tool_use"] }],
     ["deepseek-v4-pro", { contextWindow: 1_000_000, maxOutputTokens: 384_000, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
     ["deepseek-v4-flash", { contextWindow: 1_000_000, maxOutputTokens: 384_000, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
+    ["hy3", { contextWindow: 256_000, maxOutputTokens: 64_000, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
   ]);
   assert.deepEqual(new Set(Object.keys(APPLICATION_MODEL_METADATA)), new Set(expected.keys()));
   for (const [modelId, spec] of expected) {

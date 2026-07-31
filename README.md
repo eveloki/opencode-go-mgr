@@ -94,10 +94,10 @@ attached to each Release) as `compose.yaml` and optionally create a
 neighboring `.env`. Or run from a checkout:
 
 ```bash
-git clone --branch v1.5.6 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.7 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
-# Edit .env: choose first-run administrator setup and pin OCG_IMAGE to 1.5.6.
+# Edit .env: choose first-run administrator setup and pin OCG_IMAGE to 1.5.7.
 docker compose pull
 docker compose up -d --no-build
 docker compose ps
@@ -110,19 +110,28 @@ and local source builds.
 
 ## Supported Models And Protocols
 
-Each known model is mapped to its native OpenCode-Go protocol. Requests in a
-different protocol are converted automatically — text, system instructions,
-images, tool calls and results, reasoning content, completion status, errors,
-and usage fields.
+Each known model has a hardcoded **preferred** OpenCode-Go protocol (from the
+official docs endpoint table) and a **supported** set verified with a test
+account. When the client protocol is in that set, the gateway **passthroughs**
+without conversion. Otherwise it converts to the preferred protocol — text,
+system instructions, images, tool calls and results, reasoning content,
+completion status, errors, and usage fields.
 
-| Client protocol | Models |
+| Preferred upstream | Models |
 | --- | --- |
-| OpenAI Chat Completions | `glm-5.2`, `glm-5.1`, `kimi-k2.7-code`, `kimi-k2.6`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro` |
-| Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.5`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus` |
+| OpenAI Chat Completions | `grok-4.5`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
+| OpenAI Responses | `gpt-5.6-luna` |
+| Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.5`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
+
+Multi-protocol passthrough (live test-account probe; preferred stays as above):
+
+- All three: `glm-5.2`, `glm-5.1`, `glm-5`
+- Chat + Responses: `grok-4.5`, `gpt-5.6-luna`
+- Chat + Messages: MiniMax / Qwen families above
 
 - **Gemini is a client-only format**: `/v1beta/models/{model}:generateContent`
   and `:streamGenerateContent` (plus `/v1/models/...` aliases) are converted
-  to the selected model's native protocol; clients may authenticate with
+  to the selected model's preferred protocol; clients may authenticate with
   `x-goog-api-key`. Requests never go to Google.
 - **Claude Desktop** uses `/claude-desktop/v1/...` with the aliases
   `claude-sonnet-4-6`, `claude-opus-4-6`, and `claude-haiku-4-5-20251001`;
