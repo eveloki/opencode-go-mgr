@@ -186,12 +186,18 @@
               class="routing-option"
               :class="{ 'routing-option--selected': config.routing_mode === option.value }"
             >
-              <n-radio :value="option.value" :aria-label="t(option.label)">
+              <n-radio
+                :value="option.value"
+                :aria-label="t(option.label)"
+                :aria-describedby="`routing-option-desc-${option.value}`"
+              >
                 <span class="routing-option-title">{{ t(option.label) }}</span>
               </n-radio>
-              <p class="field-caption">{{ t(option.behavior) }}</p>
-              <p class="field-caption">{{ t(option.pros) }}</p>
-              <p class="field-caption">{{ t(option.cons) }}</p>
+              <div :id="`routing-option-desc-${option.value}`">
+                <p class="field-caption">{{ t(option.behavior) }}</p>
+                <p class="field-caption">{{ t(option.pros) }}</p>
+                <p class="field-caption">{{ t(option.cons) }}</p>
+              </div>
             </div>
           </n-radio-group>
           <div class="routing-sticky">
