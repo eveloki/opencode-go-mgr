@@ -90,5 +90,9 @@ test("USD costs use the narrow dollar symbol and preserve requested precision", 
 
 test("network failures use a human-facing fallback without hiding server errors", () => {
   assert.equal(userFacingError(new TypeError("Failed to fetch"), "offline"), "offline");
+  assert.equal(userFacingError(new TypeError("NetworkError when attempting to fetch resource."), "offline"), "offline");
+  assert.equal(userFacingError(new TypeError("Load failed"), "offline"), "offline");
   assert.equal(userFacingError(new Error("server detail"), "offline"), "server detail");
+  assert.equal(userFacingError("plain", "offline"), "plain");
+  assert.equal(userFacingError(new TypeError("syntax boom"), "offline"), "syntax boom");
 });
