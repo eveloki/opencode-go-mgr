@@ -240,6 +240,7 @@ async fn forward_request_impl(
                 | "connection"
                 | "transfer-encoding"
                 | "accept-encoding"
+                | "x-ocg-conversation-id"
         ) || (plan.upstream != ApiFormat::Messages
             && matches!(header.as_str(), "anthropic-version" | "anthropic-beta")))
         {

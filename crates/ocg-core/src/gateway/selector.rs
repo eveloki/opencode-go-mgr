@@ -17,24 +17,34 @@ impl AccountSelector {
     }
 
     pub fn select_excluding(&self, db: &Database, exclude_ids: &[&str]) -> Result<Option<Account>> {
-        let now = Utc::now();
-        for account in db.list_accounts()? {
-            if !account.enabled {
-                continue;
-            }
-            if account.auth_error.is_some() {
-                continue;
-            }
-            if exclude_ids.iter().any(|excluded| account.id == *excluded) {
-                continue;
-            }
-            if account.is_cooling_at(now) {
-                continue;
-            }
-            return Ok(Some(account));
-        }
+        let accounts = db.list_accounts()?;
+        Ok(Self::first_available(&accounts, exclude_ids))
+    }
 
-        Ok(None)
+    pub fn is_available(account: &Account, exclude_ids: &[&str]) -> bool {
+        let now = Utc::now();
+        account.enabled
+            && account.auth_error.is_none()
+            && !exclude_ids.iter().any(|excluded| account.id == *excluded)
+            && !account.is_cooling_at(now)
+    }
+
+    pub fn first_available(accounts: &[Account], exclude_ids: &[&str]) -> Option<Account> {
+        accounts
+            .iter()
+            .find(|account| Self::is_available(account, exclude_ids))
+            .cloned()
+    }
+
+    pub fn find_available(
+        accounts: &[Account],
+        account_id: &str,
+        exclude_ids: &[&str],
+    ) -> Option<Account> {
+        accounts
+            .iter()
+            .find(|account| account.id == account_id && Self::is_available(account, exclude_ids))
+            .cloned()
     }
 }
 

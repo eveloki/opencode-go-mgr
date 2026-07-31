@@ -138,6 +138,15 @@ fn format_date(date: NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoutingMode {
+    #[default]
+    StrictPriority,
+    StickyGlobal,
+    RoundRobin,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -150,6 +159,8 @@ pub struct AppConfig {
     pub connect_timeout_secs: u64,
     pub non_stream_timeout_secs: u64,
     pub stream_idle_timeout_secs: u64,
+    pub routing_mode: RoutingMode,
+    pub conversation_sticky: bool,
     pub claude_desktop_models: ClaudeDesktopModels,
 }
 
@@ -165,6 +176,8 @@ impl Default for AppConfig {
             connect_timeout_secs: 30,
             non_stream_timeout_secs: 900,
             stream_idle_timeout_secs: 300,
+            routing_mode: RoutingMode::StrictPriority,
+            conversation_sticky: false,
             claude_desktop_models: ClaudeDesktopModels::default(),
         }
     }
@@ -310,6 +323,7 @@ pub fn normalize_client_root_url(value: &str) -> Result<String, String> {
 impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.validate_timeouts()?;
+        // routing_mode is validated by serde enum decoding; unknown values never reach here.
         self.claude_desktop_models.validate()
     }
 
@@ -480,8 +494,8 @@ pub struct DailyModelCost {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountInput, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
-        CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, normalize_purchase_date,
+        AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
+        CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, RoutingMode, normalize_purchase_date,
         purchase_expires_on,
     };
 
@@ -568,5 +582,42 @@ mod tests {
         let json = serde_json::to_value(input).expect("input should serialize");
         assert_eq!(json["purchase_date"], "2026-07-15");
         assert!(json.get("recharge_date").is_none());
+    }
+
+    #[test]
+    fn routing_mode_defaults_and_rejects_unknown_values() {
+        let missing: AppConfig = serde_json::from_value(serde_json::json!({
+            "gateway_key": "k"
+        }))
+        .expect("missing routing fields should default");
+        assert_eq!(missing.routing_mode, RoutingMode::StrictPriority);
+        assert!(!missing.conversation_sticky);
+
+        for mode in [
+            RoutingMode::StrictPriority,
+            RoutingMode::StickyGlobal,
+            RoutingMode::RoundRobin,
+        ] {
+            let config = AppConfig {
+                routing_mode: mode,
+                conversation_sticky: true,
+                gateway_key: "k".into(),
+                ..AppConfig::default()
+            };
+            config.validate().expect("valid routing config");
+            let encoded = serde_json::to_value(&config).expect("serialize");
+            let decoded: AppConfig =
+                serde_json::from_value(encoded).expect("round-trip routing config");
+            assert_eq!(decoded.routing_mode, mode);
+            assert!(decoded.conversation_sticky);
+        }
+
+        assert!(
+            serde_json::from_value::<AppConfig>(serde_json::json!({
+                "gateway_key": "k",
+                "routing_mode": "weighted"
+            }))
+            .is_err()
+        );
     }
 }

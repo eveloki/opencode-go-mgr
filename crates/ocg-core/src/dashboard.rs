@@ -12,7 +12,7 @@ use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Path, Query, Request, State},
+    extract::{Path, Query, Request, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, Response as HttpResponse, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -41,7 +41,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/accounts/{id}/reset-cooldown",
             post(reset_account_cooldown),
         )
-        .route("/settings", get(get_settings).post(update_settings))
+        .route("/settings", get(get_settings).post(update_settings_route))
         .route(
             "/claude-desktop/models",
             get(get_claude_desktop_models).put(update_claude_desktop_models),
@@ -1378,6 +1378,14 @@ async fn update_settings(
     Ok(Json(SettingsRevisionResponse {
         revision: state.settings_revision(),
     }))
+}
+
+async fn update_settings_route(
+    State(state): State<CoreState>,
+    input: Result<Json<SettingsUpdateRequest>, JsonRejection>,
+) -> Result<Json<SettingsRevisionResponse>, ApiError> {
+    let input = input.map_err(|error| ApiError::bad_request(error.body_text()))?;
+    update_settings(State(state), input).await
 }
 
 async fn regenerate_gateway_key(

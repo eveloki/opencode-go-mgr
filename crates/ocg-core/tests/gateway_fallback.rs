@@ -8,7 +8,7 @@ use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
-use ocg_core::models::{Account, AccountUpdate};
+use ocg_core::models::{Account, AccountUpdate, RoutingMode};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -38,6 +38,7 @@ struct MockCall {
     anthropic_version: Option<String>,
     body: String,
     accept_encoding: Option<String>,
+    conversation_header: Option<String>,
 }
 
 #[derive(Clone)]
@@ -258,6 +259,10 @@ async fn mock_chat(
         .get(axum::http::header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let conversation_header = headers
+        .get("x-ocg-conversation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     state.calls.lock().unwrap().push(MockCall {
         key: key.clone(),
         path: uri.path().to_string(),
@@ -266,6 +271,7 @@ async fn mock_chat(
         anthropic_version,
         body,
         accept_encoding,
+        conversation_header,
     });
 
     let reply = {
@@ -296,6 +302,15 @@ async fn mock_chat(
 }
 
 fn build_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf) {
+    build_state_with_routing(base_url, keys, RoutingMode::StrictPriority, false)
+}
+
+fn build_state_with_routing(
+    base_url: String,
+    keys: &[&str],
+    routing_mode: RoutingMode,
+    conversation_sticky: bool,
+) -> (Arc<CoreStateInner>, PathBuf) {
     let dir = temp_data_dir("state");
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
     let db = Database::open(dir.clone()).unwrap();
@@ -303,6 +318,8 @@ fn build_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf
     let mut config = state.config();
     config.gateway_key = "gw-test".into();
     config.upstream_base_url = base_url;
+    config.routing_mode = routing_mode;
+    config.conversation_sticky = conversation_sticky;
     state.set_config(config).unwrap();
 
     let now = Utc::now();
@@ -341,22 +358,54 @@ async fn start_gateway(state: Arc<CoreStateInner>) -> (u16, GatewayHandle) {
 }
 
 async fn chat(port: u16) -> (u16, String) {
-    let response = reqwest::Client::new()
+    chat_with_conversation(port, None, "ping").await
+}
+
+async fn chat_with_conversation(
+    port: u16,
+    conversation_id: Option<&str>,
+    user: &str,
+) -> (u16, String) {
+    let request = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
         .header(reqwest::header::AUTHORIZATION, "Bearer gw-test")
         .header(reqwest::header::ACCEPT_ENCODING, "gzip")
         .json(&serde_json::json!({
             "model": "deepseek-v4-flash",
-            "messages": [{"role": "user", "content": "ping"}],
+            "messages": [{"role": "user", "content": user}],
             "max_tokens": 3,
             "stream": false
-        }))
-        .send()
-        .await
-        .unwrap();
+        }));
+    let request = if let Some(conversation_id) = conversation_id {
+        request.header("x-ocg-conversation-id", conversation_id)
+    } else {
+        request
+    };
+    let response = request.send().await.unwrap();
     let status = response.status().as_u16();
     let body = response.text().await.unwrap();
     (status, body)
+}
+
+fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str, enabled: bool) {
+    state
+        .db
+        .lock()
+        .update_account(
+            account_id,
+            &AccountUpdate {
+                name: None,
+                username: None,
+                password: None,
+                key: None,
+                enabled: Some(enabled),
+                referral_code: None,
+                purchase_date: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
 }
 
 async fn models(port: u16) -> (StatusCode, String) {
@@ -2476,6 +2525,307 @@ async fn delayed_dashboard_ping_429_does_not_cool_down_replaced_key() {
     assert!(stored.auth_error.is_none());
     assert!(stored.cooldown_until.is_none());
     assert!(stored.last_error.is_none());
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn sticky_global_keeps_failover_account_after_higher_priority_recovers() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state_with_routing(
+        base_url,
+        &["key-1", "key-2"],
+        RoutingMode::StickyGlobal,
+        false,
+    );
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    assert_eq!(chat(port).await.0, 200);
+    set_account_enabled(&state, "acct-1", false);
+    assert_eq!(chat(port).await.0, 200);
+    set_account_enabled(&state, "acct-1", true);
+    assert_eq!(chat(port).await.0, 200);
+
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["key-1", "key-2", "key-2"]
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn round_robin_cycles_and_skips_a_disabled_account() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state_with_routing(
+        base_url,
+        &["key-1", "key-2"],
+        RoutingMode::RoundRobin,
+        false,
+    );
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    assert_eq!(chat(port).await.0, 200);
+    set_account_enabled(&state, "acct-2", false);
+    assert_eq!(chat(port).await.0, 200);
+    set_account_enabled(&state, "acct-2", true);
+    assert_eq!(chat(port).await.0, 200);
+    assert_eq!(chat(port).await.0, 200);
+
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["key-1", "key-1", "key-2", "key-1"]
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn explicit_conversation_bindings_are_sticky_and_private() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) =
+        build_state_with_routing(base_url, &["key-1", "key-2"], RoutingMode::RoundRobin, true);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    for (conversation, user) in [
+        ("conversation-a", "a1"),
+        ("conversation-b", "b1"),
+        ("conversation-a", "a2"),
+        ("conversation-b", "b2"),
+    ] {
+        assert_eq!(
+            chat_with_conversation(port, Some(conversation), user)
+                .await
+                .0,
+            200
+        );
+    }
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["key-1", "key-2", "key-1", "key-2"]
+    );
+    assert!(calls.iter().all(|call| call.conversation_header.is_none()));
+    drop(calls);
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn conversation_failover_rebinds_to_the_successful_account() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 401,
+                body: r#"{"error":{"message":"expired key"}}"#,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state_with_routing(
+        base_url,
+        &["key-1", "key-2"],
+        RoutingMode::StrictPriority,
+        true,
+    );
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    assert_eq!(
+        chat_with_conversation(port, Some("conversation-rebind"), "first")
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        chat_with_conversation(port, Some("conversation-rebind"), "second")
+            .await
+            .0,
+        200
+    );
+
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["key-1", "key-2", "key-2"]
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn model_discovery_does_not_advance_round_robin_generation_cursor() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state_with_routing(
+        base_url,
+        &["key-1", "key-2"],
+        RoutingMode::RoundRobin,
+        false,
+    );
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    assert_eq!(chat(port).await.0, 200);
+    assert_eq!(models(port).await.0, StatusCode::OK);
+    assert_eq!(chat(port).await.0, 200);
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| (call.key.as_str(), call.path.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("key-1", "/v1/chat/completions"),
+            ("key-1", "/v1/models"),
+            ("key-2", "/v1/chat/completions"),
+        ]
+    );
+    drop(calls);
+    assert_eq!(state.db.lock().list_forward_logs(10).unwrap().len(), 2);
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn concurrent_round_robin_requests_are_evenly_distributed() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state_with_routing(
+        base_url,
+        &["key-1", "key-2"],
+        RoutingMode::RoundRobin,
+        false,
+    );
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let requests = (0..20)
+        .map(|_| tokio::spawn(chat(port)))
+        .collect::<Vec<_>>();
+    for request in requests {
+        assert_eq!(request.await.unwrap().0, 200);
+    }
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 20);
+    assert_eq!(calls.iter().filter(|call| call.key == "key-1").count(), 10);
+    assert_eq!(calls.iter().filter(|call| call.key == "key-2").count(), 10);
+    drop(calls);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());

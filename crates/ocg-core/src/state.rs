@@ -94,9 +94,10 @@ impl std::error::Error for DesktopUpdateStartError {
 }
 
 // Note: Mutex lock ordering is (1) settings_update, (2) db, (3) config,
-// (4) http_client, (5) gateway, (6) pricing. desktop_update_status and the async
-// pricing_refresh guard are never held while acquiring another sync lock.
-// Never acquire in reverse order; always drop one before acquiring another where possible.
+// (4) http_client, (5) gateway, (6) pricing, (7) routing. desktop_update_status
+// and the async pricing_refresh guard are never held while acquiring another
+// sync lock. Never acquire in reverse order; always drop one before acquiring
+// another where possible. Do not hold the routing lock across DB or network I/O.
 pub struct CoreStateInner {
     pub db: Mutex<Database>,
     pub config: Mutex<AppConfig>,
@@ -114,6 +115,7 @@ pub struct CoreStateInner {
     http_client: Mutex<reqwest::Client>,
     pricing: RwLock<Arc<PricingSnapshot>>,
     pub pricing_refresh: tokio::sync::Mutex<()>,
+    pub routing: crate::gateway::routing::RoutingRuntime,
     pub data_dir: PathBuf,
     pub cipher: Arc<dyn KeyCipher + Send + Sync>,
 }
@@ -181,6 +183,7 @@ impl CoreStateInner {
             http_client: Mutex::new(http_client),
             pricing: RwLock::new(Arc::new(pricing)),
             pricing_refresh: tokio::sync::Mutex::new(()),
+            routing: crate::gateway::routing::RoutingRuntime::new(),
             data_dir,
             cipher,
         })
@@ -398,11 +401,20 @@ impl CoreStateInner {
             let db = self.db.lock();
             save_config(&db, &config)?;
         }
-        let mut current_config = self.config.lock();
-        let mut current_client = self.http_client.lock();
-        *current_config = config;
-        *current_client = http_client;
+        let should_reset_routing = {
+            let mut current_config = self.config.lock();
+            let mut current_client = self.http_client.lock();
+            let should_reset = current_config.routing_mode != config.routing_mode
+                || current_config.conversation_sticky != config.conversation_sticky
+                || current_config.gateway_key != config.gateway_key;
+            *current_config = config;
+            *current_client = http_client;
+            should_reset
+        };
         self.settings_revision.fetch_add(1, Ordering::AcqRel);
+        if should_reset_routing {
+            self.routing.reset();
+        }
         Ok(())
     }
 
@@ -585,6 +597,92 @@ mod tests {
     }
 
     #[test]
+    fn routing_runtime_resets_when_routing_fields_or_gateway_key_change() {
+        use crate::crypto::{KeyCipher, StaticKeyCipher};
+        use crate::models::{Account, RoutingMode};
+        use std::sync::Arc;
+
+        fn test_account(cipher: &Arc<dyn KeyCipher + Send + Sync>, id: &str) -> Account {
+            Account {
+                id: id.into(),
+                name: id.into(),
+                username: None,
+                password_cipher: None,
+                key_cipher: cipher.encrypt(id).unwrap(),
+                enabled: true,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                last_error: None,
+                auth_error: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        let dir = temp_data_dir("routing-reset");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state =
+            CoreStateInner::new(db, dir.clone(), cipher.clone()).expect("state should initialize");
+        let accounts = vec![test_account(&cipher, "a"), test_account(&cipher, "b")];
+
+        assert_eq!(
+            state
+                .routing
+                .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
+                .unwrap()
+                .id,
+            "a"
+        );
+        assert_eq!(
+            state
+                .routing
+                .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
+                .unwrap()
+                .id,
+            "b"
+        );
+
+        let mut invalid = state.config();
+        invalid.routing_mode = RoutingMode::StickyGlobal;
+        invalid.connect_timeout_secs = 0;
+        assert!(state.set_config(invalid).is_err());
+        assert_eq!(
+            state
+                .routing
+                .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
+                .unwrap()
+                .id,
+            "a",
+            "failed config validation must not reset the active round-robin cursor"
+        );
+
+        let mut next = state.config();
+        next.conversation_sticky = true;
+        state
+            .set_config(next)
+            .expect("conversation sticky change should reset routing");
+
+        assert_eq!(
+            state
+                .routing
+                .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
+                .unwrap()
+                .id,
+            "a"
+        );
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
     fn settings_revision_advances_only_after_successful_commit() {
         let dir = temp_data_dir("settings-revision");
         let db = Database::open(dir.clone()).expect("test database should open");
@@ -744,6 +842,8 @@ mod tests {
                 .expect("test config should be an object");
             legacy_object.remove("claude_desktop_models");
             legacy_object.remove("show_dock_icon");
+            legacy_object.remove("routing_mode");
+            legacy_object.remove("conversation_sticky");
         }
         db.set_setting("config", &legacy.to_string())
             .expect("legacy config should persist");
@@ -755,6 +855,11 @@ mod tests {
             AppConfig::default().claude_desktop_models.resolved()
         );
         assert!(state.config().show_dock_icon);
+        assert_eq!(
+            state.config().routing_mode,
+            crate::models::RoutingMode::StrictPriority
+        );
+        assert!(!state.config().conversation_sticky);
         let stored = state
             .db
             .lock()

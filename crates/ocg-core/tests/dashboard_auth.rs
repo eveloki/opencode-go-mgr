@@ -2,7 +2,7 @@ use chrono::Utc;
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
-use ocg_core::models::{AppConfig, ForwardLog};
+use ocg_core::models::{AppConfig, ForwardLog, RoutingMode};
 use ocg_core::state::CoreStateInner;
 use reqwest::StatusCode;
 use serde_json::json;
@@ -561,6 +561,62 @@ async fn loopback_settings_accept_legacy_payload_without_revision() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(state.config().connect_timeout_secs, 17);
+
+    gateway::stop_gateway(handle);
+}
+
+#[tokio::test]
+async fn loopback_settings_round_trip_routing_modes_and_reject_unknown_values() {
+    let state = state("settings-routing");
+    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let url = format!("http://127.0.0.1:{}/dashboard/api/settings", handle.port);
+    let client = reqwest::Client::new();
+
+    for mode in [
+        RoutingMode::StrictPriority,
+        RoutingMode::StickyGlobal,
+        RoutingMode::RoundRobin,
+    ] {
+        let mut config = state.config();
+        config.routing_mode = mode;
+        config.conversation_sticky = mode != RoutingMode::StrictPriority;
+        let response = client
+            .post(&url)
+            .json(&settings_payload(&state, &config))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let loaded = client
+            .get(&url)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(loaded["routing_mode"], serde_json::to_value(mode).unwrap());
+        assert_eq!(
+            loaded["conversation_sticky"],
+            mode != RoutingMode::StrictPriority
+        );
+    }
+
+    let before = state.config();
+    let before_revision = state.settings_revision();
+    let mut invalid = settings_payload(&state, &before);
+    invalid["routing_mode"] = json!("weighted-random");
+    let response = client.post(&url).json(&invalid).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.config().routing_mode, before.routing_mode);
+    assert_eq!(
+        state.config().conversation_sticky,
+        before.conversation_sticky
+    );
+    assert_eq!(state.settings_revision(), before_revision);
 
     gateway::stop_gateway(handle);
 }

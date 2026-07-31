@@ -8,7 +8,7 @@ use crate::gateway::forwarder::{
 use crate::gateway::protocol::{
     ApiFormat, ProtocolError, RequestPlan, format_error, prepare_gemini_request, prepare_request,
 };
-use crate::gateway::selector::AccountSelector;
+use crate::gateway::routing::resolve_conversation_key;
 use crate::models::{
     AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
     ClaudeDesktopModels,
@@ -434,10 +434,11 @@ async fn execute_plan(
     config: AppConfig,
     client: reqwest::Client,
 ) -> axum::response::Response {
-    let selector = AccountSelector::new();
     // One logical client request, including safe retries and account fallback,
     // must use one immutable pricing revision from start to finish.
     let pricing_snapshot = state.pricing_snapshot();
+    let conversation_key =
+        resolve_conversation_key(client_format, &plan.model, &headers, &client_body);
 
     let mut last_error: Option<String> = None;
     let mut failed_ids: Vec<String> = Vec::new();
@@ -445,15 +446,43 @@ async fn execute_plan(
 
     loop {
         let account = {
-            let db = state.db.lock();
+            let accounts = match state.db.lock().list_accounts() {
+                Ok(accounts) => accounts,
+                Err(e) => {
+                    let message = format!("failed to select account: {e}");
+                    record_plan_failure(
+                        &state,
+                        &trace,
+                        &client_body,
+                        attempt.max(1),
+                        client_format,
+                        &plan,
+                        "gateway",
+                        "account_selection",
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &message,
+                    );
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &message,
+                        None,
+                    );
+                }
+            };
             let excluded = failed_ids.iter().map(String::as_str).collect::<Vec<_>>();
-            match selector.select_excluding(&db, &excluded) {
-                Ok(Some(a)) => a,
-                Ok(None) => {
+            match state.routing.select_account(
+                &accounts,
+                config.routing_mode,
+                config.conversation_sticky,
+                conversation_key.as_deref(),
+                &excluded,
+            ) {
+                Some(a) => a,
+                None => {
                     // No enabled, non-cooldown, non-excluded account left.
                     // If any enabled account is in cooldown, tell the client when the soonest resets.
-                    let soonest = db.soonest_cooldown_reset().ok().flatten();
-                    drop(db);
+                    let soonest = state.db.lock().soonest_cooldown_reset().ok().flatten();
                     return match soonest {
                         Some(until) => {
                             record_plan_failure(
@@ -493,28 +522,6 @@ async fn execute_plan(
                             )
                         }
                     };
-                }
-                Err(e) => {
-                    let message = format!("failed to select account: {e}");
-                    drop(db);
-                    record_plan_failure(
-                        &state,
-                        &trace,
-                        &client_body,
-                        attempt.max(1),
-                        client_format,
-                        &plan,
-                        "gateway",
-                        "account_selection",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                    );
-                    return protocol_error_response(
-                        client_format,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                        None,
-                    );
                 }
             }
         };
