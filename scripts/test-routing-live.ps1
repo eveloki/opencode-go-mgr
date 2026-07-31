@@ -304,6 +304,26 @@ function Restore-State {
             }
         }
         Set-AccountOrder @($script:AccountsSnapshot | ForEach-Object { $_.id })
+        # Force routing runtime reset even when final values already match the snapshot:
+        # flip conversation_sticky first (other fields stay at snapshot), re-GET revision,
+        # then write the full snapshot back.
+        $currentSettings = Get-Settings
+        $flipSticky = -not [bool]$script:SettingsSnapshot.conversation_sticky
+        $flipPayload = [ordered]@{
+            gateway_port = $script:SettingsSnapshot.gateway_port
+            gateway_key = $script:SettingsSnapshot.gateway_key
+            upstream_base_url = $script:SettingsSnapshot.upstream_base_url
+            client_root_url = $script:SettingsSnapshot.client_root_url
+            auto_start = $script:SettingsSnapshot.auto_start
+            show_dock_icon = $script:SettingsSnapshot.show_dock_icon
+            connect_timeout_secs = $script:SettingsSnapshot.connect_timeout_secs
+            non_stream_timeout_secs = $script:SettingsSnapshot.non_stream_timeout_secs
+            stream_idle_timeout_secs = $script:SettingsSnapshot.stream_idle_timeout_secs
+            routing_mode = $script:SettingsSnapshot.routing_mode
+            conversation_sticky = $flipSticky
+            expected_revision = $currentSettings.revision
+        }
+        [void](Invoke-JsonRequest -Uri "$BaseUrl/dashboard/api/settings" -Method POST -Body $flipPayload)
         $currentSettings = Get-Settings
         $payload = [ordered]@{
             gateway_port = $script:SettingsSnapshot.gateway_port
@@ -349,17 +369,26 @@ try {
     if ($null -eq $script:SettingsSnapshot.conversation_sticky) { throw "conversation_sticky is missing from settings API" }
 
     $targets = @($TargetAccountNames | ForEach-Object { Get-AccountByName $_ })
-    if (@($targets).Count -lt 2) { throw "at least two target accounts are required" }
+    if (@($targets).Count -ne 2) { throw "TargetAccountNames must contain exactly 2 names; got $(@($targets).Count)" }
     Write-Info "target accounts: $(@($targets | ForEach-Object { $_.name }) -join ', ')"
     Write-Info "startup mode=$($script:SettingsSnapshot.routing_mode) conversation_sticky=$($script:SettingsSnapshot.conversation_sticky)"
-
-    if (-not $SkipProtocolMatrix -and -not $OnlyConcurrency) {
-        Run-Scenario "protocol matrix" { Invoke-ProtocolMatrix }
-    }
 
     $targetIds = @($targets | ForEach-Object { $_.id })
     $otherIds = @($script:AccountsSnapshot | Where-Object { $targetIds -notcontains $_.id } | ForEach-Object { $_.id })
     $targetOrder = @($targetIds + $otherIds)
+    # Disable non-target accounts before any protocol/routing scenario so RR assertions
+    # are not affected by other enabled accounts. Restore-State still restores the snapshot.
+    foreach ($id in $otherIds) {
+        Set-AccountEnabled $id $false
+    }
+    Set-AccountEnabled $targets[0].id $true
+    Set-AccountEnabled $targets[1].id $true
+    Set-AccountOrder $targetOrder
+    Write-Info "disabled non-target accounts: $(@($otherIds).Count)"
+
+    if (-not $SkipProtocolMatrix -and -not $OnlyConcurrency) {
+        Run-Scenario "protocol matrix" { Invoke-ProtocolMatrix }
+    }
 
     if (-not $OnlyConcurrency) {
     Run-Scenario "strict priority follows order" {
