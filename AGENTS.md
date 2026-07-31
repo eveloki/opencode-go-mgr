@@ -1,13 +1,16 @@
 # AGENTS.md — ocg-manager
 
 本文件给 AI 编码助手使用。以当前代码为准，别按旧 README 或过期需求文档补不存在的东西。
+用户文档见 `docs/`；发版细节以 `docs/MAINTAINER.md` 为准。
 
 ## 项目事实
 
 - 产品：OCG Manager，OpenCode-Go 多账号本地管理器。
 - 前端：Vue 3 + TypeScript + naive-ui，源码在 `src/`。
 - 前端 API：`src/api/tauri.ts` 是历史命名，当前封装 HTTP `/dashboard/api`，不是 Tauri `invoke()`。
-- Rust workspace：`crates/ocg-core`、`crates/ocg-cli`、`src-tauri`。
+- 面板视图（侧栏顺序）：Dashboard / Accounts / Pricing / Applications / Logs / Settings。
+- UI 文案：接入凭证在面板上显示为 **Key**（不要写 “Gateway Key”）；设计系统以 `DESIGN.md` + `src/theme.ts` 为准。
+- Rust workspace：`crates/ocg-core`、`crates/ocg-cli`（二进制名 `ocg-manager-cli`）、`src-tauri`。
 - 核心 Gateway：Axum + Tokio + reqwest，默认监听 `127.0.0.1:9042`；同一端口提供 OpenAI Chat Completions / Responses、Anthropic Messages、Gemini `generateContent` 客户端入口与 Claude Desktop 别名入口。
 - 持久化：SQLite。GUI 数据目录为 Windows `%USERPROFILE%\.ocg-mgr` 或 macOS/Linux `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
 - 桌面端：Tauri v2 跨平台托盘应用，主窗口默认隐藏；托盘/单实例逻辑用系统浏览器打开 `http://127.0.0.1:<port>/dashboard/`，回环监听自动跳过登录。
@@ -15,6 +18,7 @@
 - 每个节点都由自己的 dashboard 管理；项目不提供远端同步或 Admin API。
 - 非回环监听使用单管理员登录。Docker 可通过 `OCG_ADMIN_USERNAME` 和 `OCG_ADMIN_PASSWORD` 首次初始化（两个必须同时设置，只设一个会启动报错）；未提供时由首个注册者创建管理员。
 - 设置页通过受保护的 `/dashboard/api/settings/check-update` 手动检查 GitHub 最新 Release。内置升级公钥的已安装桌面版可继续下载、校验签名并原位安装；开发构建、CLI、Docker 与尚未进入升级通道的旧版保留发布页/手动覆盖路径。
+- 价格表通过受保护的 `GET /dashboard/api/pricing`、`PUT /dashboard/api/pricing/multipliers`、`POST /dashboard/api/pricing/refresh` 管理；只在用户点击刷新时访问 `https://opencode.ai/docs/go/`，不得自动轮询。
 - 公开 GitHub Release 发布后，`.github/workflows/container.yml` 构建并冒烟验证 `linux/amd64` 镜像，发布到 `ghcr.io/klarkxy/opencode-go-mgr`。Compose 默认使用该镜像；本地源码构建需设置 `OCG_IMAGE=ocg-manager:local` 后执行 `docker compose up -d --build`。
 - `.github/workflows/quality.yml` 在 PR / `main` 上复用 Linux 主质量门和 Windows Tauri 定向测试。`release.yml` 的手动候选（即使选择 tag ref）始终无签名且可只构建指定平台；只有 `v*` tag 的 push 事件才构建三平台并读取 repository signing secrets。tag push 视为单维护者的明确发布授权：工作流在校验恰好 15 个附件、升级签名、公钥连续性与 GitHub 服务端 digest 后自动公开同一个未变更 draft。
 - 容器固定以 UID/GID `10001` 运行并内置 `LICENSE`；Compose 透传可选的 `OCG_MANAGER_ENCRYPTION_KEY` 以支持显式密钥恢复，正常部署仍优先保留卷内 `.encryption-key`。
@@ -29,11 +33,15 @@
 - `crates/ocg-core/src/dashboard.rs`：当前 Vue 面板使用的 `/dashboard/api`。
 - `crates/ocg-core/src/db.rs`：SQLite schema、迁移、查询。
 - `crates/ocg-core/src/models.rs`：共享 serde 类型和 `AppConfig`。
+- `crates/ocg-core/src/pricing.rs`：OpenCode Go 价格快照、倍率与额度估算。
 - `crates/ocg-cli/src/main.rs`：CLI `serve`、`key`、`status`。
 - `src-tauri/src/lib.rs`：Tauri 启动、Gateway 启动、托盘、命令注册。
 - `src-tauri/src/updater.rs`：签名桌面升级器桥接；由受保护的 dashboard HTTP API 触发，不向 WebView 暴露 updater command 权限。
 - `src-tauri/src/tray.rs`：托盘菜单和 dashboard 打开逻辑。
-- `src/views/`：Dashboard / Accounts / Applications / Logs / Settings。
+- `src/views/`：Dashboard / Accounts / Pricing / Applications / Logs / Settings。
+- `src/views/application-guides.ts`：16 个应用教程注册表（改数量/协议/脱敏时同步测）。
+- `src/theme.ts` + `DESIGN.md`：主题 token 与设计规范；改色/字号时两边一起改。
+- `docs/`：USER、MAINTAINER、防滥用声明、CONTRIBUTORS、文档索引。
 
 ## 常用命令
 
@@ -43,6 +51,7 @@ pnpm run dev
 pnpm run build:web
 pnpm run test
 pnpm run design:lint
+pnpm run release:check
 pnpm run build
 ```
 
@@ -50,70 +59,35 @@ pnpm run build
 
 `pnpm run build` 只用于当前原生平台的最终 release 构建，并在成功后原子替换 `release/`；只验证前端时用 `pnpm run build:web`。Windows 仅发布 x64 NSIS 安装包，macOS 发布 Universal DMG，Linux x64 发布 AppImage 和 deb；CLI 压缩包必须包含同级 `dist/` 与 `LICENSE`。
 
-## Release 打包流程
+## 本地 Release 构建（Windows 速查）
 
-### 环境准备（Windows）
+完整发版流程、CI 矩阵与签名密钥见 `docs/MAINTAINER.md`。本地 smoke 构建：
 
-1. 确保 `pnpm` 可用。本项目使用 `packageManager: pnpm@10.29.2`，可通过 `corepack` 启用；若当前环境没有 `corepack` 管理员权限或 PATH 未包含 pnpm，可在用户目录创建 shim：
-
-   ```powershell
-   # 示例路径，请按实际 node/corepack 版本调整
-   $shimDir = "$env:LOCALAPPDATA\pnpm-shim"
-   $nodeExe = "C:\Program Files\nodejs\node.exe"
-   $pnpmCjs = "$env:LOCALAPPDATA\node\corepack\v1\pnpm\10.29.2\bin\pnpm.cjs"
-   New-Item -ItemType Directory -Force -Path $shimDir
-   "@echo off`n`"$nodeExe`" `"$pnpmCjs`" %*" | Out-File -Encoding ASCII "$shimDir\pnpm.cmd"
-   $env:Path = "$shimDir;$env:Path"
-   ```
-
-2. 退出已安装的 release 版本，释放单实例锁和 `9042` 端口。可用以下命令查找并关闭：
+1. 确保 `pnpm` 可用（`packageManager: pnpm@10.29.2`）。PATH 无 pnpm 时可在用户目录做 shim。
+2. 退出已安装 release 版，释放单实例锁和 `9042`：
 
    ```powershell
    Get-NetTCPConnection -LocalPort 9042 -ErrorAction SilentlyContinue |
      Select-Object OwningProcess | Get-Process | Stop-Process -Force
    ```
 
-3. 确认版本一致：`package.json`、`src-tauri/tauri.conf.json`、`Cargo.toml` workspace 和 `src-tauri/Cargo.toml` 的 `version` 必须相同。
+3. 版本一致：`package.json`、`src-tauri/tauri.conf.json`、workspace `Cargo.toml`、`src-tauri/Cargo.toml`，以及 `compose.example.yaml` 的标题与默认镜像。
+4. 执行 `pnpm run build`（调用 `scripts/release.mjs`）。
 
-### 执行构建
+签名相关环境变量（与 CI / MAINTAINER 一致）：
 
-```powershell
-# 如果 pnpm 不在 PATH，先加 shim
-$env:Path = "C:\Users\<用户名>\AppData\Local\pnpm-shim;$env:Path"
-pnpm run build
-```
+- `TAURI_SIGNING_PRIVATE_KEY`：私钥内容，或仓库外安全路径（脚本会规范化为 Tauri 的 path 形式）。
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：私钥密码（如有）。
+- `TAURI_UPDATER_PUBLIC_KEY`：公钥内容；须匹配 `src-tauri/updater-public-key.sha256`。
+- `OCG_REQUIRE_UPDATER_ARTIFACTS=1`：强制要求签名产物；缺密钥则失败。
 
-`pnpm run build` 会调用 `scripts/release.mjs`，其流程如下：
+**没有 `TAURI_SIGNING_PRIVATE_KEY` 时只产出普通本地包，不能用于应用内升级，仅做本地 smoke test。**
 
-1. 校验版本一致性（`validateVersion`）。
-2. 解析 updater 签名配置（`scripts/generate-updater-manifest.mjs`）。**没有 `TAURI_SIGNING_PRIVATE_KEY_PATH` 时只产出普通本地包，不能用于应用内升级，仅做本地 smoke test。**
-3. 清理并创建临时目录 `.release-tmp-<pid>/release` 和 `.release-tmp-<pid>/cli`。
-4. 调用 `tauri build --ci --bundles nsis`（Windows）/`appimage,deb`（Linux）/`dmg[,app.tar.gz]`（macOS）。
-5. 把 Tauri 产物复制到临时 release 目录。
-6. 重新编译 CLI：`cargo build --release --bin ocg-manager-cli`。
-7. 准备 CLI 包：把 CLI 二进制、`dist/` 目录、`LICENSE` 放进临时 `cli/` 目录。
-8. 打包 CLI zip（Windows 用 `Compress-Archive`）或 tar.gz（Linux/macOS）。
-9. 生成 `SHA256SUMS`。
-10. 原子替换 `release/` 目录：先把旧的 `release/` 重命名为 `.release-backup-<pid>`，再把临时 release 目录重命名为 `release/`，成功后删除备份。
-11. 清理 `.release-tmp-<pid>`。
-
-### 构建后处理
-
-Tauri 在 Windows 上会重写 `src-tauri/Cargo.toml` 和 `src-tauri/gen/schemas/*.json` 的行尾为 CRLF。由于 `core.autocrlf=true`，`git diff` 可能为空但 `git status` 仍显示 modified。构建完成后需把这些文件还原：
+Windows 上 Tauri 可能把 `src-tauri/Cargo.toml` 与 `src-tauri/gen/schemas/*.json` 行尾改成 CRLF；构建后如需干净工作树：
 
 ```powershell
 git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json src-tauri/gen/schemas/windows-schema.json
 ```
-
-### 产物位置
-
-构建成功后 `release/` 目录包含（以 Windows x64 为例）：
-
-- `ocg-manager_<version>_windows-x64-setup.exe`
-- `ocg-manager-cli_<version>_windows-x64.zip`
-- `SHA256SUMS`
-
-macOS 产物为 `_macos-universal.dmg` 和 `_macos-universal.app.tar.gz`（启用 updater 时）；Linux 产物为 `_linux-x64.AppImage`、`_linux-x64.deb` 和 `_linux-x64.tar.gz`。
 
 ## 开发约束
 
@@ -124,6 +98,8 @@ macOS 产物为 `_macos-universal.dmg` 和 `_macos-universal.app.tar.gz`（启�
 - 不要重新引入远端同步；远端节点通过自己的 dashboard 管理。
 - `auto_start` 仅在 Windows release/安装版 Tauri 桌面进程中可用；HTTP dashboard 依据运行时能力显示开关，开发构建、CLI、Docker、macOS 和 Linux 不暴露该设置。
 - `show_dock_icon` 仅在 macOS Tauri 桌面进程中可用；关闭后保留菜单栏托盘图标。Windows、Linux、CLI 与 Docker 不暴露该设置。
+- 改文档时保持中英对、路径与 TOC 一致；用户可见事实以代码与 `docs/USER*.md` 为准。
+- 改 UI 外观时遵循 `DESIGN.md`：六档字号、七主题、接入中心首屏、Key 命名；主题实现以 `src/theme.ts` 为准。
 
 ## 测试策略
 

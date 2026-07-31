@@ -27,20 +27,21 @@ matrix, the CI flow, and the things that are explicitly out of scope.
 ```
 ocg-manager/
 ├── crates/
-│   ├── ocg-core/      Gateway, dashboard HTTP API, SQLite, models, crypto, selector, cooldown, cost accounting
+│   ├── ocg-core/      Gateway, dashboard HTTP API, SQLite, models, crypto, selector, cooldown, pricing
 │   └── ocg-cli/       Headless CLI and gateway entrypoint
 ├── src/               Vue 3 dashboard (TypeScript, naive-ui, Vite)
 │   ├── App.vue        Top-level shell, auth page, side rail, header
 │   ├── api/tauri.ts   Historical name; HTTP wrapper for /dashboard/api (not Tauri invoke)
-│   ├── components/    LocaleSwitcher, StackedBarChart
+│   ├── components/    LocaleSwitcher, PricingCatalog, StackedBarChart, …
 │   ├── i18n/          i18n setup + per-locale message tables + tests
 │   ├── styles/        Theme tokens, design-system overrides
-│   └── views/         Dashboard, Accounts, Applications, Logs, Settings (+ unit tests)
-├── src-tauri/         Cross-platform tray app, single-instance behavior, Tauri commands, native packaging
-├── docs/              USER.md, MAINTAINER.md (English + Chinese)
-├── scripts/           free-dev-port.mjs, release.mjs
+│   └── views/         Dashboard, Accounts, Pricing, Applications, Logs, Settings (+ unit tests)
+├── src-tauri/         Cross-platform tray app, single-instance, updater bridge, native packaging
+├── docs/              USER / MAINTAINER / anti-abuse (EN+ZH), CONTRIBUTORS, index
+├── scripts/           free-dev-port, release, updater manifest, release notes, smokes, …
+├── AGENTS.md          Facts and constraints for AI coding assistants
 ├── DESIGN.md          Design system source of truth (linted in CI)
-├── .github/workflows/ Cross-platform release workflow
+├── .github/workflows/ quality.yml, release.yml, container.yml
 ├── Dockerfile         Multi-stage headless gateway image
 ├── compose.yaml       Source-build and image Compose service definition
 └── compose.example.yaml  Pull-only Compose example attached to each Release
@@ -136,6 +137,7 @@ ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042
 The frontend unit tests live next to the code they cover
 (`src/i18n.test.ts`, `src/views/accounts-usage.test.ts`,
 `src/views/dashboard-connection.test.ts`, `src/views/logs.test.ts`,
+`src/views/pricing-view.test.ts`, `src/views/settings-update.test.ts`,
 `src/theme.test.ts`). They run with Node's experimental
 `--experimental-strip-types` flag — no extra test runner is required. Pair
 them with `pnpm run build:web` for a final smoke test.
@@ -225,13 +227,14 @@ difference, and the Claude Desktop three-role persistence behavior.
   clicks the button; it is not telemetry.
 - Docker may bootstrap the first administrator with `OCG_ADMIN_USERNAME` and
   `OCG_ADMIN_PASSWORD`; otherwise the first registration wins.
-- The Applications view is generated from 16 guides: Claude Code, Claude
-  Desktop, Codex, Gemini CLI, Pi, Kimi Code CLI, OpenCode, WorkBuddy, OpenClaw,
-  Hermes, Cherry Studio, VS Code Copilot Chat, Cline, Roo Code, Continue, and
-  Chatbox.
-  The Claude Desktop copy action also saves its three role models; every
-  other guide only produces client configuration and does not change gateway
-  settings.
+- The side rail exposes Dashboard, Accounts, Pricing, Applications, Logs, and
+  Settings. The Applications view is generated from 16 guides: Claude Code,
+  Claude Desktop, Codex, Gemini CLI, Pi, Kimi Code CLI, OpenCode, WorkBuddy,
+  OpenClaw, Hermes, Cherry Studio, VS Code Copilot Chat, Cline, Roo Code,
+  Continue, and Chatbox. The Claude Desktop copy action also saves its three
+  role models; every other guide only produces client configuration and does
+  not change gateway settings. The Pricing view reads and refreshes the active
+  OpenCode Go snapshot through the protected pricing API.
 
 ### Persistence
 
@@ -721,4 +724,5 @@ most of them; the manual parts need a real desktop.
 ---
 
 [中文维护者指南](MAINTAINER.zh-CN.md) · [User guide](USER.md) ·
-[用户指南](USER.zh-CN.md) · [Back to README](../README.md)
+[用户指南](USER.zh-CN.md) · [Docs index](README.md) ·
+[Back to README](../README.md)

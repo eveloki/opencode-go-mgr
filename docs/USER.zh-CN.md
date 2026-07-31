@@ -16,6 +16,7 @@
   - [接入中心](#接入中心)
   - [应用教程](#应用教程)
   - [账号](#账号)
+  - [价格表](#价格表)
   - [日志](#日志)
   - [设置](#设置)
 - [Gateway 行为](#gateway-行为)
@@ -223,9 +224,9 @@ docker compose ps
 
 ## 管理面板
 
-管理面板是 Gateway 提供的单页 Vue 3 应用，左侧边栏四个主视图：**仪表盘**、
-**账号**、**应用**、**日志**，外加 **设置** 入口。顶栏右侧是主题切换、语言
-切换、退出登录。
+管理面板是 Gateway 提供的单页 Vue 3 应用。左侧边栏（宽度低于 1024px 时改为顶
+部横向菜单）共六个视图：**仪表盘**、**账号**、**价格表**、**应用**、**日志**、
+**设置**。顶栏右侧是主题切换、语言切换、退出登录。
 
 面板原生支持十种语言：简体中文、繁體中文、English、日本語、한국어、Español、
 Français、Deutsch、Português (Brasil)、Русский，默认简体中文。语言选择持久化
@@ -784,4 +785,5 @@ ocg.example.com {
 ---
 
 [English user guide](USER.md) · [Maintainer guide](MAINTAINER.md) ·
-[维护者指南](MAINTAINER.zh-CN.md) · [回到 README](../README.zh-CN.md)
+[维护者指南](MAINTAINER.zh-CN.md) · [文档索引](README.md) ·
+[回到 README](../README.zh-CN.md)

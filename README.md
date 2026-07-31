@@ -121,13 +121,35 @@ completion status, errors, and usage fields.
 | --- | --- |
 | OpenAI Chat Completions | `grok-4.5`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
 | OpenAI Responses | `gpt-5.6-luna` |
-| Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.5`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
+| Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
-Multi-protocol passthrough (live test-account probe; preferred stays as above):
+Passthrough matrix (live test-account probe, 2026-07-31). ✓ = client protocol is forwarded as-is; empty = converted to the model's preferred protocol. Source of truth: `MODEL_PROTOCOLS` in `crates/ocg-core/src/gateway/protocol.rs`.
 
-- All three: `glm-5.2`, `glm-5.1`, `glm-5`
-- Chat + Responses: `grok-4.5`, `gpt-5.6-luna`
-- Chat + Messages: MiniMax / Qwen families above
+| Model | Preferred | Chat | Responses | Messages |
+| --- | --- | :---: | :---: | :---: |
+| `grok-4.5` | Chat | ✓ | ✓ | |
+| `glm-5.2` | Chat | ✓ | ✓ | ✓ |
+| `glm-5.1` | Chat | ✓ | ✓ | ✓ |
+| `glm-5` | Chat | ✓ | ✓ | ✓ |
+| `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `kimi-k3` | Chat | ✓ | | |
+| `kimi-k2.7-code` | Chat | ✓ | | |
+| `kimi-k2.6` | Chat | ✓ | | |
+| `kimi-k2.5` | Chat | ✓ | | |
+| `deepseek-v4-pro` | Chat | ✓ | | |
+| `deepseek-v4-flash` | Chat | ✓ | | |
+| `mimo-v2.5` | Chat | ✓ | | |
+| `mimo-v2.5-pro` | Chat | ✓ | | |
+| `hy3` | Chat | ✓ | | |
+| `minimax-m3` | Messages | ✓ | | ✓ |
+| `minimax-m2.7` | Messages | ✓ | | ✓ |
+| `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
+| `minimax-m2.5` | Messages | ✓ | | ✓ |
+| `minimax-m2.5-highspeed` | Messages | ✓ | | ✓ |
+| `qwen3.7-max` | Messages | ✓ | | ✓ |
+| `qwen3.7-plus` | Messages | ✓ | | ✓ |
+| `qwen3.6-plus` | Messages | ✓ | | ✓ |
+| `qwen3.5-plus` | Messages | ✓ | | ✓ |
 
 - **Gemini is a client-only format**: `/v1beta/models/{model}:generateContent`
   and `:streamGenerateContent` (plus `/v1/models/...` aliases) are converted
@@ -167,12 +189,14 @@ to 100% and marks it as an error. The account recovers automatically after
 
 ## Documentation
 
-- [中文 README](README.zh-CN.md) · [English README](README.md)
-- [User guide](docs/USER.md) · [用户指南](docs/USER.zh-CN.md)
-- [Maintainer guide](docs/MAINTAINER.md) · [维护者指南](docs/MAINTAINER.zh-CN.md)
-- [OpenCode-Go anti-abuse statement](OPENCODE_GO_ANTI_ABUSE.md) ·
-  [OpenCode-Go 防滥用声明](OPENCODE_GO_ANTI_ABUSE.zh-CN.md)
-- [Contributors / 贡献者](CONTRIBUTORS.md)
+| Audience | English | 简体中文 |
+| --- | --- | --- |
+| README | [README.md](README.md) | [README.zh-CN.md](README.zh-CN.md) |
+| End users | [User guide](docs/USER.md) | [用户指南](docs/USER.zh-CN.md) |
+| Maintainers | [Maintainer guide](docs/MAINTAINER.md) | [维护者指南](docs/MAINTAINER.zh-CN.md) |
+| Policy | [Anti-abuse statement](docs/OPENCODE_GO_ANTI_ABUSE.md) | [防滥用声明](docs/OPENCODE_GO_ANTI_ABUSE.zh-CN.md) |
+| Credits | [Contributors](docs/CONTRIBUTORS.md) | same file |
+| Index | [docs/](docs/README.md) | — |
 
 ## Development
 

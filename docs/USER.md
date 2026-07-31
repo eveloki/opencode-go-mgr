@@ -17,6 +17,7 @@ the true / false circuit breakers, and protocol conversion actually work.
   - [Connection Center](#connection-center)
   - [Application Guides](#application-guides)
   - [Accounts](#accounts)
+  - [Pricing](#pricing)
   - [Logs](#logs)
   - [Settings](#settings)
 - [Gateway Behavior](#gateway-behavior)
@@ -247,9 +248,10 @@ The direct GUI steps are also the fallback when in-app update is unavailable.
 ## The Dashboard
 
 The dashboard is a single-page Vue 3 application served by the gateway. The
-left rail exposes four views — **Dashboard**, **Accounts**, **Applications**,
-and **Logs** — plus the **Settings** menu. The top right of the header holds
-the theme switcher, the language switcher, and the sign-out button.
+left rail (or the horizontal app menu below 1024px) exposes six views:
+**Dashboard**, **Accounts**, **Pricing**, **Applications**, **Logs**, and
+**Settings**. The top right of the header holds the theme switcher, the
+language switcher, and the sign-out button.
 
 The dashboard speaks ten languages: 简体中文, 繁體中文, English, 日本語,
 한국어, Español, Français, Deutsch, Português (Brasil), and Русский. The
@@ -946,4 +948,5 @@ intentionally want to delete all stored accounts, credentials, and keys.
 ---
 
 [中文用户指南](USER.zh-CN.md) · [Maintainer guide](MAINTAINER.md) ·
-[维护者指南](MAINTAINER.zh-CN.md) · [Back to README](../README.md)
+[维护者指南](MAINTAINER.zh-CN.md) · [Docs index](README.md) ·
+[Back to README](../README.md)

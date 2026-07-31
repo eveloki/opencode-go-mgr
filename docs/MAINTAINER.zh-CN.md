@@ -26,20 +26,21 @@
 ```
 ocg-manager/
 ├── crates/
-│   ├── ocg-core/      Gateway、面板 HTTP API、SQLite、models、crypto、selector、cooldown、用量统计
+│   ├── ocg-core/      Gateway、面板 HTTP API、SQLite、models、crypto、selector、cooldown、pricing
 │   └── ocg-cli/       无头 CLI 与 Gateway 入口
 ├── src/               Vue 3 管理面板（TypeScript、naive-ui、Vite）
 │   ├── App.vue        顶层外壳、登录页、侧边栏、顶栏
 │   ├── api/tauri.ts   历史命名；HTTP 封装 /dashboard/api（不是 Tauri invoke）
-│   ├── components/    LocaleSwitcher、StackedBarChart
+│   ├── components/    LocaleSwitcher、PricingCatalog、StackedBarChart、…
 │   ├── i18n/          i18n 注册表 + 各语言文案 + 单元测试
 │   ├── styles/        主题 token、设计系统覆盖
-│   └── views/         Dashboard、Accounts、Applications、Logs、Settings（含单元测试）
-├── src-tauri/         跨平台托盘应用、单实例行为、Tauri commands、原生打包
-├── docs/              USER.md、MAINTAINER.md（中英双语）
-├── scripts/           free-dev-port.mjs、release.mjs
+│   └── views/         Dashboard、Accounts、Pricing、Applications、Logs、Settings（含单测）
+├── src-tauri/         跨平台托盘应用、单实例、升级桥接、原生打包
+├── docs/              USER / MAINTAINER / 防滥用（中英）、CONTRIBUTORS、索引
+├── scripts/           free-dev-port、release、updater manifest、release notes、冒烟脚本、…
+├── AGENTS.md          给 AI 编码助手的项目事实与约束
 ├── DESIGN.md          设计系统源（CI 中 lint）
-├── .github/workflows/ 跨平台发布工作流
+├── .github/workflows/ quality.yml、release.yml、container.yml
 ├── Dockerfile         多阶段无头 Gateway 镜像
 ├── compose.yaml       支持源码构建与镜像拉取的 Compose 服务定义
 └── compose.example.yaml  每个 Release 附带的只拉取镜像示例
@@ -126,7 +127,8 @@ ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042
 
 前端单元测试与代码放在同一目录（`src/i18n.test.ts`、
 `src/views/accounts-usage.test.ts`、`src/views/dashboard-connection.test.ts`、
-`src/views/logs.test.ts`、`src/theme.test.ts`），用 Node 实验性的
+`src/views/logs.test.ts`、`src/views/pricing-view.test.ts`、
+`src/views/settings-update.test.ts`、`src/theme.test.ts`），用 Node 实验性的
 `--experimental-strip-types` 跑，不需要额外测试框架。最后再跑一次
 `pnpm run build:web` 做冒烟。
 
@@ -195,10 +197,12 @@ Desktop 三个角色模型的持久化行为。
   不属于遥测。
 - Docker 可用 `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；
   不提供时由首位注册者创建。
-- **应用** 视图维护 16 个教程：Claude Code、Claude Desktop、Codex、Gemini
-  CLI、Pi、Kimi Code CLI、OpenCode、WorkBuddy、OpenClaw、Hermes、Cherry Studio、
-  VS Code Copilot Chat、Cline、Roo Code、Continue、Chatbox。Claude Desktop 的复制
-  动作还会保存三个角色模型；其他教程只生成客户端配置，不修改 Gateway 设置。
+- 侧栏包含仪表盘、账号、价格表、应用、日志、设置。**应用** 视图维护 16 个教程：
+  Claude Code、Claude Desktop、Codex、Gemini CLI、Pi、Kimi Code CLI、OpenCode、
+  WorkBuddy、OpenClaw、Hermes、Cherry Studio、VS Code Copilot Chat、Cline、Roo
+  Code、Continue、Chatbox。Claude Desktop 的复制动作还会保存三个角色模型；其他
+  教程只生成客户端配置，不修改 Gateway 设置。**价格表** 视图通过受保护的定价
+  API 读取并刷新当前 OpenCode Go 快照。
 
 ### 持久化
 
@@ -582,4 +586,5 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 ---
 
 [English maintainer guide](MAINTAINER.md) · [User guide](USER.md) ·
-[用户指南](USER.zh-CN.md) · [回到 README](../README.zh-CN.md)
+[用户指南](USER.zh-CN.md) · [文档索引](README.md) ·
+[回到 README](../README.zh-CN.md)
