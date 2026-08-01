@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -12,6 +14,25 @@ import {
   parseCommitSubject,
   selectPreviousTag,
 } from "./generate-release-notes.mjs";
+
+function runGit(cwd, args) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    windowsHide: true,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "ocg-test",
+      GIT_AUTHOR_EMAIL: "ocg-test@example.com",
+      GIT_COMMITTER_NAME: "ocg-test",
+      GIT_COMMITTER_EMAIL: "ocg-test@example.com",
+    },
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr?.trim() || `git ${args.join(" ")} failed`);
+  }
+  return result.stdout ?? "";
+}
 
 test("parseCommitSubject understands conventional commits and filters noise", () => {
   assert.deepEqual(parseCommitSubject("feat(macos): add Dock icon setting"), {
@@ -108,19 +129,36 @@ test("generateReleaseNotes uses git helpers and previous-tag range", () => {
   assert.equal(calls.length, 2);
 });
 
-test("CLI writes notes for the current repository tag range", () => {
+test("CLI writes notes for a local tag range without depending on checkout depth", () => {
   const script = fileURLToPath(new URL("./generate-release-notes.mjs", import.meta.url));
-  const repoRoot = fileURLToPath(new URL("../", import.meta.url));
-  const result = spawnSync(
-    process.execPath,
-    [script, "--tag", "v1.5.7", "--previous", "v1.5.6", "--repo-root", repoRoot],
-    { encoding: "utf8", windowsHide: true },
-  );
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stdout, /# OCG Manager v1\.5\.7/);
-  assert.match(result.stdout, /## Changes since v1\.5\.6/);
-  assert.match(result.stdout, /multi-protocol passthrough|account routing/);
-  assert.ok(result.stdout.includes(PLATFORM_RELEASE_NOTES));
+  const repoRoot = mkdtempSync(join(tmpdir(), "ocg-release-notes-"));
+  try {
+    runGit(repoRoot, ["init"]);
+    runGit(repoRoot, ["checkout", "-b", "main"]);
+    writeFileSync(join(repoRoot, "README.md"), "v1\n", "utf8");
+    runGit(repoRoot, ["add", "README.md"]);
+    runGit(repoRoot, ["commit", "-m", "chore: initial"]);
+    runGit(repoRoot, ["tag", "v1.5.6"]);
+    writeFileSync(join(repoRoot, "README.md"), "v2\n", "utf8");
+    runGit(repoRoot, ["add", "README.md"]);
+    runGit(repoRoot, ["commit", "-m", "feat: shipping notes"]);
+    runGit(repoRoot, ["commit", "--allow-empty", "-m", "style: ignored formatting"]);
+    runGit(repoRoot, ["tag", "v1.5.7"]);
+
+    const result = spawnSync(
+      process.execPath,
+      [script, "--tag", "v1.5.7", "--repo-root", repoRoot],
+      { encoding: "utf8", windowsHide: true },
+    );
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /# OCG Manager v1\.5\.7/);
+    assert.match(result.stdout, /## Changes since v1\.5\.6/);
+    assert.match(result.stdout, /### Features\n\n- shipping notes/);
+    assert.doesNotMatch(result.stdout, /ignored formatting/);
+    assert.ok(result.stdout.includes(PLATFORM_RELEASE_NOTES));
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
 });
 
 test("release workflow generates notes from git instead of a fixed blurb", () => {
