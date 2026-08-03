@@ -5,7 +5,20 @@ import { fileURLToPath } from "node:url";
 export const PLATFORM_RELEASE_NOTES =
   "Updater payloads include Tauri minisign signatures. The Windows installer remains unsigned by Authenticode; the macOS app uses ad-hoc signing and is not notarized.";
 
-const VERSION_TAG = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+export const PRERELEASE_WARNING = `> [!WARNING]
+> **Beta preview: managed account registration and isolated browser profiles are Beta and have not been thoroughly tested.**
+>
+> The following remain unverified in real release conditions:
+> - Real Google signup, OpenCode signup, and payment flows.
+> - noVNC keyboard and clipboard behavior.
+> - Live GHCR first-publication behavior for the browser image.
+>
+> This preview also includes gateway, redaction, and release-pipeline changes. Do not treat it as production-ready.`;
+
+const PRERELEASE_IDENTIFIER = "(?:0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)";
+const VERSION_TAG = new RegExp(
+  `^v?(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-${PRERELEASE_IDENTIFIER}(?:\\.${PRERELEASE_IDENTIFIER})*)?$`,
+);
 const CONVENTIONAL = /^(?:[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D]+\s*)*([a-zA-Z]+)(?:\(([^)]+)\))?(!)?:\s*(.+)$/u;
 const EXCLUDED_TYPES = new Set(["style", "test"]);
 const PREPARE_RELEASE = /^(?:release|chore)(?:\([^)]*\))?: (?:prepare|bump|release)\b/i;
@@ -115,8 +128,11 @@ export function buildReleaseNotes({ tag, previousTag = null, subjects = [] }) {
   }
 
   lines.push("---", "", PLATFORM_RELEASE_NOTES, "");
-  // Keep a stable leading title for GitHub release readers.
-  return [`# OCG Manager ${current}`, "", ...lines].join("\n");
+  const heading = [`# OCG Manager ${current}`, ""];
+  if (current.includes("-")) {
+    return [PRERELEASE_WARNING, "", ...heading, ...lines].join("\n");
+  }
+  return [...heading, ...lines].join("\n");
 }
 
 export function selectPreviousTag(currentTag, tags) {
@@ -135,7 +151,11 @@ export function selectPreviousTag(currentTag, tags) {
   if (index === -1) {
     throw new Error(`Release tag ${current} was not found among repository tags.`);
   }
-  return ordered[index + 1] ?? null;
+  const earlier = ordered.slice(index + 1);
+  if (!current.includes("-")) {
+    return earlier.find((tag) => !tag.includes("-")) ?? null;
+  }
+  return earlier[0] ?? null;
 }
 
 function compareVersionTags(left, right) {
@@ -156,7 +176,23 @@ function compareVersionTags(left, right) {
   if (a.pre === b.pre) return 0;
   if (a.pre === null) return 1;
   if (b.pre === null) return -1;
-  return a.pre < b.pre ? -1 : a.pre > b.pre ? 1 : 0;
+  const aIdentifiers = a.pre.split(".");
+  const bIdentifiers = b.pre.split(".");
+  for (let index = 0; index < Math.max(aIdentifiers.length, bIdentifiers.length); index += 1) {
+    const aIdentifier = aIdentifiers[index];
+    const bIdentifier = bIdentifiers[index];
+    if (aIdentifier === undefined) return -1;
+    if (bIdentifier === undefined) return 1;
+    if (aIdentifier === bIdentifier) continue;
+    const aNumeric = /^\d+$/.test(aIdentifier);
+    const bNumeric = /^\d+$/.test(bIdentifier);
+    if (aNumeric && bNumeric) {
+      return BigInt(aIdentifier) < BigInt(bIdentifier) ? -1 : 1;
+    }
+    if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+    return aIdentifier < bIdentifier ? -1 : 1;
+  }
+  return 0;
 }
 
 export function listVersionTags(runGit) {

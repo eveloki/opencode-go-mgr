@@ -29,6 +29,7 @@ the true / false circuit breakers, and protocol conversion actually work.
   - [True And False Circuit Breakers](#true-and-false-circuit-breakers)
 - [CLI](#cli)
 - [Docker](#docker)
+  - [Optional Remote Browser](#optional-remote-browser)
 - [Data And Security](#data-and-security)
 - [Limits](#limits)
 - [Troubleshooting](#troubleshooting)
@@ -172,11 +173,16 @@ CLI and Docker upgrades remain manual.
 1. Stop every process using the data: choose **Quit** from the desktop tray,
    stop the CLI with Ctrl+C or its service manager, or run
    `docker compose stop`.
-2. Copy the **entire** GUI data directory, CLI data directory, or Docker
-   `ocg-data` volume. A stopped Docker container can be copied with
-   `docker compose cp ocg-manager:/data/. ../ocg-data-backup`.
+2. Copy the **entire** GUI or CLI data directory. Desktop
+   `browser-profiles/` is already inside the GUI data directory. For Docker,
+   back up both sensitive volumes: `ocg-data` and `ocg-browser-profiles`.
+   With the containers stopped, run
+   `docker compose cp ocg-manager:/data/. ../ocg-data-backup` and
+   `docker compose cp ocg-manager:/browser-profiles/. ../ocg-browser-profiles-backup`.
 3. Keep the backup outside the repository, and check that it contains
-   `data.sqlite` and, where present, `.encryption-key`.
+   `data.sqlite` and, where present, `.encryption-key`. Browser profiles hold
+   long-lived cookies and login state and are not encrypted by OCG Manager;
+   protect them like account keys and the database.
 
 ### Restore
 
@@ -187,6 +193,8 @@ CLI and Docker upgrades remain manual.
 Caveats:
 
 - Docker files in `/data` must remain writable by UID/GID `10001`.
+- Docker files in `/browser-profiles` must also remain writable by UID/GID
+  `10001`.
 - Windows GUI obfuscation is bound to the Windows user and machine, so its
   data cannot restore account keys or passwords on another machine — create
   fresh data there and re-enter the credentials.
@@ -200,19 +208,23 @@ Caveats:
 
 First verify the backup and confirm that `.env` pins the intended same or
 newer image. The `docker compose down -v` command below permanently deletes
-the current volume; run it only after preserving that data separately:
+all current named volumes; run it only after preserving both kinds of
+persistent data separately:
 
 ```bash
 docker compose down -v
 docker compose run --rm --no-deps --user root \
   --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
   --entrypoint sh \
-  --volume ../ocg-data-backup:/backup:ro \
+  --volume ../ocg-data-backup:/backup/data:ro \
+  --volume ../ocg-browser-profiles-backup:/backup/browser-profiles:ro \
   ocg-manager \
-  -c 'cp -a /backup/. /data/ && chown -R 10001:10001 /data && \
-      find /data -type d -exec chmod 700 {} + && \
-      find /data -type f -exec chmod 600 {} +'
-docker compose up -d --no-build
+  -c 'cp -a /backup/data/. /data/ && \
+      cp -a /backup/browser-profiles/. /browser-profiles/ && \
+      chown -R 10001:10001 /data /browser-profiles && \
+      find /data /browser-profiles -type d -exec chmod 700 {} + && \
+      find /data /browser-profiles -type f -exec chmod 600 {} +'
+docker compose --profile browser up -d --no-build
 docker compose ps
 ```
 
@@ -237,11 +249,15 @@ The direct GUI steps are also the fallback when in-app update is unavailable.
   `dist/`, and `LICENSE` stay together. Delete that package to uninstall;
   data remains in `~/.ocg-mgr-cli` or the custom `--data-dir`.
 - **Docker:** after backing up, run `docker compose pull` followed by
-  `docker compose up -d --no-build`. Pin `OCG_IMAGE` to the full release tag
+  `docker compose up -d --no-build`. If the browser profile is enabled, use
+  `docker compose --profile browser pull` followed by
+  `docker compose --profile browser up -d --no-build` so both images are
+  upgraded together. Pin `OCG_IMAGE` and `OCG_BROWSER_IMAGE` to full release tags
   for repeatable production deployments. `docker compose down` removes
-  containers but keeps `ocg-data`; `docker compose down -v` permanently
-  deletes the volume and is only for an intentional reset after a verified
-  backup. Selecting an older image does not roll back the database; restore
+  containers but keeps `ocg-data` and `ocg-browser-profiles`;
+  `docker compose down -v` permanently deletes them and is only for an
+  intentional reset after a verified two-volume backup. Selecting an older
+  image does not roll back the database; restore
   the complete backup made by that older version when a database rollback is
   required.
 
@@ -337,10 +353,68 @@ page.
 
 ### Accounts
 
-The **Accounts** view lets you create, edit, enable, disable, and remove
-OpenCode-Go accounts. Each account card shows the account name, the cooldown
-state, and the 5-hour / weekly / monthly usage bars driven by local
-accounting.
+The **Accounts** view splits creation into **Import existing Key** and
+**Register new account**:
+
+- A **Key account** keeps the existing flow and stores an OpenCode-Go key you
+  already have.
+- A **managed account** immediately creates a disabled, recoverable draft,
+  then advances in order through Google account, invite registration,
+  payment, and key verification. The draft and current step are persisted to
+  SQLite, so closing the page or restarting the service does not lose the
+  flow. Pending accounts cannot be selected by the gateway and do not expose
+  usage, test, or enable controls.
+
+Managed signup and isolated browser profiles are **Beta** features. They have
+not been thoroughly tested; do not rely on them in production.
+
+Before registering a managed account, save the invite URL under
+**Settings → OpenCode Go invite URL**. It must be an HTTPS URL no longer than
+2,048 characters, contain no username or password, and use exactly
+`opencode.ai` or `console.opencode.ai` as its host. The registration entry is
+disabled while it is empty. Changing it affects future invite-page opens; it
+does not rewrite completed accounts.
+
+The managed wizard is intentionally manual:
+
+1. Create or sign in to a Google account in that account's isolated browser
+   profile.
+2. Open the invite URL in the same profile and register OpenCode Go.
+3. Review and complete payment yourself on the official site.
+4. Copy the key from the site, paste it into the wizard, and run a real
+   verification.
+
+OCG Manager does not save Google passwords, solve verification challenges,
+automate payments, scrape pages, or extract keys. A `2xx` verification
+completes and enables the account. A `429` also proves that the key is valid,
+completes the account, and records the current cooldown. `401`/`403`, network
+errors, and `5xx` responses leave the account at key verification so you can
+correct it and retry.
+
+Every account has a durable, isolated browser profile. Desktop builds launch
+an external Chromium-family browser: Windows prefers Edge and then Chrome;
+macOS checks Chrome, Edge, and Chromium; Linux desktop searches `PATH` for
+Chrome, Chromium, or Edge. It uses only
+`browser-profiles/<account_id>`, first-run suppression, and a new window; it
+does not enable CDP, automation, `--no-sandbox`, or weakened web security.
+Older `profiles/<account_id>` WebView data is deliberately not imported, so
+the first open after upgrading requires another login.
+
+Every completed account has **Open OpenCode website**. A legacy account starts
+with a blank isolated profile the first time; sign in once and its cookies
+remain available for later checks of authoritative quota and referral use.
+Google and OpenCode cookies belong to different domains, but both stay in the
+same account profile.
+
+Resetting browser identity first closes that account's browser and removes
+both new and legacy profile directories. A completed account keeps its key
+and is only signed out of the website; a pending managed account also returns
+to the Google step. Deleting an account likewise deletes its cookies/profile,
+and the confirmation states this explicitly. That login state can then be
+recovered only from a backup or by signing in again.
+
+Each completed account card shows the account name, cooldown state, and the
+5-hour / weekly / monthly usage bars driven by local accounting.
 
 - **Usage baselines.** Type a percentage or drag a bar to set its current
   real-world usage baseline. After the value is saved, successful request
@@ -403,6 +477,8 @@ The **Settings** view exposes the persistent gateway configuration:
 - **Gateway Port** — the port the gateway binds (default `9042`).
 - **Gateway Key** — the same value shown in the Connection Center.
 - **Upstream URL** — the OpenCode-Go base URL.
+- **OpenCode Go invite URL** — the restricted HTTPS invite used by managed
+  account onboarding.
 - **Downstream Access Root** — see [Connection Center](#connection-center).
 - **Auto-start on login** — only the installed Windows desktop build exposes
   this switch. Development builds, the CLI, Docker, macOS, and Linux
@@ -725,11 +801,54 @@ docker compose ps
 | Variable | Scope | Meaning |
 | --- | --- | --- |
 | `OCG_IMAGE` | Compose | Image tag, mirror, local name, or immutable digest. |
+| `OCG_BROWSER_IMAGE` | Compose | Optional Chromium/noVNC sidecar image tag, mirror, local name, or digest. |
 | `OCG_PORT` | Compose | Host loopback port; the container still listens on `9042`. |
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | First start | Optional administrator bootstrap; both or neither. |
 | `OCG_CLIENT_ROOT_URL` | Runtime | Read-only external client root override. |
 | `OCG_MANAGER_ENCRYPTION_KEY` | Runtime restore | Original explicit obfuscation key, when one was used. |
 | `NPM_REGISTRY` + `CARGO_REGISTRY` | Source build | Dependency registries used only by `--build`. |
+
+### Optional Remote Browser
+
+The default gateway deployment does not start the browser sidecar. To use
+managed onboarding and website login on a Linux server or Docker host,
+reserve at least 2 CPUs, 2 GiB of RAM, and 1 GiB of `/dev/shm`, then run:
+
+```bash
+docker compose --profile browser up -d
+docker compose ps
+```
+
+`OCG_BROWSER_IMAGE` overrides the default
+`ghcr.io/klarkxy/opencode-go-mgr-browser:<version>`. The sidecar runs ordinary
+Chromium, Xvfb, a lightweight window manager, x11vnc, and noVNC. The dashboard
+shows it in a dedicated full browser tab through an authenticated same-origin
+WebSocket, including keyboard and pointer input. Use the page's explicit
+remote clipboard area to copy or paste a key. A reverse proxy in front of the
+dashboard must support WebSocket upgrades.
+
+Only one remote Chromium runs per node. Switching accounts first shuts down
+the current process cleanly and waits for its profile to flush, then starts
+the target account; any older remote page becomes invalid immediately.
+Dashboard browser tokens are memory-only, bound to the current administrator
+session, and Origin-checked. They expire after 30 minutes idle or four hours
+total; reopen the account website to create another session.
+
+The sidecar publishes no host port and never mounts the database. Its control
+and noVNC endpoints exist only on the Compose `browser-private` network. This
+project-scoped bridge is not Docker `internal`, because Chromium needs outbound
+HTTPS access to Google and OpenCode; neither sidecar endpoint is published to
+the host. A random control token lives in the shared `ocg-browser-runtime`
+runtime volume.
+Account cookies and profiles live in `ocg-browser-profiles`; do not back up the
+runtime volume, but always stop and back up the two sensitive persistent
+volumes, `ocg-data` and `ocg-browser-profiles`, together.
+
+Google may treat a data-center egress IP as high risk, require additional
+verification, or reject registration/login. OCG Manager does not bypass that
+risk control. Complete Google's checks yourself, or use the desktop build on
+a residential connection. Real payment is always an explicit user action on
+the official site.
 
 ### Administrator Bootstrap
 
@@ -772,7 +891,8 @@ port `9042`. Open `http://127.0.0.1:<OCG_PORT>/dashboard/` and sign in. Use
 `/dashboard/`, not the server root `/`.
 
 - Data and the generated `.encryption-key` obfuscation secret persist in the
-  `ocg-data` volume.
+  `ocg-data` volume; account browser cookies/profiles persist separately in
+  `ocg-browser-profiles`.
 - The container process binds `0.0.0.0`, so the dashboard requires
   administrator login even when it is published only on host `127.0.0.1`.
   That host mapping limits reachability; it does not enable the loopback
@@ -781,11 +901,14 @@ port `9042`. Open `http://127.0.0.1:<OCG_PORT>/dashboard/` and sign in. Use
   seconds; there is no `/healthz` route. That TCP check proves only that the
   process is listening — not that the dashboard API, an upstream account, or
   a real model request works.
-- The image runs as the unprivileged `ocg` user (UID/GID 10001). The supplied
-  Compose service makes the root filesystem read-only, mounts `/tmp` as
-  tmpfs, drops every Linux capability, and enables `no-new-privileges`. The
-  named `ocg-data` volume remains writable and is the only persistent
-  application state.
+- Both images run as the unprivileged `ocg` user (UID/GID 10001). The supplied
+  Compose services make the root filesystem read-only, mount `/tmp` as tmpfs,
+  and drop every Linux capability. The main service also enables
+  `no-new-privileges`; the browser service instead uses `seccomp=unconfined`
+  so ordinary Chromium can establish its own namespace and renderer seccomp
+  sandboxes. The sidecar does not use `--no-sandbox` and has 1 GiB of shared
+  memory. `ocg-data` and `ocg-browser-profiles` are the two persistent state
+  volumes.
 - The startup log contains the Gateway Key, so log output and Docker daemon
   access are sensitive. Configure log rotation on the Docker host if its
   defaults are not bounded.
@@ -796,6 +919,7 @@ Routine operational checks:
 docker compose config --quiet
 docker compose ps
 docker compose logs --tail=100 -f ocg-manager
+docker compose --profile browser logs --tail=100 -f browser
 curl --fail http://127.0.0.1:9042/dashboard/
 ```
 
@@ -804,13 +928,18 @@ you changed it.
 
 ### Verifying An Image
 
-Each stable image includes an SPDX SBOM, BuildKit SLSA provenance, and a
-GitHub signed provenance attestation. Inspect and verify a release with:
+Both the main and browser images include an SPDX SBOM, BuildKit SLSA
+provenance, and a GitHub signed provenance attestation. Inspect and verify a
+release with:
 
 ```bash
 docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.7
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.7
 gh attestation verify \
   oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.7 \
+  --repo klarkxy/opencode-go-mgr
+gh attestation verify \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.7 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -834,7 +963,8 @@ ocg.example.com {
 
 After signing in, set a non-empty Gateway Key before sending API traffic.
 Stop the service with `docker compose down`; add `-v` only when you
-intentionally want to delete all stored accounts, credentials, and keys.
+intentionally want to delete all stored accounts, credentials, keys, cookies,
+and browser profiles.
 
 ## Data And Security
 
@@ -849,6 +979,10 @@ intentionally want to delete all stored accounts, credentials, and keys.
   boundary: anyone with the data directory and its `.encryption-key`, or able
   to run the Windows GUI in the original Windows user/machine context, can
   recover account keys and saved login passwords.
+- **Browser profiles.** `browser-profiles/`, or Docker's
+  `ocg-browser-profiles`, contains long-lived cookies and official-site login
+  state and is not encrypted by OCG Manager at all. Protect, transfer, and
+  destroy it with the same care as the database and account keys.
 - **No cross-node sync.** Each node manages its own accounts through its own
   dashboard. OCG Manager does not synchronize account credentials between
   nodes.
@@ -895,8 +1029,9 @@ intentionally want to delete all stored accounts, credentials, and keys.
 - Streaming token counts are accurate only when upstream emits usage chunks;
   cost uses the active OpenCode Go pricing snapshot. Without usage, logs end
   as `success_no_usage`.
-- The current HTTP dashboard does not expose the older isolated WebView
-  browser command.
+- Browser onboarding provides only manual page interaction; it does not
+  register Google accounts, solve verification challenges, pay, scrape
+  pages, or extract keys automatically.
 - The installed Windows desktop dashboard can start OCG Manager in the tray
   when the user logs in. Development builds, macOS, Linux, CLI, and Docker do
   not expose that dashboard `auto_start` switch. Docker Compose separately
@@ -938,8 +1073,9 @@ intentionally want to delete all stored accounts, credentials, and keys.
 - **Docker first-run registration does not pick up my
   `OCG_ADMIN_PASSWORD`.** The variables are only honored when the database
   has no administrator yet. Use the stored administrator account. Recreate
-  `ocg-data` only for an intentional full reset after a verified backup;
-  doing so erases every account, credential, and setting.
+  `ocg-data` and `ocg-browser-profiles` only for an intentional full reset
+  after a verified backup; doing so erases every account, credential,
+  setting, cookie, and browser profile.
 - **SmartScreen / Gatekeeper warns about the installer or the DMG.** The
   current Windows builds are unsigned and the macOS app is ad-hoc signed. Use
   **Open Anyway** for the first launch; the warning is not a sign of

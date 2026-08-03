@@ -18,8 +18,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($CandidateVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
-  throw "CandidateVersion must be stable semver, got: $CandidateVersion"
+function Test-CandidateVersion {
+  param([string]$Version)
+  return [bool]($Version -match '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$')
+}
+
+if (!(Test-CandidateVersion -Version $CandidateVersion)) {
+  throw "CandidateVersion must be SemVer without build metadata, got: $CandidateVersion"
 }
 $CandidateInstaller = (Resolve-Path -LiteralPath $CandidateInstaller).Path
 if ($PreviousInstaller) {

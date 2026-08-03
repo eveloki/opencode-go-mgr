@@ -196,6 +196,65 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
         StatusCode::CONFLICT
     );
 
+    assert_eq!(
+        client
+            .post(format!("{base}/auth/logout"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/auth/logout"))
+            .header(reqwest::header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/settings"))
+            .header(reqwest::header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let login = client
+        .post(format!("{base}/auth/login"))
+        .json(&json!({ "username": "admin", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let replacement_cookie = login
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_ne!(replacement_cookie, cookie);
+    assert_eq!(
+        client
+            .get(format!("{base}/settings"))
+            .header(reqwest::header::COOKIE, &replacement_cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
     gateway::stop_gateway(handle);
 }
 
@@ -329,11 +388,7 @@ async fn loopback_desktop_update_api_is_safe_atomic_and_pollable() {
     assert_eq!(initial["current_version"], current_version);
     assert_eq!(initial["install_supported"], true);
 
-    for rejected in [
-        current_version.to_string(),
-        "0.0.1".to_string(),
-        format!("{newer_version}-beta.1"),
-    ] {
+    for rejected in [current_version.to_string(), "0.0.1".to_string()] {
         assert_eq!(
             client
                 .post(format!("{base}/install-update"))
@@ -350,7 +405,7 @@ async fn loopback_desktop_update_api_is_safe_atomic_and_pollable() {
 
     let accepted = client
         .post(format!("{base}/install-update"))
-        .json(&json!({ "expected_version": format!("v{newer_version}") }))
+        .json(&json!({ "expected_version": format!("v{newer_version}-beta.1") }))
         .send()
         .await
         .unwrap();
@@ -359,7 +414,7 @@ async fn loopback_desktop_update_api_is_safe_atomic_and_pollable() {
     assert_eq!(accepted["phase"], "checking");
     assert_eq!(
         started_versions.lock().unwrap().as_slice(),
-        [newer_version.as_str()]
+        [format!("{newer_version}-beta.1")]
     );
     assert_eq!(
         client

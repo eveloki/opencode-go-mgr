@@ -865,7 +865,7 @@ test("dashboard and settings keep partial data safe", async () => {
   const app = await readFile(new URL("../App.vue", import.meta.url), "utf8");
 
   assert.match(dashboard, /Promise\.allSettled/);
-  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| clientRootPreview\.status === 'error'(?: \|\| editingGatewayKey)?"/);
+  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error' \|\| editingGatewayKey"/);
   assert.match(settings, /if \(!loaded\.value\) return/);
   assert.match(settings, /\{\{ maskedSettingsKey \}\}/);
   assert.doesNotMatch(settings, /v-model:value="config\.gateway_key"/);
@@ -954,6 +954,7 @@ test("settings expose the downstream display root and bounded request timeouts",
   const pricing = await readFile(new URL("./Pricing.vue", import.meta.url), "utf8");
   const api = await readFile(new URL("../api/tauri.ts", import.meta.url), "utf8");
   const dashboard = await readFile(new URL("./Dashboard.vue", import.meta.url), "utf8");
+  const settingsMerge = await readFile(new URL("./settings-merge.ts", import.meta.url), "utf8");
 
   assert.match(settings, /下游访问根地址（可选）/);
   assert.ok(settings.indexOf("t('上游地址')") < settings.indexOf('class="downstream-grid"'));
@@ -991,8 +992,9 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(settings, /config\.conversation_sticky/);
   assert.match(settings, /X-OCG-Conversation-Id/);
   assert.match(settings, /运行时路由状态已重置/);
-  assert.match(settings, /routing_mode: current\.routing_mode !== saved\.routing_mode/);
-  assert.match(settings, /conversation_sticky: current\.conversation_sticky !== saved\.conversation_sticky/);
+  assert.match(settingsMerge, /"routing_mode"/);
+  assert.match(settingsMerge, /"conversation_sticky"/);
+  assert.match(settingsMerge, /if \(current\[key\] !== saved\[key\]\)/);
   assert.match(settings, /const routingChanged = !!savedConfig\.value/);
   assert.match(settings, /tauriApi\.updateSettings\(payload\)/);
   assert.match(api, /const \{ revision, \.\.\.settings \} = config/);
@@ -1098,7 +1100,7 @@ test("settings expose supported Windows auto-start safely", async () => {
   assert.match(settings, /const latest = await tauriApi\.getSettings\(\)/);
   assert.match(settings, /savedConfig\.value = \{ \.\.\.latest \}/);
   assert.match(settings, /pendingSettingsMerge = \{ current: \{ \.\.\.config\.value \}, saved \}/);
-  assert.match(settings, /mergeUnsavedSettingsAfterKeyRegeneration\(latest, pending\.current, pending\.saved\)/);
+  assert.match(settings, /mergeUnsavedSettings\(latest, pending\.current, pending\.saved\)/);
   assert.match(settings, /pendingSettingsMerge = null/);
   assert.match(settings, /mutationError = error[\s\S]*?const latest = await tauriApi\.getSettings\(\)/);
   assert.match(settings, /savedConfig\.value = null;[\s\S]*?loaded\.value = false/);

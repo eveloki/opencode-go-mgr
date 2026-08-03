@@ -125,7 +125,7 @@ const form = ref<AccountDraft>(blankAccountDraft());
 const nameWasEdited = ref(false);
 
 const isEdit = computed(() => !!props.account);
-const title = computed(() => (isEdit.value ? t("编辑账号") : t("新增账号")));
+const title = computed(() => (isEdit.value ? t("编辑账号") : t("导入已有 Key")));
 
 const rules = computed<FormRules>(() => {
   const base: FormRules = {

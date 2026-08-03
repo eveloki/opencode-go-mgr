@@ -32,6 +32,7 @@ if ($workflow -match 'function\s+Invoke-Installer') {
   throw 'Release workflow still embeds the Windows installer implementation'
 }
 foreach ($requiredPattern in @(
+  'Test-CandidateVersion',
   '\.WaitForExit\(1000 \* \$TimeoutSeconds\)',
   '\.Kill\(\$true\)',
   'Test-RegistryValue',
@@ -45,6 +46,29 @@ foreach ($requiredPattern in @(
 if ($script -match '\.PSObject\.Properties\.Name') {
   throw 'Windows release smoke must handle an empty registry value collection under StrictMode'
 }
+$versionHelper = $ast.Find({
+  param($node)
+  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Test-CandidateVersion'
+}, $true)
+if (!$versionHelper) {
+  throw 'Windows release smoke is missing Test-CandidateVersion'
+}
+& {
+  param([string]$Definition)
+  Invoke-Expression $Definition
+
+  foreach ($valid in @('1.5.8', '1.5.8-beta.1', '1.5.8-rc.10')) {
+    if (!(Test-CandidateVersion -Version $valid)) {
+      throw "Windows release smoke rejected valid CandidateVersion $valid"
+    }
+  }
+  foreach ($invalid in @('v1.5.8-beta.1', '1.5.8-beta.01', '1.5.8+build.1', 'latest')) {
+    if (Test-CandidateVersion -Version $invalid) {
+      throw "Windows release smoke accepted invalid CandidateVersion $invalid"
+    }
+  }
+} $versionHelper.Extent.Text
 $registryHelper = $ast.Find({
   param($node)
   $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

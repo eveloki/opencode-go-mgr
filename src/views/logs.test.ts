@@ -121,6 +121,7 @@ test("settings API maps the loaded revision to conditional writes and returns ne
     gateway_port: 9042,
     gateway_key: "ocg-old-key",
     upstream_base_url: "https://opencode.ai/zen/go",
+    opencode_invite_url: "",
     client_root_url: "",
     client_root_url_from_env: false,
     auto_start: false,
@@ -198,6 +199,72 @@ test("account API sends purchase dates and the complete reorder payload", async 
       method: "PUT",
       body: { account_ids: ["account-2", "account-1"] },
     },
+  ]);
+});
+
+test("managed account API uses ordered setup, browser targets, and profile reset routes", async () => {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { location: { pathname: "/dashboard" }, dispatchEvent() {} },
+  });
+  const requests: Array<{ url: string; method: string; body: unknown }> = [];
+  const account = {
+    id: "managed-1",
+    name: "Managed",
+    username: "note@example.com",
+    account_type: "managed",
+    setup_step: "google_account",
+  };
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string, init: RequestInit = {}) => {
+      requests.push({
+        url: input,
+        method: init.method ?? "GET",
+        body: init.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (input.endsWith("/browser/capabilities")) {
+        return new Response(JSON.stringify({ mode: "remote" }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (input.endsWith("/browser-profile")) {
+        return new Response(JSON.stringify(account), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (input.endsWith("/browser")) {
+        return new Response(JSON.stringify({ mode: "remote", session_token: "session-1" }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify(account), {
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  await tauriApi.createManagedAccount({ name: "Managed", username: "note@example.com" });
+  await tauriApi.advanceAccountSetup("managed-1", "opencode_registration");
+  await tauriApi.verifyManagedAccountKey("managed-1", "sk-secret");
+  assert.deepEqual(await tauriApi.getBrowserCapabilities(), { mode: "remote" });
+  assert.deepEqual(await tauriApi.openAccountBrowser("managed-1", "invite"), {
+    mode: "remote",
+    session_token: "session-1",
+  });
+  await tauriApi.resetAccountBrowserProfile("managed-1");
+
+  assert.deepEqual(requests.map(({ url, method, body }) => ({
+    path: new URL(url, "http://localhost").pathname,
+    method,
+    body,
+  })), [
+    { path: "/dashboard/api/accounts/managed", method: "POST", body: { name: "Managed", username: "note@example.com" } },
+    { path: "/dashboard/api/accounts/managed-1/setup", method: "PATCH", body: { setup_step: "opencode_registration" } },
+    { path: "/dashboard/api/accounts/managed-1/setup/verify-key", method: "POST", body: { key: "sk-secret" } },
+    { path: "/dashboard/api/browser/capabilities", method: "GET", body: null },
+    { path: "/dashboard/api/accounts/managed-1/browser", method: "POST", body: { target: "invite" } },
+    { path: "/dashboard/api/accounts/managed-1/browser-profile", method: "DELETE", body: null },
   ]);
 });
 

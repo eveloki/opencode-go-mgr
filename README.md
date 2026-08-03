@@ -24,6 +24,10 @@ native OpenCode-Go protocol and converts the response back.
   discovery, and Claude Desktop aliases on one port.
 - **Local multi-account rotation** — drag account cards to persist priority;
   the gateway skips disabled, cooling, or already-failed accounts.
+- **Managed onboarding and isolated profiles (Beta)** — manually complete Google,
+  OpenCode Go, payment, and key verification through an invite URL; each
+  account keeps its own browser login, with an optional Docker noVNC sidecar.
+  This feature has not been thoroughly tested; do not rely on it in production.
 - **Purchase-cycle reminders** — per-account purchase dates and monthly
   expiry with remaining days in the dashboard; expiry never blocks an account.
 - **OpenCode Go quota estimates** — 5-hour, weekly, and monthly usage bars
@@ -71,8 +75,8 @@ upstream side.
 
 1. Install and launch OCG Manager. The dashboard opens in your system browser
    once the gateway is ready; use the tray icon to reopen it.
-2. Add an OpenCode-Go account in the **Accounts** view and copy the Gateway
-   Key.
+2. Import an existing key in **Accounts**, or configure an invite URL in
+   Settings and use managed onboarding; then copy the Gateway Key.
 3. Point your client at `http://127.0.0.1:9042/v1`. The **Applications** view
    has per-client configuration guides.
 
@@ -102,6 +106,12 @@ docker compose pull
 docker compose up -d --no-build
 docker compose ps
 ```
+
+For managed onboarding and website login on a Linux server, reserve at least
+2 CPUs, 2 GiB of RAM, and 1 GiB of `/dev/shm`, then run
+`docker compose --profile browser up -d`. This enables the optional
+`ghcr.io/klarkxy/opencode-go-mgr-browser` sidecar. Back up the sensitive
+`ocg-data` and `ocg-browser-profiles` volumes together.
 
 Open `http://127.0.0.1:9042/dashboard/`; the server root `/` is not the
 dashboard URL. See the [Docker guide](docs/USER.md#docker) for credentials,

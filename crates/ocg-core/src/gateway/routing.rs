@@ -474,6 +474,8 @@ mod tests {
             password_cipher: None,
             key_cipher: cipher.encrypt(id).unwrap(),
             enabled,
+            account_type: crate::models::AccountType::Key,
+            setup_step: crate::models::AccountSetupStep::Ready,
             referral_code: None,
             purchase_date: String::new(),
             expires_on: String::new(),

@@ -26,9 +26,8 @@ function updaterEncoded(value) {
   return Buffer.from(value, "utf8").toString("base64");
 }
 
-function withReleaseFixture(callback) {
+function withReleaseFixture(callback, version = "1.4.2") {
   const directory = mkdtempSync(join(tmpdir(), "ocg-updater-manifest-"));
-  const version = "1.4.2";
   const assets = [
     `ocg-manager_${version}_windows-x64-setup.exe`,
     `ocg-manager_${version}_linux-x64.AppImage`,
@@ -96,6 +95,27 @@ test("writeUpdaterManifest creates latest.json", () => {
   });
 });
 
+test("prerelease manifests use immutable prerelease filenames, version, and URLs", () => {
+  withReleaseFixture(({ assets, directory, version }) => {
+    const manifest = buildUpdaterManifest({
+      releaseDir: directory,
+      tag: `v${version}`,
+      repository: "klarkxy/opencode-go-mgr",
+    });
+
+    assert.equal(manifest.version, "1.5.8-beta.1");
+    assert.ok(assets.every((asset) => asset.includes("1.5.8-beta.1")));
+    assert.deepEqual(manifest.platforms["windows-x86_64-nsis"], {
+      signature: "signature-0",
+      url: "https://github.com/klarkxy/opencode-go-mgr/releases/download/v1.5.8-beta.1/ocg-manager_1.5.8-beta.1_windows-x64-setup.exe",
+    });
+    assert.match(
+      manifest.platforms["darwin-aarch64"].url,
+      /v1\.5\.8-beta\.1\/ocg-manager_1\.5\.8-beta\.1_macos-universal\.app\.tar\.gz$/,
+    );
+  }, "1.5.8-beta.1");
+});
+
 test("missing signature fails closed", () => {
   withReleaseFixture(({ assets, directory }) => {
     rmSync(join(directory, `${assets[2]}.sig`));
@@ -110,15 +130,19 @@ test("missing signature fails closed", () => {
   });
 });
 
-test("mutable tags and invalid repositories are rejected", () => {
+test("mutable, malformed, and build-metadata tags plus invalid repositories are rejected", () => {
   withReleaseFixture(({ directory }) => {
     assert.throws(
       () => buildUpdaterManifest({ releaseDir: directory, tag: "latest", repository: "owner/repo" }),
-      /immutable version tag/,
+      /immutable SemVer tag/,
     );
     assert.throws(
-      () => buildUpdaterManifest({ releaseDir: directory, tag: "v1.4.2-beta.1", repository: "owner/repo" }),
-      /immutable version tag/,
+      () => buildUpdaterManifest({ releaseDir: directory, tag: "v1.4.2-beta.01", repository: "owner/repo" }),
+      /immutable SemVer tag/,
+    );
+    assert.throws(
+      () => buildUpdaterManifest({ releaseDir: directory, tag: "v1.4.2+build.1", repository: "owner/repo" }),
+      /immutable SemVer tag/,
     );
     assert.throws(
       () => buildUpdaterManifest({ releaseDir: directory, tag: "v1.4.2", repository: "owner/repo/extra" }),

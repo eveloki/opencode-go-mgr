@@ -7,6 +7,8 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { normalizeReleaseVersion } from "./release-policy.mjs";
+
 const PLATFORM_ASSETS = Object.freeze({
   "windows-x86_64-nsis": (version) => `ocg-manager_${version}_windows-x64-setup.exe`,
   "linux-x86_64-appimage": (version) => `ocg-manager_${version}_linux-x64.AppImage`,
@@ -184,11 +186,18 @@ export function verifyUpdaterSignature({ payloadPath, signaturePath, publicKey }
 }
 
 function parseTag(tag) {
-  const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag);
-  if (!match) {
-    throw new Error(`Updater manifest requires an immutable version tag such as v1.4.2; received ${tag}.`);
+  if (!String(tag ?? "").startsWith("v")) {
+    throw new Error(
+      `Updater manifest requires an immutable SemVer tag such as v1.4.2 or v1.5.8-beta.1; received ${tag}.`,
+    );
   }
-  return tag.slice(1);
+  try {
+    return normalizeReleaseVersion(tag, "updater manifest tag");
+  } catch {
+    throw new Error(
+      `Updater manifest requires an immutable SemVer tag such as v1.4.2 or v1.5.8-beta.1; received ${tag}.`,
+    );
+  }
 }
 
 function parseRepository(repository) {
@@ -244,7 +253,7 @@ function parseArguments(argv) {
     const flag = argv[index];
     const value = argv[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
-      throw new Error("Usage: generate-updater-manifest.mjs --release-dir <dir> --tag <vX.Y.Z> --repository <owner/name>");
+      throw new Error("Usage: generate-updater-manifest.mjs --release-dir <dir> --tag <vX.Y.Z[-prerelease]> --repository <owner/name>");
     }
     if (flag === "--release-dir") options.releaseDir = value;
     else if (flag === "--tag") options.tag = value;

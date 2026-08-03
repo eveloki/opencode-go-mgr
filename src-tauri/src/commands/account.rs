@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use chrono::Utc;
-use ocg_core::models::{Account, AccountInput, AccountUpdate};
+use ocg_core::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
+use ocg_core::models::{Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate};
 use ocg_core::state::CoreState;
 use tauri::State;
 
@@ -34,6 +35,8 @@ pub(crate) fn create_account_inner(
         },
         key_cipher: core.encrypt_key(&input.key).map_err(|e| e.to_string())?,
         enabled: true,
+        account_type: AccountType::Key,
+        setup_step: AccountSetupStep::Ready,
         referral_code: input.referral_code,
         purchase_date: input.purchase_date.unwrap_or_default(),
         expires_on: String::new(),
@@ -89,6 +92,16 @@ pub(crate) fn update_account_inner(
     };
     {
         let db = core.db.lock();
+        if update.enabled == Some(true) {
+            let account = db
+                .get_account(&id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "account not found".to_string())?;
+            let resulting_key = key_cipher.as_deref().unwrap_or(&account.key_cipher);
+            if !account.setup_step.is_ready() || resulting_key.is_empty() {
+                return Err("account setup is not complete and cannot be enabled".to_string());
+            }
+        }
         db.update_account(
             &id,
             &update,
@@ -111,22 +124,53 @@ pub(crate) fn update_account_inner(
 }
 
 #[tauri::command]
-pub fn delete_account(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    delete_account_inner(&state.core, id)
+pub async fn delete_account(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    delete_account_inner(&state.core, id).await
 }
 
-pub(crate) fn delete_account_inner(core: &CoreState, id: String) -> Result<(), String> {
-    {
+pub(crate) async fn delete_account_inner(core: &CoreState, id: String) -> Result<(), String> {
+    let browser_operation = core.browser.operation().await;
+    core.recover_browser_profiles_for_account(&id)
+        .map_err(|e| e.to_string())?;
+    let account = {
+        let db = core.db.lock();
+        db.get_account(&id).map_err(|e| e.to_string())?
+    };
+    let Some(account) = account else {
+        return Ok(());
+    };
+    browser_operation
+        .stop_account(&id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let staged = StagedBrowserProfiles::stage(
+        &core.data_dir(),
+        &id,
+        BrowserProfileOperationKind::DeleteAccount,
+    )
+    .map_err(|e| e.to_string())?;
+    let delete_result = {
         let mut db = core.db.lock();
-        if let Some(account) = db.get_account(&id).map_err(|e| e.to_string())? {
-            db.delete_account(&id).map_err(|e| e.to_string())?;
+        let result = db.delete_account(&id);
+        if result.is_ok() {
             let _ = db.log_gateway(
                 "info",
                 "account",
                 &format!("deleted account {}", account.name),
             );
         }
+        result
+    };
+    if let Err(error) = delete_result {
+        let restore_error = staged.restore().err();
+        return Err(match restore_error {
+            Some(restore) => format!(
+                "failed to delete account: {error}; failed to restore browser profile: {restore}"
+            ),
+            None => format!("failed to delete account: {error}"),
+        });
     }
+    staged.purge().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -136,27 +180,26 @@ pub fn toggle_account(state: State<'_, AppState>, id: String) -> Result<Account,
 }
 
 pub(crate) fn toggle_account_inner(core: &CoreState, id: String) -> Result<Account, String> {
-    let account = {
-        let db = core.db.lock();
-        db.get_account(&id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "account not found".to_string())?
-    };
+    let db = core.db.lock();
+    let account = db
+        .get_account(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "account not found".to_string())?;
+    let next_enabled = !account.enabled;
+    if next_enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
+        return Err("account setup is not complete and cannot be enabled".to_string());
+    }
     let update = AccountUpdate {
         name: None,
         username: None,
         password: None,
         key: None,
-        enabled: Some(!account.enabled),
+        enabled: Some(next_enabled),
         referral_code: None,
         purchase_date: None,
     };
-    {
-        let db = core.db.lock();
-        db.update_account(&id, &update, None, None)
-            .map_err(|e| e.to_string())?;
-    }
-    let db = core.db.lock();
+    db.update_account(&id, &update, None, None)
+        .map_err(|e| e.to_string())?;
     let account = db
         .get_account(&id)
         .map_err(|e| e.to_string())?
@@ -175,6 +218,9 @@ pub(crate) fn test_account_inner(core: &CoreState, id: String) -> Result<String,
         .get_account(&id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "account not found".to_string())?;
+    if !account.setup_step.is_ready() || account.key_cipher.is_empty() {
+        return Err("account setup is not complete and cannot be tested".to_string());
+    }
     let key = core
         .decrypt_key(&account.key_cipher)
         .map_err(|e| e.to_string())?;
@@ -235,6 +281,7 @@ pub(crate) fn reset_account_cooldown_inner(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use ocg_core::browser::browser_profile_paths;
     use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
     use ocg_core::db::Database;
     use ocg_core::state::CoreStateInner;
@@ -253,8 +300,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn account_command_inners_cover_lifecycle() {
+    #[tokio::test]
+    async fn account_command_inners_cover_lifecycle() {
         let (dir, core) = temp_core();
 
         assert!(get_accounts_inner(&core).unwrap().is_empty());
@@ -335,8 +382,59 @@ mod tests {
         let cleared = reset_account_cooldown_inner(&core, created.id.clone()).unwrap();
         assert!(cleared.cooldown_until.is_none());
 
-        delete_account_inner(&core, blank.id.clone()).unwrap();
-        delete_account_inner(&core, "missing".into()).unwrap();
+        let mut pending = blank.clone();
+        pending.id = uuid::Uuid::new_v4().to_string();
+        pending.name = "pending".into();
+        pending.key_cipher = String::new();
+        pending.enabled = false;
+        pending.account_type = AccountType::Managed;
+        pending.setup_step = AccountSetupStep::GoogleAccount;
+        core.db.lock().create_account(&pending).unwrap();
+
+        assert!(toggle_account_inner(&core, pending.id.clone()).is_err());
+        assert!(test_account_inner(&core, pending.id.clone()).is_err());
+        assert!(
+            update_account_inner(
+                &core,
+                pending.id.clone(),
+                AccountUpdate {
+                    name: None,
+                    username: None,
+                    password: None,
+                    key: Some("sk-cannot-bypass-setup".into()),
+                    enabled: Some(true),
+                    referral_code: None,
+                    purchase_date: None,
+                },
+            )
+            .is_err()
+        );
+
+        let blank_profiles = browser_profile_paths(&dir, &blank.id).unwrap();
+        assert!(blank_profiles.iter().all(|path| path.starts_with(&dir)));
+        for profile in &blank_profiles {
+            fs::create_dir_all(profile).unwrap();
+            fs::write(profile.join("Cookies"), b"session").unwrap();
+        }
+        delete_account_inner(&core, blank.id.clone()).await.unwrap();
+        assert!(blank_profiles.iter().all(|path| !path.exists()));
+
+        let pending_profile = browser_profile_paths(&dir, &pending.id).unwrap()[0].clone();
+        fs::create_dir_all(&pending_profile).unwrap();
+        fs::write(pending_profile.join("SingletonLock"), b"active").unwrap();
+        assert!(
+            delete_account_inner(&core, pending.id.clone())
+                .await
+                .is_err()
+        );
+        assert!(core.db.lock().get_account(&pending.id).unwrap().is_some());
+        assert!(pending_profile.exists());
+        fs::remove_file(pending_profile.join("SingletonLock")).unwrap();
+        delete_account_inner(&core, pending.id.clone())
+            .await
+            .unwrap();
+
+        delete_account_inner(&core, "missing".into()).await.unwrap();
         assert_eq!(get_accounts_inner(&core).unwrap().len(), 1);
 
         assert!(toggle_account_inner(&core, "missing".into()).is_err());

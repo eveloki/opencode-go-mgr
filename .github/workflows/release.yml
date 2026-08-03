@@ -442,18 +442,25 @@ jobs:
           set -euo pipefail
           notes_file="$RUNNER_TEMP/release-notes.md"
           node scripts/generate-release-notes.mjs --tag "$GITHUB_REF_NAME" > "$notes_file"
+          prerelease=$(node scripts/release-policy.mjs is-prerelease --version "$GITHUB_REF_NAME")
+          release_type_flags=()
+          if [ "$prerelease" = true ]; then
+            release_type_flags+=(--prerelease)
+          fi
           if [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
             gh release upload "$GITHUB_REF_NAME" release/* --clobber
-            gh release edit "$GITHUB_REF_NAME" --notes-file "$notes_file"
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$notes_file" "${release_type_flags[@]}"
           elif gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "Refusing to modify an already-published release." >&2
             exit 1
           else
-            gh release create "$GITHUB_REF_NAME" release/* --draft --verify-tag --title "OCG Manager $GITHUB_REF_NAME" --notes-file "$notes_file"
+            gh release create "$GITHUB_REF_NAME" release/* --draft --verify-tag \
+              --title "OCG Manager $GITHUB_REF_NAME" --notes-file "$notes_file" "${release_type_flags[@]}"
           fi
-          release_metadata=$(gh release view "$GITHUB_REF_NAME" --json databaseId,isDraft,tagName)
-          if ! jq -e --arg tag "$GITHUB_REF_NAME" \
-            '.isDraft == true and .tagName == $tag and (.databaseId | type == "number")' \
+          release_metadata=$(gh release view "$GITHUB_REF_NAME" --json databaseId,isDraft,isPrerelease,tagName)
+          if ! jq -e --arg tag "$GITHUB_REF_NAME" --argjson prerelease "$prerelease" \
+            '.isDraft == true and .isPrerelease == $prerelease and .tagName == $tag
+              and (.databaseId | type == "number")' \
             <<<"$release_metadata" >/dev/null; then
             echo "Refusing to continue without the exact draft Release identity." >&2
             exit 1
@@ -504,11 +511,14 @@ jobs:
             echo "Invalid draft Release id: $RELEASE_ID" >&2
             exit 1
           fi
+          prerelease=$(node scripts/release-policy.mjs is-prerelease --version "$GITHUB_REF_NAME")
           ready=false
           for attempt in 1 2 3 4 5; do
             if gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release-metadata.json; then
               if jq -e --argjson release_id "$RELEASE_ID" --arg tag "$GITHUB_REF_NAME" \
+                --argjson prerelease "$prerelease" \
                 '.id == $release_id and .tag_name == $tag and .draft == true
+                  and .prerelease == $prerelease
                   and (.assets | length == 15)
                   and all(.assets[]; (.name | type == "string") and (.digest | type == "string"))' \
                 release-metadata.json >/dev/null; then
@@ -568,21 +578,29 @@ jobs:
             echo "Invalid verified Release id: $RELEASE_ID" >&2
             exit 1
           fi
-          latest_error="$RUNNER_TEMP/latest-release-error"
-          if current_latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>"$latest_error"); then
-            :
-          elif grep -q '(HTTP 404)' "$latest_error"; then
+          prerelease=$(node scripts/release-policy.mjs is-prerelease --version "$GITHUB_REF_NAME")
+          if [ "$prerelease" = true ]; then
             current_latest=
+            make_latest=false
           else
-            cat "$latest_error" >&2
-            exit 1
+            latest_error="$RUNNER_TEMP/latest-release-error"
+            if current_latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>"$latest_error"); then
+              :
+            elif grep -q '(HTTP 404)' "$latest_error"; then
+              current_latest=
+            else
+              cat "$latest_error" >&2
+              exit 1
+            fi
+            make_latest=$(node scripts/release-policy.mjs should-advance \
+              --candidate "$GITHUB_REF_NAME" \
+              --current "$current_latest")
           fi
-          make_latest=$(node scripts/release-policy.mjs should-advance \
-            --candidate "$GITHUB_REF_NAME" \
-            --current "$current_latest")
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release-metadata.json
           if ! jq -e --argjson release_id "$RELEASE_ID" --arg tag "$GITHUB_REF_NAME" \
+            --argjson prerelease "$prerelease" \
             '.id == $release_id and .tag_name == $tag and .draft == true
+              and .prerelease == $prerelease
               and (.assets | length == 15)
               and all(.assets[]; (.name | type == "string") and (.digest | type == "string"))' \
             release-metadata.json >/dev/null; then
@@ -598,9 +616,12 @@ jobs:
           fi
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -F draft=false \
+            -F prerelease="$prerelease" \
             -f make_latest="$make_latest" \
             --silent
-          if [ "$make_latest" = true ]; then
+          if [ "$prerelease" = true ]; then
+            echo "$GITHUB_REF_NAME was published as a prerelease without evaluating or advancing the stable latest channel."
+          elif [ "$make_latest" = true ]; then
             echo "$GITHUB_REF_NAME advanced the GitHub latest channel (previous: ${current_latest:-none})."
           else
             echo "$GITHUB_REF_NAME was published without rolling back newer latest release $current_latest."

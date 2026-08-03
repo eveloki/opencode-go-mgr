@@ -1,7 +1,10 @@
 use crate::auth;
+use crate::browser::{
+    BrowserCapabilities, BrowserOpenResult, BrowserProfileOperationKind, StagedBrowserProfiles,
+};
 use crate::db::{ForwardLogQueryOptions, ReorderAccountsError};
 use crate::gateway::{
-    diagnostics::sanitize_upstream_error_value,
+    diagnostics::{redact_known_secret, sanitize_upstream_error_value_with_known_secret},
     forwarder::forward_get,
     limit::{parse_reset, parse_usage_limit_window},
     protocol::supported_model_ids,
@@ -12,20 +15,29 @@ use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Path, Query, Request, State, rejection::JsonRejection},
-    http::{HeaderMap, HeaderValue, Response as HttpResponse, StatusCode, header},
+    extract::{
+        Path, Query, Request, State, WebSocketUpgrade,
+        rejection::JsonRejection,
+        ws::{Message as AxumWsMessage, WebSocket},
+    },
+    http::{HeaderMap, HeaderValue, Response as HttpResponse, StatusCode, header, uri::Authority},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path as FsPath, PathBuf};
+use std::str::FromStr;
+
+const MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES: usize = 64 * 1024;
 
 pub fn api_router(state: CoreState) -> Router<CoreState> {
     let protected = Router::new()
         .route("/accounts", get(list_accounts).post(create_account))
+        .route("/accounts/managed", post(create_managed_account))
         .route("/accounts/order", put(reorder_accounts))
         .route(
             "/accounts/{id}",
@@ -33,6 +45,21 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         )
         .route("/accounts/{id}/toggle", post(toggle_account))
         .route("/accounts/{id}/test", post(test_account))
+        .route("/accounts/{id}/setup", patch(advance_account_setup))
+        .route(
+            "/accounts/{id}/setup/verify-key",
+            post(verify_managed_account_key),
+        )
+        .route("/browser/capabilities", get(browser_capabilities))
+        .route("/accounts/{id}/browser", post(open_account_browser))
+        .route(
+            "/accounts/{id}/browser-profile",
+            delete(reset_account_browser_profile),
+        )
+        .route(
+            "/browser/sessions/{token}/ws",
+            get(browser_session_websocket),
+        )
         .route(
             "/accounts/{id}/usage",
             get(account_usage).patch(update_account_usage),
@@ -200,7 +227,7 @@ async fn register_admin(
         }
         auth::save_admin(&db, &admin).map_err(ApiError::internal)?;
     }
-    session_response(&state, &headers, StatusCode::CREATED)
+    session_response(&state, &headers, StatusCode::CREATED).await
 }
 
 async fn login_admin(
@@ -222,10 +249,28 @@ async fn login_admin(
             "用户名或密码错误",
         ));
     }
-    session_response(&state, &headers, StatusCode::OK)
+    session_response(&state, &headers, StatusCode::OK).await
 }
 
-async fn logout_admin(headers: HeaderMap) -> Result<Response, ApiError> {
+async fn logout_admin(
+    State(state): State<CoreState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if !is_local_dashboard_request(&state, &headers) && !has_dashboard_session(&state, &headers) {
+        return Err(ApiError::status(
+            StatusCode::UNAUTHORIZED,
+            "dashboard session is required",
+        ));
+    }
+    let _browser_operation = state.browser.operation().await;
+    if !is_local_dashboard_request(&state, &headers) && !has_dashboard_session(&state, &headers) {
+        return Err(ApiError::status(
+            StatusCode::UNAUTHORIZED,
+            "dashboard session is required",
+        ));
+    }
+    state.browser.invalidate_remote_sessions();
+    *state.dashboard_session_token.lock() = uuid::Uuid::new_v4().simple().to_string();
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
@@ -260,6 +305,13 @@ fn is_local_dashboard_request(state: &CoreState, headers: &HeaderMap) -> bool {
 }
 
 fn has_dashboard_session(state: &CoreState, headers: &HeaderMap) -> bool {
+    let current = state.dashboard_session_token.lock();
+    dashboard_session_value(headers)
+        .map(|value| value == current.as_str())
+        .unwrap_or(false)
+}
+
+fn dashboard_session_value(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
@@ -269,19 +321,21 @@ fn has_dashboard_session(state: &CoreState, headers: &HeaderMap) -> bool {
                 (name == SESSION_COOKIE).then_some(value)
             })
         })
-        .map(|value| value == state.dashboard_session_token)
-        .unwrap_or(false)
 }
 
-fn session_response(
+async fn session_response(
     state: &CoreState,
     headers: &HeaderMap,
     status: StatusCode,
 ) -> Result<Response, ApiError> {
+    let _browser_operation = state.browser.operation().await;
+    state.browser.invalidate_remote_sessions();
+    let session_token = uuid::Uuid::new_v4().simple().to_string();
+    *state.dashboard_session_token.lock() = session_token.clone();
     let mut response = (status, Json(serde_json::json!({ "ok": true }))).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        cookie_header(&state.dashboard_session_token, headers, false)?,
+        cookie_header(&session_token, headers, false)?,
     );
     Ok(response)
 }
@@ -360,6 +414,8 @@ struct DashboardAccount {
     password: String,
     key: String,
     enabled: bool,
+    account_type: AccountType,
+    setup_step: AccountSetupStep,
     purchase_date: String,
     expires_on: String,
     cooldown_until: Option<String>,
@@ -373,7 +429,19 @@ struct DashboardAccount {
     updated_at: String,
 }
 
-fn dashboard_account(account: Account) -> DashboardAccount {
+fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
+    let known_secret = if account.key_cipher.is_empty() {
+        Some(String::new())
+    } else {
+        state.decrypt_key(&account.key_cipher).ok()
+    };
+    let sanitize_persisted_error = |error: Option<String>| {
+        error.and_then(|error| {
+            known_secret
+                .as_deref()
+                .map(|secret| redact_known_secret(&error, secret))
+        })
+    };
     DashboardAccount {
         id: account.id,
         name: account.name,
@@ -381,6 +449,8 @@ fn dashboard_account(account: Account) -> DashboardAccount {
         password: String::new(),
         key: String::new(),
         enabled: account.enabled,
+        account_type: account.account_type,
+        setup_step: account.setup_step,
         purchase_date: account.purchase_date,
         expires_on: account.expires_on,
         cooldown_until: account.cooldown_until.map(|t| t.to_rfc3339()),
@@ -388,8 +458,8 @@ fn dashboard_account(account: Account) -> DashboardAccount {
         cooldown_5h_until: account.cooldown_5h_until.map(|t| t.to_rfc3339()),
         cooldown_week_until: account.cooldown_week_until.map(|t| t.to_rfc3339()),
         cooldown_month_until: account.cooldown_month_until.map(|t| t.to_rfc3339()),
-        last_error: account.last_error,
-        auth_error: account.auth_error,
+        last_error: sanitize_persisted_error(account.last_error),
+        auth_error: sanitize_persisted_error(account.auth_error),
         created_at: account.created_at.to_rfc3339(),
         updated_at: account.updated_at.to_rfc3339(),
     }
@@ -701,7 +771,7 @@ async fn list_accounts(
     Ok(Json(
         accounts
             .into_iter()
-            .map(dashboard_account)
+            .map(|account| dashboard_account(&state, account))
             .collect::<Vec<_>>(),
     ))
 }
@@ -733,6 +803,8 @@ async fn create_account(
             .encrypt_key(input.key.trim())
             .map_err(ApiError::internal)?,
         enabled: true,
+        account_type: AccountType::Key,
+        setup_step: AccountSetupStep::Ready,
         referral_code: clean_optional(input.referral_code),
         purchase_date,
         expires_on: String::new(),
@@ -758,7 +830,382 @@ async fn create_account(
             .map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::internal("created account not found"))?
     };
-    Ok(Json(dashboard_account(account)))
+    Ok(Json(dashboard_account(&state, account)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedAccountInput {
+    name: String,
+    #[serde(default)]
+    username: Option<String>,
+}
+
+async fn create_managed_account(
+    State(state): State<CoreState>,
+    Json(input): Json<ManagedAccountInput>,
+) -> Result<(StatusCode, Json<DashboardAccount>), ApiError> {
+    if state.config().opencode_invite_url.is_empty() {
+        return Err(ApiError::status(
+            StatusCode::PRECONDITION_FAILED,
+            "configure an OpenCode invite URL before registering a managed account",
+        ));
+    }
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("name is required"));
+    }
+    if name.chars().count() > 200 {
+        return Err(ApiError::bad_request("name must be at most 200 characters"));
+    }
+
+    let now = Utc::now();
+    let id = uuid::Uuid::new_v4().to_string();
+    let account = Account {
+        id: id.clone(),
+        name,
+        username: clean_optional(input.username),
+        password_cipher: None,
+        key_cipher: String::new(),
+        enabled: false,
+        account_type: AccountType::Managed,
+        setup_step: AccountSetupStep::GoogleAccount,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        last_error: None,
+        auth_error: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let account = {
+        let db = state.db.lock();
+        db.create_account(&account).map_err(ApiError::internal)?;
+        let _ = db.log_gateway(
+            "info",
+            "account",
+            &format!("created managed account draft {}", account.name),
+        );
+        db.get_account(&id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::internal("created managed account not found"))?
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(dashboard_account(&state, account)),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountSetupUpdate {
+    setup_step: AccountSetupStep,
+}
+
+async fn advance_account_setup(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    Json(input): Json<AccountSetupUpdate>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let current = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if current.account_type != AccountType::Managed {
+        return Err(ApiError::bad_request(
+            "setup steps are only available for managed accounts",
+        ));
+    }
+    let expected = current.setup_step.next().ok_or_else(|| {
+        ApiError::status(
+            StatusCode::CONFLICT,
+            "the current setup step cannot be advanced manually",
+        )
+    })?;
+    if expected != input.setup_step || input.setup_step == AccountSetupStep::Ready {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            format!(
+                "setup must advance from {} to {}",
+                current.setup_step.as_str(),
+                expected.as_str()
+            ),
+        ));
+    }
+    if !state
+        .db
+        .lock()
+        .advance_managed_setup(&id, current.setup_step, input.setup_step)
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "setup changed; reload the account and try again",
+        ));
+    }
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    Ok(Json(dashboard_account(&state, account)))
+}
+
+const GOOGLE_SIGNUP_URL: &str = "https://accounts.google.com/signup";
+const OPENCODE_CONSOLE_URL: &str = "https://opencode.ai/zen/go";
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BrowserTarget {
+    GoogleSignup,
+    Invite,
+    Console,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenBrowserInput {
+    target: BrowserTarget,
+}
+
+async fn browser_capabilities(State(state): State<CoreState>) -> Json<BrowserCapabilities> {
+    Json(state.browser.capabilities().await)
+}
+
+async fn open_account_browser(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<OpenBrowserInput>,
+) -> Result<Json<BrowserOpenResult>, ApiError> {
+    let browser_operation = state.browser.operation().await;
+    state
+        .recover_browser_profiles_for_account(&id)
+        .map_err(ApiError::internal)?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if account.account_type != AccountType::Managed
+        && !matches!(input.target, BrowserTarget::Console)
+    {
+        return Err(ApiError::bad_request(
+            "imported key accounts can only open the OpenCode console",
+        ));
+    }
+    let url = match input.target {
+        BrowserTarget::GoogleSignup => GOOGLE_SIGNUP_URL.to_string(),
+        BrowserTarget::Invite => {
+            let invite = state.config().opencode_invite_url;
+            if invite.is_empty() {
+                return Err(ApiError::status(
+                    StatusCode::PRECONDITION_FAILED,
+                    "configure an OpenCode invite URL before opening this step",
+                ));
+            }
+            invite
+        }
+        BrowserTarget::Console => OPENCODE_CONSOLE_URL.to_string(),
+    };
+    let binding = dashboard_session_binding(&state, &headers)?;
+    browser_operation
+        .open(&id, &url, &binding)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::status(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))
+}
+
+async fn reset_account_browser_profile(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let browser_operation = state.browser.operation().await;
+    state
+        .recover_browser_profiles_for_account(&id)
+        .map_err(ApiError::internal)?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    browser_operation
+        .stop_account(&id)
+        .await
+        .map_err(|error| ApiError::status(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let staged = StagedBrowserProfiles::stage(
+        &state.data_dir(),
+        &id,
+        BrowserProfileOperationKind::ResetProfile,
+    )
+    .map_err(ApiError::internal)?;
+    if account.account_type == AccountType::Managed && !account.setup_step.is_ready() {
+        if let Err(error) = state.db.lock().reset_pending_managed_setup(&id) {
+            let purge_error = staged.purge().err();
+            return Err(ApiError::internal(match purge_error {
+                Some(purge) => format!(
+                    "failed to reset managed setup: {error}; failed to finish browser profile reset: {purge}"
+                ),
+                None => format!("failed to reset managed setup: {error}"),
+            }));
+        }
+    }
+    staged.purge().map_err(ApiError::internal)?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    Ok(Json(dashboard_account(&state, account)))
+}
+
+async fn browser_session_websocket(
+    State(state): State<CoreState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    websocket: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    validate_websocket_origin(&headers)?;
+    let binding = dashboard_session_binding(&state, &headers)?;
+    let mut remote_session = state
+        .browser
+        .remote_websocket_session(&token, &binding)
+        .map_err(|error| ApiError::status(StatusCode::GONE, error.to_string()))?;
+    let worker = tokio::select! {
+        _ = remote_session.cancellation.changed() => {
+            return Err(ApiError::status(StatusCode::GONE, "browser session was replaced"));
+        }
+        result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio_tungstenite::connect_async(&remote_session.worker_ws_url),
+        ) => {
+            let (worker, _) = result
+                .map_err(|_| ApiError::status(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "timed out connecting to remote browser display",
+                ))?
+                .map_err(|error| ApiError::status(
+                    StatusCode::BAD_GATEWAY,
+                    format!("failed to connect to remote browser display: {error}"),
+                ))?;
+            worker
+        }
+    };
+    Ok(websocket.on_upgrade(move |client| {
+        proxy_browser_websocket(state, token, remote_session.cancellation, client, worker)
+    }))
+}
+
+async fn proxy_browser_websocket(
+    state: CoreState,
+    token: String,
+    mut cancellation: tokio::sync::watch::Receiver<bool>,
+    client: WebSocket,
+    worker: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    use tokio_tungstenite::tungstenite::Message as WorkerWsMessage;
+
+    let (mut client_tx, mut client_rx) = client.split();
+    let (mut worker_tx, mut worker_rx) = worker.split();
+    let mut expiry_check = tokio::time::interval(std::time::Duration::from_secs(1));
+    expiry_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cancellation.changed() => { break; }
+            _ = expiry_check.tick() => {
+                if !state.browser.remote_session_active(&token) { break; }
+            }
+            message = client_rx.next() => {
+                let Some(Ok(message)) = message else { break };
+                if !state.browser.touch_remote_session(&token) { break; }
+                let message = match message {
+                    AxumWsMessage::Text(value) => WorkerWsMessage::Text(value.as_str().into()),
+                    AxumWsMessage::Binary(value) => WorkerWsMessage::Binary(value),
+                    AxumWsMessage::Ping(value) => WorkerWsMessage::Ping(value),
+                    AxumWsMessage::Pong(value) => WorkerWsMessage::Pong(value),
+                    AxumWsMessage::Close(_) => break,
+                };
+                if worker_tx.send(message).await.is_err() { break; }
+            }
+            message = worker_rx.next() => {
+                let Some(Ok(message)) = message else { break };
+                if !state.browser.remote_session_active(&token) { break; }
+                let message = match message {
+                    WorkerWsMessage::Text(value) => AxumWsMessage::Text(value.as_str().into()),
+                    WorkerWsMessage::Binary(value) => AxumWsMessage::Binary(value),
+                    WorkerWsMessage::Ping(value) => AxumWsMessage::Ping(value),
+                    WorkerWsMessage::Pong(value) => AxumWsMessage::Pong(value),
+                    WorkerWsMessage::Close(_) => break,
+                    WorkerWsMessage::Frame(_) => continue,
+                };
+                if client_tx.send(message).await.is_err() { break; }
+            }
+        }
+    }
+    let _ = worker_tx.close().await;
+    let _ = client_tx.close().await;
+}
+
+fn dashboard_session_binding(state: &CoreState, headers: &HeaderMap) -> Result<String, ApiError> {
+    if is_local_dashboard_request(state, headers) {
+        return Ok("local-dashboard".to_string());
+    }
+    if has_dashboard_session(state, headers) {
+        return dashboard_session_value(headers)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ApiError::status(StatusCode::UNAUTHORIZED, "dashboard session is required")
+            });
+    }
+    Err(ApiError::status(
+        StatusCode::UNAUTHORIZED,
+        "dashboard session is required",
+    ))
+}
+
+fn validate_websocket_origin(headers: &HeaderMap) -> Result<(), ApiError> {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::bad_request("browser WebSocket Origin is required"))?;
+    let origin = reqwest::Url::parse(origin)
+        .map_err(|_| ApiError::bad_request("browser WebSocket Origin is invalid"))?;
+    if !matches!(origin.scheme(), "http" | "https") {
+        return Err(ApiError::bad_request(
+            "browser WebSocket Origin must use http or https",
+        ));
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::bad_request("browser WebSocket Host is required"))?;
+    let authority = Authority::from_str(host)
+        .map_err(|_| ApiError::bad_request("browser WebSocket Host is invalid"))?;
+    let default_port = if origin.scheme() == "https" { 443 } else { 80 };
+    if !origin
+        .host_str()
+        .is_some_and(|value| value.eq_ignore_ascii_case(authority.host()))
+        || origin.port_or_known_default() != Some(authority.port_u16().unwrap_or(default_port))
+    {
+        return Err(ApiError::status(
+            StatusCode::FORBIDDEN,
+            "browser WebSocket Origin does not match Host",
+        ));
+    }
+    Ok(())
 }
 
 async fn update_account(
@@ -766,6 +1213,24 @@ async fn update_account(
     Path(id): Path<String>,
     Json(mut update): Json<AccountUpdate>,
 ) -> Result<Json<DashboardAccount>, ApiError> {
+    let existing = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if !existing.setup_step.is_ready()
+        && (update.enabled == Some(true)
+            || update
+                .key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty()))
+    {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "finish managed-account key verification before enabling or replacing its key",
+        ));
+    }
     if let Some(value) = update.purchase_date.take() {
         update.purchase_date = Some(
             normalize_purchase_date(&value)
@@ -798,7 +1263,7 @@ async fn update_account(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
-    Ok(Json(dashboard_account(account)))
+    Ok(Json(dashboard_account(&state, account)))
 }
 
 #[derive(Deserialize)]
@@ -828,7 +1293,7 @@ async fn reorder_accounts(
     Ok(Json(
         accounts
             .into_iter()
-            .map(dashboard_account)
+            .map(|account| dashboard_account(&state, account))
             .collect::<Vec<_>>(),
     ))
 }
@@ -837,9 +1302,48 @@ async fn delete_account(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let mut db = state.db.lock();
-    db.delete_account(&id).map_err(ApiError::internal)?;
-    let _ = db.log_gateway("info", "account", &format!("deleted account {}", id));
+    let browser_operation = state.browser.operation().await;
+    state
+        .recover_browser_profiles_for_account(&id)
+        .map_err(ApiError::internal)?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    browser_operation
+        .stop_account(&id)
+        .await
+        .map_err(|error| ApiError::status(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let staged = StagedBrowserProfiles::stage(
+        &state.data_dir(),
+        &id,
+        BrowserProfileOperationKind::DeleteAccount,
+    )
+    .map_err(ApiError::internal)?;
+    let delete_result = {
+        let mut db = state.db.lock();
+        let result = db.delete_account(&id);
+        if result.is_ok() {
+            let _ = db.log_gateway(
+                "info",
+                "account",
+                &format!("deleted account {} ({})", id, account.name),
+            );
+        }
+        result
+    };
+    if let Err(error) = delete_result {
+        let restore_error = staged.restore().err();
+        return Err(ApiError::internal(match restore_error {
+            Some(restore) => format!(
+                "failed to delete account: {error}; failed to restore browser profile: {restore}"
+            ),
+            None => format!("failed to delete account: {error}"),
+        }));
+    }
+    staged.purge().map_err(ApiError::internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -853,12 +1357,19 @@ async fn toggle_account(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
+    let next_enabled = !account.enabled;
+    if next_enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "account setup is not complete and cannot be enabled",
+        ));
+    }
     let update = AccountUpdate {
         name: None,
         username: None,
         password: None,
         key: None,
-        enabled: Some(!account.enabled),
+        enabled: Some(next_enabled),
         referral_code: None,
         purchase_date: None,
     };
@@ -873,7 +1384,7 @@ async fn toggle_account(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
-    Ok(Json(dashboard_account(account)))
+    Ok(Json(dashboard_account(&state, account)))
 }
 
 async fn test_account(
@@ -886,6 +1397,12 @@ async fn test_account(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if !account.setup_step.is_ready() || account.key_cipher.is_empty() {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "account setup is not complete",
+        ));
+    }
     let key = state
         .decrypt_key(&account.key_cipher)
         .map_err(ApiError::internal)?;
@@ -913,7 +1430,7 @@ async fn test_account(
         }
     })?;
     if status == StatusCode::UNAUTHORIZED {
-        let sanitized = sanitize_upstream_error_value(&body).to_string();
+        let sanitized = sanitize_upstream_error_value_with_known_secret(&body, &key).to_string();
         let auth_error = format!("upstream auth error 401: {}", short_body(&sanitized));
         {
             let db = state.db.lock();
@@ -937,6 +1454,8 @@ async fn test_account(
     if status == StatusCode::TOO_MANY_REQUESTS {
         let cooldown = parse_reset(&body).unwrap_or_else(|| Duration::minutes(5));
         let until = Utc::now() + cooldown;
+        let sanitized_body =
+            sanitize_upstream_error_value_with_known_secret(&body, &key).to_string();
         {
             let db = state.db.lock();
             let credential_matches = db
@@ -946,7 +1465,7 @@ async fn test_account(
                 db.set_account_rate_limit(
                     &account.id,
                     until,
-                    &body,
+                    &sanitized_body,
                     parse_usage_limit_window(&body),
                 )
                 .map_err(ApiError::internal)?;
@@ -966,10 +1485,11 @@ async fn test_account(
         ));
     }
     if !status.is_success() {
+        let sanitized = sanitize_upstream_error_value_with_known_secret(&body, &key).to_string();
         return Err(ApiError::bad_request(format!(
             "Ping failed: upstream returned {}: {}",
             status,
-            short_body(&body)
+            short_body(&sanitized)
         )));
     }
     state
@@ -986,6 +1506,206 @@ async fn test_account(
     Ok(Json(serde_json::json!({
         "message": format!("Ping OK: {} ({})", account.name, masked)
     })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifyManagedKeyInput {
+    key: String,
+}
+
+async fn verify_managed_account_key(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    Json(input): Json<VerifyManagedKeyInput>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if account.account_type != AccountType::Managed
+        || account.setup_step != AccountSetupStep::KeyVerification
+    {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "managed account is not waiting for key verification",
+        ));
+    }
+    let key = input.key.trim();
+    if key.is_empty() {
+        return Err(ApiError::bad_request("key is required"));
+    }
+    if key.len() > 4096 {
+        return Err(ApiError::bad_request("key is too long"));
+    }
+    let key_cipher = state.encrypt_key(key).map_err(ApiError::internal)?;
+    if !state
+        .db
+        .lock()
+        .save_managed_key_for_verification(&id, &key_cipher)
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "account setup changed; reload and try again",
+        ));
+    }
+
+    let (config, client) = state.upstream_context();
+    validate_upstream_url(&config.upstream_base_url)?;
+    let response = client
+        .post(format!(
+            "{}/v1/chat/completions",
+            config.upstream_base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(key)
+        .json(&account_ping_payload())
+        .timeout(std::time::Duration::from_secs(
+            config.non_stream_timeout_secs,
+        ))
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::status(
+                StatusCode::BAD_GATEWAY,
+                if error.is_timeout() {
+                    "key verification timed out; the account remains pending".to_string()
+                } else {
+                    format!("key verification request failed; the account remains pending: {error}")
+                },
+            )
+        })?;
+    let status = response.status();
+    let body = read_managed_key_verification_response(response)
+        .await
+        .map_err(|error| {
+            ApiError::status(
+                StatusCode::BAD_GATEWAY,
+                if error.is_timeout() {
+                    "key verification response timed out; the account remains pending".to_string()
+                } else {
+                    format!("failed to read key verification response: {error}")
+                },
+            )
+        })?;
+
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        let sanitized = sanitize_upstream_error_value_with_known_secret(&body, key).to_string();
+        let auth_error = format!(
+            "upstream auth error {}: {}",
+            status.as_u16(),
+            short_body(&sanitized)
+        );
+        state
+            .db
+            .lock()
+            .set_account_auth_error_if_key_matches(&id, &key_cipher, Some(&auth_error))
+            .map_err(ApiError::internal)?;
+        return Err(ApiError::bad_request(format!(
+            "Key verification failed: {auth_error}"
+        )));
+    }
+
+    if status.is_server_error() {
+        return Err(ApiError::status(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "key verification upstream returned {}; the account remains pending",
+                status
+            ),
+        ));
+    }
+
+    if status != StatusCode::TOO_MANY_REQUESTS && !status.is_success() {
+        let sanitized = sanitize_upstream_error_value_with_known_secret(&body, key).to_string();
+        return Err(ApiError::bad_request(format!(
+            "Key verification failed: upstream returned {}: {}",
+            status,
+            short_body(&sanitized)
+        )));
+    }
+
+    {
+        let db = state.db.lock();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let cooldown = parse_reset(&body).unwrap_or_else(|| Duration::minutes(5));
+            let sanitized_body =
+                sanitize_upstream_error_value_with_known_secret(&body, key).to_string();
+            if !db
+                .set_account_rate_limit_if_key_matches(
+                    &id,
+                    &key_cipher,
+                    Utc::now() + cooldown,
+                    &sanitized_body,
+                    parse_usage_limit_window(&body),
+                )
+                .map_err(ApiError::internal)?
+            {
+                return Err(ApiError::status(
+                    StatusCode::CONFLICT,
+                    "the key changed while it was being verified; retry verification",
+                ));
+            }
+        }
+        if !db
+            .complete_managed_setup_if_key_matches(&id, &key_cipher)
+            .map_err(ApiError::internal)?
+        {
+            return Err(ApiError::status(
+                StatusCode::CONFLICT,
+                "the key changed while it was being verified; retry verification",
+            ));
+        }
+        if status != StatusCode::TOO_MANY_REQUESTS {
+            db.clear_account_cooldown(&id).map_err(ApiError::internal)?;
+        }
+        let _ = db.log_gateway(
+            "info",
+            "account",
+            &format!("verified managed account {}", account.name),
+        );
+    }
+
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    Ok(Json(dashboard_account(&state, account)))
+}
+
+async fn read_managed_key_verification_response(
+    response: reqwest::Response,
+) -> Result<String, reqwest::Error> {
+    let read_limit = MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES.saturating_add(1);
+    let capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .map_or(read_limit, |length| length.min(read_limit));
+    let mut body = Vec::with_capacity(capacity);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let remaining = read_limit.saturating_sub(body.len());
+        if remaining == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if body.len() == read_limit {
+            break;
+        }
+    }
+
+    let truncated = body.len() > MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES;
+    body.truncate(MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES);
+    let mut text = String::from_utf8_lossy(&body).into_owned();
+    if truncated {
+        text.push_str("\n<key verification response truncated>");
+    }
+    Ok(text)
 }
 
 fn account_ping_payload() -> serde_json::Value {
@@ -1093,7 +1813,7 @@ async fn reset_account_cooldown(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
-    Ok(Json(dashboard_account(account)))
+    Ok(Json(dashboard_account(&state, account)))
 }
 
 #[derive(Serialize)]
@@ -1183,20 +1903,20 @@ async fn check_update(
         .map_err(update_check_error)?;
 
     let current_version = env!("CARGO_PKG_VERSION");
-    let (current_parts, current_version) = parse_stable_version(current_version)
-        .ok_or_else(|| ApiError::internal("application version is not stable X.Y.Z"))?;
-    let (latest_parts, latest_version) =
-        parse_stable_version(&release.tag_name).ok_or_else(|| {
+    let (current_version_parts, current_version) = parse_semver_version(current_version)
+        .ok_or_else(|| ApiError::internal("application version is not valid SemVer"))?;
+    let (latest_version_parts, latest_version) = parse_semver_version(&release.tag_name)
+        .ok_or_else(|| {
             ApiError::status(
                 StatusCode::BAD_GATEWAY,
-                "GitHub latest release has an invalid stable version tag",
+                "GitHub latest release has an invalid SemVer tag",
             )
         })?;
 
     Ok(Json(UpdateCheckResponse {
         current_version: current_version.to_string(),
         latest_version: latest_version.to_string(),
-        update_available: is_update_available(current_parts, latest_parts),
+        update_available: is_update_available(&current_version_parts, &latest_version_parts),
         release_url: GITHUB_LATEST_RELEASE_URL,
         install_supported: state.desktop_update_supported(),
     }))
@@ -1211,11 +1931,11 @@ async fn install_update(
     Json(input): Json<InstallUpdateRequest>,
 ) -> Result<(StatusCode, Json<DesktopUpdateStatus>), ApiError> {
     let status = state.desktop_update_status();
-    let (current_parts, _) = parse_stable_version(&status.current_version)
-        .ok_or_else(|| ApiError::internal("application version is not stable X.Y.Z"))?;
-    let (expected_parts, expected_version) = parse_stable_version(&input.expected_version)
-        .ok_or_else(|| ApiError::bad_request("expected_version must be a stable X.Y.Z version"))?;
-    if !is_update_available(current_parts, expected_parts) {
+    let (current_version_parts, _) = parse_semver_version(&status.current_version)
+        .ok_or_else(|| ApiError::internal("application version is not valid SemVer"))?;
+    let (expected_version_parts, expected_version) = parse_semver_version(&input.expected_version)
+        .ok_or_else(|| ApiError::bad_request("expected_version must be a valid SemVer version"))?;
+    if !is_update_available(&current_version_parts, &expected_version_parts) {
         return Err(ApiError::bad_request(
             "expected_version must be newer than the current version",
         ));
@@ -1269,24 +1989,106 @@ fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
-fn parse_stable_version(version: &str) -> Option<([u64; 3], &str)> {
-    let version = version.strip_prefix('v').unwrap_or(version);
-    let mut parts = version.split('.');
-    let parse_part = |part: &str| {
-        (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-            .then(|| part.parse().ok())
-            .flatten()
-    };
-    let parsed = [
-        parse_part(parts.next()?)?,
-        parse_part(parts.next()?)?,
-        parse_part(parts.next()?)?,
-    ];
-    parts.next().is_none().then_some((parsed, version))
+#[derive(Debug)]
+struct SemverVersion<'a> {
+    core: [u64; 3],
+    prerelease: Option<Vec<PrereleaseIdentifier<'a>>>,
 }
 
-fn is_update_available(current: [u64; 3], latest: [u64; 3]) -> bool {
-    latest > current
+#[derive(Debug)]
+struct PrereleaseIdentifier<'a> {
+    value: &'a str,
+    numeric: Option<u64>,
+}
+
+fn parse_semver_version(version: &str) -> Option<(SemverVersion<'_>, &str)> {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let display_version = version;
+    let (version, build) = match version.split_once('+') {
+        Some((version, build)) => (version, Some(build)),
+        None => (version, None),
+    };
+    build
+        .is_none_or(|build| build.split('.').all(is_semver_identifier))
+        .then_some(())?;
+
+    let (core, prerelease) = match version.split_once('-') {
+        Some((core, prerelease)) => (core, Some(prerelease)),
+        None => (version, None),
+    };
+    let mut core_parts = core.split('.');
+    let core = [
+        parse_semver_number(core_parts.next()?)?,
+        parse_semver_number(core_parts.next()?)?,
+        parse_semver_number(core_parts.next()?)?,
+    ];
+    core_parts.next().is_none().then_some(())?;
+
+    let prerelease = match prerelease {
+        Some(prerelease) => Some(
+            prerelease
+                .split('.')
+                .map(parse_prerelease_identifier)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        None => None,
+    };
+    Some((SemverVersion { core, prerelease }, display_version))
+}
+
+fn is_semver_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn parse_prerelease_identifier(value: &str) -> Option<PrereleaseIdentifier<'_>> {
+    is_semver_identifier(value).then_some(())?;
+    let numeric = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        Some(parse_semver_number(value)?)
+    } else {
+        None
+    };
+    Some(PrereleaseIdentifier { value, numeric })
+}
+
+fn parse_semver_number(value: &str) -> Option<u64> {
+    (!value.is_empty()
+        && (value == "0" || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit()))
+    .then(|| value.parse().ok())
+    .flatten()
+}
+
+fn is_update_available(current: &SemverVersion<'_>, latest: &SemverVersion<'_>) -> bool {
+    use std::cmp::Ordering;
+
+    let core_ordering = latest.core.cmp(&current.core);
+    if core_ordering != Ordering::Equal {
+        return core_ordering == Ordering::Greater;
+    }
+    match (&current.prerelease, &latest.prerelease) {
+        (None, None) => false,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (Some(current), Some(latest)) => {
+            latest
+                .iter()
+                .zip(current)
+                .map(
+                    |(latest, current)| match (latest.numeric, current.numeric) {
+                        (Some(latest), Some(current)) => latest.cmp(&current),
+                        (Some(_), None) => Ordering::Less,
+                        (None, Some(_)) => Ordering::Greater,
+                        (None, None) => latest.value.cmp(current.value),
+                    },
+                )
+                .find(|ordering| *ordering != Ordering::Equal)
+                .unwrap_or_else(|| latest.len().cmp(&current.len()))
+                == Ordering::Greater
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1538,12 +2340,17 @@ async fn gateway_logs(
     State(state): State<CoreState>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Vec<GatewayLog>>, ApiError> {
-    state
+    let mut logs = state
         .db
         .lock()
         .query_gateway_logs(q.limit.unwrap_or(100), q.request_id.as_deref())
-        .map(Json)
-        .map_err(ApiError::internal)
+        .map_err(ApiError::internal)?;
+    let secrets = dashboard_account_secrets(&state)?;
+    for log in &mut logs {
+        log.message = redact_known_secrets(&log.message, &secrets);
+        log.diagnostic = redact_diagnostic(log.diagnostic.take(), secrets.values());
+    }
+    Ok(Json(logs))
 }
 
 async fn forward_logs(
@@ -1551,7 +2358,7 @@ async fn forward_logs(
     Query(q): Query<ForwardLogQuery>,
 ) -> Result<Json<ForwardLogPage>, ApiError> {
     let (start_time, end_time) = validate_forward_log_query(&q)?;
-    state
+    let mut page = state
         .db
         .lock()
         .query_forward_logs(ForwardLogQueryOptions {
@@ -1566,8 +2373,53 @@ async fn forward_logs(
             sort_by: q.sort_by.as_deref(),
             sort_order: q.sort_order.as_deref(),
         })
-        .map(Json)
-        .map_err(ApiError::internal)
+        .map_err(ApiError::internal)?;
+    let secrets = dashboard_account_secrets(&state)?;
+    for log in &mut page.items {
+        if let Some(secret) = secrets.get(&log.account_id) {
+            log.error_message = log
+                .error_message
+                .take()
+                .map(|error| redact_known_secret(&error, secret));
+            log.diagnostic = redact_diagnostic(log.diagnostic.take(), std::slice::from_ref(secret));
+        }
+    }
+    Ok(Json(page))
+}
+
+fn dashboard_account_secrets(state: &CoreState) -> Result<BTreeMap<String, String>, ApiError> {
+    let accounts = state
+        .db
+        .lock()
+        .list_accounts()
+        .map_err(ApiError::internal)?;
+    Ok(accounts
+        .into_iter()
+        .filter(|account| !account.key_cipher.is_empty())
+        .filter_map(|account| {
+            state
+                .decrypt_key(&account.key_cipher)
+                .ok()
+                .map(|secret| (account.id, secret))
+        })
+        .collect())
+}
+
+fn redact_known_secrets(text: &str, secrets: &BTreeMap<String, String>) -> String {
+    secrets.values().fold(text.to_string(), |text, secret| {
+        redact_known_secret(&text, secret)
+    })
+}
+
+fn redact_diagnostic(
+    diagnostic: Option<serde_json::Value>,
+    secrets: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Option<serde_json::Value> {
+    let mut encoded = diagnostic?.to_string();
+    for secret in secrets {
+        encoded = redact_known_secret(&encoded, secret.as_ref());
+    }
+    serde_json::from_str(&encoded).ok()
 }
 
 async fn forward_log_models(State(state): State<CoreState>) -> Result<Json<Vec<String>>, ApiError> {
@@ -1588,7 +2440,13 @@ async fn dashboard_summary(
     let now = Utc::now();
     let available_accounts = accounts
         .iter()
-        .filter(|a| a.enabled && a.auth_error.is_none() && !a.is_cooling_at(now))
+        .filter(|a| {
+            a.enabled
+                && a.setup_step.is_ready()
+                && !a.key_cipher.is_empty()
+                && a.auth_error.is_none()
+                && !a.is_cooling_at(now)
+        })
         .count();
     let (today_cost, week_cost, month_cost) = db.total_usage().map_err(ApiError::internal)?;
     Ok(Json(DashboardSummary {
@@ -1657,28 +2515,37 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountOrderInput, AccountUsageUpdate, ForwardLogQuery, MAX_PRICING_MULTIPLIER,
-        PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
-        SettingsUpdateRequest, UpdateCheckResponse, apply_pricing_refresh, asset_path,
-        create_account, dashboard_account, dashboard_summary, format_error_chain,
-        is_update_available, parse_stable_version, pricing_multiplier_changes,
-        pricing_semantically_equal, reorder_accounts, update_account, update_account_usage,
-        update_pricing_multipliers, update_settings, validate_forward_log_query,
+        AccountOrderInput, AccountSetupUpdate, AccountUsageUpdate, BrowserTarget, ForwardLogQuery,
+        MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
+        OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
+        SemverVersion, SettingsUpdateRequest, UpdateCheckResponse, VerifyManagedKeyInput,
+        advance_account_setup, apply_pricing_refresh, asset_path, create_account,
+        create_managed_account, dashboard_account, dashboard_summary, format_error_chain,
+        is_update_available, open_account_browser, parse_semver_version,
+        pricing_multiplier_changes, pricing_semantically_equal,
+        read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
+        reorder_accounts, update_account, update_account_usage, update_pricing_multipliers,
+        update_settings, validate_forward_log_query, validate_websocket_origin,
+        verify_managed_account_key,
     };
+    use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::Database;
     use crate::models::{
-        Account, AccountInput, AccountUpdate, AppConfig, ClaudeDesktopModels,
-        normalize_purchase_date, purchase_expires_on,
+        Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate, AppConfig,
+        ClaudeDesktopModels, normalize_purchase_date, purchase_expires_on,
     };
     use crate::state::CoreStateInner;
     use axum::Json;
     use axum::extract::{Path as AxumPath, State};
-    use axum::http::StatusCode;
+    use axum::http::{HeaderMap, StatusCode, header};
     use chrono::Utc;
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn temp_data_dir(label: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
@@ -1691,6 +2558,41 @@ mod tests {
         dir
     }
 
+    async fn spawn_key_verification_upstream(
+        status: StatusCode,
+        body: impl Into<String>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let body = body.into();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test upstream should bind");
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 8192];
+            let _ = stream.read(&mut request).await;
+            let reason = status.canonical_reason().unwrap_or("Test");
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                reason,
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        (address, task)
+    }
+
+    fn managed_key_verification_account(id: &str) -> Account {
+        let mut account = test_account(id);
+        account.account_type = AccountType::Managed;
+        account.setup_step = AccountSetupStep::KeyVerification;
+        account.key_cipher.clear();
+        account.enabled = false;
+        account
+    }
+
     fn test_account(id: &str) -> Account {
         let now = Utc::now();
         Account {
@@ -1700,6 +2602,8 @@ mod tests {
             password_cipher: None,
             key_cipher: format!("cipher-{id}"),
             enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
             referral_code: None,
             purchase_date: "2026-06-15".into(),
             expires_on: "2026-07-15".into(),
@@ -1732,6 +2636,84 @@ mod tests {
         assert!(asset_path(root, "/secret.txt").is_none());
         assert!(asset_path(root, r"nested\secret.txt").is_none());
         assert!(asset_path(root, "C:/secret.txt").is_none());
+    }
+
+    #[test]
+    fn browser_websocket_origin_must_match_request_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "manager.example:9443".parse().unwrap());
+        headers.insert(
+            header::ORIGIN,
+            "https://manager.example:9443".parse().unwrap(),
+        );
+        validate_websocket_origin(&headers).expect("same origin should pass");
+
+        headers.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        let error = validate_websocket_origin(&headers).expect_err("cross origin must fail");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+        headers.remove(header::ORIGIN);
+        assert!(validate_websocket_origin(&headers).is_err());
+    }
+
+    #[tokio::test]
+    async fn dashboard_open_recovers_staged_profile_before_native_launch() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = temp_data_dir("browser-open-recovery");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("browser-open-test"));
+        let state = Arc::new(
+            CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+        );
+        state.set_dashboard_local_mode(true);
+        let account = test_account("account-1");
+        state.db.lock().create_account(&account).unwrap();
+        let profile = dir.join("browser-profiles").join(&account.id);
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(profile.join("Cookies"), b"recover-me").unwrap();
+        let staged = StagedBrowserProfiles::stage(
+            &dir,
+            &account.id,
+            BrowserProfileOperationKind::DeleteAccount,
+        )
+        .unwrap();
+        assert!(!profile.exists());
+        drop(staged);
+
+        let launched = Arc::new(AtomicBool::new(false));
+        let launched_flag = launched.clone();
+        let expected_profile = profile.clone();
+        state
+            .browser
+            .register_native_hooks(
+                Arc::new(move |_, _| {
+                    if !expected_profile.join("Cookies").is_file() {
+                        anyhow::bail!("profile was not recovered before launch");
+                    }
+                    launched_flag.store(true, Ordering::SeqCst);
+                    Ok(())
+                }),
+                Arc::new(|_| Ok(())),
+            )
+            .unwrap();
+
+        let response = open_account_browser(
+            State(state.clone()),
+            AxumPath(account.id.clone()),
+            HeaderMap::new(),
+            Json(OpenBrowserInput {
+                target: BrowserTarget::Console,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.0.mode, crate::browser::BrowserMode::Native);
+        assert!(launched.load(Ordering::SeqCst));
+        assert!(profile.join("Cookies").is_file());
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2106,6 +3088,7 @@ mod tests {
 
     #[test]
     fn dashboard_account_does_not_export_secrets() {
+        const OPAQUE_KEY: &str = "opaque/account+key=42";
         let dir = temp_data_dir("secret-list");
         let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
         let db = Database::open(dir.clone()).unwrap();
@@ -2115,8 +3098,10 @@ mod tests {
             name: "main".into(),
             username: Some("user".into()),
             password_cipher: Some(state.encrypt_key("password-secret").unwrap()),
-            key_cipher: state.encrypt_key("sk-secret").unwrap(),
+            key_cipher: state.encrypt_key(OPAQUE_KEY).unwrap(),
             enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
             referral_code: None,
             purchase_date: "2026-01-31".into(),
             expires_on: "2026-02-28".into(),
@@ -2125,22 +3110,43 @@ mod tests {
             cooldown_5h_until: None,
             cooldown_week_until: None,
             cooldown_month_until: None,
-            last_error: None,
-            auth_error: None,
+            last_error: Some(format!("legacy rate limit echoed {OPAQUE_KEY}")),
+            auth_error: Some(format!("legacy auth failure echoed {OPAQUE_KEY}")),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
 
-        let dto = dashboard_account(account);
+        let dto = dashboard_account(&state, account);
 
         assert_eq!(dto.username, "user");
         assert!(dto.password.is_empty());
         assert!(dto.key.is_empty());
+        assert!(!dto.last_error.as_deref().unwrap().contains(OPAQUE_KEY));
+        assert!(!dto.auth_error.as_deref().unwrap().contains(OPAQUE_KEY));
         assert_eq!(dto.purchase_date, "2026-01-31");
         assert_eq!(dto.expires_on, "2026-02-28");
         let json = serde_json::to_value(dto).expect("dashboard account should serialize");
+        assert!(!json.to_string().contains(OPAQUE_KEY));
         assert!(json.get("recharge_date").is_none());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn historical_dashboard_logs_redact_current_account_secrets() {
+        const OPAQUE_KEY: &str = "opaque/account+key=42";
+        let secrets = BTreeMap::from([("acct-1".to_string(), OPAQUE_KEY.to_string())]);
+        let message =
+            redact_known_secrets(&format!("legacy gateway log echoed {OPAQUE_KEY}"), &secrets);
+        assert!(!message.contains(OPAQUE_KEY));
+
+        let diagnostic = redact_diagnostic(
+            Some(serde_json::json!({
+                "upstream_error": {"message": format!("rejected {OPAQUE_KEY}")}
+            })),
+            secrets.values(),
+        )
+        .unwrap();
+        assert!(!diagnostic.to_string().contains(OPAQUE_KEY));
     }
 
     #[tokio::test]
@@ -2188,6 +3194,201 @@ mod tests {
 
         drop(state);
         fs::remove_dir_all(dir).expect("test directory should be removable");
+    }
+
+    #[tokio::test]
+    async fn managed_draft_requires_invite_and_resumes_in_strict_order() {
+        let dir = temp_data_dir("managed-draft");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let state = Arc::new(
+            CoreStateInner::new(db, dir.clone(), cipher).expect("test state should initialize"),
+        );
+
+        let missing_invite = create_managed_account(
+            State(state.clone()),
+            Json(ManagedAccountInput {
+                name: "pending".into(),
+                username: None,
+            }),
+        )
+        .await
+        .expect_err("managed registration should require an invite URL");
+        assert_eq!(missing_invite.status, StatusCode::PRECONDITION_FAILED);
+
+        let mut config = state.config();
+        config.opencode_invite_url = "https://opencode.ai/invite/test".into();
+        state.set_config(config).unwrap();
+        let (status, Json(draft)) = create_managed_account(
+            State(state.clone()),
+            Json(ManagedAccountInput {
+                name: "  pending  ".into(),
+                username: Some("  user@example.test  ".into()),
+            }),
+        )
+        .await
+        .expect("managed draft should be created");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(draft.account_type, AccountType::Managed);
+        assert_eq!(draft.setup_step, AccountSetupStep::GoogleAccount);
+        assert!(!draft.enabled);
+
+        let skipped = advance_account_setup(
+            State(state.clone()),
+            AxumPath(draft.id.clone()),
+            Json(AccountSetupUpdate {
+                setup_step: AccountSetupStep::Payment,
+            }),
+        )
+        .await
+        .expect_err("setup must not skip steps");
+        assert_eq!(skipped.status, StatusCode::CONFLICT);
+
+        let advanced = advance_account_setup(
+            State(state.clone()),
+            AxumPath(draft.id.clone()),
+            Json(AccountSetupUpdate {
+                setup_step: AccountSetupStep::OpencodeRegistration,
+            }),
+        )
+        .await
+        .expect("next setup step should save")
+        .0;
+        assert_eq!(advanced.setup_step, AccountSetupStep::OpencodeRegistration);
+        let persisted = state.db.lock().get_account(&draft.id).unwrap().unwrap();
+        assert!(persisted.key_cipher.is_empty());
+        assert!(!persisted.enabled);
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test directory should be removable");
+    }
+
+    #[tokio::test]
+    async fn managed_key_verification_routes_only_2xx_and_429_accounts() {
+        const OPAQUE_KEY: &str = "opaque/account+key=42";
+        for (label, status, body, should_finish) in [
+            ("ok", StatusCode::OK, r#"{"choices":[]}"#, true),
+            (
+                "rate-limited",
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":{"message":"weekly usage limit reached for opaque/account+key=42"}}"#,
+                true,
+            ),
+            (
+                "unauthorized",
+                StatusCode::UNAUTHORIZED,
+                r#"{"error":{"message":"invalid key opaque/account+key=42"}}"#,
+                false,
+            ),
+            (
+                "server-error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":{"message":"temporary failure for opaque/account+key=42"}}"#,
+                false,
+            ),
+        ] {
+            let (address, upstream) = spawn_key_verification_upstream(status, body).await;
+            let dir = temp_data_dir(&format!("verify-{label}"));
+            let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+            let db = Database::open(dir.clone()).unwrap();
+            db.create_account(&managed_key_verification_account(label))
+                .unwrap();
+            let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+            let mut config = state.config();
+            config.upstream_base_url = format!("http://{address}");
+            config.non_stream_timeout_secs = 5;
+            state.set_config(config).unwrap();
+
+            let result = verify_managed_account_key(
+                State(state.clone()),
+                AxumPath(label.to_string()),
+                Json(VerifyManagedKeyInput {
+                    key: OPAQUE_KEY.into(),
+                }),
+            )
+            .await;
+            let stored = state.db.lock().get_account(label).unwrap().unwrap();
+            assert_ne!(stored.key_cipher, OPAQUE_KEY);
+            if should_finish {
+                let dto = result.expect("2xx and 429 should complete setup").0;
+                assert!(!serde_json::to_string(&dto).unwrap().contains(OPAQUE_KEY));
+                assert_eq!(dto.setup_step, AccountSetupStep::Ready);
+                assert!(dto.enabled);
+                assert!(dto.key.is_empty());
+                assert_eq!(stored.setup_step, AccountSetupStep::Ready);
+                assert!(stored.enabled);
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    assert!(stored.cooldown_until.is_some());
+                }
+            } else {
+                let error = result.expect_err("auth and server failures should stay pending");
+                assert!(
+                    !error.message.contains(OPAQUE_KEY),
+                    "verification API error leaked key: {}",
+                    error.message
+                );
+                assert!(matches!(
+                    error.status,
+                    StatusCode::BAD_REQUEST | StatusCode::BAD_GATEWAY
+                ));
+                assert_eq!(stored.setup_step, AccountSetupStep::KeyVerification);
+                assert!(!stored.enabled);
+            }
+            assert!(
+                stored
+                    .last_error
+                    .as_deref()
+                    .is_none_or(|error| !error.contains(OPAQUE_KEY))
+            );
+            assert!(
+                stored
+                    .auth_error
+                    .as_deref()
+                    .is_none_or(|error| !error.contains(OPAQUE_KEY))
+            );
+
+            upstream.await.unwrap();
+            drop(state);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_key_verification_response_read_is_bounded() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let (address, upstream) =
+            spawn_key_verification_upstream(StatusCode::OK, "normal body").await;
+        let normal = read_managed_key_verification_response(
+            client
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(normal, "normal body");
+        upstream.await.unwrap();
+
+        let oversized = "x".repeat(MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES + 1024);
+        let (address, upstream) = spawn_key_verification_upstream(StatusCode::OK, oversized).await;
+        let body = read_managed_key_verification_response(
+            client
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(body.ends_with("\n<key verification response truncated>"));
+        assert!(
+            body.len()
+                <= MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES
+                    + "\n<key verification response truncated>".len()
+        );
+        upstream.await.unwrap();
     }
 
     #[tokio::test]
@@ -2336,6 +3537,8 @@ mod tests {
             password_cipher: None,
             key_cipher: cipher.encrypt("sk-test").unwrap(),
             enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
             referral_code: None,
             purchase_date: "2026-01-31".into(),
             expires_on: "2026-02-28".into(),
@@ -2569,8 +3772,8 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    fn version_parts(version: &str) -> [u64; 3] {
-        parse_stable_version(version)
+    fn parsed_version(version: &str) -> SemverVersion<'_> {
+        parse_semver_version(version)
             .expect("test version should be valid")
             .0
     }
@@ -2600,37 +3803,82 @@ mod tests {
     #[test]
     fn stable_version_comparison_detects_newer_release() {
         assert!(is_update_available(
-            version_parts("1.0.0"),
-            version_parts("1.1.0")
+            &parsed_version("1.0.0"),
+            &parsed_version("1.1.0")
         ));
     }
 
     #[test]
     fn stable_version_comparison_treats_equal_as_current() {
         assert!(!is_update_available(
-            version_parts("1.1.0"),
-            version_parts("1.1.0")
+            &parsed_version("1.1.0"),
+            &parsed_version("1.1.0")
         ));
     }
 
     #[test]
     fn stable_version_comparison_treats_current_ahead_as_current() {
         assert!(!is_update_available(
-            version_parts("2.0.0"),
-            version_parts("1.9.9")
+            &parsed_version("2.0.0"),
+            &parsed_version("1.9.9")
         ));
     }
 
     #[test]
-    fn stable_version_parser_strips_v_prefix() {
+    fn semver_version_parser_strips_v_prefix() {
         assert_eq!(
-            parse_stable_version("v1.2.3").map(|(_, value)| value),
+            parse_semver_version("v1.2.3").map(|(_, value)| value),
             Some("1.2.3")
         );
     }
 
     #[test]
-    fn stable_version_parser_rejects_non_stable_tag() {
-        assert!(parse_stable_version("v1.1.0-beta.1").is_none());
+    fn semver_version_parser_accepts_dot_separated_build_metadata() {
+        assert_eq!(
+            parse_semver_version("v1.2.3+build.1").map(|(_, value)| value),
+            Some("1.2.3+build.1")
+        );
+    }
+
+    #[test]
+    fn prerelease_build_ignores_older_stable_release() {
+        assert!(!is_update_available(
+            &parsed_version("1.5.8-beta.1"),
+            &parsed_version("1.5.7")
+        ));
+    }
+
+    #[test]
+    fn prerelease_build_detects_newer_prerelease_release() {
+        assert!(is_update_available(
+            &parsed_version("1.5.8-beta.1"),
+            &parsed_version("1.5.8-beta.2")
+        ));
+    }
+
+    #[test]
+    fn prerelease_build_detects_final_release() {
+        assert!(is_update_available(
+            &parsed_version("1.5.8-beta.1"),
+            &parsed_version("1.5.8")
+        ));
+    }
+
+    #[test]
+    fn prerelease_comparison_uses_numeric_dot_separated_identifiers() {
+        assert!(is_update_available(
+            &parsed_version("1.5.8-beta.2.9"),
+            &parsed_version("1.5.8-beta.11")
+        ));
+    }
+
+    #[test]
+    fn semver_version_parser_rejects_malformed_versions() {
+        for version in ["v1.1", "v01.1.0", "v1.1.0-beta.01", "v1.1.0+build..1"] {
+            assert!(
+                parse_semver_version(version).is_none(),
+                "{version} should be rejected"
+            );
+        }
     }
 }

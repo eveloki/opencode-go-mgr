@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const STABLE_VERSION = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const RELEASE_VERSION = /^v?((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/;
+const PRERELEASE_IDENTIFIER = "(?:0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)";
+const RELEASE_VERSION = new RegExp(
+  `^v?((0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-${PRERELEASE_IDENTIFIER}(?:\\.${PRERELEASE_IDENTIFIER})*)?)$`,
+);
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 export function normalizeReleaseVersion(value, label = "release version") {
@@ -30,6 +33,10 @@ export function parseStableVersion(value, label = "version") {
   };
 }
 
+export function isPrereleaseVersion(value, label = "release version") {
+  return normalizeReleaseVersion(value, label).includes("-");
+}
+
 export function compareStableVersions(left, right) {
   const a = parseStableVersion(left, "candidate version");
   const b = parseStableVersion(right, "current channel version");
@@ -44,6 +51,27 @@ export function shouldAdvanceChannel(candidate, current) {
   parseStableVersion(candidate, "candidate version");
   if (!current) return true;
   return compareStableVersions(candidate, current) > 0;
+}
+
+export function pairedChannelDecision({ candidate, mainCurrent, browserCurrent }) {
+  const candidateVersion = parseStableVersion(candidate, "candidate version").version;
+  const mainAdvance = shouldAdvanceChannel(candidateVersion, mainCurrent);
+  const browserAdvance = shouldAdvanceChannel(candidateVersion, browserCurrent);
+  const mainVersion = mainAdvance
+    ? candidateVersion
+    : parseStableVersion(mainCurrent, "current main channel version").version;
+  const browserVersion = browserAdvance
+    ? candidateVersion
+    : parseStableVersion(browserCurrent, "current browser channel version").version;
+
+  if (mainVersion !== browserVersion) {
+    throw new Error(
+      `Refusing to leave paired container channel split: main=${mainVersion}, browser=${browserVersion}, `
+      + `candidate=${candidateVersion}.`,
+    );
+  }
+
+  return { mainAdvance, browserAdvance, version: mainVersion };
 }
 
 export function immutableTagDecision({ tag, candidateDigest, existingDigest }) {
@@ -66,16 +94,21 @@ export function validateComposeVersion(source, expectedVersion) {
   const expected = normalizeReleaseVersion(expectedVersion);
   const headerMatches = [...source.matchAll(/^# Pull-only Docker Compose example for OCG Manager v([^\s]+)\.$/gm)];
   const imageMatches = [...source.matchAll(/\$\{OCG_IMAGE:-ghcr\.io\/klarkxy\/opencode-go-mgr:([^}]+)\}/g)];
-  if (headerMatches.length !== 1 || imageMatches.length !== 1) {
+  const browserImageMatches = [
+    ...source.matchAll(/\$\{OCG_BROWSER_IMAGE:-ghcr\.io\/klarkxy\/opencode-go-mgr-browser:([^}]+)\}/g),
+  ];
+  if (headerMatches.length !== 1 || imageMatches.length !== 1 || browserImageMatches.length !== 1) {
     throw new Error(
-      "compose.example.yaml must contain exactly one versioned header and one default GHCR image.",
+      "compose.example.yaml must contain exactly one versioned header, main GHCR image, and browser GHCR image.",
     );
   }
   const headerVersion = headerMatches[0][1];
   const imageVersion = imageMatches[0][1];
-  if (headerVersion !== expected || imageVersion !== expected) {
+  const browserImageVersion = browserImageMatches[0][1];
+  if (headerVersion !== expected || imageVersion !== expected || browserImageVersion !== expected) {
     throw new Error(
-      `Compose version mismatch: release=${expected}, header=${headerVersion}, image=${imageVersion}.`,
+      `Compose version mismatch: release=${expected}, header=${headerVersion}, `
+      + `image=${imageVersion}, browser=${browserImageVersion}.`,
     );
   }
   return expected;
@@ -101,6 +134,18 @@ function main(argv) {
     process.stdout.write(String(shouldAdvanceChannel(options.candidate, options.current)));
     return;
   }
+  if (command === "is-prerelease") {
+    process.stdout.write(String(isPrereleaseVersion(options.version)));
+    return;
+  }
+  if (command === "paired-channel") {
+    process.stdout.write(JSON.stringify(pairedChannelDecision({
+      candidate: options.candidate,
+      mainCurrent: options["main-current"],
+      browserCurrent: options["browser-current"],
+    })));
+    return;
+  }
   if (command === "immutable-tag") {
     process.stdout.write(immutableTagDecision({
       tag: options.tag,
@@ -115,7 +160,7 @@ function main(argv) {
     return;
   }
   throw new Error(
-    "Usage: release-policy.mjs should-advance|immutable-tag|validate-compose [options]",
+    "Usage: release-policy.mjs should-advance|is-prerelease|paired-channel|immutable-tag|validate-compose [options]",
   );
 }
 

@@ -12,6 +12,10 @@ pub struct Account {
     pub password_cipher: Option<String>,
     pub key_cipher: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub account_type: AccountType,
+    #[serde(default)]
+    pub setup_step: AccountSetupStep,
     pub referral_code: Option<String>,
     #[serde(alias = "recharge_date")]
     pub purchase_date: String,
@@ -36,6 +40,86 @@ pub struct Account {
     pub auth_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountType {
+    #[default]
+    Key,
+    Managed,
+}
+
+impl AccountType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::Managed => "managed",
+        }
+    }
+}
+
+impl TryFrom<&str> for AccountType {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "key" => Ok(Self::Key),
+            "managed" => Ok(Self::Managed),
+            _ => Err(format!("unknown account type `{value}`")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSetupStep {
+    GoogleAccount,
+    OpencodeRegistration,
+    Payment,
+    KeyVerification,
+    #[default]
+    Ready,
+}
+
+impl AccountSetupStep {
+    pub fn next(self) -> Option<Self> {
+        match self {
+            Self::GoogleAccount => Some(Self::OpencodeRegistration),
+            Self::OpencodeRegistration => Some(Self::Payment),
+            Self::Payment => Some(Self::KeyVerification),
+            Self::KeyVerification | Self::Ready => None,
+        }
+    }
+
+    pub fn is_ready(self) -> bool {
+        self == Self::Ready
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GoogleAccount => "google_account",
+            Self::OpencodeRegistration => "opencode_registration",
+            Self::Payment => "payment",
+            Self::KeyVerification => "key_verification",
+            Self::Ready => "ready",
+        }
+    }
+}
+
+impl TryFrom<&str> for AccountSetupStep {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "google_account" => Ok(Self::GoogleAccount),
+            "opencode_registration" => Ok(Self::OpencodeRegistration),
+            "payment" => Ok(Self::Payment),
+            "key_verification" => Ok(Self::KeyVerification),
+            "ready" => Ok(Self::Ready),
+            _ => Err(format!("unknown account setup step `{value}`")),
+        }
+    }
 }
 
 impl Account {
@@ -153,6 +237,7 @@ pub struct AppConfig {
     pub gateway_port: u16,
     pub gateway_key: String,
     pub upstream_base_url: String,
+    pub opencode_invite_url: String,
     pub client_root_url: String,
     pub auto_start: bool,
     pub show_dock_icon: bool,
@@ -170,6 +255,7 @@ impl Default for AppConfig {
             gateway_port: 9042,
             gateway_key: String::new(),
             upstream_base_url: "https://opencode.ai/zen/go".to_string(),
+            opencode_invite_url: String::new(),
             client_root_url: String::new(),
             auto_start: false,
             show_dock_icon: true,
@@ -323,6 +409,7 @@ pub fn normalize_client_root_url(value: &str) -> Result<String, String> {
 impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.validate_timeouts()?;
+        normalize_opencode_invite_url(&self.opencode_invite_url)?;
         // routing_mode is validated by serde enum decoding; unknown values never reach here.
         self.claude_desktop_models.validate()
     }
@@ -347,6 +434,33 @@ impl AppConfig {
         }
         Ok(())
     }
+}
+
+pub fn normalize_opencode_invite_url(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    if value.len() > 2048 {
+        return Err("OpenCode invite URL is too long".to_string());
+    }
+    let parsed = reqwest::Url::parse(value)
+        .map_err(|error| format!("invalid OpenCode invite URL: {error}"))?;
+    if parsed.scheme() != "https" {
+        return Err("OpenCode invite URL must use https".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("OpenCode invite URL must not contain credentials".to_string());
+    }
+    match parsed.host_str() {
+        Some("opencode.ai" | "console.opencode.ai") => {}
+        _ => {
+            return Err(
+                "OpenCode invite URL host must be opencode.ai or console.opencode.ai".to_string(),
+            );
+        }
+    }
+    Ok(parsed.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -495,8 +609,8 @@ pub struct DailyModelCost {
 mod tests {
     use super::{
         AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
-        CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, RoutingMode, normalize_purchase_date,
-        purchase_expires_on,
+        CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, RoutingMode,
+        normalize_opencode_invite_url, normalize_purchase_date, purchase_expires_on,
     };
 
     #[test]
@@ -618,6 +732,32 @@ mod tests {
                 "routing_mode": "weighted"
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn opencode_invite_url_is_https_and_host_allowlisted() {
+        assert_eq!(normalize_opencode_invite_url("  ").unwrap(), "");
+        assert_eq!(
+            normalize_opencode_invite_url("https://opencode.ai/invite/test").unwrap(),
+            "https://opencode.ai/invite/test"
+        );
+        assert!(normalize_opencode_invite_url("https://console.opencode.ai/invite?id=1").is_ok());
+        for invalid in [
+            "http://opencode.ai/invite/test",
+            "https://opencode.ai.evil.test/invite",
+            "https://user:pass@opencode.ai/invite",
+            "https://example.com/invite",
+            "not-a-url",
+        ] {
+            assert!(
+                normalize_opencode_invite_url(invalid).is_err(),
+                "accepted unsafe invite URL {invalid:?}"
+            );
+        }
+        assert!(
+            normalize_opencode_invite_url(&format!("https://opencode.ai/{}", "x".repeat(2049)))
+                .is_err()
         );
     }
 }

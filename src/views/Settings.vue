@@ -15,6 +15,21 @@
             placeholder="https://opencode.ai/zen/go"
           />
         </n-form-item>
+        <n-form-item
+          :label="t('OpenCode 邀请链接（注册新账号）')"
+          :validation-status="inviteUrlPreview.status"
+          :feedback="inviteUrlPreview.feedback"
+        >
+          <n-input
+            v-model:value="config.opencode_invite_url"
+            :disabled="!loaded || regenerating"
+            clearable
+            class="mono"
+            placeholder="https://opencode.ai/..."
+            :input-props="{ 'aria-label': t('OpenCode 邀请链接（注册新账号）') }"
+            @blur="normalizeInviteUrlInput"
+          />
+        </n-form-item>
         <div class="downstream-grid">
           <n-form-item
             :label="t('下游访问根地址（可选）')"
@@ -275,7 +290,7 @@
       <n-button
         type="primary"
         :loading="saving"
-        :disabled="!loaded || regenerating || clientRootPreview.status === 'error' || editingGatewayKey"
+        :disabled="!loaded || regenerating || clientRootPreview.status === 'error' || inviteUrlPreview.status === 'error' || editingGatewayKey"
         @click="saveSettings"
       >{{ t("保存设置") }}</n-button>
     </section>
@@ -462,6 +477,8 @@ import {
   normalizeClientRootUrl,
   resolveConnectionUrls,
 } from "./dashboard-connection";
+import { normalizeOpenCodeInviteUrl } from "./managed-account";
+import { mergeUnsavedSettings } from "./settings-merge";
 import {
   clearUpdateTarget,
   decideInstallRequestFailure,
@@ -511,6 +528,7 @@ const config = ref<AppConfig>({
   gateway_port: 9042,
   gateway_key: "",
   upstream_base_url: "https://opencode.ai/zen/go",
+  opencode_invite_url: "",
   client_root_url: "",
   client_root_url_from_env: false,
   auto_start: false,
@@ -612,6 +630,22 @@ const clientRootPreview = computed<{
   }
 });
 
+const inviteUrlPreview = computed<{ status?: "error"; feedback: string }>(() => {
+  try {
+    const normalized = normalizeOpenCodeInviteUrl(config.value.opencode_invite_url);
+    return {
+      feedback: normalized
+        ? t("仅用于注册向导打开邀请页面；更新后不会改写已完成账号。")
+        : t("留空时“注册新账号”入口不可用。仅接受 opencode.ai 官方 HTTPS 链接。"),
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      feedback: error instanceof Error ? t(error.message as MessageKey) : t("邀请链接格式无效"),
+    };
+  }
+});
+
 const supportsInstallUpdate = computed(() => Boolean(
   updateResult.value?.update_available && updateResult.value.install_supported,
 ));
@@ -680,11 +714,17 @@ async function loadSettings(): Promise<boolean> {
   }
 }
 
-async function reloadSettingsAfterConflict(error: unknown): Promise<boolean> {
+async function reloadSettingsAfterConflict(
+  error: unknown,
+  current = { ...config.value },
+  saved = savedConfig.value ? { ...savedConfig.value } : null,
+): Promise<boolean> {
   if (!(error instanceof DashboardRequestError) || error.status !== 409) return false;
+  pendingSettingsMerge = saved ? { current, saved } : null;
   if (await loadSettings()) {
-    message.warning(t("设置已被其他操作修改，已重新加载最新设置，你的未保存修改已被覆盖"));
+    message.warning(t("设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存"));
   } else {
+    pendingSettingsMerge = null;
     message.error(t("保存失败: {error}", { error: String(error) }));
   }
   return true;
@@ -693,9 +733,11 @@ async function reloadSettingsAfterConflict(error: unknown): Promise<boolean> {
 async function saveSettings() {
   if (!loaded.value) return;
   if (!normalizeClientRootInput()) return;
+  if (!normalizeInviteUrlInput()) return;
   if (!validateTimeouts()) return;
   saving.value = true;
   const payload = { ...config.value };
+  const saved = savedConfig.value ? { ...savedConfig.value } : null;
   const routingChanged = !!savedConfig.value && (
     savedConfig.value.routing_mode !== payload.routing_mode
     || savedConfig.value.conversation_sticky !== payload.conversation_sticky
@@ -707,7 +749,7 @@ async function saveSettings() {
     savedConfig.value = { ...payload };
     message.success(routingChanged ? t("设置已保存；运行时路由状态已重置") : t("设置已保存"));
   } catch (e) {
-    if (!(await reloadSettingsAfterConflict(e))) {
+    if (!(await reloadSettingsAfterConflict(e, payload, saved))) {
       message.error(t("保存失败: {error}", { error: String(e) }));
     }
   } finally {
@@ -717,7 +759,9 @@ async function saveSettings() {
 
 async function handleAutoStartToggle(newValue: boolean) {
   if (!loaded.value || !savedConfig.value) return;
-  const next = { ...savedConfig.value, auto_start: newValue };
+  const saved = { ...savedConfig.value };
+  const current = { ...config.value, auto_start: newValue };
+  const next = { ...saved, auto_start: newValue };
   saving.value = true;
   try {
     const result = await tauriApi.updateSettings(next);
@@ -727,7 +771,7 @@ async function handleAutoStartToggle(newValue: boolean) {
     config.value.revision = result.revision;
     message.success(t("设置已保存"));
   } catch (e) {
-    if (!(await reloadSettingsAfterConflict(e))) {
+    if (!(await reloadSettingsAfterConflict(e, current, saved))) {
       config.value.auto_start = savedConfig.value.auto_start;
       message.error(t("自动启动设置失败: {error}", { error: String(e) }));
     }
@@ -738,7 +782,9 @@ async function handleAutoStartToggle(newValue: boolean) {
 
 async function handleDockVisibilityToggle(newValue: boolean) {
   if (!loaded.value || !savedConfig.value) return;
-  const next = { ...savedConfig.value, show_dock_icon: newValue };
+  const saved = { ...savedConfig.value };
+  const current = { ...config.value, show_dock_icon: newValue };
+  const next = { ...saved, show_dock_icon: newValue };
   saving.value = true;
   try {
     const result = await tauriApi.updateSettings(next);
@@ -748,7 +794,7 @@ async function handleDockVisibilityToggle(newValue: boolean) {
     config.value.revision = result.revision;
     message.success(t("设置已保存"));
   } catch (e) {
-    if (!(await reloadSettingsAfterConflict(e))) {
+    if (!(await reloadSettingsAfterConflict(e, current, saved))) {
       config.value.show_dock_icon = savedConfig.value.show_dock_icon;
       message.error(t("Dock 图标设置失败: {error}", { error: String(e) }));
     }
@@ -764,7 +810,9 @@ async function saveGatewayKey() {
     message.error(t("新 Key 不能为空"));
     return;
   }
-  const payload = { ...savedConfig.value, gateway_key: key };
+  const saved = { ...savedConfig.value };
+  const current = { ...config.value };
+  const payload = { ...saved, gateway_key: key };
   saving.value = true;
   try {
     const result = await tauriApi.updateSettings(payload);
@@ -776,9 +824,7 @@ async function saveGatewayKey() {
     editingGatewayKey.value = false;
     message.success(t("Key 已保存"));
   } catch (e) {
-    if (await reloadSettingsAfterConflict(e)) {
-      cancelGatewayKeyEdit();
-    } else {
+    if (!(await reloadSettingsAfterConflict(e, current, saved))) {
       message.error(t("Key 保存失败: {error}", { error: String(e) }));
     }
   } finally {
@@ -807,6 +853,16 @@ function normalizeClientRootInput(): boolean {
   }
 }
 
+function normalizeInviteUrlInput(): boolean {
+  try {
+    config.value.opencode_invite_url = normalizeOpenCodeInviteUrl(config.value.opencode_invite_url);
+    return true;
+  } catch (error) {
+    message.error(error instanceof Error ? t(error.message as MessageKey) : t("邀请链接格式无效"));
+    return false;
+  }
+}
+
 function validateTimeouts(): boolean {
   const fields = [
     { field: t("连接超时"), value: config.value.connect_timeout_secs, min: 1, max: 300 },
@@ -821,43 +877,11 @@ function validateTimeouts(): boolean {
   return false;
 }
 
-function mergeUnsavedSettingsAfterKeyRegeneration(
-  latest: AppConfig,
-  current: AppConfig,
-  saved: AppConfig,
-): AppConfig {
-  return {
-    ...latest,
-    gateway_port: current.gateway_port !== saved.gateway_port ? current.gateway_port : latest.gateway_port,
-    upstream_base_url: current.upstream_base_url !== saved.upstream_base_url
-      ? current.upstream_base_url
-      : latest.upstream_base_url,
-    client_root_url: current.client_root_url !== saved.client_root_url
-      ? current.client_root_url
-      : latest.client_root_url,
-    connect_timeout_secs: current.connect_timeout_secs !== saved.connect_timeout_secs
-      ? current.connect_timeout_secs
-      : latest.connect_timeout_secs,
-    non_stream_timeout_secs: current.non_stream_timeout_secs !== saved.non_stream_timeout_secs
-      ? current.non_stream_timeout_secs
-      : latest.non_stream_timeout_secs,
-    stream_idle_timeout_secs: current.stream_idle_timeout_secs !== saved.stream_idle_timeout_secs
-      ? current.stream_idle_timeout_secs
-      : latest.stream_idle_timeout_secs,
-    routing_mode: current.routing_mode !== saved.routing_mode
-      ? current.routing_mode
-      : latest.routing_mode,
-    conversation_sticky: current.conversation_sticky !== saved.conversation_sticky
-      ? current.conversation_sticky
-      : latest.conversation_sticky,
-  };
-}
-
 function acceptSettingsSnapshot(latest: AppConfig) {
   const pending = pendingSettingsMerge;
   savedConfig.value = { ...latest };
   config.value = pending
-    ? mergeUnsavedSettingsAfterKeyRegeneration(latest, pending.current, pending.saved)
+    ? mergeUnsavedSettings(latest, pending.current, pending.saved)
     : latest;
   pendingSettingsMerge = null;
   loaded.value = true;

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   PLATFORM_RELEASE_NOTES,
+  PRERELEASE_WARNING,
   buildReleaseNotes,
   formatChangeLine,
   generateReleaseNotes,
@@ -91,10 +92,46 @@ test("empty ranges still produce a readable stub plus platform notes", () => {
   assert.ok(notes.includes(PLATFORM_RELEASE_NOTES));
 });
 
+test("every prerelease note leads with the full Beta risk warning", () => {
+  for (const tag of ["v1.5.8-beta.1", "v1.5.8-rc.2"]) {
+    const notes = buildReleaseNotes({
+      tag,
+      previousTag: "v1.5.7",
+      subjects: ["feat: managed account registration and isolated browser profiles"],
+    });
+    assert.ok(notes.includes(PRERELEASE_WARNING));
+    assert.ok(notes.startsWith(`${PRERELEASE_WARNING}\n\n# OCG Manager ${tag}`));
+    assert.match(notes, /managed account registration and isolated browser profiles are Beta/i);
+    assert.match(notes, /have not been thoroughly tested/i);
+    assert.match(notes, /Real Google signup, OpenCode signup, and payment flows/);
+    assert.match(notes, /noVNC keyboard and clipboard behavior/);
+    assert.match(notes, /Live GHCR first-publication behavior/);
+    assert.match(notes, /gateway, redaction, and release-pipeline changes/);
+    assert.match(notes, /Do not treat it as production-ready/);
+  }
+});
+
+test("stable notes do not show the Beta warning", () => {
+  const notes = buildReleaseNotes({ tag: "v1.5.8", previousTag: "v1.5.7", subjects: [] });
+  assert.doesNotMatch(notes, /\[!WARNING\]|Beta preview/);
+});
+
 test("selectPreviousTag walks descending versions", () => {
   assert.equal(selectPreviousTag("v1.5.7", ["v1.5.7", "v1.5.6", "v1.5.5"]), "v1.5.6");
   assert.equal(selectPreviousTag("1.5.5", ["v1.5.7", "v1.5.6", "v1.5.5", "v1.4.2"]), "v1.4.2");
   assert.equal(selectPreviousTag("v1.0.0", ["v1.0.0"]), null);
+  assert.equal(
+    selectPreviousTag("v1.5.8-beta.2", ["v1.5.8-beta.2", "v1.5.8-beta.1", "v1.5.7"]),
+    "v1.5.8-beta.1",
+  );
+  assert.equal(
+    selectPreviousTag("v1.5.8-beta.10", ["v1.5.8-beta.2", "v1.5.8-beta.10", "v1.5.7"]),
+    "v1.5.8-beta.2",
+  );
+  assert.equal(
+    selectPreviousTag("v1.5.8", ["v1.5.8", "v1.5.8-beta.2", "v1.5.8-beta.1", "v1.5.7"]),
+    "v1.5.7",
+  );
   assert.throws(() => selectPreviousTag("v9.9.9", ["v1.0.0"]), /was not found/);
 });
 
@@ -127,6 +164,22 @@ test("generateReleaseNotes uses git helpers and previous-tag range", () => {
   const notes = generateReleaseNotes({ tag: "v1.5.7", runGit });
   assert.match(notes, /### Features\n\n- shipping notes/);
   assert.equal(calls.length, 2);
+});
+
+test("stable generation uses the previous stable tag across same-version Betas", () => {
+  const runGit = (args) => {
+    if (args[0] === "tag") return "v1.5.8\nv1.5.8-beta.2\nv1.5.8-beta.1\nv1.5.7\n";
+    if (args[0] === "log") {
+      assert.deepEqual(args.slice(0, 2), ["log", "v1.5.7..v1.5.8"]);
+      return "feat: preserve the complete stable feature scope\n";
+    }
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+
+  const notes = generateReleaseNotes({ tag: "v1.5.8", runGit });
+  assert.match(notes, /## Changes since v1\.5\.7/);
+  assert.match(notes, /preserve the complete stable feature scope/);
+  assert.doesNotMatch(notes, /Beta preview/);
 });
 
 test("CLI writes notes for a local tag range without depending on checkout depth", () => {

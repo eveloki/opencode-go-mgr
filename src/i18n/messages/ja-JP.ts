@@ -1,6 +1,8 @@
 import type { Messages } from "./en-US";
+import { managedAccountEnUSMessages } from "./managed-account.ts";
 
 export const jaJPMessages = {
+  ...managedAccountEnUSMessages,
   "语言：{language}": "言語：{language}",
   "取消": "キャンセル",
   "保存": "保存",
@@ -481,7 +483,7 @@ export const jaJPMessages = {
   "保存 Key": "Key を保存",
   "Key 已保存": "Key を保存しました",
   "Key 保存失败: {error}": "Key の保存に失敗しました：{error}",
-  "设置已被其他操作修改，已重新加载最新设置，你的未保存修改已被覆盖": "設定が他の操作で変更されたため最新の設定を再読み込みしました。未保存の変更は上書きされました",
+  "设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存": "設定が他の操作で変更されました。最新の設定にローカルの変更を統合したため、もう一度保存してください",
   "自动启动设置失败: {error}": "自動起動の更新に失敗しました：{error}",
   "输入新 Key": "新しい Key を入力",
   "建立上游连接的初始超时（秒）": "アップストリーム接続の初期タイムアウト（秒）",

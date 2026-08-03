@@ -3,7 +3,7 @@
     <n-space vertical :size="16" class="accounts-content">
       <n-space justify="space-between" align="center" class="accounts-toolbar">
         <n-h3 style="margin: 0">{{ t("账号") }}</n-h3>
-        <n-button type="primary" @click="openCreateModal">
+        <n-button type="primary" @click="openAddModal">
           <template #icon>
             <n-icon :component="PlusOutlined" />
           </template>
@@ -40,7 +40,7 @@
 
       <n-empty v-if="!accountListLoading && !accountListError && accounts.length === 0" :description="t('暂无账号')">
         <template #extra>
-          <n-button type="primary" @click="openCreateModal">
+          <n-button type="primary" @click="openAddModal">
             <template #icon>
               <n-icon :component="PlusOutlined" />
             </template>
@@ -58,6 +58,7 @@
           class="account-card"
           :class="{
             'account-card--cooling': accountIsCooling(account),
+            'account-card--pending': !accountIsReady(account),
             'account-card--dragging': draggingAccountId === account.id,
           }"
         >
@@ -86,6 +87,9 @@
               <div class="account-heading">
                 <div class="account-name-row">
                   <span class="account-name">{{ account.name }}</span>
+                  <n-tag v-if="account.account_type === 'managed'" type="info" size="small" :bordered="false">
+                    {{ t("托管注册") }}
+                  </n-tag>
                   <n-tooltip v-if="account.auth_error || accountIsCooling(account)">
                     <template #trigger>
                       <n-tag :type="accountStatusTagType(account)" size="small">
@@ -97,13 +101,13 @@
                   <n-tag v-else :type="accountStatusTagType(account)" size="small">
                     {{ accountStatusLabel(account) }}
                   </n-tag>
-                  <n-tag size="small" :bordered="false">
+                  <n-tag v-if="accountIsReady(account)" size="small" :bordered="false">
                     {{ t("购买于 {date}", { date: account.purchase_date }) }}
                   </n-tag>
-                  <n-tag size="small" :bordered="false">
+                  <n-tag v-if="accountIsReady(account)" size="small" :bordered="false">
                     {{ t("到期于 {date}", { date: account.expires_on }) }}
                   </n-tag>
-                  <n-tag :type="accountExpiryTagType(account)" size="small" :bordered="false">
+                  <n-tag v-if="accountIsReady(account)" :type="accountExpiryTagType(account)" size="small" :bordered="false">
                     {{ accountExpiryLabel(account) }}
                   </n-tag>
                 </div>
@@ -113,7 +117,7 @@
 
           <template #header-extra>
             <n-space align="center" :size="8">
-              <n-tooltip trigger="hover">
+              <n-tooltip v-if="accountIsReady(account)" trigger="hover">
                 <template #trigger>
                   <n-button
                     circle
@@ -129,7 +133,7 @@
                 {{ t("测试连接") }}
               </n-tooltip>
 
-              <n-tooltip trigger="hover">
+              <n-tooltip v-if="accountIsReady(account)" trigger="hover">
                 <template #trigger>
                   <n-switch
                     :value="account.enabled"
@@ -141,7 +145,7 @@
               </n-tooltip>
 
               <n-popover
-                v-if="usageEdits[account.id]"
+                v-if="accountIsReady(account) && usageEdits[account.id]"
                 trigger="click"
                 placement="bottom-end"
                 :show-arrow="false"
@@ -311,7 +315,16 @@
             </n-space>
           </template>
 
-          <div v-if="!quotaLimitsError">
+          <div v-if="!accountIsReady(account)" class="managed-pending">
+            <div>
+              <strong>{{ managedStepLabel(account.setup_step) }}</strong>
+              <p>{{ t("注册进度已保存。继续后仍会使用该账号自己的浏览器 Profile。") }}</p>
+            </div>
+            <n-button type="primary" secondary @click="openManagedWizard(account.id)">
+              {{ t("继续注册") }}
+            </n-button>
+          </div>
+          <div v-else-if="!quotaLimitsError">
             <div v-if="usageLoadErrors[account.id]" class="usage-load-error" role="alert">
               <span>{{ t("用量加载失败") }}</span>
               <n-button
@@ -367,6 +380,16 @@
       <span class="sr-only" aria-live="polite" aria-atomic="true">{{ orderAnnouncement }}</span>
     </n-space>
 
+    <AccountAddModal
+      v-model:show="showAddModal"
+      :managed-available="managedRegistrationAvailable"
+      :managed-reason="managedRegistrationReason"
+      :invite-missing="!opencodeInviteUrl"
+      @import-key="openCreateModal"
+      @register-managed="openManagedCreateModal"
+      @open-settings="openSettings"
+    />
+
     <AccountFormModal
       v-model:show="showModal"
       :account="editingAccount"
@@ -374,6 +397,64 @@
       :busy="busy"
       @save="onFormSave"
       @reset-cooldown="resetCooldown(editingAccount!.id)"
+    />
+
+    <n-modal
+      :show="showManagedCreate"
+      preset="card"
+      :title="t('注册新账号')"
+      style="width: 520px; max-width: calc(100vw - 32px)"
+      :mask-closable="false"
+      :close-on-esc="!busy"
+      @update:show="setManagedCreateVisible"
+    >
+      <n-form label-placement="top" @submit.prevent="createManagedAccount">
+        <n-form-item :label="t('名称')" required>
+          <n-input
+            v-model:value="managedDraft.name"
+            autofocus
+            :disabled="busy"
+            :placeholder="t('例如：新账号 1')"
+            :input-props="{ 'aria-label': t('名称') }"
+          />
+        </n-form-item>
+        <n-form-item :label="t('邮箱备注（可选）')">
+          <n-input
+            v-model:value="managedDraft.username"
+            :disabled="busy"
+            :placeholder="t('仅作为账号备注，不保存 Google 密码')"
+            :input-props="{ 'aria-label': t('邮箱备注（可选）') }"
+          />
+        </n-form-item>
+      </n-form>
+      <n-alert type="info" :show-icon="false">
+        {{ t("创建后会立即保存注册草稿；关闭页面或服务重启后仍可继续。") }}
+      </n-alert>
+      <template #footer>
+        <n-space justify="end">
+          <n-button :disabled="busy" @click="setManagedCreateVisible(false)">
+            {{ busy ? t("加载中…") : t("取消") }}
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="busy"
+            :disabled="!managedDraft.name.trim()"
+            @click="createManagedAccount"
+          >{{ t("创建并开始") }}</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <ManagedAccountWizard
+      v-if="managedWizardAccount"
+      v-model:show="showManagedWizard"
+      :account="managedWizardAccount"
+      :browser-capabilities="browserCapabilities"
+      :opening-target="openingBrowserTarget"
+      :busy="busy"
+      @open-browser="openAccountBrowser(managedWizardAccount.id, $event)"
+      @advance="advanceManagedSetup(managedWizardAccount.id, $event)"
+      @verify-key="verifyManagedKey(managedWizardAccount.id, $event)"
     />
   </div>
 </template>
@@ -386,9 +467,13 @@ import {
   NCard,
   NDropdown,
   NEmpty,
+  NForm,
+  NFormItem,
   NH3,
   NIcon,
+  NInput,
   NInputNumber,
+  NModal,
   NPopover,
   NProgress,
   NSpin,
@@ -408,7 +493,16 @@ import {
   ThunderboltOutlined,
 } from "@vicons/antd";
 import { DashboardRequestError, tauriApi } from "../api/tauri";
-import type { Account, AccountInput, AccountUpdate, PricingLimits, UsageWindow } from "../api/tauri";
+import type {
+  Account,
+  AccountInput,
+  AccountSetupStep,
+  AccountUpdate,
+  BrowserCapabilities,
+  BrowserTarget,
+  PricingLimits,
+  UsageWindow,
+} from "../api/tauri";
 import {
   defaultResetsInMinutes,
   isCooling,
@@ -430,7 +524,10 @@ import { t } from "../i18n/index.ts";
 import { formatCost } from "../utils/format.ts";
 import { userFacingError } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
+import { browserViewUrl } from "./managed-account";
+import AccountAddModal from "../components/AccountAddModal.vue";
 import AccountFormModal from "../components/AccountFormModal.vue";
+import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
 
 type AccountMenuOption = {
   key: string | number;
@@ -482,13 +579,38 @@ const usageLoading = ref<Record<string, boolean>>({});
 const usageLoadErrors = ref<Record<string, string | null>>({});
 const pinging = ref<Record<string, boolean>>({});
 const showModal = ref(false);
+const showAddModal = ref(false);
+const showManagedCreate = ref(false);
+const showManagedWizard = ref(false);
 const editingAccount = ref<Account | null>(null);
+const managedWizardAccountId = ref<string | null>(null);
+const managedDraft = ref({ name: "", username: "" });
+const opencodeInviteUrl = ref("");
+const browserCapabilities = ref<BrowserCapabilities>({
+  mode: "unsupported",
+  reason: t("正在检测浏览器能力…"),
+});
+const openingBrowserTarget = ref<BrowserTarget | null>(null);
 const busy = ref(false);
 const orderSaving = ref(false);
 const draggingAccountId = ref<string | null>(null);
 const orderAnnouncement = ref("");
 const now = ref(Date.now());
 let accountDrag: AccountDragState | null = null;
+
+const managedWizardAccount = computed(() => (
+  accounts.value.find(({ id }) => id === managedWizardAccountId.value) ?? null
+));
+const managedRegistrationAvailable = computed(() => (
+  Boolean(opencodeInviteUrl.value) && browserCapabilities.value.mode !== "unsupported"
+));
+const managedRegistrationReason = computed(() => {
+  if (!opencodeInviteUrl.value) return t("请先在设置中填写 OpenCode 邀请链接");
+  if (browserCapabilities.value.mode === "unsupported") {
+    return browserCapabilities.value.reason || t("当前环境不支持独立浏览器");
+  }
+  return "";
+});
 
 function errorDetail(error: unknown): string {
   return userFacingError(error, t("无法连接到本地服务，请确认程序正在运行后重试"));
@@ -717,6 +839,20 @@ function accountIsCooling(account: Account): boolean {
   return isCooling(account, now.value);
 }
 
+function accountIsReady(account: Account): boolean {
+  return account.setup_step === "ready";
+}
+
+function managedStepLabel(step: AccountSetupStep): string {
+  switch (step) {
+    case "google_account": return t("待完成：Google 账号");
+    case "opencode_registration": return t("待完成：邀请注册");
+    case "payment": return t("待完成：支付");
+    case "key_verification": return t("待完成：验证 Key");
+    case "ready": return t("注册完成");
+  }
+}
+
 function formatRemaining(account: Account): string {
   if (!account.cooldown_until) return "";
   const ms = new Date(account.cooldown_until).getTime() - now.value;
@@ -762,6 +898,7 @@ function accountExpiryLabel(account: Account): string {
 }
 
 function accountStatusLabel(account: Account): string {
+  if (!accountIsReady(account)) return t("注册中");
   if (account.auth_error) {
     return account.enabled
       ? t("认证失效（401 熔断）")
@@ -773,6 +910,7 @@ function accountStatusLabel(account: Account): string {
 }
 
 function accountStatusTagType(account: Account): "success" | "warning" | "error" | "default" {
+  if (!accountIsReady(account)) return "warning";
   if (account.auth_error) return "error";
   if (!account.enabled) return "default";
   if (accountIsCooling(account)) return "warning";
@@ -780,10 +918,24 @@ function accountStatusTagType(account: Account): "success" | "warning" | "error"
 }
 
 function accountMenuOptions(account: Account): AccountMenuOption[] {
-  const options: AccountMenuOption[] = [
-    { key: "edit", label: t("编辑账号"), accountId: account.id, accountName: account.name },
-  ];
-  if (accountIsCooling(account)) {
+  const options: AccountMenuOption[] = [];
+  if (accountIsReady(account)) {
+    options.push({
+      key: "open-console",
+      label: t("打开 OpenCode 官网"),
+      accountId: account.id,
+      accountName: account.name,
+    });
+    options.push({ key: "edit", label: t("编辑账号"), accountId: account.id, accountName: account.name });
+  } else {
+    options.push({
+      key: "continue-setup",
+      label: t("继续注册"),
+      accountId: account.id,
+      accountName: account.name,
+    });
+  }
+  if (accountIsReady(account) && accountIsCooling(account)) {
     options.push({
       key: "reset",
       label: t("重置冷却"),
@@ -791,6 +943,12 @@ function accountMenuOptions(account: Account): AccountMenuOption[] {
       accountName: account.name,
     });
   }
+  options.push({
+    key: "reset-profile",
+    label: t("重置官网登录状态"),
+    accountId: account.id,
+    accountName: account.name,
+  });
   options.push({
     key: "delete",
     label: t("删除账号"),
@@ -801,16 +959,32 @@ function accountMenuOptions(account: Account): AccountMenuOption[] {
 }
 
 function handleMenuSelect(key: string | number, accountId: string) {
-  if (key === "edit") {
+  if (key === "open-console") {
+    void openAccountBrowser(accountId, "console");
+  } else if (key === "continue-setup") {
+    openManagedWizard(accountId);
+  } else if (key === "edit") {
     openEditModal(accountId);
   } else if (key === "reset") {
     resetCooldown(accountId);
+  } else if (key === "reset-profile") {
+    const account = accounts.value.find((item) => item.id === accountId);
+    if (!account) return;
+    dialog.warning({
+      title: t("重置官网登录状态"),
+      content: accountIsReady(account)
+        ? t("确定重置账号 {name} 的独立浏览器 Profile 吗？Google 与 OpenCode 登录状态会被清除，但 Key 不受影响。", { name: account.name })
+        : t("确定重置账号 {name} 的独立浏览器 Profile 吗？登录状态会被清除，注册进度将回到 Google 账号步骤。", { name: account.name }),
+      positiveText: t("重置"),
+      negativeText: t("取消"),
+      onPositiveClick: () => resetBrowserProfile(accountId),
+    });
   } else if (key === "delete") {
     const account = accounts.value.find((item) => item.id === accountId);
     if (!account) return;
     dialog.warning({
       title: t("删除账号"),
-      content: t("确定删除账号 {name} 吗？", { name: account.name }),
+      content: t("确定删除账号 {name} 吗？账号数据以及独立浏览器中的 Cookie 和 Profile 都会被删除。", { name: account.name }),
       positiveText: t("删除"),
       negativeText: t("取消"),
       onPositiveClick: () => deleteAccount(accountId),
@@ -818,14 +992,155 @@ function handleMenuSelect(key: string | number, accountId: string) {
   }
 }
 
+function openAddModal(): void {
+  showAddModal.value = true;
+}
+
 function openCreateModal(): void {
+  showAddModal.value = false;
   editingAccount.value = null;
   showModal.value = true;
+}
+
+function openManagedCreateModal(): void {
+  if (!managedRegistrationAvailable.value) return;
+  showAddModal.value = false;
+  managedDraft.value = { name: "", username: "" };
+  showManagedCreate.value = true;
+}
+
+function setManagedCreateVisible(show: boolean): void {
+  if (!show && busy.value) return;
+  showManagedCreate.value = show;
+}
+
+function openManagedWizard(accountId: string): void {
+  const account = accounts.value.find(({ id }) => id === accountId);
+  if (!account || account.account_type !== "managed" || accountIsReady(account)) return;
+  managedWizardAccountId.value = accountId;
+  showManagedWizard.value = true;
+}
+
+function openSettings(): void {
+  showAddModal.value = false;
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", "settings");
+  url.searchParams.delete("session");
+  url.hash = "";
+  window.history.pushState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
 function openEditModal(id: string): void {
   editingAccount.value = accounts.value.find((account) => account.id === id) ?? null;
   showModal.value = true;
+}
+
+async function createManagedAccount(): Promise<void> {
+  const name = managedDraft.value.name.trim();
+  if (!name || busy.value || !managedRegistrationAvailable.value) return;
+  busy.value = true;
+  try {
+    const username = managedDraft.value.username.trim();
+    const created = await tauriApi.createManagedAccount({
+      name,
+      ...(username ? { username } : {}),
+    });
+    addAccount(created);
+    showManagedCreate.value = false;
+    managedWizardAccountId.value = created.id;
+    showManagedWizard.value = true;
+    message.success(t("注册草稿已创建"));
+  } catch (error) {
+    message.error(t("创建注册草稿失败: {error}", { error: errorDetail(error) }));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function advanceManagedSetup(accountId: string, setupStep: AccountSetupStep): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const updated = await tauriApi.advanceAccountSetup(accountId, setupStep);
+    replaceAccount(updated);
+    message.success(t("注册进度已保存"));
+  } catch (error) {
+    await recoverManagedSetupConflict(accountId, error);
+    message.error(t("保存注册进度失败: {error}", { error: errorDetail(error) }));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function verifyManagedKey(accountId: string, key: string): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const updated = await tauriApi.verifyManagedAccountKey(accountId, key);
+    replaceAccount(updated);
+    if (accountIsReady(updated)) {
+      showManagedWizard.value = false;
+      await loadAccountUsage(updated.id);
+      message.success(accountIsCooling(updated)
+        ? t("Key 有效，账号已启用并按上游响应进入冷却")
+        : t("Key 验证成功，账号已启用"));
+    }
+  } catch (error) {
+    await recoverManagedSetupConflict(accountId, error);
+    message.error(t("Key 验证失败: {error}", { error: errorDetail(error) }));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function openAccountBrowser(accountId: string, target: BrowserTarget): Promise<void> {
+  if (openingBrowserTarget.value) return;
+  if (browserCapabilities.value.mode === "unsupported") {
+    message.error(browserCapabilities.value.reason || t("当前环境不支持独立浏览器"));
+    return;
+  }
+  let remoteTab: Window | null = null;
+  if (browserCapabilities.value.mode === "remote") {
+    remoteTab = window.open("", "_blank");
+    if (!remoteTab) {
+      message.error(t("浏览器阻止了新标签页，请允许此站点打开弹出窗口"));
+      return;
+    }
+    remoteTab.opener = null;
+  }
+  openingBrowserTarget.value = target;
+  try {
+    const result = await tauriApi.openAccountBrowser(accountId, target);
+    if (result.mode === "remote") {
+      if (!result.session_token) throw new Error(t("服务未返回远程浏览器会话令牌"));
+      if (!remoteTab) throw new Error(t("浏览器模式已变化，请重试"));
+      remoteTab.location.replace(browserViewUrl(window.location.href, result.session_token));
+      message.success(t("远程浏览器已在新标签页打开"));
+    } else {
+      remoteTab?.close();
+      message.success(t("已使用该账号的独立 Profile 打开浏览器"));
+    }
+  } catch (error) {
+    remoteTab?.close();
+    message.error(t("打开浏览器失败: {error}", { error: errorDetail(error) }));
+  } finally {
+    openingBrowserTarget.value = null;
+  }
+}
+
+async function resetBrowserProfile(accountId: string): Promise<void> {
+  try {
+    const updated = await tauriApi.resetAccountBrowserProfile(accountId);
+    replaceAccount(updated);
+    if (!accountIsReady(updated)) {
+      delete usageMap.value[accountId];
+      delete usageEdits.value[accountId];
+    }
+    message.success(t("官网登录状态已重置"));
+  } catch (error) {
+    message.error(t("重置官网登录状态失败: {error}", { error: errorDetail(error) }));
+  }
 }
 
 function sameAccountOrder(left: readonly Account[], right: readonly Account[]): boolean {
@@ -979,15 +1294,35 @@ function removeAccountState(id: string): void {
   delete pinging.value[id];
 }
 
-async function refreshAccountState(id: string): Promise<void> {
+async function refreshAccountState(id: string): Promise<Account | null> {
   const loaded = await tauriApi.getAccounts();
   applyLoadedAccounts(loaded);
-  if (!loaded.some((account) => account.id === id)) {
+  const account = loaded.find((item) => item.id === id);
+  if (!account) {
     removeAccountState(id);
     message.warning(t("未找到该账号，已为你刷新列表"));
-    return;
+    return null;
   }
-  await loadAccountUsage(id);
+  if (accountIsReady(account)) {
+    await loadAccountUsage(id);
+  } else {
+    delete usageMap.value[id];
+    delete usageEdits.value[id];
+  }
+  return account;
+}
+
+async function recoverManagedSetupConflict(accountId: string, error: unknown): Promise<void> {
+  if (!(error instanceof DashboardRequestError) || ![404, 409].includes(error.status)) return;
+  try {
+    const account = await refreshAccountState(accountId);
+    if (!account || accountIsReady(account)) {
+      showManagedWizard.value = false;
+      managedWizardAccountId.value = null;
+    }
+  } catch {
+    // Preserve the original mutation error; the next explicit refresh can retry reconciliation.
+  }
 }
 
 async function loadAccounts() {
@@ -998,7 +1333,11 @@ async function loadAccounts() {
     accounts.value = loaded;
     // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端
     if (quotaLimits.value) {
-      await mapWithConcurrency(loaded, 4, (account) => loadAccountUsage(account.id));
+      await mapWithConcurrency(
+        loaded.filter(accountIsReady),
+        4,
+        (account) => loadAccountUsage(account.id),
+      );
     }
   } catch (e) {
     accountListError.value = errorDetail(e);
@@ -1023,14 +1362,36 @@ async function loadQuotaLimits(): Promise<boolean> {
   }
 }
 
+async function loadRegistrationOptions(): Promise<void> {
+  const [settingsResult, browserResult] = await Promise.allSettled([
+    tauriApi.getSettings(),
+    tauriApi.getBrowserCapabilities(),
+  ]);
+  if (settingsResult.status === "fulfilled") {
+    opencodeInviteUrl.value = settingsResult.value.opencode_invite_url || "";
+  } else {
+    opencodeInviteUrl.value = "";
+  }
+  if (browserResult.status === "fulfilled") {
+    browserCapabilities.value = browserResult.value;
+  } else {
+    browserCapabilities.value = {
+      mode: "unsupported",
+      reason: t("浏览器能力检测失败: {error}", { error: errorDetail(browserResult.reason) }),
+    };
+  }
+}
+
 async function initializeAccounts() {
+  const registrationOptions = loadRegistrationOptions();
   await loadQuotaLimits();
   await loadAccounts();
+  await registrationOptions;
 }
 
 async function retryQuotaLimits() {
   if (!await loadQuotaLimits()) return;
-  await mapWithConcurrency(accounts.value, 4, (account) => loadAccountUsage(account.id));
+  await mapWithConcurrency(accounts.value.filter(accountIsReady), 4, (account) => loadAccountUsage(account.id));
 }
 
 async function loadAccountUsage(accountId: string) {
@@ -1192,6 +1553,10 @@ onUnmounted(() => {
   border-color: rgba(208, 48, 80, 0.45);
 }
 
+.account-card--pending {
+  border-color: color-mix(in srgb, var(--ocg-primary) 32%, var(--ocg-divider));
+}
+
 .account-card--dragging {
   border-color: var(--ocg-primary);
   box-shadow: 0 10px 28px color-mix(in srgb, var(--ocg-primary) 18%, transparent);
@@ -1243,6 +1608,25 @@ onUnmounted(() => {
 
 .account-name-row :deep(.n-tag) {
   flex: 0 0 auto;
+}
+
+.managed-pending {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 2px 2px;
+}
+
+.managed-pending strong {
+  color: var(--ocg-ink);
+  font-size: var(--ocg-font-md);
+}
+
+.managed-pending p {
+  margin: 4px 0 0;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
 }
 
 .usage-load-error {
@@ -1381,6 +1765,11 @@ onUnmounted(() => {
 }
 
 @media (max-width: 640px) {
+  .managed-pending {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .account-card :deep(.n-card-header) {
     flex-wrap: wrap;
     gap: 8px;

@@ -16,7 +16,10 @@ export default defineConfig({
     strictPort: true,
     host: "127.0.0.1",
     proxy: {
-      "/dashboard/api": "http://127.0.0.1:9042",
+      "/dashboard/api": {
+        target: "http://127.0.0.1:9042",
+        ws: true,
+      },
     },
     watch: {
       ignored: ["**/target/**", "**/src-tauri/target/**"],

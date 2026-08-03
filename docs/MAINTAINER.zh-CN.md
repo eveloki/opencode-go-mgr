@@ -27,7 +27,9 @@
 ocg-manager/
 ├── crates/
 │   ├── ocg-core/      Gateway、面板 HTTP API、SQLite、models、crypto、selector、cooldown、pricing
-│   └── ocg-cli/       无头 CLI 与 Gateway 入口
+│   ├── ocg-cli/       无头 CLI 与 Gateway 入口
+│   └── ocg-browser-worker/  Linux Chromium Sidecar 控制服务
+├── browser/           Xvfb、Openbox、x11vnc、noVNC 启动脚本
 ├── src/               Vue 3 管理面板（TypeScript、naive-ui、Vite）
 │   ├── App.vue        顶层外壳、登录页、侧边栏、顶栏
 │   ├── api/tauri.ts   历史命名；HTTP 封装 /dashboard/api（不是 Tauri invoke）
@@ -42,6 +44,7 @@ ocg-manager/
 ├── DESIGN.md          设计系统源（CI 中 lint）
 ├── .github/workflows/ quality.yml、release.yml、container.yml
 ├── Dockerfile         多阶段无头 Gateway 镜像
+├── Dockerfile.browser Chromium/noVNC Sidecar 镜像
 ├── compose.yaml       支持源码构建与镜像拉取的 Compose 服务定义
 └── compose.example.yaml  每个 Release 附带的只拉取镜像示例
 ```
@@ -111,6 +114,7 @@ cargo test --workspace
 ```bash
 cargo test -p ocg-core
 cargo test -p ocg-manager-cli
+cargo test -p ocg-browser-worker
 cargo test -p ocg-core gemini
 cargo test -p ocg-core claude_desktop
 ```
@@ -204,6 +208,43 @@ Desktop 三个角色模型的持久化行为。
   教程只生成客户端配置，不修改 Gateway 设置。**价格表** 视图通过受保护的定价
   API 读取并刷新当前 OpenCode Go 快照。
 
+### 账号生命周期与浏览器运行时
+
+- schema v16 给账号增加 `account_type`（`key | managed`）与 `setup_step`
+  （`google_account → opencode_registration → payment → key_verification → ready`）。
+  旧行迁移为 `key + ready`。托管草稿立即持久化为空 Key、`enabled=false`；选择器、
+  启用接口和路由都必须同时要求 `ready` 与非空 Key。
+- 设置中的 `opencode_invite_url` 只接受最长 2048 字符、无用户名密码的 HTTPS URL，
+  主机严格限定为 `opencode.ai` 或 `console.opencode.ai`。注册步骤不抓取网页：Google
+  注册、验证码、OpenCode 注册和付款完全由用户操作，Key 也由用户复制回填。
+- 托管状态只能顺序前进。Key 实测返回 `2xx` 时进入 `ready + enabled`；`429` 同样
+  证明 Key 有效，同时写入冷却；`401`/`403`、网络错误或 `5xx` 保持
+  `key_verification`。API、DTO 与日志绝不能返回明文 Key。
+- 受 Dashboard 鉴权保护的生命周期接口为 `POST /accounts/managed`、
+  `PATCH /accounts/{id}/setup` 与 `POST /accounts/{id}/setup/verify-key`；浏览器接口
+  为 `GET /browser/capabilities`、`POST /accounts/{id}/browser`、
+  `DELETE /accounts/{id}/browser-profile` 和
+  `/browser/sessions/{token}/ws`（都位于 `/dashboard/api` 下）。浏览目标只允许
+  Google 注册、配置的邀请 URL 与 OpenCode 官网。远程会话令牌只在内存中保存，
+  绑定管理员会话并检查 Origin，空闲 30 分钟或总计 4 小时失效。
+- 桌面端由 Tauri 注册原生启动/停止 hook，但 Vue 仍通过 HTTP API 调用。Windows
+  依次查 Edge、Chrome；macOS 查 Chrome、Edge、Chromium；Linux 从 `PATH` 查
+  Chrome/Chromium/Edge。外部浏览器使用
+  `browser-profiles/<account_id>`、`--no-first-run`、
+  `--no-default-browser-check` 与新窗口，不得加入 CDP、automation、
+  `--no-sandbox` 或关闭 Web 安全的参数。
+- `crates/ocg-browser-worker` 每节点只保留一个 Chromium。切换账号先 SIGTERM 当前
+  进程组并等待 Profile 写盘，超时才强制结束。Sidecar 以 UID/GID 10001、只读根
+  文件系统、零 capability 运行；控制 token 由共享运行时卷随机生成。Chromium
+  需要建立自身的 user/PID/network namespace 和 renderer seccomp 沙箱，因此 browser
+  服务使用 `seccomp=unconfined` 且不能启用 `no-new-privileges`。Sidecar 仍不挂载
+  SQLite，不发布宿主机端口。浏览器项目桥接网络不能设为 Docker `internal`，因为
+  Chromium 需要访问 Google/OpenCode 的 HTTPS 出站网络。
+- Profile 删除必须先停浏览器，校验账号 ID 防目录穿越，再把新旧 Profile 原子改名
+  暂存；数据库操作成功后清理暂存目录，失败则恢复。重置完成账号不删除 Key；重置
+  注册中账号还要回到 `google_account`。删除账号的 UI 确认必须写明 Cookie/Profile
+  也会删除。
+
 ### 持久化
 
 - `crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询；
@@ -215,6 +256,10 @@ Desktop 三个角色模型的持久化行为。
   `claude_desktop_models` 的配置会得到默认 Sonnet 目标 `minimax-m3`，并被规范
   写回 SQLite。模型更新由 `settings_update` 序列化；常规 settings 保存会保留专
   用的 Claude Desktop 映射。
+- Docker 将 SQLite、Key 与 `.encryption-key` 放在 `ocg-data`，长期 Cookie 与
+  浏览器状态放在 `ocg-browser-profiles`。两卷都是高敏感持久状态，必须在服务停止
+  后成对备份；`ocg-browser-runtime` 只含运行时控制 token，不应加入备份。浏览器
+  Profile 不由 OCG Manager 加密。
 
 ### 节点边界
 
@@ -223,8 +268,9 @@ Desktop 三个角色模型的持久化行为。
 
 ## 升级与数据库迁移
 
-GUI 或 CLI 启动时会原地执行 SQLite 迁移。升级前备份完整数据目录，包括数据库
-与存在时的 `.encryption-key`；直接/手动升级时先停止进程，签名桌面升级器会自
+GUI 或 CLI 启动时会原地执行 SQLite 迁移。升级前备份完整数据目录，包括数据库、
+存在时的 `.encryption-key` 与 `browser-profiles/`；Docker 同时备份
+`ocg-data` 和 `ocg-browser-profiles`。直接/手动升级时先停止进程，签名桌面升级器会自
 行停止并重启。项目不保证降级兼容；如需回滚，恢复对应旧版本升级前的数据备份，
 不要让旧二进制直接打开已迁移的数据库。
 
@@ -283,8 +329,8 @@ SHA256SUMS
 `scripts/release.mjs` 负责所有繁重工作：
 
 1. 校验 `package.json`、`src-tauri/tauri.conf.json`、workspace `Cargo.toml`、
-   `src-tauri/Cargo.toml`，以及 `compose.example.yaml` 的标题和默认镜像版本一
-   致；如有 Git tag，与之比对。
+   `src-tauri/Cargo.toml`，以及 `compose.example.yaml` 的三个带版本字段
+   （标题、主镜像和浏览器镜像默认值）一致；如有 Git tag，与之比对。
 2. 在创建暂存目录前解析升级签名模式；设置 `OCG_REQUIRE_UPDATER_ARTIFACTS=1`
    时，缺私钥或 `TAURI_UPDATER_PUBLIC_KEY` 都会在替换 `release/` 前失败；配置
    的公钥还必须匹配 `src-tauri/updater-public-key.sha256` 中已提交的 SHA-256
@@ -380,6 +426,15 @@ GitHub Release 存储层报告的 digest 对比。draft job 会把数字 Release
 游；验证和公开 job 都重新校验该 ID、tag 与 draft 状态，不使用无法显示 draft
 Release 的 tag 查询端点。
 
+`v1.5.8-beta.1` 这类 SemVer 预发布 tag 走同一条真实签名 tag 路径，并保持恰好
+15 个不可变附件。升级 manifest 会在 payload 文件名和下载 URL 中保留完整预发布
+后缀，Windows 安装包冒烟也接受同一个预发布 `CandidateVersion`。自动生成的说明
+开头会显著标注“托管账号注册与隔离浏览器 Profile 均为 Beta，尚未充分测试”，并
+列出尚未实测的 Google/OpenCode 真实注册与支付、noVNC 键盘/剪贴板、GHCR 首次
+公开发布路径；同时说明 preview 还包含 Gateway、脱敏和发布链路改动，不能视为生
+产可用。之后生成稳定版说明时会跳过同版本预发布 tag，以前一个稳定版为基线，避免
+完整功能范围被 Beta tag 隐藏。
+
 ### publish-release —— 只公开已验证的 tag 构建
 
 `v*` tag push 是单维护者的明确发版授权，因此 `verify-release` 成功后会自动运行
@@ -390,6 +445,9 @@ job。缺少签名密钥、冒烟失败或验证失败时，Release 都不会公
 发布 job 还进入仓库级 `release-moving-channels` 串行队列；正式公开前会比较候
 选版本和当前 GitHub latest，只允许严格更高的稳定 SemVer 推进 `latest`。延迟
 完成的旧 run 仍可公开自己的不可变 Release，但不能把移动通道回滚。
+预发布 tag 的 draft 与最终 Release 都设为 `prerelease=true`，固定
+`make_latest=false`，且不会调用只适用于稳定版的 latest 比较；稳定 tag 的行为不
+变。
 
 ### 升级签名密钥
 
@@ -424,12 +482,34 @@ closed。密钥轮换属于 break-glass 恢复，不是普通 secret 更新。�
 ### container.yml —— 镜像流水线
 
 GitHub Release 发布后会触发 `.github/workflows/container.yml`。该工作流检出
-Release tag，构建并冒烟验证加固后的 `linux/amd64` 镜像，先按 digest 推送而不
-分配可变名称，再进入仓库级串行标签队列。`X.Y.Z` 与 `sha-<12 位 commit>` 仅在
-不存在时创建；已存在时只有 digest 与候选完全相同才接受，否则失败。稳定版
-`X.Y` 和选择更新的 `latest` 只有在候选 SemVer 高于通道当前版本标签时才移动。
-工作流同时记录 SPDX SBOM、BuildKit SLSA provenance 与 GitHub 签名 provenance。
-`X.Y.Z` 和 `sha-*` 是不可变发布标签；`X.Y` 与 `latest` 是单调移动通道。
+Release tag，同时构建并冒烟验证两个 `linux/amd64` 镜像：主服务
+`ghcr.io/klarkxy/opencode-go-mgr` 与 Sidecar
+`ghcr.io/klarkxy/opencode-go-mgr-browser`。主镜像冒烟检查 Dashboard、鉴权和许可
+证；浏览器镜像在只读根文件系统、零 capability、Chromium 可用的 seccomp
+配置、无宿主机端口下启动 Xvfb/noVNC，并通过受 token 保护的控制 API 真正拉起
+普通 Chromium 与持久 Profile。
+
+两个镜像都先按 digest 推送而不分配可变名称，再进入仓库级串行标签队列。
+`X.Y.Z` 与 `sha-<12 位 commit>` 仅在不存在时创建；已存在时只有各自 digest 与
+候选完全相同才接受，否则失败。稳定版 `X.Y` 和选择更新的 `latest` 按镜像对整体
+决策：要么都收敛到候选版本，要么保留已经对齐的较新版本对；若通道仍会分裂，工作
+流会失败而不是静默保留。两个镜像各自记录 SPDX SBOM、BuildKit SLSA provenance
+与 GitHub 签名 provenance。`X.Y.Z` 和 `sha-*` 是不可变发布标签；`X.Y` 与
+`latest` 是单调移动通道。浏览器镜像是 GHCR 包，不会增加 GitHub Release 附件；
+原生发布仍必须恰好 15 个附件。
+
+Package 可见性独立于关联仓库管理，工作流不能依赖 repository token 代为改成
+公开；新的浏览器 package 在首次推送 digest 前也根本不存在。因此第一次创建该
+package 的 `container.yml` 会先完成推送，再因 GitHub 默认的私有可见性停在匿名
+拉取门禁。这是唯一允许的引导例外：在 GitHub Package 设置中把新浏览器 package
+设为**公开**（并确认主 package 也是公开），然后对同一个 tag 手动重跑
+`container.yml`。不可变标签只有 digest 完全相同时才允许重放，所以重跑只完成
+原发布，不会替换产物。在重跑全绿前，不得把容器发布视为完成；之后每个 Release
+都必须在第一次运行时直接通过匿名门禁。
+
+标签发布后，门禁使用空 Docker 凭证目录匿名拉取两个精确版本标签；package 若仍
+为私有或不可访问，`container.yml` 会失败，而不会伪装成可供公开 Compose 使用的
+成功发布。
 
 手动触发可回填已有 Release tag，且只有显式选择后才会更新 `latest`。工作流会
 显式检出 `refs/tags/<tag>`，验证 HEAD 确实由该 tag 解析得到，并在发布任何镜像
@@ -444,12 +524,17 @@ tag 上下文。
 
 ```bash
 docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:X.Y.Z
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:X.Y.Z
 docker buildx imagetools inspect --raw \
   ghcr.io/klarkxy/opencode-go-mgr@sha256:<digest>
 docker buildx imagetools inspect --format '{{json .SBOM}}' \
   ghcr.io/klarkxy/opencode-go-mgr@sha256:<digest> > sbom.json
 gh attestation verify \
   oci://ghcr.io/klarkxy/opencode-go-mgr@sha256:<digest> \
+  --repo klarkxy/opencode-go-mgr \
+  --signer-workflow klarkxy/opencode-go-mgr/.github/workflows/container.yml
+gh attestation verify \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser@sha256:<browser-digest> \
   --repo klarkxy/opencode-go-mgr \
   --signer-workflow klarkxy/opencode-go-mgr/.github/workflows/container.yml
 ```
@@ -474,13 +559,16 @@ CI 不会操作真实桌面 UI，也不启动真实 Claude Desktop 或 Gemini CL
 Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流式转换和 SSE 事
 件形状，但不能证明第三方客户端的新版本仍接受生成的配置。容器冒烟只检查 TCP
 健康、Dashboard HTML、auth status、镜像内许可证，以及未登录 settings 返回
-`401`。改动未覆盖路径时需手工验证。
+`401`。浏览器容器冒烟会启动真实 Chromium、确认 Profile 目录和无公开端口，但不
+登录 Google/OpenCode、不操作 noVNC 键鼠/剪贴板，也不执行真实支付。Google 数据
+中心 IP 风控、桌面浏览器发现、Cookie 跨重启保留和远程账号切换仍需手工验证。
 
 ## 发版步骤
 
-1. 确定 `X.Y.Z`，同步修改 `package.json`、`src-tauri/tauri.conf.json`、
+1. 确定 `X.Y.Z`（或 `X.Y.Z-beta.N` 这类不可变 SemVer 预发布版本），同步修改
+   `package.json`、`src-tauri/tauri.conf.json`、
    workspace `Cargo.toml`、`src-tauri/Cargo.toml`，以及
-   `compose.example.yaml` 的标题和默认镜像。
+   `compose.example.yaml` 的标题、主镜像与浏览器镜像默认值。
 2. 运行 `cargo check --workspace --all-targets` 刷新 `Cargo.lock`，再运行
    `pnpm install --frozen-lockfile`、`cargo fmt --all -- --check`、
    `pnpm run test`、`pnpm run design:lint`、`pnpm run release:check` 和
@@ -488,14 +576,15 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 3. 与上一个公开 tag 比较，复核 diff 和当前平台的 `release/` payload，然后提交
    版本、lockfile、文档与 Release notes 改动。
 4. 先合并已经审查的改动，再在 `main` 的最终 commit 上执行
-   `git tag -a vX.Y.Z -m "OCG Manager vX.Y.Z"` 创建附注 tag 并推送。不要在之后
+   `git tag -a vX.Y.Z -m "OCG Manager vX.Y.Z"`（如为预发布，保留对应后缀）创建
+   附注 tag 并推送。不要在之后
    还会 squash merge 的分支 commit 上提前打 tag。
 5. 等待 `quality`、`preflight`、全部原生矩阵 job、`draft-release`、
    `verify-release` 和 `publish-release` 通过。确认公开的是同一个已验证 draft，
    再复核恰好 15 个附件、冒烟日志、平台警告，以及基于上一个 tag diff 编写的说
    明。
-6. 等待 `container.yml` 通过，确认 GHCR package 已公开，核验版本与 digest，再
-   匿名拉取完整版本标签。
+6. 等待 `container.yml` 通过，确认两个 GHCR package 已公开，分别核验版本与
+   digest，再匿名拉取两个完整版本标签。
 
 应把已发布的资产和 tag 视为不可变。已发布 payload 有误时发新的 patch 版本，
 不要替换资产或移动 tag。
@@ -508,7 +597,7 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 - [ ] 可复用质量门中的 Ubuntu 与 Windows job 全绿；tag-only 签名
       `release:check` 通过；选中的每个 `pnpm run build` 与平台冒烟全绿。
 - [ ] `git diff --check` 干净；相对上一个 tag 的 diff 只含预期范围；四份代码
-      版本清单、`compose.example.yaml` 与 Cargo.lock 三个本地包条目一致。
+      版本清单、`compose.example.yaml` 与 Cargo.lock 四个本地包条目一致。
 - [ ] 每个 runner 的 `release/SHA256SUMS` 与目录内全部 payload 一致；
       `verify-release` 接受恰好 15 个附件、升级 manifest、四份签名、checksum
       和 GitHub 服务端 digest。
@@ -527,6 +616,15 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
       会话时映射 API 返回 `401`。
 - [ ] 打开 **应用** 视图，确认 16 个教程完整可选；逐项抽查复制结果不含掩码
       Key，并实际启动 Claude Desktop 与 Gemini CLI 各完成一次文本和工具调用。
+- [ ] 覆盖 schema v16 迁移、旧账号 `key + ready`、托管状态机顺序、Pending 路由
+      隔离、邀请 URL 白名单，以及 Key 验证的 `2xx`/`429`/`401`/`403`/网络/
+      `5xx` 分支；确认任何 DTO 和日志都没有明文 Key。
+- [ ] 在 Windows 验证 Edge/Chrome 优先级，在 macOS/Linux 验证浏览器发现；用两个
+      账号确认 Profile 隔离和重启后 Cookie 保留。确认重置会退出官网但保留完成账号
+      Key，删除会同时清理新旧 Profile，旧 WebView Profile 不会被导入。
+- [ ] 人工完成 Google → 邀请链接 → OpenCode 登录 → 支付前确认页 → Key 回填；
+      真实支付只由测试者明确执行。旧 Key 账号首次打开官网后登录一次，再验证实际
+      额度和邀请使用情况可回访。分别覆盖桌面和 Docker Sidecar。
 - [ ] Windows 上本地跑一次安装包，确认 SmartScreen 警告文案，打开面板、添加
       账号、发一条请求。
 - [ ] macOS 上挂载 DMG，确认 **Open Anyway** 流程可用，打开面板、添加账号、
@@ -537,13 +635,15 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
       载后清理。
 - [ ] 确认 `scripts/release.mjs` 报告原子替换 `release/` 成功，旧 `release/`
       已清掉。
-- [ ] 本地构建容器，并在隔离卷上确认 UID/GID `10001`、内置 `LICENSE`、只读/
-      capability 加固、面板鉴权和备份恢复后的属主权限。
+- [ ] 本地构建两个容器，并在隔离卷上确认 UID/GID `10001`、内置 `LICENSE`、只读/
+      capability 加固、面板鉴权和备份恢复后的属主权限。用
+      `docker compose --profile browser up -d` 验证单 Chromium、noVNC 键鼠/剪贴板、
+      账号切换、Sidecar 重启、1 GiB shm、无公开端口和双卷备份恢复。
 - [ ] 推送 tag 前复核计划使用的 GitHub Release 说明与未签名 / ad-hoc 警告；公
       开后确认同一份说明和精确的已验证资产集合已经发布。
-- [ ] 发布后确认 `container.yml` 通过，并按预期 digest 匿名拉取
-      `ghcr.io/klarkxy/opencode-go-mgr:<version>`，再验证 signer workflow、
-      SBOM 与 SLSA provenance。
+- [ ] 发布后确认 `container.yml` 通过，并按预期 digest 匿名拉取主镜像与
+      `ghcr.io/klarkxy/opencode-go-mgr-browser:<version>`，再分别验证 signer
+      workflow、SBOM 与 SLSA provenance；GitHub Release 仍恰好 15 个附件。
 
 ## 已知缺口
 
@@ -554,7 +654,8 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 - 生成的 Tauri schema 文件会让 diff 变吵；除非 Tauri 配置真的改了，否则不要动
   它们。
 - 流式用量仅在上游发出 usage chunk 时精确，否则记为 `success_no_usage`。
-- HTTP 面板没有暴露旧的隔离 WebView 浏览器 command；Tauri command 层里仍保留。
+- 旧 `profiles/<account_id>` WebView Profile 不会迁移到外部 Chromium；升级后首次
+  需要重新登录。保留旧路径仅用于重置/删除时安全清理，不能尝试跨引擎直接复用。
 - Responses 端点是无状态。`previous_response_id`、`conversation`、
   `store: true`、`background: true` 直接返回 `400`，不会静默忽略。这是有意为
   之，详见 `protocol.rs` 和用户指南。

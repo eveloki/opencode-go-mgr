@@ -23,6 +23,9 @@ Desktop 协议；Gateway 会把请求转换到模型的 OpenCode-Go 原生协议
   模型列表与 Claude Desktop 别名入口。
 - **本地多账号轮询**：拖动账号卡片即可持久调整优先级；Gateway 自动跳过已禁用、
   冷却中或本次请求已失败的账号。
+- **托管注册与独立 Profile（Beta）**：可用邀请链接人工完成 Google、OpenCode Go、支付与
+  Key 验证；每个账号保留独立浏览器登录状态，Docker 可选 noVNC Sidecar。该功能尚未经过充分
+  测试，请勿依赖其用于生产环境。
 - **购买周期提醒**：每个账号记录购买日期，按自然月计算到期日并显示剩余天数；
   提醒不会自动禁用账号。
 - **OpenCode Go 额度估算**：5 小时、本周、本月用量条按官方文档美元快照估算，
@@ -64,7 +67,8 @@ Gateway: http://127.0.0.1:9042/v1
 
 1. 安装并启动 OCG Manager。Gateway 就绪后管理面板会在系统浏览器中打开；之后可
    通过托盘图标重新打开。
-2. 在 **账号** 视图添加 OpenCode-Go 账号，复制 Gateway Key。
+2. 在 **账号** 视图导入已有 Key，或先在设置中填写邀请链接后用托管向导注册新
+   账号；复制 Gateway Key。
 3. 把客户端指向 `http://127.0.0.1:9042/v1`。**应用** 视图提供了各客户端的配置
    教程。
 
@@ -93,6 +97,11 @@ docker compose pull
 docker compose up -d --no-build
 docker compose ps
 ```
+
+Linux 服务器需要托管注册/官网登录时，至少预留 2 CPU、2 GiB 内存与 1 GiB
+`/dev/shm`，再执行 `docker compose --profile browser up -d`。它会启用可选的
+`ghcr.io/klarkxy/opencode-go-mgr-browser` Sidecar；`ocg-data` 与
+`ocg-browser-profiles` 两个敏感卷必须一起备份。
 
 打开 `http://127.0.0.1:9042/dashboard/`；服务根路径 `/` 不是管理面板地址。
 管理员、持久化、备份恢复、HTTPS、升级、digest/attestation 校验和本地源码构建

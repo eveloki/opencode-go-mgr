@@ -1,4 +1,4 @@
-use crate::gateway::protocol::ApiFormat;
+use crate::gateway::protocol::{ApiFormat, decode_anthropic_thinking_block, decode_chat_reasoning};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -122,7 +122,10 @@ pub fn api_format_name(format: ApiFormat) -> &'static str {
     }
 }
 
-pub fn safe_upstream_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+pub fn safe_upstream_headers(
+    headers: &HeaderMap,
+    known_secret: Option<&str>,
+) -> BTreeMap<String, String> {
     const ALLOWED: &[&str] = &[
         "x-request-id",
         "request-id",
@@ -136,7 +139,14 @@ pub fn safe_upstream_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
     let mut safe = BTreeMap::new();
     for name in ALLOWED {
         if let Some(value) = headers.get(*name).and_then(|value| value.to_str().ok()) {
-            safe.insert((*name).to_string(), truncate_text(&redact_text(value), 256));
+            let value = known_secret.map_or_else(
+                || value.to_string(),
+                |secret| redact_known_secret(value, secret),
+            );
+            safe.insert(
+                (*name).to_string(),
+                truncate_text(&redact_text(&value), 256),
+            );
         }
     }
     safe
@@ -411,6 +421,368 @@ pub(crate) fn sanitize_upstream_error_value(text: &str) -> Value {
         "text": truncate_text(&redacted, MAX_UPSTREAM_ERROR_BYTES.saturating_sub(64)),
         "truncated": redacted.len() > MAX_UPSTREAM_ERROR_BYTES.saturating_sub(64),
     })
+}
+
+/// Redact the exact credential selected for an upstream attempt before applying
+/// the generic error sanitizer. Upstream providers sometimes echo credentials
+/// in ordinary message fields, where neither a sensitive field name nor a
+/// conventional `sk-` prefix is available to identify them.
+pub(crate) fn sanitize_upstream_error_value_with_known_secret(
+    text: &str,
+    known_secret: &str,
+) -> Value {
+    sanitize_upstream_error_value(&redact_known_secret(text, known_secret))
+}
+
+/// Remove an exact known secret while otherwise preserving an upstream body.
+/// JSON string values are handled after decoding as well, so credentials that
+/// contain quotes, backslashes, or other JSON-escaped characters are covered.
+pub(crate) fn redact_known_secret(text: &str, known_secret: &str) -> String {
+    if known_secret.is_empty() {
+        return text.to_string();
+    }
+
+    let directly_redacted = redact_exact_occurrences(text, known_secret);
+    let directly_redacted = serde_json::to_string(known_secret)
+        .ok()
+        .and_then(|encoded| {
+            encoded
+                .strip_prefix('"')
+                .and_then(|encoded| encoded.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .filter(|encoded| encoded != known_secret)
+        .map_or(directly_redacted.clone(), |encoded| {
+            redact_exact_occurrences(&directly_redacted, &encoded)
+        });
+    let Ok(mut value) = serde_json::from_str::<Value>(&directly_redacted) else {
+        return directly_redacted;
+    };
+    redact_known_secret_value(&mut value, known_secret);
+    serde_json::to_string(&value).unwrap_or(directly_redacted)
+}
+
+fn redact_known_secret_value(value: &mut Value, known_secret: &str) {
+    match value {
+        Value::String(text) => *text = redact_exact_occurrences(text, known_secret),
+        Value::Array(values) => {
+            for value in values {
+                redact_known_secret_value(value, known_secret);
+            }
+        }
+        Value::Object(values) => {
+            let original = std::mem::take(values);
+            for (key, mut value) in original {
+                redact_known_secret_value(&mut value, known_secret);
+                values.insert(redact_exact_occurrences(&key, known_secret), value);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Redact an exact known secret from JSON values without changing object keys.
+///
+/// Successful upstream responses must retain their schema even when an account
+/// Key happens to be a short/common token such as `data`. Error diagnostics use
+/// a more aggressive text sanitizer, but client-facing success payloads only
+/// need the credential removed from values that can carry provider output.
+pub(crate) fn redact_known_secret_values(value: &mut Value, known_secret: &str) {
+    if known_secret.is_empty() {
+        return;
+    }
+    redact_known_secret_values_at(value, known_secret, None, None, false, None, true);
+}
+
+/// Streaming argument fragments are not standalone JSON yet. Their semantic
+/// redactor owns those fields, so the frame-level defense must leave them intact
+/// instead of accidentally rewriting nested property names.
+pub(crate) fn redact_known_secret_stream_values(value: &mut Value, known_secret: &str) {
+    if known_secret.is_empty() {
+        return;
+    }
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    redact_known_secret_values_at(
+        value,
+        known_secret,
+        None,
+        None,
+        true,
+        event_type.as_deref(),
+        true,
+    );
+}
+
+fn redact_known_secret_values_at(
+    value: &mut Value,
+    known_secret: &str,
+    key_hint: Option<&str>,
+    parent_key: Option<&str>,
+    streaming: bool,
+    stream_event_type: Option<&str>,
+    preserve_protocol_controls: bool,
+) {
+    match value {
+        Value::String(text)
+            if !(preserve_protocol_controls
+                && key_hint.is_some_and(|key| is_protocol_control_string_value(key, text))) =>
+        {
+            if key_hint == Some("encrypted_content")
+                && opaque_replay_contains_secret(text, known_secret)
+            {
+                text.clear();
+                return;
+            }
+            if streaming
+                && stream_fragment_is_semantically_owned(key_hint, parent_key, stream_event_type)
+            {
+                return;
+            }
+            if key_hint == Some("arguments")
+                && let Ok(mut arguments) = serde_json::from_str::<Value>(text)
+            {
+                redact_known_secret_values_at(
+                    &mut arguments,
+                    known_secret,
+                    None,
+                    None,
+                    false,
+                    None,
+                    false,
+                );
+                if let Ok(encoded) = serde_json::to_string(&arguments) {
+                    *text = encoded;
+                    return;
+                }
+            }
+            *text = redact_exact_occurrences(text, known_secret);
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_known_secret_values_at(
+                    value,
+                    known_secret,
+                    key_hint,
+                    parent_key,
+                    streaming,
+                    stream_event_type,
+                    preserve_protocol_controls,
+                );
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                let child_preserves_protocol_controls = preserve_protocol_controls
+                    && !matches!(key.as_str(), "input" | "args" | "metadata");
+                redact_known_secret_values_at(
+                    value,
+                    known_secret,
+                    Some(key),
+                    key_hint,
+                    streaming,
+                    stream_event_type,
+                    child_preserves_protocol_controls,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn opaque_replay_contains_secret(encrypted_content: &str, known_secret: &str) -> bool {
+    decode_anthropic_thinking_block(encrypted_content)
+        .is_some_and(|block| json_values_contain_secret(&block, known_secret))
+        || decode_chat_reasoning(encrypted_content)
+            .is_some_and(|reasoning| reasoning.contains(known_secret))
+}
+
+fn json_values_contain_secret(value: &Value, known_secret: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(known_secret),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_values_contain_secret(value, known_secret)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| json_values_contain_secret(value, known_secret)),
+        _ => false,
+    }
+}
+
+fn stream_fragment_is_semantically_owned(
+    key: Option<&str>,
+    parent_key: Option<&str>,
+    event_type: Option<&str>,
+) -> bool {
+    match key {
+        Some("arguments") => {
+            matches!(parent_key, Some("function" | "function_call"))
+                || matches!(event_type, Some("response.function_call_arguments.done"))
+        }
+        Some("partial_json") => {
+            parent_key == Some("delta") && event_type == Some("content_block_delta")
+        }
+        Some("delta") if parent_key.is_none() => matches!(
+            event_type,
+            Some(
+                "response.output_text.delta"
+                    | "response.refusal.delta"
+                    | "response.reasoning_text.delta"
+                    | "response.reasoning_summary_text.delta"
+                    | "response.function_call_arguments.delta"
+                    | "response.custom_tool_call_input.delta"
+            )
+        ),
+        _ => false,
+    }
+}
+
+/// Protocol discriminators and correlation metadata are not provider content.
+/// Rewriting them for a short/common Key (for example `text`, `message`, or
+/// `stop`) makes otherwise safe responses unparsable. Unknown string fields are
+/// still redacted by default so provider-specific content remains covered.
+fn is_protocol_control_string_value(key: &str, value: &str) -> bool {
+    match key {
+        "type" => matches!(
+            value,
+            "message"
+                | "message_start"
+                | "message_delta"
+                | "message_stop"
+                | "content_block_start"
+                | "content_block_delta"
+                | "content_block_stop"
+                | "text"
+                | "text_delta"
+                | "input_text"
+                | "output_text"
+                | "refusal"
+                | "image"
+                | "input_image"
+                | "image_url"
+                | "thinking"
+                | "redacted_thinking"
+                | "thinking_delta"
+                | "signature_delta"
+                | "reasoning"
+                | "reasoning_text"
+                | "summary_text"
+                | "tool"
+                | "tool_use"
+                | "server_tool_use"
+                | "tool_result"
+                | "function"
+                | "function_call"
+                | "function_call_output"
+                | "custom"
+                | "custom_tool_call"
+                | "input_json_delta"
+                | "base64"
+                | "url"
+                | "auto"
+                | "any"
+                | "enabled"
+                | "disabled"
+                | "json_schema"
+                | "json_object"
+                | "grammar"
+                | "object"
+                | "string"
+                | "error"
+                | "api_error"
+                | "server_error"
+                | "invalid_request_error"
+                | "authentication_error"
+                | "rate_limit_error"
+                | "upstream_outcome_unknown"
+                | "response.created"
+                | "response.in_progress"
+                | "response.output_item.added"
+                | "response.content_part.added"
+                | "response.reasoning_summary_part.added"
+                | "response.content_part.done"
+                | "response.output_text.delta"
+                | "response.output_text.done"
+                | "response.refusal.delta"
+                | "response.reasoning_text.delta"
+                | "response.reasoning_summary_text.delta"
+                | "response.reasoning_summary_text.done"
+                | "response.reasoning_summary_part.done"
+                | "response.function_call_arguments.delta"
+                | "response.function_call_arguments.done"
+                | "response.custom_tool_call_input.delta"
+                | "response.custom_tool_call_input.done"
+                | "response.output_item.done"
+                | "response.completed"
+                | "response.incomplete"
+                | "response.failed"
+        ),
+        "object" => matches!(
+            value,
+            "chat.completion" | "chat.completion.chunk" | "list" | "model" | "response"
+        ),
+        "role" => matches!(
+            value,
+            "assistant" | "user" | "system" | "developer" | "tool" | "model"
+        ),
+        "status" => matches!(
+            value,
+            "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled"
+        ),
+        "reason" => matches!(value, "max_output_tokens" | "content_filter"),
+        "stop_reason" => matches!(
+            value,
+            "end_turn" | "max_tokens" | "stop_sequence" | "tool_use" | "pause_turn" | "refusal"
+        ),
+        "finish_reason" => matches!(
+            value,
+            "stop" | "length" | "tool_calls" | "function_call" | "content_filter"
+        ),
+        "finishReason" => matches!(
+            value,
+            "STOP"
+                | "MAX_TOKENS"
+                | "SAFETY"
+                | "RECITATION"
+                | "LANGUAGE"
+                | "OTHER"
+                | "BLOCKLIST"
+                | "PROHIBITED_CONTENT"
+                | "SPII"
+                | "MALFORMED_FUNCTION_CALL"
+        ),
+        "service_tier" => matches!(value, "auto" | "default" | "flex" | "priority"),
+        "tool_choice" => matches!(value, "auto" | "none" | "required"),
+        "truncation" => matches!(value, "auto" | "disabled"),
+        "effort" => matches!(
+            value,
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+        ),
+        "format" => matches!(value, "text" | "json_schema" | "json_object" | "grammar"),
+        "media_type" => matches!(
+            value,
+            "application/json"
+                | "application/pdf"
+                | "text/plain"
+                | "image/png"
+                | "image/jpeg"
+                | "image/gif"
+                | "image/webp"
+        ),
+        "encoding" => matches!(value, "base64" | "utf-8" | "gzip"),
+        _ => false,
+    }
+}
+
+fn redact_exact_occurrences(text: &str, secret: &str) -> String {
+    let mut redacted = text.replace(secret, "<redacted>");
+    while redacted.contains(secret) {
+        redacted = redacted.replace(secret, "");
+    }
+    redacted
 }
 
 fn redact_value(value: &mut Value, key_hint: Option<&str>) {
@@ -793,6 +1165,153 @@ mod tests {
     }
 
     #[test]
+    fn upstream_error_redacts_an_exact_known_secret_with_any_format() {
+        let secret = "opaque/credential+with=punctuation";
+        let json_error = format!(
+            r#"{{"error":{{"message":"provider rejected {secret}","detail":"{secret}"}}}}"#
+        );
+        let encoded =
+            sanitize_upstream_error_value_with_known_secret(&json_error, secret).to_string();
+        assert!(!encoded.contains(secret), "known secret leaked: {encoded}");
+
+        let escaped_secret = "opaque/\"quoted\"\\credential";
+        let escaped_error = serde_json::json!({
+            "error": {"message": format!("provider rejected {escaped_secret}")}
+        })
+        .to_string();
+        let encoded =
+            sanitize_upstream_error_value_with_known_secret(&escaped_error, escaped_secret)
+                .to_string();
+        assert!(
+            !encoded.contains("opaque/"),
+            "JSON-escaped known secret leaked: {encoded}"
+        );
+
+        let plain = redact_known_secret(&format!("unexpected credential: {secret}"), secret);
+        assert_eq!(plain, "unexpected credential: <redacted>");
+
+        let marker_overlap = redact_known_secret("credential=redacted", "redacted");
+        assert!(!marker_overlap.contains("redacted"));
+    }
+
+    #[test]
+    fn success_value_redaction_never_changes_json_keys() {
+        let mut value = json!({
+            "data": "data",
+            "metadata": {
+                "database": "safe data value",
+                "nested": ["data", 42]
+            }
+        });
+        redact_known_secret_values(&mut value, "data");
+
+        assert!(value.get("data").is_some());
+        assert!(value["metadata"].get("database").is_some());
+        assert_eq!(value["data"], "<redacted>");
+        assert_eq!(value["metadata"]["database"], "safe <redacted> value");
+        assert_eq!(value["metadata"]["nested"][0], "<redacted>");
+    }
+
+    #[test]
+    fn success_value_redaction_preserves_protocol_control_values() {
+        let mut value = json!({
+            "type": "text",
+            "object": "chat.completion",
+            "status": "completed",
+            "id": "text",
+            "model": "text",
+            "name": "text",
+            "text": "before text after",
+            "detail": "text"
+        });
+        redact_known_secret_values(&mut value, "text");
+
+        assert_eq!(value["type"], "text");
+        assert_eq!(value["object"], "chat.completion");
+        assert_eq!(value["status"], "completed");
+        for key in ["id", "model", "name"] {
+            assert_eq!(value[key], "<redacted>", "free-form field {key} leaked");
+        }
+        assert_eq!(value["text"], "before <redacted> after");
+        assert_eq!(value["detail"], "<redacted>");
+
+        for event_type in [
+            "response.reasoning_summary_part.added",
+            "response.output_text.done",
+            "response.reasoning_summary_text.done",
+        ] {
+            let mut event = json!({"type":event_type});
+            redact_known_secret_values(&mut event, event_type);
+            assert_eq!(event["type"], event_type);
+        }
+    }
+
+    #[test]
+    fn success_value_redaction_does_not_trust_arbitrary_control_field_text() {
+        let secret = "opaque/account+key=42";
+        let mut value = json!({
+            "type": format!("echo {secret}"),
+            "status": format!("failed: {secret}"),
+            "stop_sequence": secret,
+            "nested": {"reason": format!("provider said {secret}")}
+        });
+        redact_known_secret_values(&mut value, secret);
+
+        assert!(!value.to_string().contains(secret), "{value}");
+        assert_eq!(value["type"], "echo <redacted>");
+        assert_eq!(value["stop_sequence"], "<redacted>");
+    }
+
+    #[test]
+    fn success_value_redaction_removes_known_opaque_replays_with_the_secret() {
+        let secret = "opaque/account+key=42";
+        let anthropic = super::super::protocol::encode_anthropic_thinking_block(&json!({
+            "type":"thinking",
+            "thinking":format!("before {secret} after"),
+            "signature":"sig_123"
+        }))
+        .unwrap();
+        let chat = super::super::protocol::encode_chat_reasoning(&format!("before {secret} after"))
+            .unwrap();
+        let mut value = json!({
+            "output":[
+                {"type":"reasoning","encrypted_content":anthropic},
+                {"type":"reasoning","encrypted_content":chat}
+            ]
+        });
+        redact_known_secret_values(&mut value, secret);
+
+        assert_eq!(value["output"][0]["encrypted_content"], "");
+        assert_eq!(value["output"][1]["encrypted_content"], "");
+
+        let safe = super::super::protocol::encode_anthropic_thinking_block(&json!({
+            "type":"redacted_thinking",
+            "data":"safe"
+        }))
+        .unwrap();
+        let mut safe_value = json!({"encrypted_content":safe});
+        redact_known_secret_values(&mut safe_value, "data");
+        assert_eq!(safe_value["encrypted_content"], safe);
+    }
+
+    #[test]
+    fn success_value_redaction_parses_nested_tool_arguments() {
+        for secret in ["data", "a\"b", "a\\b"] {
+            let mut value = json!({
+                "arguments": json!({"data":"safe","type":secret,"token":secret}).to_string()
+            });
+            redact_known_secret_values(&mut value, secret);
+            let arguments: Value =
+                serde_json::from_str(value["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                arguments,
+                json!({"data":"safe","type":"<redacted>","token":"<redacted>"}),
+                "nested arguments leaked or corrupted {secret:?}"
+            );
+        }
+    }
+
+    #[test]
     fn upstream_error_redacts_common_plain_text_secret_boundaries() {
         let cases = [
             (
@@ -933,7 +1452,7 @@ mod tests {
         headers.insert("cf-ray", "ray-456".parse().unwrap());
         headers.insert("authorization", "Bearer secret".parse().unwrap());
         headers.insert("set-cookie", "session=secret".parse().unwrap());
-        let safe = safe_upstream_headers(&headers);
+        let safe = safe_upstream_headers(&headers, None);
         assert_eq!(
             safe.get("x-request-id").map(String::as_str),
             Some("provider-123")

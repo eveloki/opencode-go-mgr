@@ -1,6 +1,8 @@
 import type { Messages } from "./en-US";
+import { managedAccountEnUSMessages } from "./managed-account.ts";
 
 export const koKRMessages = {
+  ...managedAccountEnUSMessages,
   "语言：{language}": "언어: {language}",
   "取消": "취소",
   "保存": "저장",
@@ -481,7 +483,7 @@ export const koKRMessages = {
   "保存 Key": "Key 저장",
   "Key 已保存": "Key를 저장했습니다",
   "Key 保存失败: {error}": "Key 저장 실패: {error}",
-  "设置已被其他操作修改，已重新加载最新设置，你的未保存修改已被覆盖": "설정이 다른 작업에 의해 변경되어 최신 설정을 다시 불러왔습니다. 저장하지 않은 변경 사항은 덮어쓰였습니다",
+  "设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存": "설정이 다른 곳에서 변경되었습니다. 최신 설정에 로컬 변경 사항을 병합했으니 다시 저장하세요",
   "自动启动设置失败: {error}": "자동 시작 설정 실패: {error}",
   "输入新 Key": "새 Key 입력",
   "建立上游连接的初始超时（秒）": "업스트림 연결 초기 시간 초과(초)",

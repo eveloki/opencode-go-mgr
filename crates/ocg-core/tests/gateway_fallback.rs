@@ -4,6 +4,7 @@ use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
@@ -56,12 +57,32 @@ struct DelayedReply {
 }
 
 const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
+const OPAQUE_ACCOUNT_KEY: &str = "opaque/account+key=42";
+const LIMITED_BODY_WITH_ECHOED_KEY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached for opaque/account+key=42. Resets in 3 days.","detail":"opaque/account+key=42"}}"#;
+const ERROR_BODY_WITH_ECHOED_KEY: &str = r#"{"error":{"message":"provider rejected opaque/account+key=42","detail":"opaque/account+key=42"}}"#;
 const SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+const SUCCESS_BODY_WITH_ECHOED_KEY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"before opaque/account+key=42 after"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+const SUCCESS_BODY_WITH_COMMON_KEY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"before text after"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+const SUCCESS_BODY_WITH_NESTED_ARGUMENT_KEY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"run","arguments":"{\"data\":\"safe\",\"token\":\"data\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
 const RESPONSES_SUCCESS_BODY: &str = r#"{"id":"resp_ok","object":"response","status":"completed","model":"deepseek-v4-flash","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":10,"output_tokens":2,"input_tokens_details":{"cached_tokens":0}}}"#;
 const MESSAGES_SUCCESS_BODY: &str = r#"{"id":"msg-ok","type":"message","role":"assistant","model":"minimax-m2.7","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":0}}"#;
+const MESSAGES_SUCCESS_BODY_WITH_ECHOED_KEY_IN_THINKING: &str = r#"{"id":"msg-ok","type":"message","role":"assistant","model":"minimax-m2.7","content":[{"type":"thinking","thinking":"opaque/account+key=42","signature":"sig_123"},{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":0}}"#;
 const CHAT_STREAM_BODY: &str = concat!(
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
+    "data: [DONE]\n\n"
+);
+const CHAT_STREAM_WITH_UNTERMINATED_KEY_TAIL: &str = concat!(
+    "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"opaque/account+key=42\"},\"finish_reason\":\"stop\"}]}"
+);
+const CHAT_STREAM_WITH_SPLIT_ECHOED_KEY: &str = concat!(
+    "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"before opaque/account+\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"key=42 after\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
+    "data: [DONE]\n\n"
+);
+const CHAT_STREAM_WITH_COMMON_KEY: &str = concat!(
+    "data: {\"id\":\"chat-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"before text after\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
     "data: [DONE]\n\n"
 );
 const RESPONSES_STREAM_BODY: &str = concat!(
@@ -87,9 +108,6 @@ const MESSAGES_STREAM_TAIL: &str = concat!(
     "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
     "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 );
-const CHAT_BAD_REQUEST_BODY: &str =
-    r#"{"error":{"type":"invalid_request_error","message":"bad request"}}"#;
-
 fn temp_data_dir(label: &str) -> PathBuf {
     let mut dir = std::env::temp_dir();
     dir.push(format!(
@@ -337,6 +355,8 @@ fn build_state_with_routing(
             password_cipher: None,
             key_cipher: state.encrypt_key(key).unwrap(),
             enabled: true,
+            account_type: ocg_core::models::AccountType::Key,
+            setup_step: ocg_core::models::AccountSetupStep::Ready,
             referral_code: None,
             purchase_date: String::new(),
             expires_on: String::new(),
@@ -520,6 +540,20 @@ async fn protocol_stream_call(port: u16, path: &str, model: &str) -> (StatusCode
     (status, body)
 }
 
+fn chat_stream_text(body: &str) -> String {
+    body.split("\n\n")
+        .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .filter_map(|value| {
+            value
+                .pointer("/choices/0/delta/content")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn model_discovery_does_not_create_inference_logs() {
     let replies = HashMap::from([(
@@ -555,6 +589,31 @@ async fn model_discovery_does_not_create_inference_logs() {
         .unwrap();
     assert!(logs.items.is_empty());
     assert_eq!(logs.summary.total_requests, 0);
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn model_discovery_redacts_success_values_without_changing_json_keys() {
+    let replies = HashMap::from([(
+        "data".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: r#"{"object":"list","data":[{"id":"metadata"},{"echo":"data"}]}"#,
+        }]),
+    )]);
+    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["data"]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(body.get("data").is_some(), "schema key was changed: {body}");
+    assert_eq!(body["data"][1]["echo"], "<redacted>");
+    assert_eq!(body["data"][0]["id"], "meta<redacted>");
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -606,10 +665,10 @@ async fn model_discovery_keeps_rate_limit_cooldown_without_logging() {
 async fn model_discovery_falls_back_once_for_429() {
     let replies = HashMap::from([
         (
-            "key-1".to_string(),
+            OPAQUE_ACCOUNT_KEY.to_string(),
             VecDeque::from([MockReply {
                 status: 429,
-                body: LIMITED_BODY,
+                body: LIMITED_BODY_WITH_ECHOED_KEY,
             }]),
         ),
         (
@@ -621,8 +680,8 @@ async fn model_discovery_falls_back_once_for_429() {
         ),
     ]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
-    let (port, gateway_handle) = start_gateway(state).await;
+    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY, "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, body) = models(port).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -633,7 +692,37 @@ async fn model_discovery_falls_back_once_for_429() {
             .iter()
             .map(|call| call.key.as_str())
             .collect::<Vec<_>>(),
-        ["key-1", "key-2"]
+        [OPAQUE_ACCOUNT_KEY, "key-2"]
+    );
+    let stored = state.db.lock().get_account("acct-1").unwrap().unwrap();
+    let last_error = stored
+        .last_error
+        .expect("429 should persist a sanitized error");
+    assert!(!last_error.contains(OPAQUE_ACCOUNT_KEY));
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn model_discovery_error_response_never_echoes_the_selected_account_key() {
+    let replies = HashMap::from([(
+        OPAQUE_ACCOUNT_KEY.to_string(),
+        VecDeque::from([MockReply {
+            status: 500,
+            body: ERROR_BODY_WITH_ECHOED_KEY,
+        }]),
+    )]);
+    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        !body.contains(OPAQUE_ACCOUNT_KEY),
+        "response leaked key: {body}"
     );
 
     gateway::stop_gateway(gateway_handle);
@@ -1174,6 +1263,205 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
 }
 
 #[tokio::test]
+async fn successful_inference_never_echoes_the_selected_account_key() {
+    for client_path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        let replies = HashMap::from([(
+            OPAQUE_ACCOUNT_KEY.to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY_WITH_ECHOED_KEY,
+            }]),
+        )]);
+        let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+        let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
+        let (port, gateway_handle) = start_gateway(state).await;
+
+        let (status, response) = protocol_call(port, client_path, "deepseek-v4-flash").await;
+        assert_eq!(status, StatusCode::OK, "{client_path}: {response}");
+        assert!(
+            !response.to_string().contains(OPAQUE_ACCOUNT_KEY),
+            "{client_path} leaked the selected account Key: {response}"
+        );
+
+        gateway::stop_gateway(gateway_handle);
+        let _ = stop_mock.send(());
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn common_short_key_redaction_preserves_non_stream_protocol_discriminators() {
+    for client_path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        let replies = HashMap::from([(
+            "text".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY_WITH_COMMON_KEY,
+            }]),
+        )]);
+        let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+        let (state, dir) = build_state(base_url, &["text"]);
+        let (port, gateway_handle) = start_gateway(state).await;
+
+        let (status, response) = protocol_call(port, client_path, "deepseek-v4-flash").await;
+        assert_eq!(status, StatusCode::OK, "{client_path}: {response}");
+        let content = match client_path {
+            "/v1/chat/completions" => {
+                assert_eq!(response["object"], "chat.completion");
+                response["choices"][0]["message"]["content"].as_str()
+            }
+            "/v1/responses" => {
+                assert_eq!(response["object"], "response");
+                assert_eq!(response["output"][0]["type"], "message");
+                assert_eq!(response["output"][0]["content"][0]["type"], "output_text");
+                response["output"][0]["content"][0]["text"].as_str()
+            }
+            "/v1/messages" => {
+                assert_eq!(response["type"], "message");
+                assert_eq!(response["content"][0]["type"], "text");
+                response["content"][0]["text"].as_str()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(content, Some("before <redacted> after"), "{response}");
+
+        gateway::stop_gateway(gateway_handle);
+        let _ = stop_mock.send(());
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn non_stream_tool_argument_redaction_preserves_nested_json_keys() {
+    let replies = HashMap::from([(
+        "data".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY_WITH_NESTED_ARGUMENT_KEY,
+        }]),
+    )]);
+    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["data"]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, response) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash").await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let arguments = response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(arguments).unwrap(),
+        serde_json::json!({"data":"safe","token":"<redacted>"})
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn successful_conversion_redacts_a_key_before_opaque_reasoning_replay_encoding() {
+    let replies = HashMap::from([(
+        OPAQUE_ACCOUNT_KEY.to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: MESSAGES_SUCCESS_BODY_WITH_ECHOED_KEY_IN_THINKING,
+        }]),
+    )]);
+    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, response) = protocol_call(port, "/v1/responses", "minimax-m2.7").await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let encrypted = response["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .and_then(|item| item["encrypted_content"].as_str())
+        .expect("converted response should retain a safe reasoning replay block");
+    let encoded = encrypted
+        .strip_prefix("ocg-anthropic-thinking-v1:")
+        .expect("reasoning replay should use the Anthropic envelope");
+    let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
+    assert!(
+        !decoded.contains(OPAQUE_ACCOUNT_KEY),
+        "opaque replay leaked the selected account Key: {decoded}"
+    );
+    assert!(decoded.contains("<redacted>"), "{decoded}");
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn streamed_inference_redacts_a_selected_key_split_across_events() {
+    for client_path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        let replies = HashMap::from([(
+            OPAQUE_ACCOUNT_KEY.to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: CHAT_STREAM_WITH_SPLIT_ECHOED_KEY,
+            }]),
+        )]);
+        let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+        let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
+        let (port, gateway_handle) = start_gateway(state).await;
+
+        let (status, body) = protocol_stream_call(port, client_path, "deepseek-v4-flash").await;
+        assert_eq!(status, StatusCode::OK, "{client_path}: {body}");
+        assert!(
+            !body.contains(OPAQUE_ACCOUNT_KEY),
+            "{client_path} leaked a split selected account Key: {body}"
+        );
+        assert!(body.contains("before "), "{client_path}: {body}");
+        assert!(body.contains(" after"), "{client_path}: {body}");
+
+        gateway::stop_gateway(gateway_handle);
+        let _ = stop_mock.send(());
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn common_short_key_redaction_preserves_stream_protocol_discriminators() {
+    for client_path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        let replies = HashMap::from([(
+            "text".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: CHAT_STREAM_WITH_COMMON_KEY,
+            }]),
+        )]);
+        let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+        let (state, dir) = build_state(base_url, &["text"]);
+        let (port, gateway_handle) = start_gateway(state).await;
+
+        let (status, body) = protocol_stream_call(port, client_path, "deepseek-v4-flash").await;
+        assert_eq!(status, StatusCode::OK, "{client_path}: {body}");
+        assert!(!body.contains("before text after"), "{client_path}: {body}");
+        assert!(body.contains("before "), "{client_path}: {body}");
+        assert!(body.contains(" after"), "{client_path}: {body}");
+        match client_path {
+            "/v1/chat/completions" => {
+                assert!(body.contains("chat.completion.chunk"), "{body}")
+            }
+            "/v1/responses" => {
+                assert!(body.contains("response.output_text.delta"), "{body}")
+            }
+            "/v1/messages" => assert!(body.contains("text_delta"), "{body}"),
+            _ => unreachable!(),
+        }
+
+        gateway::stop_gateway(gateway_handle);
+        let _ = stop_mock.send(());
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
 async fn inference_skips_accounts_with_unusable_stored_credentials() {
     struct Case {
         client_path: &'static str,
@@ -1318,7 +1606,7 @@ async fn converts_streams_across_chat_messages_and_responses() {
             model: "minimax-m2.7",
             upstream_path: "/v1/chat/completions",
             upstream_body: CHAT_STREAM_BODY,
-            expected_events: &["\"content\":\"ok\"", "finish_reason", "data: [DONE]"],
+            expected_events: &["finish_reason", "data: [DONE]"],
         },
         Case {
             client_path: "/v1/responses",
@@ -1354,6 +1642,9 @@ async fn converts_streams_across_chat_messages_and_responses() {
                 case.client_path,
                 case.model
             );
+        }
+        if case.client_path == "/v1/chat/completions" {
+            assert_eq!(chat_stream_text(&body), "ok", "{body}");
         }
         assert_eq!(calls.lock().unwrap()[0].path, case.upstream_path);
         let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
@@ -1662,7 +1953,7 @@ async fn stream_ending_before_downstream_output_retries_same_account_once() {
     .await
     .expect("the zero-output retry should complete before the watchdog");
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("\"content\":\"ok\""), "{body}");
+    assert_eq!(chat_stream_text(&body), "ok", "{body}");
     assert!(!body.contains("upstream_outcome_unknown"), "{body}");
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 
@@ -2024,10 +2315,10 @@ async fn manual_order_drives_fallback_while_ineligible_accounts_are_skipped() {
 async fn converted_request_error_uses_callers_envelope_without_fallback() {
     let replies = HashMap::from([
         (
-            "key-1".to_string(),
+            OPAQUE_ACCOUNT_KEY.to_string(),
             VecDeque::from([MockReply {
                 status: 400,
-                body: CHAT_BAD_REQUEST_BODY,
+                body: ERROR_BODY_WITH_ECHOED_KEY,
             }]),
         ),
         (
@@ -2039,15 +2330,48 @@ async fn converted_request_error_uses_callers_envelope_without_fallback() {
         ),
     ]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
-    let (port, gateway_handle) = start_gateway(state).await;
+    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY, "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, body) = protocol_call(port, "/v1/messages", "deepseek-v4-flash").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["type"], "error");
-    assert_eq!(body["error"]["type"], "invalid_request_error");
-    assert_eq!(body["error"]["message"], "bad request");
+    assert!(!body.to_string().contains(OPAQUE_ACCOUNT_KEY));
     assert_eq!(calls.lock().unwrap().len(), 1);
+
+    let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
+    let persisted = format!("{:?}{:?}", log.error_message, log.diagnostic);
+    assert!(
+        !persisted.contains(OPAQUE_ACCOUNT_KEY),
+        "forward log leaked key: {persisted}"
+    );
+    assert!(log.diagnostic.is_some());
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn unterminated_stream_tail_never_echoes_the_selected_account_key() {
+    let replies = HashMap::from([(
+        OPAQUE_ACCOUNT_KEY.to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: CHAT_STREAM_WITH_UNTERMINATED_KEY_TAIL,
+        }]),
+    )]);
+    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) =
+        protocol_stream_call(port, "/v1/chat/completions", "deepseek-v4-flash").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains(OPAQUE_ACCOUNT_KEY),
+        "stream leaked key: {body}"
+    );
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -2405,11 +2729,11 @@ async fn all_limited_accounts_return_429_with_soonest_reset() {
 #[tokio::test]
 async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
     let replies = HashMap::from([(
-        "key-1".to_string(),
+        OPAQUE_ACCOUNT_KEY.to_string(),
         VecDeque::from([
             MockReply {
                 status: 401,
-                body: r#"{"error":{"message":"expired key","api_key":"secret-value"}}"#,
+                body: ERROR_BODY_WITH_ECHOED_KEY,
             },
             MockReply {
                 status: 200,
@@ -2418,7 +2742,7 @@ async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
         ]),
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
     let endpoint = format!(
         "http://127.0.0.1:{}/dashboard/api/accounts/acct-1/test",
@@ -2427,6 +2751,11 @@ async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
 
     let first = reqwest::Client::new().post(&endpoint).send().await.unwrap();
     assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+    let first_body = first.text().await.unwrap();
+    assert!(
+        !first_body.contains(OPAQUE_ACCOUNT_KEY),
+        "dashboard ping error leaked key: {first_body}"
+    );
     let auth_error = state
         .db
         .lock()
@@ -2436,7 +2765,7 @@ async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
         .auth_error
         .expect("401 should persist an auth error");
     assert!(auth_error.contains("401"));
-    assert!(!auth_error.contains("secret-value"));
+    assert!(!auth_error.contains(OPAQUE_ACCOUNT_KEY));
 
     let second = reqwest::Client::new().post(&endpoint).send().await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
@@ -2450,7 +2779,9 @@ async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
             .auth_error
             .is_none()
     );
-    assert_eq!(calls.lock().unwrap().len(), 2);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| call.key == OPAQUE_ACCOUNT_KEY));
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());

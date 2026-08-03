@@ -15,7 +15,7 @@ use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::state::CoreStateInner;
 use parking_lot::Mutex;
-use state::GuiState;
+use state::{BrowserProcessState, GuiState};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
@@ -57,6 +57,61 @@ pub fn run() {
         }
     }
 
+    let browser_processes = Arc::new(Mutex::new(BrowserProcessState::default()));
+    match commands::browser::native_browser_name() {
+        Ok(browser_name) => {
+            let launcher_data_dir = core_state.data_dir();
+            let launcher_processes = browser_processes.clone();
+            let launcher: ocg_core::browser::NativeBrowserLauncher =
+                Arc::new(move |account_id, url| {
+                    commands::browser::open_external_browser(
+                        launcher_data_dir.clone(),
+                        launcher_processes.clone(),
+                        account_id,
+                        url,
+                    )
+                    .map(|_| ())
+                    .map_err(anyhow::Error::msg)
+                });
+            let stopper_processes = browser_processes.clone();
+            let stopper_data_dir = core_state.data_dir();
+            let stopper: ocg_core::browser::NativeBrowserStopper = Arc::new(move |account_id| {
+                commands::browser::stop_external_browser(
+                    &stopper_processes,
+                    account_id,
+                    Some(&stopper_data_dir),
+                )
+                .map_err(anyhow::Error::msg)
+            });
+            if let Err(error) = core_state.browser.register_native_hooks(launcher, stopper) {
+                let _ = core_state.db.lock().log_gateway(
+                    "warn",
+                    "browser",
+                    &format!("failed to register native browser hooks: {error}"),
+                );
+            } else {
+                let _ = core_state.db.lock().log_gateway(
+                    "info",
+                    "browser",
+                    &format!("native browser available: {browser_name}"),
+                );
+            }
+        }
+        Err(reason) => {
+            if let Err(error) = core_state
+                .browser
+                .register_native_unavailable_reason(reason.clone())
+            {
+                let _ = core_state.db.lock().log_gateway(
+                    "warn",
+                    "browser",
+                    &format!("failed to register native browser availability: {error}"),
+                );
+            }
+            let _ = core_state.db.lock().log_gateway("warn", "browser", &reason);
+        }
+    }
+
     // Start gateway on startup
     let config = core_state.config();
     let gateway_state = core_state.clone();
@@ -86,7 +141,7 @@ pub fn run() {
 
     let gui_state = Arc::new(GuiState {
         core: core_state.clone(),
-        current_browser_window: Mutex::new(None),
+        browser_processes,
     });
 
     let app_state = gui_state.clone();
@@ -155,11 +210,17 @@ pub fn run() {
             commands::dashboard::get_daily_cost_by_model,
             commands::browser::open_browser,
             commands::browser::close_browser,
+            commands::browser::close_account_browser,
+            commands::browser::reset_browser_profile,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(move |_app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                let _ = commands::browser::close_all_browser_processes(
+                    &app_state.browser_processes,
+                    Some(&core_state.data_dir()),
+                );
                 if let Some(handle) = core_state.gateway.lock().take() {
                     gateway::stop_gateway(handle);
                 }

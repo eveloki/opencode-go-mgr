@@ -142,7 +142,7 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
   const header = source.slice(
     source.indexOf("<template #header>"),
-    source.indexOf('<div v-if="!quotaLimitsError'),
+    source.indexOf('<div v-if="!accountIsReady(account)"'),
   );
   const usageStart = source.indexOf('class="usage-strip-body" role="group"');
   const usage = source.slice(
@@ -151,8 +151,8 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   );
 
   assert.ok(header.indexOf("accountStatusLabel(account)") < header.indexOf('t("购买于 {date}"'));
-  assert.match(header, /<n-tag size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
-  assert.match(header, /<n-tag size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
+  assert.match(header, /<n-tag v-if="accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
+  assert.match(header, /<n-tag v-if="accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
   assert.match(header, /<n-popover[\s\S]*?trigger="click"[\s\S]*?placement="bottom-end"[\s\S]*?:width="320"[\s\S]*?@update:show="\(show: boolean\) => show && focusUsageEditor\(account\.id\)"[\s\S]*?class="usage-editor-popover"/);
   assert.doesNotMatch(header, /:flip="false"/);
   assert.ok(header.indexOf("@update:value=\"toggleAccount(account.id)\"") < header.indexOf("<n-popover"));

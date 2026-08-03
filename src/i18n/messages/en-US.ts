@@ -1,4 +1,7 @@
+import { managedAccountEnUSMessages } from "./managed-account.ts";
+
 export const enUSMessages = {
+  ...managedAccountEnUSMessages,
   "语言：{language}": "Language: {language}",
   "取消": "Cancel",
   "保存": "Save",
@@ -479,7 +482,7 @@ export const enUSMessages = {
   "保存 Key": "Save Key",
   "Key 已保存": "Key saved",
   "Key 保存失败: {error}": "Failed to save Key: {error}",
-  "设置已被其他操作修改，已重新加载最新设置，你的未保存修改已被覆盖": "Settings were changed elsewhere and reloaded; your unsaved edits were overwritten.",
+  "设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存": "Settings changed elsewhere. The latest settings were merged with your local edits; save again to apply them.",
   "自动启动设置失败: {error}": "Failed to update auto-start: {error}",
   "输入新 Key": "Enter new Key",
   "建立上游连接的初始超时（秒）": "Initial timeout for establishing the upstream connection (seconds)",

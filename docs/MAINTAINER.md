@@ -28,7 +28,9 @@ matrix, the CI flow, and the things that are explicitly out of scope.
 ocg-manager/
 ├── crates/
 │   ├── ocg-core/      Gateway, dashboard HTTP API, SQLite, models, crypto, selector, cooldown, pricing
-│   └── ocg-cli/       Headless CLI and gateway entrypoint
+│   ├── ocg-cli/       Headless CLI and gateway entrypoint
+│   └── ocg-browser-worker/  Linux Chromium sidecar control service
+├── browser/           Xvfb, Openbox, x11vnc, and noVNC startup script
 ├── src/               Vue 3 dashboard (TypeScript, naive-ui, Vite)
 │   ├── App.vue        Top-level shell, auth page, side rail, header
 │   ├── api/tauri.ts   Historical name; HTTP wrapper for /dashboard/api (not Tauri invoke)
@@ -43,6 +45,7 @@ ocg-manager/
 ├── DESIGN.md          Design system source of truth (linted in CI)
 ├── .github/workflows/ quality.yml, release.yml, container.yml
 ├── Dockerfile         Multi-stage headless gateway image
+├── Dockerfile.browser Chromium/noVNC sidecar image
 ├── compose.yaml       Source-build and image Compose service definition
 └── compose.example.yaml  Pull-only Compose example attached to each Release
 ```
@@ -120,6 +123,7 @@ For focused work:
 ```bash
 cargo test -p ocg-core
 cargo test -p ocg-manager-cli
+cargo test -p ocg-browser-worker
 cargo test -p ocg-core gemini
 cargo test -p ocg-core claude_desktop
 ```
@@ -236,6 +240,54 @@ difference, and the Claude Desktop three-role persistence behavior.
   not change gateway settings. The Pricing view reads and refreshes the active
   OpenCode Go snapshot through the protected pricing API.
 
+### Account Lifecycle And Browser Runtime
+
+- Schema v16 adds `account_type` (`key | managed`) and `setup_step`
+  (`google_account → opencode_registration → payment → key_verification → ready`).
+  Existing rows migrate to `key + ready`. A managed draft is persisted
+  immediately with an empty key and `enabled=false`; the selector, enable
+  endpoint, and request path must all require both `ready` and a non-empty
+  key.
+- `opencode_invite_url` accepts only a credential-free HTTPS URL up to 2,048
+  characters whose host is exactly `opencode.ai` or `console.opencode.ai`.
+  Onboarding never scrapes pages: Google registration and challenges,
+  OpenCode registration, and payment remain manual, and the user copies the
+  key back into the dashboard.
+- Managed steps advance only in order. A real key probe returning `2xx`
+  transitions to `ready + enabled`; `429` also proves validity and records
+  cooldown. `401`/`403`, network errors, and `5xx` remain at
+  `key_verification`. APIs, DTOs, and logs must never return plaintext keys.
+- Protected lifecycle endpoints are `POST /accounts/managed`,
+  `PATCH /accounts/{id}/setup`, and
+  `POST /accounts/{id}/setup/verify-key`. Browser endpoints are
+  `GET /browser/capabilities`, `POST /accounts/{id}/browser`,
+  `DELETE /accounts/{id}/browser-profile`, and
+  `/browser/sessions/{token}/ws`, all below `/dashboard/api`. Targets are
+  limited to Google signup, the configured invite, and the OpenCode console.
+  Remote tokens are memory-only, administrator-session-bound, and
+  Origin-checked; they expire after 30 minutes idle or four hours total.
+- Tauri registers native launch/stop hooks, while Vue still calls the HTTP
+  API. Windows discovers Edge then Chrome; macOS checks Chrome, Edge, and
+  Chromium; Linux searches `PATH` for Chrome/Chromium/Edge. The external
+  browser uses `browser-profiles/<account_id>`, `--no-first-run`,
+  `--no-default-browser-check`, and a new window. Never add CDP, automation,
+  `--no-sandbox`, or disabled web security.
+- `crates/ocg-browser-worker` keeps one Chromium per node. An account switch
+  sends SIGTERM to the current process group and waits for profile flush,
+  forcing termination only after the bounded timeout. The sidecar runs as
+  UID/GID 10001 with a read-only root and no capabilities; a shared runtime
+  volume holds a random control token. Chromium must create its own user/PID/
+  network namespaces and renderer seccomp sandbox, so the browser service uses
+  `seccomp=unconfined` and cannot use `no-new-privileges`. It still does not
+  mount SQLite or publish a host port. The project-scoped browser bridge is not
+  Docker `internal`, because Chromium needs outbound HTTPS to Google/OpenCode.
+- Profile deletion must stop the browser, validate account IDs against path
+  traversal, and atomically rename both new and legacy profiles into staging.
+  Purge only after the database operation commits; restore staging on
+  failure. Reset keeps a completed account's key, while a pending managed
+  account also returns to `google_account`. Delete confirmations must state
+  that cookies/profile are removed.
+
 ### Persistence
 
 - `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
@@ -249,6 +301,11 @@ difference, and the Claude Desktop three-role persistence behavior.
   `minimax-m3` and is canonically rewritten to SQLite. Model updates are
   serialized by `settings_update`; an ordinary settings save preserves the
   dedicated Claude Desktop mapping.
+- Docker stores SQLite, keys, and `.encryption-key` in `ocg-data`, while
+  long-lived cookies and browser state live in `ocg-browser-profiles`. Stop
+  and back up these two sensitive persistent volumes together.
+  `ocg-browser-runtime` contains only the runtime control token and should not
+  be backed up. OCG Manager does not encrypt browser profiles.
 
 ### Per-Node Boundaries
 
@@ -258,8 +315,9 @@ There is no cross-node sync and no Admin API. Do not add one.
 ## Upgrades And Database Migrations
 
 SQLite migrations run in place when the GUI or CLI starts. Back up the
-complete data directory before upgrading, including the database and
-`.encryption-key` when present; stop the process first for a direct/manual
+complete data directory before upgrading, including the database,
+`.encryption-key` when present, and `browser-profiles/`; for Docker, back up
+both `ocg-data` and `ocg-browser-profiles`. Stop the process first for a direct/manual
 upgrade. The signed desktop updater manages its own stop and restart.
 Downgrades are not guaranteed; to roll back, restore the data backup made by
 the matching older version instead of opening a migrated database with an
@@ -327,7 +385,7 @@ signatures, the pull-only Compose example, `latest.json`, and `SHA256SUMS`
 `scripts/release.mjs` does the heavy lifting:
 
 1. Validates that `package.json`, `src-tauri/tauri.conf.json`, the workspace
-   `Cargo.toml`, `src-tauri/Cargo.toml`, and both versioned fields in
+   `Cargo.toml`, `src-tauri/Cargo.toml`, and all three versioned fields in
    `compose.example.yaml` all agree. It also checks the Git tag, if any,
    against that version.
 2. Resolves the updater signing mode before creating the staging tree. With
@@ -454,6 +512,19 @@ ID downstream; verification and publication re-check that exact ID, tag, and
 draft state instead of using the tag lookup endpoint, which does not expose
 draft Releases.
 
+SemVer prerelease tags such as `v1.5.8-beta.1` use this same real signed tag
+path and the same exact 15 immutable attachments. Their updater manifest keeps
+the full prerelease identifier in payload names and download URLs, and the
+Windows packaged smoke accepts that same prerelease `CandidateVersion`.
+Generated notes begin with a prominent Beta warning for managed account
+registration and isolated browser profiles. The warning names the still
+unverified real Google/OpenCode signup/payment, noVNC keyboard/clipboard, and
+live GHCR first-publication paths, states that gateway/redaction/release
+changes are also included, and says the preview is not production-ready.
+Automatic notes for a later stable tag skip same-version prerelease tags as
+their baseline, preserving the complete feature scope since the prior stable
+release.
+
 ### publish-release — publish only the verified tag build
 
 The `v*` tag push is the single maintainer's explicit release authorization.
@@ -469,6 +540,9 @@ The publication job is serialized in the repository-wide
 the candidate with the current GitHub latest release and advances `latest`
 only for a strictly newer stable SemVer. A delayed older run can therefore
 publish its immutable release without rolling the moving latest channel back.
+For a prerelease tag, the workflow marks both draft and public Release as
+`prerelease=true`, forces `make_latest=false`, and never calls the stable-only
+latest-channel comparison. Stable tag behavior is unchanged.
 
 ### Updater signing key
 
@@ -513,16 +587,43 @@ clients cannot trust a release signed only by the replacement key.
 ### container.yml — the image pipeline
 
 Publishing the GitHub Release triggers `.github/workflows/container.yml`.
-That workflow checks out the release tag, builds and smoke-tests the hardened
-`linux/amd64` container, pushes the verified result by digest without
-assigning a mutable name, and then enters a repository-wide serialized tag
-queue. It creates `X.Y.Z` and `sha-<12-character-commit>` only when absent,
-accepts an existing tag only when it already has the exact candidate digest,
-and fails on any mismatch. Stable `X.Y` and opted-in `latest` move only when
-the candidate SemVer is newer than the version label currently on that
-channel. The workflow also records an SPDX SBOM, BuildKit SLSA provenance,
-and GitHub signed provenance. `X.Y.Z` and `sha-*` are release-specific
-immutable tags; `X.Y` and `latest` are monotonic moving channels.
+It checks out the release tag and builds and smokes two `linux/amd64` images:
+the main `ghcr.io/klarkxy/opencode-go-mgr` service and the
+`ghcr.io/klarkxy/opencode-go-mgr-browser` sidecar. The main smoke covers the
+dashboard, authentication, and license. The browser smoke starts Xvfb/noVNC
+under a read-only root, zero capabilities, Chromium-compatible seccomp
+configuration, and no host-published port, then uses the token-protected
+control API to launch a real ordinary Chromium process with a persistent
+profile.
+
+Both verified results are pushed by digest without assigning a mutable name,
+then enter the repository-wide serialized tag queue. `X.Y.Z` and
+`sha-<12-character-commit>` are created only when absent; an existing tag is
+accepted only when its image's exact candidate digest already matches.
+Stable `X.Y` and opted-in `latest` are decided as a pair: the workflow either
+converges both image channels at the candidate or retains an already aligned
+newer pair; it fails rather than silently retaining a split channel. Each
+image records an SPDX SBOM, BuildKit SLSA provenance, and GitHub signed
+provenance. `X.Y.Z` and `sha-*` are release-specific immutable tags; `X.Y`
+and `latest` are monotonic moving channels. The browser image is a GHCR
+package, not a GitHub Release asset, so the native release remains exactly 15
+attachments.
+
+Package visibility is managed separately from the linked repository, so the
+workflow cannot rely on its repository token to make a package public. A new
+browser package does not exist until its first digest is pushed. Consequently,
+the first `container.yml` run that creates that package is expected to stop at
+the anonymous-pull gate while the package still has GitHub's default private
+visibility. This is the only bootstrap exception: set the new browser package
+to **Public** (and confirm the main package is also Public), then manually rerun
+`container.yml` for the same tag. Immutable-tag replay is accepted only at the
+same digests, so the rerun completes the original publication without replacing
+artifacts. Do not treat the container distribution as complete until that rerun
+is green. Every later release must pass the anonymous gate on its first run.
+
+After tag publication the gate uses an empty Docker credential directory to
+pull both exact-version tags. A private or inaccessible package therefore fails
+`container.yml` instead of appearing as a successful public Compose dependency.
 
 A manual dispatch can backfill an existing release tag and must opt in before
 updating `latest`. The checkout uses the exact `refs/tags/<tag>` ref,
@@ -540,12 +641,17 @@ GitHub attestation. Constrain verification to this signer workflow:
 
 ```bash
 docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:X.Y.Z
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:X.Y.Z
 docker buildx imagetools inspect --raw \
   ghcr.io/klarkxy/opencode-go-mgr@sha256:<digest>
 docker buildx imagetools inspect --format '{{json .SBOM}}' \
   ghcr.io/klarkxy/opencode-go-mgr@sha256:<digest> > sbom.json
 gh attestation verify \
   oci://ghcr.io/klarkxy/opencode-go-mgr@sha256:<digest> \
+  --repo klarkxy/opencode-go-mgr \
+  --signer-workflow klarkxy/opencode-go-mgr/.github/workflows/container.yml
+gh attestation verify \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser@sha256:<browser-digest> \
   --repo klarkxy/opencode-go-mgr \
   --signer-workflow klarkxy/opencode-go-mgr/.github/workflows/container.yml
 ```
@@ -576,16 +682,20 @@ database downgrade, migration rollback, an upstream account, or a real
 gateway request. Rust tests cover Gemini/Claude Desktop routing,
 authentication, alias rewriting, non-stream conversion, and SSE event shapes,
 but they cannot prove that new versions of third-party clients still accept
-the generated configuration. The container smoke checks TCP health, dashboard
-HTML, auth status, the bundled license, and a protected settings request
-returning `401`. Run the relevant checks manually when changing uncovered
-paths.
+the generated configuration. The main container smoke checks TCP health,
+dashboard HTML, auth status, the bundled license, and a protected settings
+request returning `401`. The browser smoke launches real Chromium and
+verifies its profile and absence of public ports, but it does not log in to
+Google/OpenCode, operate noVNC keyboard/clipboard, or make a real payment.
+Google data-center-IP risk, desktop browser discovery, cookie persistence
+across restarts, and remote account switching remain manual checks.
 
 ## Release Procedure
 
-1. Choose `X.Y.Z` and set it in `package.json`, `src-tauri/tauri.conf.json`,
+1. Choose `X.Y.Z` (or an immutable SemVer prerelease such as
+   `X.Y.Z-beta.N`) and set it in `package.json`, `src-tauri/tauri.conf.json`,
    the workspace `Cargo.toml`, `src-tauri/Cargo.toml`, and the header plus
-   default image in `compose.example.yaml`.
+   default main and browser images in `compose.example.yaml`.
 2. Run `cargo check --workspace --all-targets` to refresh `Cargo.lock`, then
    run `pnpm install --frozen-lockfile`, `cargo fmt --all -- --check`,
    `pnpm run test`, `pnpm run design:lint`, `pnpm run release:check`, and
@@ -595,7 +705,8 @@ paths.
    current-platform `release/` payloads, then commit the version, lockfile,
    documentation, and release-note changes.
 4. Merge the reviewed change first. On the final commit already on `main`,
-   create an annotated tag with `git tag -a vX.Y.Z -m "OCG Manager vX.Y.Z"`,
+   create an annotated tag with `git tag -a vX.Y.Z -m "OCG Manager vX.Y.Z"`
+   (preserving the prerelease suffix when applicable),
    then push the tag. Never tag a branch commit that will later be
    squash-merged.
 5. Wait for `quality`, `preflight`, every native matrix job, `draft-release`,
@@ -603,8 +714,8 @@ paths.
    converted the same verified draft, then review the exact 15 attachments,
    smoke logs, platform warnings, and notes generated from the previous-tag
    diff.
-6. Wait for `container.yml`, verify the GHCR package is public, inspect its
-   version and digest, and anonymously pull the full-version tag.
+6. Wait for `container.yml`, verify both GHCR packages are public, inspect
+   each version and digest, and anonymously pull both full-version tags.
 
 Treat published assets and tags as immutable. If a published payload is
 wrong, ship a new patch version; do not replace the asset or retarget the
@@ -620,7 +731,7 @@ most of them; the manual parts need a real desktop.
       `pnpm run build` and platform smoke is green.
 - [ ] `git diff --check` is clean, the previous-tag diff contains only the
       intended release scope, and all four code version manifests,
-      `compose.example.yaml`, plus the three local Cargo lock entries agree.
+      `compose.example.yaml`, plus the four local Cargo lock entries agree.
 - [ ] Each runner's `release/SHA256SUMS` matches every payload in that
       directory; `verify-release` accepted the exact 15 attachments, updater
       manifest, four signatures, checksums, and GitHub server digests.
@@ -647,6 +758,20 @@ most of them; the manual parts need a real desktop.
       and selectable. Spot-check that copied results contain no masked key,
       and actually launch Claude Desktop and Gemini CLI once each for a text
       and a tool call.
+- [ ] Cover schema v16 migration, legacy `key + ready`, ordered managed
+      transitions, pending-route isolation, the invite URL allowlist, and the
+      `2xx`/`429`/`401`/`403`/network/`5xx` key-verification branches. Confirm
+      that no DTO or log contains a plaintext key.
+- [ ] Verify Edge/Chrome priority on Windows and browser discovery on
+      macOS/Linux. With two accounts, prove profile isolation and cookie
+      persistence across restart. Reset must sign out but keep a completed
+      key; delete must clean new and legacy profiles; legacy WebView profiles
+      must not be imported.
+- [ ] Manually complete Google → invite URL → OpenCode login → payment review
+      page → key paste. A tester performs real payment only when explicitly
+      intended. Log in once for a legacy key account and verify later access
+      to authoritative quota and referral use. Cover desktop and Docker
+      sidecar paths.
 - [ ] On Windows, run the installer once, confirm SmartScreen warning text,
       open the dashboard, add an account, send one request.
 - [ ] On macOS, mount the DMG, confirm the **Open Anyway** flow works, open
@@ -658,15 +783,19 @@ most of them; the manual parts need a real desktop.
       value and that the value is removed on uninstall.
 - [ ] Confirm `scripts/release.mjs` reported a successful atomic replacement
       of `release/` and that the previous `release/` is gone.
-- [ ] Build the container locally and confirm UID/GID `10001`, bundled
+- [ ] Build both containers locally and confirm UID/GID `10001`, bundled
       `LICENSE`, read-only/capability hardening, dashboard authentication,
-      and backup/restore ownership on an isolated volume.
+      and backup/restore ownership on isolated volumes. Run
+      `docker compose --profile browser up -d` and verify one Chromium,
+      noVNC keyboard/clipboard, account switching, sidecar restart, 1 GiB
+      shm, no public port, and two-volume backup/restore.
 - [ ] Review the intended GitHub Release notes and the unsigned/ad-hoc
       warnings before pushing the tag; after publication, confirm the same
       notes and exact verified asset set are public.
 - [ ] After publishing, confirm `container.yml` passed and anonymously pull
-      `ghcr.io/klarkxy/opencode-go-mgr:<version>` by the expected digest;
-      then verify the signer workflow, SBOM, and SLSA provenance.
+      the main image and `ghcr.io/klarkxy/opencode-go-mgr-browser:<version>`
+      by their expected digests; verify each signer workflow, SBOM, and SLSA
+      provenance, while the GitHub Release remains exactly 15 attachments.
 
 ## Known Debt
 
@@ -680,8 +809,10 @@ most of them; the manual parts need a real desktop.
   them unless the Tauri config actually changed.
 - Streaming cost is exact only when upstream emits usage chunks. Without one,
   the row ends as `success_no_usage`.
-- The HTTP dashboard does not expose the older isolated WebView browser
-  command. The Tauri command layer still has it.
+- Legacy `profiles/<account_id>` WebView profiles are not migrated to
+  external Chromium, so users sign in again after upgrading. The old path is
+  retained only for safe reset/delete cleanup; never attempt cross-engine
+  reuse.
 - The Responses endpoint is stateless. `previous_response_id`, `conversation`,
   `store: true`, and `background: true` return `400` rather than being
   silently ignored. This is intentional — see `protocol.rs` and the User

@@ -34,14 +34,15 @@ FROM debian:bookworm-slim
 RUN groupadd --gid 10001 ocg \
     && useradd --uid 10001 --gid 10001 --no-create-home \
       --home-dir /nonexistent --shell /usr/sbin/nologin ocg \
-    && install -d -o ocg -g ocg /data
+    && install -d -m 0700 -o ocg -g ocg \
+      /data /browser-profiles /run/ocg-browser
 
 COPY --from=cli /ocg-manager-cli /usr/local/bin/ocg-manager-cli
 COPY --from=web /src/dist /opt/ocg-manager/dist
 COPY LICENSE /usr/share/licenses/ocg-manager/LICENSE
 
 USER ocg
-VOLUME ["/data"]
+VOLUME ["/data", "/browser-profiles", "/run/ocg-browser"]
 EXPOSE 9042
 STOPSIGNAL SIGINT
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

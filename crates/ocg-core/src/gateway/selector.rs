@@ -24,6 +24,8 @@ impl AccountSelector {
     pub fn is_available(account: &Account, exclude_ids: &[&str]) -> bool {
         let now = Utc::now();
         account.enabled
+            && account.setup_step.is_ready()
+            && !account.key_cipher.is_empty()
             && account.auth_error.is_none()
             && !exclude_ids.iter().any(|excluded| account.id == *excluded)
             && !account.is_cooling_at(now)
@@ -78,6 +80,8 @@ mod tests {
             password_cipher: None,
             key_cipher: cipher.encrypt(id).unwrap(),
             enabled,
+            account_type: crate::models::AccountType::Key,
+            setup_step: crate::models::AccountSetupStep::Ready,
             referral_code: None,
             purchase_date: String::new(),
             expires_on: String::new(),
@@ -149,6 +153,26 @@ mod tests {
 
         let selected = AccountSelector::new().select(&db, None).unwrap().unwrap();
         assert_eq!(selected.id, "next");
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pending_or_empty_key_accounts_are_never_selected() {
+        let dir = temp_data_dir("managed-pending");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut pending = account("pending", true, None);
+        pending.account_type = crate::models::AccountType::Managed;
+        pending.setup_step = crate::models::AccountSetupStep::KeyVerification;
+        db.create_account(&pending).unwrap();
+        let mut empty = account("empty", true, None);
+        empty.key_cipher.clear();
+        db.create_account(&empty).unwrap();
+        db.create_account(&account("ready", true, None)).unwrap();
+
+        let selected = AccountSelector::new().select(&db, None).unwrap().unwrap();
+        assert_eq!(selected.id, "ready");
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();

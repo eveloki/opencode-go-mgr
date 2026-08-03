@@ -54,6 +54,8 @@ fn benchmark_state(base_url: String) -> (Arc<CoreStateInner>, std::path::PathBuf
             password_cipher: None,
             key_cipher: state.encrypt_key("bench-upstream-key").unwrap(),
             enabled: true,
+            account_type: ocg_core::models::AccountType::Key,
+            setup_step: ocg_core::models::AccountSetupStep::Ready,
             referral_code: None,
             purchase_date: String::new(),
             expires_on: String::new(),

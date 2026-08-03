@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@novnc/novnc':
+        specifier: ^1.7.0
+        version: 1.7.0
       '@tauri-apps/cli':
         specifier: ^2.11.4
         version: 2.11.4
@@ -38,6 +41,9 @@ importers:
         version: 2.2.12(typescript@5.9.3)
 
 packages:
+
+  '@novnc/novnc@1.7.0':
+    resolution: {integrity: sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==}
 
   '@babel/helper-string-parser@7.29.7':
     resolution: {integrity: sha512-Pb5ijPrZ89GDH8223L4UP8i6QApWxs04RbPQJTeWDV0/keR2E36MeKnyr6LYmUUvqRRI+Iv87SuF1W6ErINzYw==}
@@ -682,6 +688,8 @@ packages:
       vue: ^3.0.11
 
 snapshots:
+
+  '@novnc/novnc@1.7.0': {}
 
   '@babel/helper-string-parser@7.29.7': {}
 

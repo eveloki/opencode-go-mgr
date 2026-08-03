@@ -1,6 +1,8 @@
 import type { Messages } from "./en-US";
+import { managedAccountEnUSMessages } from "./managed-account.ts";
 
 export const esESMessages = {
+  ...managedAccountEnUSMessages,
   "语言：{language}": "Idioma: {language}",
   "取消": "Cancelar",
   "保存": "Guardar",
@@ -481,7 +483,7 @@ export const esESMessages = {
   "保存 Key": "Guardar Key",
   "Key 已保存": "Key guardada",
   "Key 保存失败: {error}": "No se pudo guardar la Key: {error}",
-  "设置已被其他操作修改，已重新加载最新设置，你的未保存修改已被覆盖": "Los ajustes fueron modificados en otro lugar y se recargaron; tus cambios sin guardar se sobrescribieron",
+  "设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存": "Los ajustes cambiaron en otro lugar. Se fusionó la versión más reciente con tus cambios locales; vuelve a guardar",
   "自动启动设置失败: {error}": "No se pudo actualizar el inicio automático: {error}",
   "输入新 Key": "Introduce una Key nueva",
   "建立上游连接的初始超时（秒）": "Tiempo de espera inicial para establecer la conexión ascendente (segundos)",

@@ -70,7 +70,11 @@
 
     <n-message-provider v-else>
       <n-dialog-provider>
-      <n-layout has-sider class="app-shell">
+      <BrowserSession
+        v-if="activeKey === 'browser'"
+        :session-token="browserSessionToken"
+      />
+      <n-layout v-else has-sider class="app-shell">
         <n-layout-sider
           bordered
           collapse-mode="width"
@@ -239,7 +243,7 @@ import {
 import type { ThemeName } from "./theme";
 import { userFacingError } from "./utils/errors.ts";
 
-type ViewKey = "dashboard" | "accounts" | "apps" | "pricing" | "logs" | "settings";
+type ViewKey = "dashboard" | "accounts" | "apps" | "pricing" | "logs" | "settings" | "browser";
 
 const viewConfig: Record<ViewKey, MessageKey> = {
   dashboard: "仪表盘",
@@ -248,6 +252,7 @@ const viewConfig: Record<ViewKey, MessageKey> = {
   pricing: "价格表",
   logs: "日志",
   settings: "设置",
+  browser: "远程浏览器",
 };
 const views = new Set<ViewKey>(Object.keys(viewConfig) as ViewKey[]);
 
@@ -257,6 +262,7 @@ const Applications = defineAsyncComponent(() => import("./views/Applications.vue
 const Pricing = defineAsyncComponent(() => import("./views/Pricing.vue"));
 const Logs = defineAsyncComponent(() => import("./views/Logs.vue"));
 const Settings = defineAsyncComponent(() => import("./views/Settings.vue"));
+const BrowserSession = defineAsyncComponent(() => import("./views/BrowserSession.vue"));
 
 const osTheme = useOsTheme();
 const collapsed = ref(false);
@@ -273,6 +279,12 @@ const authState = ref<"checking" | "login" | "register" | "ready">("checking");
 const localMode = ref(false);
 const loggingOut = ref(false);
 const logoutError = ref("");
+const browserSessionToken = ref(new URLSearchParams(window.location.hash.slice(1)).get("session") ?? "");
+if (browserSessionToken.value) {
+  const sanitizedBrowserUrl = new URL(window.location.href);
+  sanitizedBrowserUrl.hash = "";
+  window.history.replaceState(null, "", sanitizedBrowserUrl);
+}
 let suppressAuthRequired = false;
 
 const authFormModel = computed(() => ({

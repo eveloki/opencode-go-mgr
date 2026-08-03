@@ -1,7 +1,8 @@
 use crate::db::{Database, ForwardLogDiagnosticUpdate};
 use crate::gateway::diagnostics::{
-    ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, safe_upstream_headers,
-    sanitize_upstream_error_value, serialize_diagnostic,
+    ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, redact_known_secret,
+    redact_known_secret_values, safe_upstream_headers,
+    sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
 use crate::gateway::limit::{parse_reset, parse_usage_limit_window};
 use crate::gateway::protocol::{
@@ -54,6 +55,7 @@ struct ForwardAttemptContext {
     upstream_format: ApiFormat,
     model: String,
     stream: bool,
+    known_secret: Option<String>,
 }
 
 impl ForwardAttemptContext {
@@ -72,7 +74,26 @@ impl ForwardAttemptContext {
             upstream_format: plan.upstream,
             model: plan.model.clone(),
             stream: plan.stream,
+            known_secret: None,
         }
+    }
+
+    fn set_known_secret(&mut self, known_secret: &str) {
+        self.known_secret = Some(known_secret.to_string());
+    }
+
+    fn redact_known_secret(&self, text: &str) -> String {
+        self.known_secret.as_deref().map_or_else(
+            || text.to_string(),
+            |secret| redact_known_secret(text, secret),
+        )
+    }
+
+    fn sanitize_upstream_error(&self, text: &str) -> String {
+        self.known_secret.as_deref().map_or_else(
+            || sanitize_upstream_error(text, ""),
+            |secret| sanitize_upstream_error(text, secret),
+        )
     }
 
     fn failure(&self, spec: FailureSpec<'_>) -> FailureRecord {
@@ -93,13 +114,17 @@ impl ForwardAttemptContext {
         diagnostic.upstream_status = spec.upstream_status;
         diagnostic.retry_action = spec.retry_action.map(str::to_string);
         if let Some(headers) = spec.upstream_headers {
-            diagnostic.upstream_headers = safe_upstream_headers(headers);
+            diagnostic.upstream_headers =
+                safe_upstream_headers(headers, self.known_secret.as_deref());
         }
         if let Some(body) = spec.request_body {
             diagnostic = diagnostic.with_request_summary(body);
         }
         if let Some(error) = spec.upstream_error {
-            diagnostic = diagnostic.with_upstream_error(error);
+            diagnostic.upstream_error = Some(self.known_secret.as_deref().map_or_else(
+                || sanitize_upstream_error_value_with_known_secret(error, ""),
+                |secret| sanitize_upstream_error_value_with_known_secret(error, secret),
+            ));
         }
         let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
         let diagnostic_json = serialize_diagnostic(diagnostic);
@@ -187,7 +212,7 @@ async fn forward_request_impl(
     headers: HeaderMap,
     pricing_snapshot: Arc<PricingSnapshot>,
 ) -> Result<ForwardResult> {
-    let attempt_context = ForwardAttemptContext::new(trace, client_body.len(), attempt, plan);
+    let mut attempt_context = ForwardAttemptContext::new(trace, client_body.len(), attempt, plan);
     ensure_safe_upstream_base_url(&config.upstream_base_url)?;
     let key = match state.decrypt_key(&account.key_cipher) {
         Ok(key) => key,
@@ -222,6 +247,7 @@ async fn forward_request_impl(
             return Ok(account_preflight_failure(plan, message));
         }
     };
+    attempt_context.set_known_secret(&key);
     let mut upstream_headers = reqwest::header::HeaderMap::new();
 
     // Forward harmless client headers only. Auth and hop-by-hop/private headers
@@ -523,7 +549,7 @@ async fn forward_request_impl(
         let error_message = format!(
             "upstream error {}: {}",
             status.as_u16(),
-            sanitize_upstream_error(&text)
+            attempt_context.sanitize_upstream_error(&text)
         );
         let failure = attempt_context.failure(FailureSpec {
             error_source: "upstream",
@@ -580,7 +606,7 @@ async fn forward_request_impl(
             // Unlike a rejected 429, ambiguous transport failures and 5xx responses are not replayed.
             let cooldown = parse_reset(&text).unwrap_or_else(|| Duration::minutes(5));
             let until = Utc::now() + cooldown;
-            let sanitized = sanitize_upstream_error(&text);
+            let sanitized = attempt_context.sanitize_upstream_error(&text);
             let error_message = format!(
                 "rate limited: {} (resets in {}s)",
                 sanitized,
@@ -630,7 +656,10 @@ async fn forward_request_impl(
         }
 
         if status.as_u16() == 408 {
-            let detail = format!("upstream returned 408: {}", sanitize_upstream_error(&text));
+            let detail = format!(
+                "upstream returned 408: {}",
+                attempt_context.sanitize_upstream_error(&text)
+            );
             let error_message = outcome_unknown_message(&detail);
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "upstream",
@@ -677,9 +706,9 @@ async fn forward_request_impl(
             let error_message = format!(
                 "upstream auth error {}: {}",
                 status.as_u16(),
-                sanitize_upstream_error(&text)
+                attempt_context.sanitize_upstream_error(&text)
             );
-            let sanitized = sanitize_upstream_error(&text);
+            let sanitized = attempt_context.sanitize_upstream_error(&text);
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "upstream",
                 error_stage: "upstream_http",
@@ -725,7 +754,7 @@ async fn forward_request_impl(
 
         // Other 4xx: request-level error. Convert its envelope for the caller,
         // but don't retry another account for the same invalid request.
-        let sanitized = sanitize_upstream_error(&text);
+        let sanitized = attempt_context.sanitize_upstream_error(&text);
         let failure = attempt_context.failure(FailureSpec {
             error_source: "upstream",
             error_stage: "upstream_http",
@@ -755,7 +784,7 @@ async fn forward_request_impl(
                 Some(failure),
             )?;
         }
-        let upstream_error = serde_json::from_str::<Value>(&text).ok();
+        let upstream_error = Some(sanitize_upstream_error_value_with_known_secret(&text, &key));
         let message = sanitized;
         let body = format_error(plan.client, status, &message, upstream_error.as_ref());
         let mut response = (status, axum::Json(body)).into_response();
@@ -808,7 +837,10 @@ async fn forward_request_impl(
         let stream_idle_timeout = StdDuration::from_secs(config.stream_idle_timeout_secs);
         let mut upstream_stream = Box::pin(upstream_resp.bytes_stream());
         let st = Arc::new(Mutex::new(StreamState::default()));
-        let converter = Arc::new(Mutex::new(StreamConverter::new(plan)));
+        let converter = Arc::new(Mutex::new(StreamConverter::new_with_known_secret(
+            plan,
+            attempt_context.known_secret.as_deref(),
+        )));
         let upstream_format = plan.upstream;
         let stream_idle_timeout_secs = config.stream_idle_timeout_secs;
 
@@ -947,7 +979,6 @@ async fn forward_request_impl(
                 }
             }
         };
-
         let stream = futures_util::stream::unfold(
             (upstream_stream, upstream_finished),
             move |(mut stream, finished)| async move {
@@ -1288,13 +1319,17 @@ async fn forward_request_impl(
                             })
                         };
                         let diagnostic = failure.as_ref().map(FailureRecord::update);
+                        let persisted_error = finish_error
+                            .as_deref()
+                            .or(stream_error.as_deref())
+                            .map(|error| attempt.redact_known_secret(error));
                         let db = db_h.db.lock();
                         if let Err(e) = db.update_forward_log(
                             initial_id,
                             &status_str,
                             None,
                             metrics,
-                            finish_error.as_deref().or(stream_error.as_deref()),
+                            persisted_error.as_deref(),
                             diagnostic.as_ref(),
                         ) {
                             let _ = db.log_gateway(
@@ -1431,7 +1466,15 @@ async fn forward_request_impl(
                 "usage_missing",
             )
         };
-        let response_json = match transform_response(plan, &upstream_json) {
+        // Redact before protocol conversion as well as after it. Some response
+        // adapters serialize source values into opaque replay fields (for
+        // example, Anthropic thinking blocks in Responses encrypted_content),
+        // where a post-conversion exact-string pass could no longer see the Key.
+        let mut client_safe_upstream_json = upstream_json.clone();
+        if let Some(secret) = attempt_context.known_secret.as_deref() {
+            redact_known_secret_values(&mut client_safe_upstream_json, secret);
+        }
+        let mut response_json = match transform_response(plan, &client_safe_upstream_json) {
             Ok(value) => value,
             Err(error) => {
                 let message = format!("response conversion failed: {}", error.message);
@@ -1459,12 +1502,19 @@ async fn forward_request_impl(
                     Some(failure),
                 )?;
                 return Ok(ForwardResult {
-                    response: error_response(plan.client, &message, Some(&upstream_json)),
+                    response: error_response(
+                        plan.client,
+                        &message,
+                        Some(&client_safe_upstream_json),
+                    ),
                     action: ForwardAction::Return,
                     error_message: Some(message),
                 });
             }
         };
+        if let Some(secret) = attempt_context.known_secret.as_deref() {
+            redact_known_secret_values(&mut response_json, secret);
+        }
 
         {
             let db = state.db.lock();
@@ -1636,13 +1686,16 @@ impl Drop for StreamOutcomeGuard {
         };
 
         let diagnostic = failure.as_ref().map(FailureRecord::update);
+        let persisted_error = error_message
+            .as_deref()
+            .map(|message| self.attempt_context.redact_known_secret(message));
         let db = self.state.db.lock();
         if let Err(error) = db.update_forward_log(
             self.log_id,
             status,
             None,
             metrics,
-            error_message.as_deref(),
+            persisted_error.as_deref(),
             diagnostic.as_ref(),
         ) {
             let _ = db.log_gateway(
@@ -1856,22 +1909,28 @@ pub async fn forward_get(
                     return Err(anyhow::anyhow!(response_body_error(&error)));
                 }
             };
+            let downstream_body = if status.is_success() {
+                redact_success_body(&body, &key)
+            } else {
+                redact_known_secret(&body, &key)
+            };
 
             if status.as_u16() == 429 {
                 let db = state.db.lock();
                 let cooldown = parse_reset(&body).unwrap_or_else(|| Duration::minutes(5));
+                let sanitized = sanitize_upstream_error(&body, &key);
                 db.set_account_rate_limit_if_key_matches(
                     &account.id,
                     &account.key_cipher,
                     Utc::now() + cooldown,
-                    &body,
+                    &sanitized,
                     parse_usage_limit_window(&body),
                 )?;
             }
             if status == StatusCode::UNAUTHORIZED {
                 let auth_error = format!(
                     "upstream auth error 401: {}",
-                    sanitize_upstream_error(&body)
+                    sanitize_upstream_error(&body, &key)
                 );
                 state.db.lock().set_account_auth_error_if_key_matches(
                     &account.id,
@@ -1880,14 +1939,14 @@ pub async fn forward_get(
                 )?;
             }
             if matches!(status.as_u16(), 401 | 403 | 429) {
-                last_http_error = Some((status, body));
+                last_http_error = Some((status, downstream_body));
                 failed_ids.push(account.id.clone());
                 break;
             }
 
             let mut headers = HeaderMap::new();
             headers.insert("content-type", HeaderValue::from_static("application/json"));
-            let mut response = (status, headers, body).into_response();
+            let mut response = (status, headers, downstream_body).into_response();
             if status == StatusCode::PAYLOAD_TOO_LARGE {
                 response
                     .extensions_mut()
@@ -1914,8 +1973,8 @@ fn is_loopback_host(url: &reqwest::Url) -> bool {
     )
 }
 
-fn sanitize_upstream_error(text: &str) -> String {
-    let safe = sanitize_upstream_error_value(text);
+fn sanitize_upstream_error(text: &str, known_secret: &str) -> String {
+    let safe = sanitize_upstream_error_value_with_known_secret(text, known_secret);
     safe.get("text")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -1923,6 +1982,14 @@ fn sanitize_upstream_error(text: &str) -> String {
         .chars()
         .take(500)
         .collect()
+}
+
+fn redact_success_body(text: &str, known_secret: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return redact_known_secret(text, known_secret);
+    };
+    redact_known_secret_values(&mut value, known_secret);
+    serde_json::to_string(&value).unwrap_or_else(|_| redact_known_secret(text, known_secret))
 }
 
 fn response_body_error(error: &reqwest::Error) -> String {
@@ -2114,7 +2181,7 @@ fn log_forward(
         local_adjustment_multiplier: metrics.local_adjustment_multiplier,
         service_tier: metrics.service_tier,
         cost_state: cost_state.to_string(),
-        error_message: error_message.map(|s| s.to_string()),
+        error_message: error_message.map(|message| context.redact_known_secret(message)),
         request_id: Some(context.trace.request_id.clone()),
         attempt: Some(context.attempt as i64),
         error_source: failure.as_ref().map(|failure| failure.error_source.clone()),
@@ -2328,6 +2395,46 @@ mod stream_usage_tests {
 
     fn usage_event() -> Vec<u8> {
         b"data: {\"id\":\"x\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30,\"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\ndata: [DONE]\n\n".to_vec()
+    }
+
+    #[test]
+    fn captured_allowlisted_upstream_header_redacts_known_secret() {
+        let secret = format!("opaque/{}", "account-key".repeat(32));
+        let context = ForwardAttemptContext {
+            trace: RequestTrace::new(),
+            client_body_bytes: 0,
+            upstream_body_bytes: 0,
+            attempt: 1,
+            client_format: ApiFormat::ChatCompletions,
+            upstream_format: ApiFormat::ChatCompletions,
+            model: "test-model".into(),
+            stream: false,
+            known_secret: Some(secret.clone()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", format!("request-{secret}").parse().unwrap());
+        let failure = context.failure(FailureSpec {
+            error_source: "upstream",
+            error_stage: "upstream_http",
+            downstream_status: Some(500),
+            upstream_status: Some(500),
+            upstream_wait_ms: None,
+            retry_action: Some("return"),
+            upstream_headers: Some(&headers),
+            upstream_error: None,
+            request_body: None,
+        });
+        assert!(secret.len() > 256);
+        assert!(
+            !failure.diagnostic_json.contains(&secret[..256]),
+            "truncated header prefix leaked Key: {}",
+            failure.diagnostic_json
+        );
+        let diagnostic: Value = serde_json::from_str(&failure.diagnostic_json).unwrap();
+        assert_eq!(
+            diagnostic["upstream_headers"]["x-request-id"],
+            "request-<redacted>"
+        );
     }
 
     #[test]

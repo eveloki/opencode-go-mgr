@@ -1,6 +1,8 @@
 import type { Messages } from "./en-US";
+import { managedAccountEnUSMessages } from "./managed-account.ts";
 
 export const deDEMessages = {
+  ...managedAccountEnUSMessages,
   "语言：{language}": "Sprache: {language}",
   "取消": "Abbrechen",
   "保存": "Speichern",
@@ -482,7 +484,7 @@ export const deDEMessages = {
   "保存 Key": "Key speichern",
   "Key 已保存": "Key gespeichert",
   "Key 保存失败: {error}": "Key konnte nicht gespeichert werden: {error}",
-  "设置已被其他操作修改，已重新加载最新设置，你的未保存修改已被覆盖": "Die Einstellungen wurden anderweitig geändert und neu geladen; deine ungespeicherten Änderungen wurden überschrieben",
+  "设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存": "Die Einstellungen wurden anderweitig geändert. Die neueste Version wurde mit deinen lokalen Änderungen zusammengeführt; bitte erneut speichern",
   "自动启动设置失败: {error}": "Automatischer Start konnte nicht aktualisiert werden: {error}",
   "输入新 Key": "Neuen Key eingeben",
   "建立上游连接的初始超时（秒）": "Initiales Timeout für den Verbindungsaufbau zum Upstream (Sekunden)",

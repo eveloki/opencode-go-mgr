@@ -132,7 +132,9 @@ test("every translated locale includes the updater interaction copy", () => {
     "重试升级",
     "已升级到 v{version}",
   ];
-  for (const filename of readdirSync(messagesDir).filter((name) => name.endsWith(".ts"))) {
+  for (const filename of readdirSync(messagesDir).filter((name) => (
+    name.endsWith(".ts") && name !== "managed-account.ts"
+  ))) {
     const source = readFileSync(new URL(filename, messagesDir), "utf8");
     for (const key of requiredKeys) {
       assert.match(source, new RegExp(`"${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`), `${filename}: ${key}`);

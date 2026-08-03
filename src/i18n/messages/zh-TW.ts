@@ -1,6 +1,8 @@
 import type { Messages } from "./en-US";
+import { managedAccountZhTWMessages } from "./managed-account.ts";
 
 export const zhTWMessages = {
+  ...managedAccountZhTWMessages,
   "语言：{language}": "語言：{language}",
   "取消": "取消",
   "保存": "儲存",
@@ -481,7 +483,7 @@ export const zhTWMessages = {
   "保存 Key": "儲存 Key",
   "Key 已保存": "Key 已儲存",
   "Key 保存失败: {error}": "Key 儲存失敗：{error}",
-  "设置已被其他操作修改，已重新加载最新设置，你的未保存修改已被覆盖": "設定已被其他操作修改，已重新載入最新設定，你的未儲存修改已被覆蓋",
+  "设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存": "設定已被其他操作修改，已合併最新設定並保留本機修改，請再次儲存",
   "自动启动设置失败: {error}": "自動啟動設定失敗：{error}",
   "输入新 Key": "輸入新 Key",
   "建立上游连接的初始超时（秒）": "建立上游連線的初始逾時（秒）",

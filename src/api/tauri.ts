@@ -7,6 +7,8 @@ export interface Account {
   password: string;
   key: string;
   enabled: boolean;
+  account_type: AccountType;
+  setup_step: AccountSetupStep;
   purchase_date: string;
   expires_on: string;
   cooldown_until: string | null;
@@ -19,6 +21,15 @@ export interface Account {
   created_at: string;
   updated_at: string;
 }
+
+export type AccountType = "key" | "managed";
+
+export type AccountSetupStep =
+  | "google_account"
+  | "opencode_registration"
+  | "payment"
+  | "key_verification"
+  | "ready";
 
 export interface AccountInput {
   name: string;
@@ -44,6 +55,7 @@ export interface AppConfig {
   gateway_port: number;
   gateway_key: string;
   upstream_base_url: string;
+  opencode_invite_url: string;
   client_root_url: string;
   client_root_url_from_env: boolean;
   auto_start: boolean;
@@ -55,6 +67,19 @@ export interface AppConfig {
   stream_idle_timeout_secs: number;
   routing_mode: RoutingMode;
   conversation_sticky: boolean;
+}
+
+export type BrowserMode = "native" | "remote" | "unsupported";
+export type BrowserTarget = "google_signup" | "invite" | "console";
+
+export interface BrowserCapabilities {
+  mode: BrowserMode;
+  reason?: string | null;
+}
+
+export interface BrowserLaunchResult {
+  mode: Exclude<BrowserMode, "unsupported">;
+  session_token?: string | null;
 }
 
 export interface UpdateCheckResult {
@@ -376,6 +401,8 @@ export const tauriApi = {
   getAccounts: () => request<Account[]>("/accounts"),
   createAccount: (input: AccountInput) =>
     request<Account>("/accounts", { method: "POST", body: jsonBody(input) }),
+  createManagedAccount: (input: { name: string; username?: string }) =>
+    request<Account>("/accounts/managed", { method: "POST", body: jsonBody(input) }),
   updateAccount: (id: string, update: AccountUpdate) =>
     request<Account>(`/accounts/${id}`, { method: "PATCH", body: jsonBody(update) }),
   reorderAccounts: (accountIds: string[]) =>
@@ -401,6 +428,24 @@ export const tauriApi = {
   }),
   resetAccountCooldown: (id: string) =>
     request<Account>(`/accounts/${id}/reset-cooldown`, { method: "POST" }),
+  advanceAccountSetup: (id: string, setupStep: AccountSetupStep) =>
+    request<Account>(`/accounts/${id}/setup`, {
+      method: "PATCH",
+      body: jsonBody({ setup_step: setupStep }),
+    }),
+  verifyManagedAccountKey: (id: string, key: string) =>
+    request<Account>(`/accounts/${id}/setup/verify-key`, {
+      method: "POST",
+      body: jsonBody({ key }),
+    }),
+  getBrowserCapabilities: () => request<BrowserCapabilities>("/browser/capabilities"),
+  openAccountBrowser: (id: string, target: BrowserTarget) =>
+    request<BrowserLaunchResult>(`/accounts/${id}/browser`, {
+      method: "POST",
+      body: jsonBody({ target }),
+    }),
+  resetAccountBrowserProfile: (id: string) =>
+    request<Account>(`/accounts/${id}/browser-profile`, { method: "DELETE" }),
 
   getSettings: () => request<AppConfig>("/settings"),
   getPricing: () => request<PricingSnapshot>("/pricing"),
@@ -464,3 +509,9 @@ export const tauriApi = {
   getDailyCostByModel: (days?: number) =>
     request<DailyModelCost[]>(`/dashboard/daily-cost-by-model?days=${days ?? 30}`),
 };
+
+export function browserSessionWebSocketUrl(token: string): string {
+  const url = new URL(`${apiBase()}/browser/sessions/${encodeURIComponent(token)}/ws`, window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}

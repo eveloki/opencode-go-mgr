@@ -1,6 +1,8 @@
 import type { Messages } from "./en-US";
+import { managedAccountEnUSMessages } from "./managed-account.ts";
 
 export const ptBRMessages = {
+  ...managedAccountEnUSMessages,
   "语言：{language}": "Idioma: {language}",
   "取消": "Cancelar",
   "保存": "Salvar",
@@ -482,7 +484,7 @@ export const ptBRMessages = {
   "保存 Key": "Salvar Key",
   "Key 已保存": "Key salva",
   "Key 保存失败: {error}": "Falha ao salvar a Key: {error}",
-  "设置已被其他操作修改，已重新加载最新设置，你的未保存修改已被覆盖": "As configurações foram alteradas em outro lugar e recarregadas; suas edições não salvas foram sobrescritas",
+  "设置已被其他操作修改，已合并最新设置并保留本地修改，请再次保存": "As configurações foram alteradas em outro lugar. A versão mais recente foi mesclada com suas edições locais; salve novamente",
   "自动启动设置失败: {error}": "Falha ao atualizar a execução automática: {error}",
   "输入新 Key": "Digite uma nova Key",
   "建立上游连接的初始超时（秒）": "Tempo limite inicial para estabelecer a conexão upstream (segundos)",

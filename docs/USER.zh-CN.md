@@ -28,6 +28,7 @@
   - [真熔断与假熔断](#真熔断与假熔断)
 - [CLI](#cli)
 - [Docker](#docker)
+  - [可选远程浏览器](#可选远程浏览器)
 - [数据与安全](#数据与安全)
 - [限制](#限制)
 - [常见问题](#常见问题)
@@ -160,11 +161,14 @@ Release 后，后续签名桌面版可在 **设置** 中一键下载并安装。
 
 1. 停止所有会写数据的进程：从桌面托盘选择 **退出**，用 Ctrl+C 或服务管理器停止
    CLI，Docker 则执行 `docker compose stop`。
-2. 复制 **整个** GUI 数据目录、CLI 数据目录或 Docker `ocg-data` 卷。已停止的
-   Docker 容器可用 `docker compose cp ocg-manager:/data/. ../ocg-data-backup`
-   复制数据。
+2. 复制 **整个** GUI 数据目录、CLI 数据目录；桌面账号的 `browser-profiles/` 已
+   包含在 GUI 数据目录中。Docker 必须同时备份 `ocg-data` 与
+   `ocg-browser-profiles` 两个敏感卷。已停止的 Docker 容器可分别执行
+   `docker compose cp ocg-manager:/data/. ../ocg-data-backup` 和
+   `docker compose cp ocg-manager:/browser-profiles/. ../ocg-browser-profiles-backup`。
 3. 备份必须放在仓库外，并确认其中有 `data.sqlite`，以及适用时的
-   `.encryption-key`。
+   `.encryption-key`。浏览器 Profile 含长期 Cookie 和登录状态，不由 OCG Manager
+   加密，必须按账号 Key 与数据库同等级保护。
 
 ### 恢复
 
@@ -174,6 +178,7 @@ Release 后，后续签名桌面版可在 **设置** 中一键下载并安装。
 注意事项：
 
 - Docker `/data` 中的文件必须继续允许 UID/GID `10001` 写入。
+- Docker `/browser-profiles` 中的文件也必须继续允许 UID/GID `10001` 写入。
 - Windows GUI 的混淆信息绑定 Windows 用户与机器，换机后不能直接恢复账号 Key 或
   密码；请在新机器创建全新数据并重新录入凭据。
 - macOS/Linux GUI、CLI 与 Docker 恢复时必须保留 `.encryption-key`，或原来显式
@@ -183,19 +188,23 @@ Release 后，后续签名桌面版可在 **设置** 中一键下载并安装。
 ### 恢复 Docker 备份到全新卷
 
 先确认备份有效，并确认 `.env` 固定到原版本或更新版本。下面的
-`docker compose down -v` 会永久删除当前卷，必须先把当前数据另行保存后才能执行：
+`docker compose down -v` 会永久删除当前的全部命名卷，必须先把两类持久数据另行
+保存后才能执行：
 
 ```bash
 docker compose down -v
 docker compose run --rm --no-deps --user root \
   --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
   --entrypoint sh \
-  --volume ../ocg-data-backup:/backup:ro \
+  --volume ../ocg-data-backup:/backup/data:ro \
+  --volume ../ocg-browser-profiles-backup:/backup/browser-profiles:ro \
   ocg-manager \
-  -c 'cp -a /backup/. /data/ && chown -R 10001:10001 /data && \
-      find /data -type d -exec chmod 700 {} + && \
-      find /data -type f -exec chmod 600 {} +'
-docker compose up -d --no-build
+  -c 'cp -a /backup/data/. /data/ && \
+      cp -a /backup/browser-profiles/. /browser-profiles/ && \
+      chown -R 10001:10001 /data /browser-profiles && \
+      find /data /browser-profiles -type d -exec chmod 700 {} + && \
+      find /data /browser-profiles -type f -exec chmod 600 {} +'
+docker compose --profile browser up -d --no-build
 docker compose ps
 ```
 
@@ -216,9 +225,13 @@ docker compose ps
 - **CLI**：整体替换解压目录，保持可执行文件、`dist/` 与 `LICENSE` 同级。删除该
   目录即可卸载；数据仍保留在 `~/.ocg-mgr-cli` 或自定义 `--data-dir`。
 - **Docker**：备份后依次执行 `docker compose pull` 和
-  `docker compose up -d --no-build`。生产部署建议把 `OCG_IMAGE` 固定到完整版本
-  标签。`docker compose down` 只删容器、保留 `ocg-data`；
-  `docker compose down -v` 会永久删除卷，只能在确认备份有效且确实要重置时使用。
+  `docker compose up -d --no-build`。如果启用了 browser profile，应改用
+  `docker compose --profile browser pull` 和
+  `docker compose --profile browser up -d --no-build`，确保两个镜像同步升级。
+  生产部署建议把 `OCG_IMAGE` 与 `OCG_BROWSER_IMAGE` 固定到完整版本
+  标签。`docker compose down` 只删容器、保留 `ocg-data` 与
+  `ocg-browser-profiles`；`docker compose down -v` 会永久删除这些卷，只能在
+  确认双卷备份有效且确实要重置时使用。
   切换到旧镜像不等于回滚数据库；需要数据库回滚时，应同时恢复该旧版本升级前制作
   的完整备份。
 
@@ -295,8 +308,52 @@ Claude Desktop 是例外，它的模型映射是持久化的：复制配置前�
 
 ### 账号
 
-**账号** 视图提供 OpenCode-Go 账号的创建、编辑、启用、禁用与删除。每张账号卡
-显示账号名、冷却状态，以及由本地估算驱动的 5 小时、本周、本月用量条。
+**账号** 视图把新增入口分为 **导入已有 Key** 与 **注册新账号**：
+
+- **Key 账号**沿用原有流程，直接保存已有 OpenCode-Go Key。
+- **托管账号**先创建一条禁用的可恢复草稿，再按顺序完成 Google 账号、邀请注册、
+  支付、Key 验证。草稿与当前步骤会立即写入 SQLite；关闭页面或重启服务后可继续。
+  注册中账号不会参与 Gateway 路由，也不会显示用量、测试或启用控件。
+
+托管注册与独立浏览器 Profile 是 **Beta** 功能，尚未经过充分测试；请勿依赖其用于
+生产环境。
+
+注册新账号前，先在 **设置 → OpenCode Go 邀请链接** 保存邀请 URL。它必须是无
+用户名/密码、最长 2048 字符的 HTTPS URL，主机只能是 `opencode.ai` 或
+`console.opencode.ai`；未配置时注册入口会保持禁用。修改邀请链接只影响以后打开
+邀请步骤，不会改写已经完成的账号。
+
+托管向导是纯人工流程：
+
+1. 用该账号的独立浏览器 Profile 创建或登录 Google 账号。
+2. 在同一 Profile 中打开邀请链接，注册 OpenCode Go。
+3. 由用户在官网确认并完成支付。
+4. 用户自行从官网复制 Key，粘贴回向导并执行真实验证。
+
+OCG Manager 不保存 Google 密码，不自动处理验证码或支付，不抓取官网，也不会从
+页面自动提取 Key。验证返回 `2xx` 时账号完成并启用；`429` 也表示 Key 有效，账号
+会完成并记录现有冷却；`401`/`403`、网络错误或 `5xx` 会停留在 Key 验证步骤，
+允许修正后重试。
+
+每个账号都有长期独立的浏览器 Profile。桌面端会启动外部 Chromium 系浏览器：
+Windows 优先 Edge、其次 Chrome；macOS 查找 Chrome、Edge、Chromium；Linux 桌面
+从 `PATH` 查找 Chrome、Chromium 或 Edge。浏览器仅使用独立
+`browser-profiles/<account_id>`、跳过首次运行提示并打开新窗口，不启用 CDP、
+自动化或降低安全性的参数。升级前旧的 `profiles/<account_id>` WebView 数据不会
+导入，因此首次需要重新登录。
+
+所有完成注册的账号都提供 **打开 OpenCode 官网**。旧账号第一次会打开空白的独立
+Profile，用户登录一次后 Cookie 会长期保留，以后可随时返回官网查看实际额度和邀请
+使用情况。Google 与 OpenCode 的 Cookie 分属不同域，但都保存在该账号的同一个
+Profile 中。
+
+重置浏览器身份会先关闭该账号的浏览器并删除新旧 Profile：完成注册的账号保留
+Key，只退出官网登录；注册中的托管账号还会回到 Google 步骤。删除账号也会删除
+浏览器 Cookie/Profile，确认框会明确提示这一点。之后这些登录状态无法从 OCG
+Manager 恢复，只能从备份恢复或重新登录。
+
+每张已完成账号卡显示账号名、冷却状态，以及由本地估算驱动的 5 小时、本周、本月
+用量条。
 
 - **用量基线**：每个窗口都可以输入百分比或拖动进度条，将其保存为当前实际用量
   基线；保存后，OCG Manager 记录的成功请求成本会继续累加到该基线上。达到 100%
@@ -343,6 +400,7 @@ Claude Desktop 是例外，它的模型映射是持久化的：复制配置前�
 - **Gateway 端口**：Gateway 监听端口（默认 `9042`）。
 - **Gateway Key**：与接入中心同一个值。
 - **上游地址**：OpenCode-Go 基础 URL。
+- **OpenCode Go 邀请链接**：托管账号注册向导使用的受限 HTTPS 邀请 URL。
 - **下游访问根地址**：见 [接入中心](#接入中心)。
 - **登录后自动启动**：只有已安装的 Windows 桌面版暴露此开关；开发构建、CLI、
   Docker、macOS、Linux 面板不显示。
@@ -610,11 +668,46 @@ docker compose ps
 | 变量 | 作用范围 | 含义 |
 | --- | --- | --- |
 | `OCG_IMAGE` | Compose | 镜像标签、镜像站、本地名称或不可变 digest。 |
+| `OCG_BROWSER_IMAGE` | Compose | 可选 Chromium/noVNC Sidecar 的镜像标签、镜像站、本地名称或 digest。 |
 | `OCG_PORT` | Compose | 宿主机回环端口；容器内仍监听 `9042`。 |
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | 首次启动 | 可选管理员引导；必须同时设置或都不设置。 |
 | `OCG_CLIENT_ROOT_URL` | 运行时 | 只读覆盖外部客户端根地址。 |
 | `OCG_MANAGER_ENCRYPTION_KEY` | 恢复时 | 原部署曾显式使用的混淆密钥。 |
 | `NPM_REGISTRY` + `CARGO_REGISTRY` | 源码构建 | 仅 `--build` 使用的依赖注册表。 |
+
+### 可选远程浏览器
+
+默认 Gateway 部署不启动浏览器 Sidecar。要在 Linux 服务器或 Docker 上使用托管
+注册与官网登录，建议宿主机至少预留 2 CPU、2 GiB 内存和 1 GiB `/dev/shm`，然后
+执行：
+
+```bash
+docker compose --profile browser up -d
+docker compose ps
+```
+
+`OCG_BROWSER_IMAGE` 可覆盖默认的
+`ghcr.io/klarkxy/opencode-go-mgr-browser:<version>`。Sidecar 运行普通 Chromium、
+Xvfb、轻量窗口管理器、x11vnc 与 noVNC；浏览画面会在 Dashboard 的独立完整标签页
+中通过同源 WebSocket 显示，键鼠输入也走该连接。远程剪贴板使用页面上明确的剪贴板
+区域复制或粘贴 Key。如果前面有反向代理，它必须支持 WebSocket 升级。
+
+每个节点同一时刻只允许一个远程 Chromium。切换账号时会先正常关闭当前 Chromium、
+等待 Profile 写盘，再启动目标账号；之前打开的远程页面立即失效。Dashboard 浏览
+会话令牌只在主服务内存中保存，绑定当前管理员会话并校验 Origin；空闲 30 分钟或
+创建满 4 小时后失效。重新打开账号页面即可取得新会话。
+
+Sidecar 不发布宿主机端口，也不挂载数据库。控制端口和 noVNC 只在 Compose 的
+`browser-private` 项目私网内可见。该桥接网络不能设为 Docker `internal`，因为
+Chromium 需要访问 Google/OpenCode 的 HTTPS 出站网络；Sidecar 的两个端点仍不会
+发布到宿主机。随机控制令牌存放在共享的 `ocg-browser-runtime` 运行时卷。账号
+Cookie/Profile 则持久化在
+`ocg-browser-profiles`；运行时卷不属于备份，`ocg-data` 与
+`ocg-browser-profiles` 才是必须成对停止并备份的两个敏感卷。
+
+Google 可能把数据中心出口 IP 视为高风险，要求额外验证，甚至拒绝注册或登录。
+OCG Manager 不绕过这类风控；遇到时由用户完成 Google 要求的验证，或改用桌面端
+住宅网络完成注册。真实付款始终由用户在官网明确执行。
 
 ### 管理员引导
 
@@ -649,15 +742,19 @@ docker compose ps
 `http://127.0.0.1:<OCG_PORT>/dashboard/` 并登录。请访问 `/dashboard/`，不要
 把服务根路径 `/` 当作面板地址。
 
-- 数据与生成的 `.encryption-key` 混淆密钥持久化在 `ocg-data` 卷中。
+- 数据与生成的 `.encryption-key` 混淆密钥持久化在 `ocg-data` 卷中；账号浏览器
+  Cookie/Profile 持久化在独立的 `ocg-browser-profiles` 卷中。
 - 容器进程监听 `0.0.0.0`，因此即使只发布到宿主机 `127.0.0.1`，管理面板也必须
   使用管理员登录；宿主机端口映射只限制可达范围，不会启用回环免登录。
 - 容器的 `HEALTHCHECK` 每 30 秒对容器内 `127.0.0.1:9042` 做 TCP 探活，不存在
   `/healthz` 路由。这个 TCP 检查只说明进程正在监听，不能证明面板 API、上游账号
   或真实模型请求可用。
-- 镜像以非特权 `ocg` 用户（UID/GID 10001）运行。随附 Compose 把根文件系统设为
-  只读、把 `/tmp` 挂成 tmpfs、丢弃全部 Linux capability，并启用
-  `no-new-privileges`；只有命名卷 `ocg-data` 保存可写应用状态。
+- 两个镜像都以非特权 `ocg` 用户（UID/GID 10001）运行。随附 Compose 把根文件系统设为
+  只读、把 `/tmp` 挂成 tmpfs，并丢弃全部 Linux capability。主服务另外启用
+  `no-new-privileges`；browser 服务改用 `seccomp=unconfined`，以便普通 Chromium
+  建立自身的 namespace 和 renderer seccomp 沙箱。Sidecar 不使用 `--no-sandbox`，
+  另有 1 GiB 共享内存；命名卷 `ocg-data` 与 `ocg-browser-profiles` 是两类持久化
+  应用状态。
 - 启动日志会打印 Gateway Key，因此日志输出和 Docker daemon 权限都属于敏感信息。
   如果 Docker 主机默认没有限制日志大小，请由部署方配置日志轮转。
 
@@ -667,6 +764,7 @@ docker compose ps
 docker compose config --quiet
 docker compose ps
 docker compose logs --tail=100 -f ocg-manager
+docker compose --profile browser logs --tail=100 -f browser
 curl --fail http://127.0.0.1:9042/dashboard/
 ```
 
@@ -674,13 +772,17 @@ curl --fail http://127.0.0.1:9042/dashboard/
 
 ### 校验镜像
 
-每个稳定镜像都带 SPDX SBOM、BuildKit SLSA provenance 与 GitHub 签名的
+主镜像与浏览器镜像都带 SPDX SBOM、BuildKit SLSA provenance 与 GitHub 签名的
 provenance attestation。可这样检查发布版本：
 
 ```bash
 docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.7
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.7
 gh attestation verify \
   oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.7 \
+  --repo klarkxy/opencode-go-mgr
+gh attestation verify \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.7 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -701,8 +803,8 @@ ocg.example.com {
 ```
 
 登录后先在面板里设置一个非空的 Gateway Key，再发送 API 流量。用
-`docker compose down` 停止服务；只有当你想彻底删除账号、凭据、Key 时才追加
-`-v`。
+`docker compose down` 停止服务；只有当你想彻底删除账号、凭据、Key、Cookie
+与浏览器 Profile 时才追加 `-v`。
 
 ## 数据与安全
 
@@ -714,6 +816,9 @@ ocg.example.com {
   **必须和数据库一起备份**，丢失后已存的凭据将无法读取。混淆不是安全边界：拿到
   数据目录及其 `.encryption-key`，或能在原 Windows 用户/机器上下文运行 Windows
   GUI 的人，都能恢复账号 Key 与保存的登录密码。
+- **浏览器 Profile**：`browser-profiles/` 或 Docker 的
+  `ocg-browser-profiles` 含长期 Cookie 与官网登录状态，完全不由 OCG Manager
+  加密。备份、传输、访问控制和销毁都应按数据库与账号 Key 的敏感级别处理。
 - **无跨节点同步**：每个节点由自己的面板管理，OCG Manager 不会在节点间同步账号
   凭据。
 - **明文 HTTP 警告**：非回环的 `http://` 根地址会把 Gateway Key 与请求内容明文
@@ -749,7 +854,8 @@ ocg.example.com {
   function、custom、namespace 工具正常转换。
 - 流式 token 数量仅在上游发出 usage chunk 时准确；额度消耗使用当前 OpenCode Go
   价格快照。没有 usage 时日志记为 `success_no_usage`。
-- 当前 HTTP 面板没有暴露旧的隔离 WebView 浏览器命令。
+- 浏览器向导只提供人工页面操作，不自动注册 Google、处理验证码、支付、抓取网页
+  或提取 Key。
 - 已安装的 Windows 桌面版可以在用户登录时把 OCG Manager 拉起到托盘；开发构建、
   macOS、Linux、CLI、Docker 不暴露面板里的 `auto_start` 开关。Docker Compose 另
   由 `restart: unless-stopped` 在 Docker daemon 重启后恢复服务。
@@ -778,7 +884,8 @@ ocg.example.com {
   假设删除后仍执行了同一套 Google 内容安全策略。
 - **Docker 首次注册的 `OCG_ADMIN_PASSWORD` 没生效。**这两个变量只在数据库还没
   有管理员时生效，请使用数据库里已有的管理员账号。只有在确认备份有效且确实要
-  完全重置时才重建 `ocg-data`；这样会删除全部账号、凭据和设置。
+  完全重置时才重建 `ocg-data` 与 `ocg-browser-profiles`；这样会删除全部账号、
+  凭据、设置、Cookie 和浏览器 Profile。
 - **SmartScreen / Gatekeeper 弹窗警告。**当前 Windows 包未签名、macOS 应用使用
   ad-hoc 签名。首次启动请用 **Open Anyway** 放行，警告本身不代表篡改。
 

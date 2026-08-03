@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use ocg_core::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher, load_or_create_static_cipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
@@ -287,6 +288,8 @@ async fn key_command(
                 password_cipher,
                 key_cipher,
                 enabled: true,
+                account_type: ocg_core::models::AccountType::Key,
+                setup_step: ocg_core::models::AccountSetupStep::Ready,
                 referral_code: None,
                 purchase_date: String::new(),
                 expires_on: String::new(),
@@ -315,18 +318,42 @@ async fn key_command(
             // ponytail: drop the outer guard from line 197 before re-locking —
             // parking_lot::Mutex is not re-entrant, so the second lock() would deadlock.
             drop(db);
-            let mut db = state.db.lock();
-            if let Some(account) = db.get_account(&id)? {
-                db.delete_account(&id)?;
-                db.log_gateway(
-                    "info",
-                    "account",
-                    &format!("cli removed account {}", account.name),
-                )?;
-                println!("removed key {} ({})", id, account.name);
-            } else {
-                anyhow::bail!("key not found: {}", id);
+            let browser_operation = state.browser.operation().await;
+            state.recover_browser_profiles_for_account(&id)?;
+            let account = state
+                .db
+                .lock()
+                .get_account(&id)?
+                .ok_or_else(|| anyhow::anyhow!("key not found: {}", id))?;
+            browser_operation.stop_account(&id).await?;
+            let staged = StagedBrowserProfiles::stage(
+                &state.data_dir(),
+                &id,
+                BrowserProfileOperationKind::DeleteAccount,
+            )?;
+            let delete_result = {
+                let mut db = state.db.lock();
+                let result = db.delete_account(&id);
+                if result.is_ok() {
+                    let _ = db.log_gateway(
+                        "info",
+                        "account",
+                        &format!("cli removed account {}", account.name),
+                    );
+                }
+                result
+            };
+            if let Err(error) = delete_result {
+                let restore_error = staged.restore().err();
+                match restore_error {
+                    Some(restore) => anyhow::bail!(
+                        "failed to remove account: {error}; failed to restore browser profile: {restore}"
+                    ),
+                    None => anyhow::bail!("failed to remove account: {error}"),
+                }
             }
+            staged.purge()?;
+            println!("removed key {} ({})", id, account.name);
         }
         KeyAction::Enable { id } => {
             drop(db);
@@ -354,6 +381,9 @@ fn toggle_account(state: &Arc<CoreStateInner>, id: &str, enabled: bool) -> Resul
     let account = db
         .get_account(id)?
         .ok_or_else(|| anyhow::anyhow!("key not found: {}", id))?;
+    if enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
+        anyhow::bail!("account setup is not complete and cannot be enabled");
+    }
     let update = ocg_core::models::AccountUpdate {
         name: None,
         username: None,
@@ -472,13 +502,14 @@ async fn ping_keys(
         let db = state.db.lock();
         match id {
             Some(i) => match db.get_account(i)? {
-                Some(a) => vec![a],
+                Some(a) if a.setup_step.is_ready() && !a.key_cipher.is_empty() => vec![a],
+                Some(_) => anyhow::bail!("account setup is not complete and cannot be pinged"),
                 None => anyhow::bail!("key not found: {}", i),
             },
             None => db
                 .list_accounts()?
                 .into_iter()
-                .filter(|a| a.enabled)
+                .filter(|a| a.enabled && a.setup_step.is_ready() && !a.key_cipher.is_empty())
                 .collect(),
         }
     };
@@ -511,7 +542,9 @@ mod tests {
         toggle_account,
     };
     use clap::{CommandFactory, Parser};
+    use ocg_core::browser::browser_profile_paths;
     use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
+    use ocg_core::models::{AccountSetupStep, AccountType};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -708,15 +741,26 @@ mod tests {
         let main = accounts
             .iter()
             .find(|account| account.name == "main")
-            .unwrap();
+            .unwrap()
+            .clone();
         assert_eq!(main.username.as_deref(), Some("alice"));
         assert!(main.password_cipher.is_some());
         let blank = accounts
             .iter()
             .find(|account| account.name == "blank-creds")
-            .unwrap();
+            .unwrap()
+            .clone();
         assert!(blank.username.is_none());
         assert!(blank.password_cipher.is_none());
+
+        let mut pending = blank.clone();
+        pending.id = uuid::Uuid::new_v4().to_string();
+        pending.name = "pending".into();
+        pending.key_cipher = String::new();
+        pending.enabled = true;
+        pending.account_type = AccountType::Managed;
+        pending.setup_step = AccountSetupStep::GoogleAccount;
+        state.db.lock().create_account(&pending).unwrap();
 
         key_command(dir.clone(), cipher.clone(), KeyAction::List)
             .await
@@ -747,6 +791,26 @@ mod tests {
         let enabled = state.db.lock().get_account(&main.id).unwrap().unwrap();
         assert!(enabled.enabled);
 
+        assert!(toggle_account(&state, &pending.id, true).is_err());
+        assert!(
+            ping_keys(
+                &state,
+                Some(pending.id.as_str()),
+                "deepseek-v4-flash",
+                "ping",
+                3,
+            )
+            .await
+            .is_err()
+        );
+
+        let blank_profiles = browser_profile_paths(&dir, &blank.id).unwrap();
+        assert!(blank_profiles.iter().all(|path| path.starts_with(&dir)));
+        for profile in &blank_profiles {
+            std::fs::create_dir_all(profile).unwrap();
+            std::fs::write(profile.join("Cookies"), b"session").unwrap();
+        }
+
         key_command(
             dir.clone(),
             cipher.clone(),
@@ -757,6 +821,32 @@ mod tests {
         .await
         .unwrap();
         assert!(state.db.lock().get_account(&blank.id).unwrap().is_none());
+        assert!(blank_profiles.iter().all(|path| !path.exists()));
+
+        let pending_profile = browser_profile_paths(&dir, &pending.id).unwrap()[0].clone();
+        std::fs::create_dir_all(&pending_profile).unwrap();
+        std::fs::write(pending_profile.join("SingletonLock"), b"active").unwrap();
+        let active_profile = key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Remove {
+                id: pending.id.clone(),
+            },
+        )
+        .await;
+        assert!(active_profile.is_err());
+        assert!(state.db.lock().get_account(&pending.id).unwrap().is_some());
+        assert!(pending_profile.exists());
+        std::fs::remove_file(pending_profile.join("SingletonLock")).unwrap();
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Remove {
+                id: pending.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
 
         let missing = key_command(
             dir.clone(),

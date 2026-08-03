@@ -725,6 +725,32 @@ impl Database {
             )?;
         }
 
+        if version < 16 {
+            // v16 introduces resumable managed-account onboarding. Existing
+            // accounts remain immediately routable as imported keys.
+            ensure_column(
+                &tx,
+                "accounts",
+                "account_type",
+                "TEXT NOT NULL DEFAULT 'key' CHECK (account_type IN ('key', 'managed'))",
+            )?;
+            ensure_column(
+                &tx,
+                "accounts",
+                "setup_step",
+                "TEXT NOT NULL DEFAULT 'ready' CHECK (setup_step IN ('google_account', 'opencode_registration', 'payment', 'key_verification', 'ready'))",
+            )?;
+            tx.execute_batch(
+                "UPDATE accounts
+                 SET account_type = 'key'
+                 WHERE account_type IS NULL OR account_type NOT IN ('key', 'managed');
+                 UPDATE accounts
+                 SET setup_step = 'ready'
+                 WHERE setup_step IS NULL OR setup_step NOT IN ('google_account', 'opencode_registration', 'payment', 'key_verification', 'ready');
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (16);",
+            )?;
+        }
+
         // Detailed diagnostics are intentionally short-lived. Keep the base log row,
         // stable request id, source, stage, and original compact error indefinitely.
         tx.execute(
@@ -785,8 +811,8 @@ impl Database {
             normalize_purchase_date(&account.purchase_date)?
         };
         self.conn.execute(
-            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, auth_error, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, auth_error, account_type, setup_step, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 account.id,
                 account.name,
@@ -803,6 +829,8 @@ impl Database {
                 account.cooldown_month_until.map(|t| t.to_rfc3339()),
                 account.last_error,
                 account.auth_error,
+                account.account_type.as_str(),
+                account.setup_step.as_str(),
                 account.created_at.to_rfc3339(),
                 account.updated_at.to_rfc3339(),
             ],
@@ -875,7 +903,7 @@ impl Database {
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, created_at, updated_at, auth_error FROM accounts WHERE id = ?1"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, created_at, updated_at, auth_error, account_type, setup_step FROM accounts WHERE id = ?1"
         )?;
         let account = stmt.query_row([id], account_from_row).optional()?;
         Ok(account)
@@ -883,10 +911,86 @@ impl Database {
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, created_at, updated_at, auth_error FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, created_at, updated_at, auth_error, account_type, setup_step FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
         )?;
         let rows = stmt.query_map([], account_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    /// Advance a managed-account onboarding step with an optimistic current-step
+    /// guard. The caller is responsible for validating that `to` is the only
+    /// legal successor of `from`.
+    pub fn advance_managed_setup(
+        &self,
+        id: &str,
+        from: AccountSetupStep,
+        to: AccountSetupStep,
+    ) -> Result<bool> {
+        let confirmed_purchase_date = (from == AccountSetupStep::Payment
+            && to == AccountSetupStep::KeyVerification)
+            .then(local_today);
+        let changed = self.conn.execute(
+            "UPDATE accounts
+             SET setup_step = ?1, enabled = 0,
+                 recharge_date = CASE WHEN ?5 IS NULL THEN recharge_date ELSE ?5 END,
+                 usage_month_window_cost_offset = CASE WHEN ?5 IS NULL
+                     THEN usage_month_window_cost_offset ELSE 0 END,
+                 updated_at = ?2
+             WHERE id = ?3 AND account_type = 'managed' AND setup_step = ?4",
+            params![
+                to.as_str(),
+                Utc::now().to_rfc3339(),
+                id,
+                from.as_str(),
+                confirmed_purchase_date,
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Persist a candidate key while keeping the account isolated from routing.
+    pub fn save_managed_key_for_verification(&self, id: &str, key_cipher: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE accounts
+             SET key_cipher = ?1, enabled = 0, auth_error = NULL, last_error = NULL,
+                 updated_at = ?2
+             WHERE id = ?3 AND account_type = 'managed' AND setup_step = 'key_verification'",
+            params![key_cipher, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Make a verified managed account routable only if the tested encrypted key
+    /// is still the one stored in the row.
+    pub fn complete_managed_setup_if_key_matches(
+        &self,
+        id: &str,
+        expected_key_cipher: &str,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE accounts
+             SET setup_step = 'ready', enabled = 1, auth_error = NULL, updated_at = ?1
+             WHERE id = ?2 AND account_type = 'managed'
+               AND setup_step = 'key_verification' AND key_cipher = ?3",
+            params![Utc::now().to_rfc3339(), id, expected_key_cipher],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Reset only an unfinished managed onboarding. Ready accounts keep their key
+    /// when their browser profile is reset.
+    pub fn reset_pending_managed_setup(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE accounts
+             SET setup_step = 'google_account', key_cipher = '', enabled = 0,
+                 auth_error = NULL, last_error = NULL, cooldown_until = NULL,
+                 cooldown_generic_until = NULL, cooldown_5h_until = NULL,
+                 cooldown_week_until = NULL, cooldown_month_until = NULL,
+                 updated_at = ?1
+             WHERE id = ?2 AND account_type = 'managed' AND setup_step <> 'ready'",
+            params![Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn reorder_accounts(
@@ -1419,6 +1523,8 @@ impl Database {
                 "SELECT MIN(cooldown_until)
                  FROM accounts
                  WHERE enabled = 1
+                   AND setup_step = 'ready'
+                   AND key_cipher <> ''
                    AND auth_error IS NULL
                    AND cooldown_until IS NOT NULL
                    AND cooldown_until > ?1",
@@ -2002,6 +2108,22 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     let expires_on = purchase_expires_on(&purchase_date).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
     })?;
+    let account_type_value = row.get::<_, String>(17)?;
+    let account_type = AccountType::try_from(account_type_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            17,
+            Type::Text,
+            Box::new(std::io::Error::other(error)),
+        )
+    })?;
+    let setup_step_value = row.get::<_, String>(18)?;
+    let setup_step = AccountSetupStep::try_from(setup_step_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            18,
+            Type::Text,
+            Box::new(std::io::Error::other(error)),
+        )
+    })?;
     Ok(Account {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -2009,6 +2131,8 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         password_cipher: row.get(3)?,
         key_cipher: row.get(4)?,
         enabled: row.get::<_, i32>(5)? != 0,
+        account_type,
+        setup_step,
         referral_code: row.get(6)?,
         purchase_date,
         expires_on,
@@ -2070,6 +2194,8 @@ mod tests {
             password_cipher: None,
             key_cipher: "cipher".into(),
             enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
             referral_code: None,
             purchase_date: String::new(),
             expires_on: String::new(),
@@ -2112,6 +2238,138 @@ mod tests {
             duration_ms: None,
             diagnostic: None,
         }
+    }
+
+    #[test]
+    fn v16_migrates_existing_accounts_to_imported_ready_keys() {
+        let dir = temp_data_dir("v16-account-lifecycle");
+        let path = dir.join("data.sqlite");
+        let now = Utc::now().to_rfc3339();
+        let conn = Connection::open(&path).expect("fixture db should open");
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+             INSERT INTO schema_version (version) VALUES (15);
+             CREATE TABLE accounts (
+                 id TEXT PRIMARY KEY, name TEXT NOT NULL, username TEXT,
+                 password_cipher TEXT, key_cipher TEXT NOT NULL,
+                 enabled INTEGER NOT NULL DEFAULT 1, referral_code TEXT,
+                 recharge_date TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
+                 cooldown_until TEXT, cooldown_generic_until TEXT,
+                 cooldown_5h_until TEXT, cooldown_week_until TEXT,
+                 cooldown_month_until TEXT, last_error TEXT, auth_error TEXT,
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+             );
+             CREATE TABLE forward_logs (
+                 id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL,
+                 cost_state TEXT NOT NULL DEFAULT 'not_applicable', diagnostic_json TEXT
+             );
+             CREATE TABLE gateway_logs (
+                 id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, diagnostic_json TEXT
+             );",
+        )
+        .expect("v15 fixture should be created");
+        conn.execute(
+            "INSERT INTO accounts
+             (id, name, key_cipher, enabled, recharge_date, created_at, updated_at)
+             VALUES ('legacy', 'Legacy', 'cipher', 1, '2026-08-01', ?1, ?1)",
+            [&now],
+        )
+        .expect("legacy account should be inserted");
+        drop(conn);
+
+        let db = Database::open(dir.clone()).expect("v16 migration should succeed");
+        let legacy = db
+            .get_account("legacy")
+            .expect("legacy account should load")
+            .expect("legacy account should remain");
+        assert_eq!(legacy.account_type, AccountType::Key);
+        assert_eq!(legacy.setup_step, AccountSetupStep::Ready);
+        let version: i64 = db
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 16);
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn managed_setup_requires_order_and_matching_verified_key() {
+        let dir = temp_data_dir("managed-setup-state");
+        let db = Database::open(dir.clone()).expect("db should open");
+        let mut managed = account("managed");
+        managed.account_type = AccountType::Managed;
+        managed.setup_step = AccountSetupStep::GoogleAccount;
+        managed.key_cipher.clear();
+        managed.enabled = false;
+        db.create_account(&managed).expect("draft should save");
+
+        assert!(
+            !db.advance_managed_setup(
+                "managed",
+                AccountSetupStep::OpencodeRegistration,
+                AccountSetupStep::Payment,
+            )
+            .unwrap()
+        );
+        for (from, to) in [
+            (
+                AccountSetupStep::GoogleAccount,
+                AccountSetupStep::OpencodeRegistration,
+            ),
+            (
+                AccountSetupStep::OpencodeRegistration,
+                AccountSetupStep::Payment,
+            ),
+        ] {
+            assert!(db.advance_managed_setup("managed", from, to).unwrap());
+        }
+        db.conn
+            .execute(
+                "UPDATE accounts SET recharge_date = '2000-01-01', usage_month_window_cost_offset = 1 WHERE id = 'managed'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            db.advance_managed_setup(
+                "managed",
+                AccountSetupStep::Payment,
+                AccountSetupStep::KeyVerification,
+            )
+            .unwrap()
+        );
+        let paid = db.get_account("managed").unwrap().unwrap();
+        assert_eq!(paid.purchase_date, local_today());
+        let month_offset: f64 = db
+            .conn
+            .query_row(
+                "SELECT usage_month_window_cost_offset FROM accounts WHERE id = 'managed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(month_offset, 0.0);
+        assert!(
+            db.save_managed_key_for_verification("managed", "candidate")
+                .unwrap()
+        );
+        assert!(
+            !db.complete_managed_setup_if_key_matches("managed", "stale")
+                .unwrap()
+        );
+        assert!(
+            db.complete_managed_setup_if_key_matches("managed", "candidate")
+                .unwrap()
+        );
+        let ready = db.get_account("managed").unwrap().unwrap();
+        assert_eq!(ready.setup_step, AccountSetupStep::Ready);
+        assert!(ready.enabled);
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
 
     fn forward_log_at(
@@ -2260,7 +2518,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 15, "{label}");
+            assert_eq!(version, 16, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -2338,7 +2596,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -2487,7 +2745,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -2631,7 +2889,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -2680,7 +2938,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
 
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
@@ -3029,7 +3287,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -3083,7 +3341,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -3157,7 +3415,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         assert!(auth_error.is_none());
 
         drop(db);

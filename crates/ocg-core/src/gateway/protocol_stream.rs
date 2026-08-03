@@ -1,3 +1,6 @@
+use super::diagnostics::{
+    redact_known_secret, redact_known_secret_stream_values, redact_known_secret_values,
+};
 use super::protocol::{
     ApiFormat, NamespaceToolMapping, ProtocolError, RequestPlan, encode_anthropic_thinking_block,
     encode_chat_reasoning, responses_id, sanitize_minimax_anthropic_usage,
@@ -5,9 +8,10 @@ use super::protocol::{
 };
 use bytes::{Bytes, BytesMut};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const MAX_PENDING_SSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DEFERRED_SSE_FRAMES: usize = 1024;
 
 pub(crate) struct StreamConverter {
     source: ApiFormat,
@@ -21,6 +25,15 @@ pub(crate) struct StreamConverter {
     pending: BytesMut,
     input: InputState,
     output: OutputState,
+    secret_redactor: StreamSecretRedactor,
+    passthrough_tainted: bool,
+    deferred_passthrough: Vec<DeferredPassthroughFrame>,
+    deferred_passthrough_bytes: usize,
+}
+
+struct DeferredPassthroughFrame {
+    passthrough: Bytes,
+    converted: Vec<Bytes>,
 }
 
 #[derive(Default)]
@@ -86,6 +99,8 @@ struct ChatTool {
 struct ResponseTool {
     block: Option<usize>,
     arguments_seen: bool,
+    arguments_closed: bool,
+    custom: bool,
 }
 
 struct OutputBlock {
@@ -137,8 +152,624 @@ enum PivotEvent {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SecretChannelKind {
+    Text,
+    Reasoning,
+    Signature,
+    Arguments,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SecretChannel {
+    kind: SecretChannelKind,
+    index: usize,
+}
+
+#[derive(Default)]
+struct StreamSecretRedactor {
+    secret: Option<String>,
+    pending: BTreeMap<SecretChannel, PendingSecret>,
+    argument_states: BTreeMap<usize, JsonArgumentRedactor>,
+    deferred_boundary: Option<DeferredBoundary>,
+}
+
+struct DeferredBoundary {
+    index: usize,
+    pending: Vec<(SecretChannelKind, PendingSecret)>,
+}
+
+struct PendingSecret {
+    text: String,
+    reasoning_origins: BTreeSet<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum JsonArgumentContext {
+    Object { expecting_key: bool },
+    Array,
+}
+
+#[derive(Default)]
+struct JsonArgumentRedactor {
+    contexts: Vec<JsonArgumentContext>,
+    in_string: bool,
+    string_is_value: bool,
+    escaped: bool,
+    escape_buffer: String,
+    high_surrogate: Option<(u16, String)>,
+    pending_value: VecDeque<JsonStringToken>,
+}
+
+struct JsonStringToken {
+    decoded: char,
+    raw: String,
+}
+
+impl JsonArgumentRedactor {
+    fn process(&mut self, input: &str, secret: &str) -> (String, bool, bool) {
+        let had_pending_value = !self.pending_value.is_empty()
+            || !self.escape_buffer.is_empty()
+            || self.high_surrogate.is_some();
+        let mut output = String::with_capacity(input.len());
+        let mut matched = false;
+        for character in input.chars() {
+            if self.in_string {
+                if self.string_is_value {
+                    if self.escape_buffer.is_empty() && character == '"' {
+                        output.push_str(&self.release_pending_value());
+                        self.high_surrogate = None;
+                        output.push(character);
+                        self.in_string = false;
+                        self.string_is_value = false;
+                    } else {
+                        matched |= self.push_value_character(character, secret, &mut output);
+                    }
+                    continue;
+                }
+
+                if !self.escaped && character == '"' {
+                    output.push(character);
+                    self.in_string = false;
+                    self.string_is_value = false;
+                    continue;
+                }
+
+                output.push(character);
+                if self.escaped {
+                    self.escaped = false;
+                } else if character == '\\' {
+                    self.escaped = true;
+                }
+                continue;
+            }
+
+            output.push(character);
+            match character {
+                '{' => self.contexts.push(JsonArgumentContext::Object {
+                    expecting_key: true,
+                }),
+                '[' => self.contexts.push(JsonArgumentContext::Array),
+                '}' | ']' => {
+                    self.contexts.pop();
+                }
+                ',' => {
+                    if let Some(JsonArgumentContext::Object { expecting_key }) =
+                        self.contexts.last_mut()
+                    {
+                        *expecting_key = true;
+                    }
+                }
+                ':' => {
+                    if let Some(JsonArgumentContext::Object { expecting_key }) =
+                        self.contexts.last_mut()
+                    {
+                        *expecting_key = false;
+                    }
+                }
+                '"' => {
+                    let is_key = matches!(
+                        self.contexts.last(),
+                        Some(JsonArgumentContext::Object {
+                            expecting_key: true
+                        })
+                    );
+                    self.in_string = true;
+                    self.string_is_value = !is_key;
+                    self.escaped = false;
+                    if is_key
+                        && let Some(JsonArgumentContext::Object { expecting_key }) =
+                            self.contexts.last_mut()
+                    {
+                        *expecting_key = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let changed = had_pending_value || output != input;
+        (output, changed, matched)
+    }
+
+    fn push_value_character(&mut self, character: char, secret: &str, output: &mut String) -> bool {
+        if self.escape_buffer.is_empty() {
+            if character == '\\' {
+                self.escape_buffer.push(character);
+                return false;
+            }
+            // A high surrogate not followed by another escape cannot form valid
+            // JSON. Drop it rather than forwarding an ambiguous secret spelling.
+            self.high_surrogate = None;
+            return self.push_value_token(
+                JsonStringToken {
+                    decoded: character,
+                    raw: character.to_string(),
+                },
+                secret,
+                output,
+            );
+        }
+
+        self.escape_buffer.push(character);
+        if self.escape_buffer.len() == 2 && character != 'u' {
+            let raw = std::mem::take(&mut self.escape_buffer);
+            let decoded = match character {
+                '"' => Some('"'),
+                '\\' => Some('\\'),
+                '/' => Some('/'),
+                'b' => Some('\u{0008}'),
+                'f' => Some('\u{000c}'),
+                'n' => Some('\n'),
+                'r' => Some('\r'),
+                't' => Some('\t'),
+                _ => None,
+            };
+            self.high_surrogate = None;
+            if let Some(decoded) = decoded {
+                return self.push_value_token(JsonStringToken { decoded, raw }, secret, output);
+            }
+            return false;
+        }
+        if !self.escape_buffer.starts_with("\\u") || self.escape_buffer.len() < 6 {
+            return false;
+        }
+
+        let raw = std::mem::take(&mut self.escape_buffer);
+        let Ok(unit) = u16::from_str_radix(&raw[2..], 16) else {
+            self.high_surrogate = None;
+            return false;
+        };
+        if (0xD800..=0xDBFF).contains(&unit) {
+            self.high_surrogate = Some((unit, raw));
+            return false;
+        }
+        if (0xDC00..=0xDFFF).contains(&unit) {
+            let Some((high, high_raw)) = self.high_surrogate.take() else {
+                return false;
+            };
+            let scalar = 0x10000 + (((high as u32 - 0xD800) << 10) | (unit as u32 - 0xDC00));
+            if let Some(decoded) = char::from_u32(scalar) {
+                return self.push_value_token(
+                    JsonStringToken {
+                        decoded,
+                        raw: format!("{high_raw}{raw}"),
+                    },
+                    secret,
+                    output,
+                );
+            }
+            return false;
+        }
+
+        self.high_surrogate = None;
+        if let Some(decoded) = char::from_u32(unit as u32) {
+            return self.push_value_token(JsonStringToken { decoded, raw }, secret, output);
+        }
+        false
+    }
+
+    fn push_value_token(
+        &mut self,
+        token: JsonStringToken,
+        secret: &str,
+        output: &mut String,
+    ) -> bool {
+        self.pending_value.push_back(token);
+        let secret = secret.chars().collect::<Vec<_>>();
+        if self.pending_value.len() == secret.len()
+            && self
+                .pending_value
+                .iter()
+                .map(|token| token.decoded)
+                .eq(secret.iter().copied())
+        {
+            self.pending_value.clear();
+            return true;
+        }
+        while !self.pending_value.is_empty()
+            && !self
+                .pending_value
+                .iter()
+                .map(|token| token.decoded)
+                .eq(secret.iter().copied().take(self.pending_value.len()))
+        {
+            if let Some(token) = self.pending_value.pop_front() {
+                output.push_str(&token.raw);
+            }
+        }
+        false
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending_value.is_empty()
+            || !self.escape_buffer.is_empty()
+            || self.high_surrogate.is_some()
+    }
+
+    fn release_pending_value(&mut self) -> String {
+        self.pending_value
+            .drain(..)
+            .map(|token| token.raw)
+            .collect()
+    }
+
+    fn finish(mut self, _secret: &str) -> String {
+        // Incomplete escapes/surrogate pairs are invalid JSON and are discarded
+        // fail-closed. A decoded proper prefix alone is safe at this boundary.
+        self.escape_buffer.clear();
+        self.high_surrogate = None;
+        self.release_pending_value()
+    }
+}
+
+impl StreamSecretRedactor {
+    fn new(secret: Option<&str>) -> Self {
+        Self {
+            secret: secret
+                .filter(|secret| !secret.is_empty())
+                .map(str::to_string),
+            pending: BTreeMap::new(),
+            argument_states: BTreeMap::new(),
+            deferred_boundary: None,
+        }
+    }
+
+    fn redact_events(&mut self, events: Vec<PivotEvent>) -> RedactedEvents {
+        let Some(secret) = self.secret.clone() else {
+            return RedactedEvents {
+                events,
+                matched: false,
+                reasoning_indexes: BTreeSet::new(),
+            };
+        };
+        let mut output = Vec::new();
+        let mut matched = false;
+        let mut reasoning_indexes = BTreeSet::new();
+        for event in events {
+            match event {
+                PivotEvent::Start { id, model, usage } => {
+                    output.extend(self.flush_deferred_boundary());
+                    output.push(PivotEvent::Start { id, model, usage });
+                }
+                PivotEvent::BlockStart { index, kind } => {
+                    output.extend(self.start_after_deferred_boundary(index, &kind));
+                    output.push(PivotEvent::BlockStart { index, kind });
+                }
+                PivotEvent::TextDelta { index, text } => {
+                    let (text, _, delta_matched, _) = self.redact_delta(
+                        SecretChannel {
+                            kind: SecretChannelKind::Text,
+                            index,
+                        },
+                        &text,
+                        &secret,
+                    );
+                    matched |= delta_matched;
+                    if !text.is_empty() {
+                        output.push(PivotEvent::TextDelta { index, text });
+                    }
+                }
+                PivotEvent::ReasoningDelta { index, text } => {
+                    let (text, _, delta_matched, matched_indexes) = self.redact_delta(
+                        SecretChannel {
+                            kind: SecretChannelKind::Reasoning,
+                            index,
+                        },
+                        &text,
+                        &secret,
+                    );
+                    matched |= delta_matched;
+                    reasoning_indexes.extend(matched_indexes);
+                    if !text.is_empty() {
+                        output.push(PivotEvent::ReasoningDelta { index, text });
+                    }
+                }
+                PivotEvent::SignatureDelta { index, signature } => {
+                    let (signature, _, delta_matched, matched_indexes) = self.redact_delta(
+                        SecretChannel {
+                            kind: SecretChannelKind::Signature,
+                            index,
+                        },
+                        &signature,
+                        &secret,
+                    );
+                    matched |= delta_matched;
+                    reasoning_indexes.extend(matched_indexes);
+                    if !signature.is_empty() {
+                        output.push(PivotEvent::SignatureDelta { index, signature });
+                    }
+                }
+                PivotEvent::ArgumentsDelta { index, arguments } => {
+                    let (arguments, _, delta_matched, _) = self.redact_delta(
+                        SecretChannel {
+                            kind: SecretChannelKind::Arguments,
+                            index,
+                        },
+                        &arguments,
+                        &secret,
+                    );
+                    matched |= delta_matched;
+                    if !arguments.is_empty() {
+                        output.push(PivotEvent::ArgumentsDelta { index, arguments });
+                    }
+                }
+                PivotEvent::BlockStop { index } => {
+                    output.extend(self.flush_deferred_boundary());
+                    output.extend(self.flush_argument_index(index));
+                    let channels = self
+                        .pending
+                        .keys()
+                        .copied()
+                        .filter(|channel| channel.index == index)
+                        .collect::<Vec<_>>();
+                    let pending = channels
+                        .into_iter()
+                        .filter_map(|channel| {
+                            self.pending
+                                .remove(&channel)
+                                .map(|value| (channel.kind, value))
+                        })
+                        .collect::<Vec<_>>();
+                    if pending.is_empty() {
+                        output.push(PivotEvent::BlockStop { index });
+                    } else {
+                        self.deferred_boundary = Some(DeferredBoundary { index, pending });
+                    }
+                }
+                PivotEvent::MessageDelta { stop_reason, usage } => {
+                    output.extend(self.flush_deferred_boundary());
+                    output.push(PivotEvent::MessageDelta { stop_reason, usage });
+                }
+                PivotEvent::Stop => {
+                    output.extend(self.flush_all());
+                    output.push(PivotEvent::Stop);
+                }
+                PivotEvent::Error { kind, message } => {
+                    output.extend(self.flush_all());
+                    let (message, message_changed) = redact_stream_value(&message, &secret);
+                    matched |= message_changed;
+                    output.push(PivotEvent::Error { kind, message });
+                }
+            }
+        }
+        RedactedEvents {
+            events: output,
+            matched,
+            reasoning_indexes,
+        }
+    }
+
+    fn redact_delta(
+        &mut self,
+        channel: SecretChannel,
+        input: &str,
+        secret: &str,
+    ) -> (String, bool, bool, BTreeSet<usize>) {
+        if channel.kind == SecretChannelKind::Arguments {
+            let (output, changed, matched) = self
+                .argument_states
+                .entry(channel.index)
+                .or_default()
+                .process(input, secret);
+            return (output, changed, matched, BTreeSet::new());
+        }
+        let prior = self.pending.remove(&channel);
+        let had_pending = prior.is_some();
+        let mut reasoning_origins = prior
+            .as_ref()
+            .map(|pending| pending.reasoning_origins.clone())
+            .unwrap_or_default();
+        if matches!(
+            channel.kind,
+            SecretChannelKind::Reasoning | SecretChannelKind::Signature
+        ) {
+            reasoning_origins.insert(channel.index);
+        }
+        let mut combined = prior.map(|pending| pending.text).unwrap_or_default();
+        combined.push_str(input);
+        let contained_secret = combined.contains(secret);
+        let matched_indexes = if contained_secret {
+            reasoning_origins.clone()
+        } else {
+            BTreeSet::new()
+        };
+        while combined.contains(secret) {
+            combined = combined.replace(secret, "");
+        }
+        let keep = longest_secret_prefix_suffix(&combined, secret);
+        let emitted_len = combined.len().saturating_sub(keep);
+        let emitted = combined[..emitted_len].to_string();
+        if keep > 0 {
+            self.pending.insert(
+                channel,
+                PendingSecret {
+                    text: combined[emitted_len..].to_string(),
+                    reasoning_origins,
+                },
+            );
+        }
+        (
+            emitted,
+            had_pending || contained_secret || keep > 0,
+            contained_secret,
+            matched_indexes,
+        )
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+            || self.deferred_boundary.is_some()
+            || self
+                .argument_states
+                .values()
+                .any(JsonArgumentRedactor::has_pending)
+    }
+
+    fn flush_argument_index(&mut self, index: usize) -> Vec<PivotEvent> {
+        let mut events = Vec::new();
+        if let Some(state) = self.argument_states.remove(&index) {
+            let value = state.finish(self.secret.as_deref().unwrap_or(""));
+            if !value.is_empty() {
+                events.push(PivotEvent::ArgumentsDelta {
+                    index,
+                    arguments: value,
+                });
+            }
+        }
+        events
+    }
+
+    fn start_after_deferred_boundary(
+        &mut self,
+        index: usize,
+        block_kind: &BlockKind,
+    ) -> Vec<PivotEvent> {
+        let Some(boundary) = self.deferred_boundary.take() else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        for (kind, mut pending) in boundary.pending {
+            let compatible = matches!(
+                (kind, block_kind),
+                (SecretChannelKind::Text, BlockKind::Text)
+                    | (SecretChannelKind::Reasoning, BlockKind::Reasoning)
+            );
+            if compatible {
+                if matches!(
+                    kind,
+                    SecretChannelKind::Reasoning | SecretChannelKind::Signature
+                ) {
+                    pending.reasoning_origins.insert(index);
+                }
+                self.pending.insert(SecretChannel { kind, index }, pending);
+            } else {
+                events.push(channel_event(kind, boundary.index, pending.text));
+            }
+        }
+        events.push(PivotEvent::BlockStop {
+            index: boundary.index,
+        });
+        events
+    }
+
+    fn flush_deferred_boundary(&mut self) -> Vec<PivotEvent> {
+        let Some(boundary) = self.deferred_boundary.take() else {
+            return Vec::new();
+        };
+        let mut events = boundary
+            .pending
+            .into_iter()
+            .map(|(kind, pending)| channel_event(kind, boundary.index, pending.text))
+            .collect::<Vec<_>>();
+        events.push(PivotEvent::BlockStop {
+            index: boundary.index,
+        });
+        events
+    }
+
+    fn flush_all(&mut self) -> Vec<PivotEvent> {
+        let mut events = self.flush_deferred_boundary();
+        let pending = std::mem::take(&mut self.pending);
+        events.extend(
+            pending
+                .into_iter()
+                .map(|(channel, pending)| channel_event(channel.kind, channel.index, pending.text)),
+        );
+        let arguments = std::mem::take(&mut self.argument_states);
+        let secret = self.secret.as_deref().unwrap_or("");
+        events.extend(arguments.into_iter().filter_map(|(index, state)| {
+            let value = state.finish(secret);
+            (!value.is_empty()).then_some(PivotEvent::ArgumentsDelta {
+                index,
+                arguments: value,
+            })
+        }));
+        events
+    }
+}
+
+fn channel_event(kind: SecretChannelKind, index: usize, value: String) -> PivotEvent {
+    match kind {
+        SecretChannelKind::Text => PivotEvent::TextDelta { index, text: value },
+        SecretChannelKind::Reasoning => PivotEvent::ReasoningDelta { index, text: value },
+        SecretChannelKind::Signature => PivotEvent::SignatureDelta {
+            index,
+            signature: value,
+        },
+        SecretChannelKind::Arguments => PivotEvent::ArgumentsDelta {
+            index,
+            arguments: value,
+        },
+    }
+}
+
+#[cfg(test)]
+fn json_string_contents(value: &str) -> String {
+    serde_json::to_string(value)
+        .ok()
+        .and_then(|encoded| {
+            encoded
+                .strip_prefix('"')
+                .and_then(|encoded| encoded.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| value.to_string())
+}
+
+struct RedactedEvents {
+    events: Vec<PivotEvent>,
+    matched: bool,
+    reasoning_indexes: BTreeSet<usize>,
+}
+
+fn redact_stream_value(value: &str, secret: &str) -> (String, bool) {
+    if secret.is_empty() || !value.contains(secret) {
+        return (value.to_string(), false);
+    }
+    let mut redacted = value.to_string();
+    while redacted.contains(secret) {
+        redacted = redacted.replace(secret, "");
+    }
+    (redacted, true)
+}
+
+fn longest_secret_prefix_suffix(value: &str, secret: &str) -> usize {
+    secret
+        .char_indices()
+        .map(|(index, _)| index)
+        .filter(|index| *index > 0)
+        .rev()
+        .find(|index| value.ends_with(&secret[..*index]))
+        .unwrap_or(0)
+}
+
 impl StreamConverter {
+    #[cfg(test)]
     pub(crate) fn new(plan: &RequestPlan) -> Self {
+        Self::new_with_known_secret(plan, None)
+    }
+
+    pub(crate) fn new_with_known_secret(plan: &RequestPlan, known_secret: Option<&str>) -> Self {
         Self {
             source: plan.upstream,
             target: plan.client,
@@ -156,6 +787,10 @@ impl StreamConverter {
             pending: BytesMut::new(),
             input: InputState::default(),
             output: OutputState::default(),
+            secret_redactor: StreamSecretRedactor::new(known_secret),
+            passthrough_tainted: false,
+            deferred_passthrough: Vec::new(),
+            deferred_passthrough_bytes: 0,
         }
     }
 
@@ -175,9 +810,14 @@ impl StreamConverter {
                 if self.input.terminal {
                     break;
                 }
-                let passthrough = sanitize_passthrough_sse_frame(self.source, &frame, &self.model);
-                let _ = self.convert_frames(vec![frame])?;
-                output.push(passthrough);
+                let passthrough = sanitize_passthrough_sse_frame(
+                    self.source,
+                    &frame,
+                    &self.model,
+                    self.secret_redactor.secret.as_deref(),
+                );
+                let (converted, secret_matched) = self.convert_frames(vec![frame])?;
+                self.emit_same_protocol_frame(passthrough, converted, secret_matched, &mut output);
             }
             return Ok(output);
         }
@@ -187,7 +827,7 @@ impl StreamConverter {
         }
         self.pending.extend_from_slice(&chunk);
         let frames = drain_frames(&mut self.pending);
-        self.convert_frames(frames)
+        self.convert_frames(frames).map(|(output, _)| output)
     }
 
     pub(crate) fn finish(&mut self) -> Result<Vec<Bytes>, ProtocolError> {
@@ -201,40 +841,50 @@ impl StreamConverter {
                 if self.input.terminal {
                     break;
                 }
-                let passthrough = sanitize_passthrough_sse_frame(self.source, &frame, &self.model);
-                let _ = self.convert_frames(vec![frame])?;
-                output.push(passthrough);
+                let passthrough = sanitize_passthrough_sse_frame(
+                    self.source,
+                    &frame,
+                    &self.model,
+                    self.secret_redactor.secret.as_deref(),
+                );
+                let (converted, secret_matched) = self.convert_frames(vec![frame])?;
+                self.emit_same_protocol_frame(passthrough, converted, secret_matched, &mut output);
             }
             if self.input.terminal {
                 return Ok(output);
             }
-            return match self.source {
-                ApiFormat::ChatCompletions if self.input.pending_stop.is_some() => {
-                    self.input.terminal = true;
-                    self.output.terminal = true;
-                    output.push(done_frame());
-                    Ok(output)
-                }
-                ApiFormat::Messages if self.input.message_delta_seen => {
-                    self.input.terminal = true;
-                    self.output.terminal = true;
-                    output.push(sse_json(
-                        Some("message_stop"),
-                        &json!({"type":"message_stop"}),
-                    ));
-                    Ok(output)
-                }
-                _ => Err(ProtocolError::new(
+            let can_finish = matches!(self.source, ApiFormat::ChatCompletions)
+                && self.input.pending_stop.is_some()
+                || matches!(self.source, ApiFormat::Messages) && self.input.message_delta_seen;
+            if !can_finish {
+                return Err(ProtocolError::new(
                     "upstream SSE ended before a terminal event",
-                )),
-            };
+                ));
+            }
+            if self.passthrough_tainted {
+                let events = self.finish_input();
+                let (chunks, _) = self.encode_redacted(events)?;
+                output.extend(chunks);
+            } else {
+                output.extend(self.release_deferred_passthrough(false));
+                self.input.terminal = true;
+                self.output.terminal = true;
+                output.push(match self.source {
+                    ApiFormat::ChatCompletions => done_frame(),
+                    ApiFormat::Messages => {
+                        sse_json(Some("message_stop"), &json!({"type":"message_stop"}))
+                    }
+                    ApiFormat::Responses | ApiFormat::Gemini => unreachable!(),
+                });
+            }
+            return Ok(output);
         }
 
         let mut frames = drain_frames(&mut self.pending);
         if !self.pending.is_empty() {
             frames.push(self.pending.split().freeze());
         }
-        let mut output = self.convert_frames(frames)?;
+        let (mut output, _) = self.convert_frames(frames)?;
         if !self.input.terminal {
             if self.input.pending_stop.is_none() && !self.input.message_delta_seen {
                 return Err(ProtocolError::new(
@@ -242,7 +892,7 @@ impl StreamConverter {
                 ));
             }
             let events = self.finish_input();
-            output.extend(self.encode_all(events)?);
+            output.extend(self.encode_redacted(events)?.0);
         }
         Ok(output)
     }
@@ -252,7 +902,7 @@ impl StreamConverter {
         if self.is_terminal() {
             return Vec::new();
         }
-        match self.target {
+        let frames = match self.target {
             ApiFormat::Messages => vec![sse_json(
                 Some("error"),
                 &json!({"type":"error","error":{"type":"api_error","message":message}}),
@@ -278,14 +928,15 @@ impl StreamConverter {
                     "error":{"code":500,"message":message,"status":"INTERNAL"}
                 }),
             )],
-        }
+        };
+        self.sanitize_generated_frames(frames)
     }
 
     pub(crate) fn outcome_unknown_event(&self, message: &str) -> Vec<Bytes> {
         if self.is_terminal() {
             return Vec::new();
         }
-        match self.target {
+        let frames = match self.target {
             ApiFormat::Messages => vec![sse_json(
                 Some("error"),
                 &json!({"type":"error","error":{"type":"upstream_outcome_unknown","message":message}}),
@@ -311,15 +962,71 @@ impl StreamConverter {
                     "error":{"code":500,"message":message,"status":"UPSTREAM_OUTCOME_UNKNOWN"}
                 }),
             )],
-        }
+        };
+        self.sanitize_generated_frames(frames)
     }
 
     pub(crate) fn is_terminal(&self) -> bool {
         self.input.terminal || self.output.terminal
     }
 
-    fn convert_frames(&mut self, frames: Vec<Bytes>) -> Result<Vec<Bytes>, ProtocolError> {
+    fn emit_same_protocol_frame(
+        &mut self,
+        passthrough: Bytes,
+        converted: Vec<Bytes>,
+        secret_matched: bool,
+        output: &mut Vec<Bytes>,
+    ) {
+        if self.passthrough_tainted {
+            output.extend(converted);
+            return;
+        }
+        if secret_matched {
+            self.passthrough_tainted = true;
+            output.extend(self.release_deferred_passthrough(true));
+            output.extend(converted);
+        } else if self.secret_redactor.has_pending() || !self.deferred_passthrough.is_empty() {
+            let converted_bytes = converted.iter().map(Bytes::len).sum::<usize>();
+            let frame_bytes = passthrough.len().saturating_add(converted_bytes);
+            if self.deferred_passthrough.len() >= MAX_DEFERRED_SSE_FRAMES
+                || self.deferred_passthrough_bytes.saturating_add(frame_bytes)
+                    > MAX_PENDING_SSE_BYTES
+            {
+                self.passthrough_tainted = true;
+                output.extend(self.release_deferred_passthrough(true));
+                output.extend(converted);
+                return;
+            }
+            self.deferred_passthrough_bytes += frame_bytes;
+            self.deferred_passthrough.push(DeferredPassthroughFrame {
+                passthrough,
+                converted,
+            });
+            if !self.secret_redactor.has_pending() {
+                output.extend(self.release_deferred_passthrough(false));
+            }
+        } else {
+            output.push(passthrough);
+        }
+    }
+
+    fn release_deferred_passthrough(&mut self, converted: bool) -> Vec<Bytes> {
+        self.deferred_passthrough_bytes = 0;
+        std::mem::take(&mut self.deferred_passthrough)
+            .into_iter()
+            .flat_map(|frame| {
+                if converted {
+                    frame.converted
+                } else {
+                    vec![frame.passthrough]
+                }
+            })
+            .collect()
+    }
+
+    fn convert_frames(&mut self, frames: Vec<Bytes>) -> Result<(Vec<Bytes>, bool), ProtocolError> {
         let mut output = Vec::new();
+        let mut secret_changed = false;
         for frame in frames {
             if self.input.terminal {
                 break;
@@ -344,9 +1051,36 @@ impl StreamConverter {
                     }
                 }
             };
-            output.extend(self.encode_all(events)?);
+            let (chunks, matched) = self.encode_redacted(events)?;
+            output.extend(chunks);
+            secret_changed |= matched;
         }
-        Ok(output)
+        Ok((output, secret_changed))
+    }
+
+    fn encode_redacted(
+        &mut self,
+        events: Vec<PivotEvent>,
+    ) -> Result<(Vec<Bytes>, bool), ProtocolError> {
+        let redacted = self.secret_redactor.redact_events(events);
+        for index in redacted.reasoning_indexes {
+            self.input.anthropic_reasoning.remove(&index);
+        }
+        let encoded = self.encode_all(redacted.events)?;
+        let output = self.sanitize_generated_frames(encoded);
+        Ok((output, redacted.matched))
+    }
+
+    fn sanitize_generated_frames(&self, frames: Vec<Bytes>) -> Vec<Bytes> {
+        let Some(secret) = self.secret_redactor.secret.as_deref() else {
+            return frames;
+        };
+        frames
+            .into_iter()
+            .map(|frame| {
+                sanitize_passthrough_sse_frame(self.target, &frame, &self.model, Some(secret))
+            })
+            .collect()
     }
 
     fn encode_all(&mut self, events: Vec<PivotEvent>) -> Result<Vec<Bytes>, ProtocolError> {
@@ -461,10 +1195,38 @@ impl StreamConverter {
                     u64_at(&value, "/index").unwrap_or(self.input.next_block as u64) as usize;
                 self.input.next_block = self.input.next_block.max(index + 1);
                 let block = value.pointer("/content_block").unwrap_or(&Value::Null);
+                let mut initial_text = None;
+                let mut initial_reasoning = None;
+                let mut initial_signature = None;
                 let kind = match block.get("type").and_then(Value::as_str).unwrap_or("") {
-                    "text" => BlockKind::Text,
+                    "text" => {
+                        initial_text = block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string);
+                        BlockKind::Text
+                    }
                     "thinking" | "redacted_thinking" => {
-                        self.input.anthropic_reasoning.insert(index, block.clone());
+                        let replay_is_safe =
+                            self.secret_redactor.secret.as_deref().is_none_or(|secret| {
+                                let mut redacted = block.clone();
+                                redact_known_secret_values(&mut redacted, secret);
+                                redacted == *block
+                            });
+                        if replay_is_safe {
+                            self.input.anthropic_reasoning.insert(index, block.clone());
+                        }
+                        initial_reasoning = block
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string);
+                        initial_signature = block
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string);
                         BlockKind::Reasoning
                     }
                     "tool_use" | "server_tool_use" => {
@@ -477,7 +1239,17 @@ impl StreamConverter {
                     _ => return Vec::new(),
                 };
                 self.input.active.insert(index, kind.clone());
-                vec![PivotEvent::BlockStart { index, kind }]
+                let mut events = vec![PivotEvent::BlockStart { index, kind }];
+                if let Some(text) = initial_text {
+                    events.push(PivotEvent::TextDelta { index, text });
+                }
+                if let Some(text) = initial_reasoning {
+                    events.push(PivotEvent::ReasoningDelta { index, text });
+                }
+                if let Some(signature) = initial_signature {
+                    events.push(PivotEvent::SignatureDelta { index, signature });
+                }
+                events
             }
             "content_block_delta" => {
                 let index = u64_at(&value, "/index").unwrap_or(0) as usize;
@@ -596,9 +1368,10 @@ impl StreamConverter {
                     text: text.to_string(),
                 });
             }
-            if let Some(text) = delta
-                .get("content")
-                .and_then(Value::as_str)
+            for text in [delta.get("content"), delta.get("refusal")]
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
                 .filter(|text| !text.is_empty())
             {
                 self.close_chat_reasoning_block(&mut events);
@@ -645,6 +1418,32 @@ impl StreamConverter {
                         if !tool.name.is_empty() {
                             events.extend(self.start_chat_tool(tool_index));
                         }
+                    }
+                }
+            }
+            if let Some(function_call) = delta.get("function_call") {
+                self.close_chat_non_tool_blocks(&mut events);
+                let tool_index = 0;
+                let tool = self.input.chat_tools.entry(tool_index).or_default();
+                if let Some(name) = function_call.get("name").and_then(Value::as_str) {
+                    tool.name = name.to_string();
+                }
+                let arguments = function_call
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if tool.started {
+                    if !arguments.is_empty() {
+                        events.push(PivotEvent::ArgumentsDelta {
+                            index: tool.block.expect("started tool has block"),
+                            arguments,
+                        });
+                    }
+                } else {
+                    tool.pending_arguments.push_str(&arguments);
+                    if !tool.name.is_empty() {
+                        events.extend(self.start_chat_tool(tool_index));
                     }
                 }
             }
@@ -741,8 +1540,30 @@ impl StreamConverter {
             "response.output_item.added" => {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
                 if let Some(item) = value.get("item") {
-                    if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    let item_type = item.get("type").and_then(Value::as_str);
+                    if matches!(item_type, Some("function_call" | "custom_tool_call")) {
                         events.extend(self.start_response_tool(output_index, item));
+                        if let Some(tool) = self.input.response_tools.get_mut(&output_index) {
+                            let custom = item_type == Some("custom_tool_call");
+                            let initial = if custom {
+                                item.get("input").and_then(Value::as_str)
+                            } else {
+                                item.get("arguments").and_then(Value::as_str)
+                            }
+                            .filter(|value| !value.is_empty());
+                            if let (Some(index), Some(initial)) = (tool.block, initial) {
+                                tool.custom = custom;
+                                tool.arguments_seen = true;
+                                events.push(PivotEvent::ArgumentsDelta {
+                                    index,
+                                    arguments: if custom {
+                                        encode_custom_input_delta(initial, true)
+                                    } else {
+                                        initial.to_string()
+                                    },
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -755,18 +1576,40 @@ impl StreamConverter {
                     Some("reasoning_text" | "summary_text")
                 );
                 events.extend(self.start_response_part(output_index, content_index, reasoning));
+                let initial = part
+                    .get("text")
+                    .or_else(|| part.get("refusal"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty());
+                if let Some(text) = initial {
+                    let key = (output_index, content_index, reasoning);
+                    self.input.response_delta_seen.insert(key);
+                    if let Some(index) = self.input.response_parts.get(&key).copied() {
+                        events.push(if reasoning {
+                            PivotEvent::ReasoningDelta {
+                                index,
+                                text: text.to_string(),
+                            }
+                        } else {
+                            PivotEvent::TextDelta {
+                                index,
+                                text: text.to_string(),
+                            }
+                        });
+                    }
+                }
             }
             "response.output_text.delta" | "response.refusal.delta" => {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
                 let content_index = u64_at(&value, "/content_index").unwrap_or(0);
                 events.extend(self.start_response_part(output_index, content_index, false));
                 let key = (output_index, content_index, false);
-                self.input.response_delta_seen.insert(key);
-                if let Some(index) = self.input.response_parts.get(&key).copied() {
-                    events.push(PivotEvent::TextDelta {
-                        index,
-                        text: string_at(&value, "/delta", ""),
-                    });
+                let text = string_at(&value, "/delta", "");
+                if !text.is_empty() {
+                    self.input.response_delta_seen.insert(key);
+                    if let Some(index) = self.input.response_parts.get(&key).copied() {
+                        events.push(PivotEvent::TextDelta { index, text });
+                    }
                 }
             }
             "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
@@ -776,26 +1619,68 @@ impl StreamConverter {
                     .unwrap_or(0);
                 events.extend(self.start_response_part(output_index, content_index, true));
                 let key = (output_index, content_index, true);
-                self.input.response_delta_seen.insert(key);
-                if let Some(index) = self.input.response_parts.get(&key).copied() {
-                    events.push(PivotEvent::ReasoningDelta {
-                        index,
-                        text: string_at(&value, "/delta", ""),
-                    });
+                let text = string_at(&value, "/delta", "");
+                if !text.is_empty() {
+                    self.input.response_delta_seen.insert(key);
+                    if let Some(index) = self.input.response_parts.get(&key).copied() {
+                        events.push(PivotEvent::ReasoningDelta { index, text });
+                    }
                 }
             }
-            "response.function_call_arguments.delta" => {
+            "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
                 let output_index = u64_at(&value, "/output_index").unwrap_or(0);
                 if !self.input.response_tools.contains_key(&output_index) {
                     events.extend(self.start_response_tool(output_index, &value));
                 }
                 if let Some(tool) = self.input.response_tools.get_mut(&output_index) {
-                    tool.arguments_seen = true;
-                    if let Some(index) = tool.block {
+                    if event_type == "response.custom_tool_call_input.delta" {
+                        tool.custom = true;
+                    }
+                    let delta = string_at(&value, "/delta", "");
+                    if !delta.is_empty()
+                        && let Some(index) = tool.block
+                    {
+                        let first_delta = !tool.arguments_seen;
+                        tool.arguments_seen = true;
                         events.push(PivotEvent::ArgumentsDelta {
                             index,
-                            arguments: string_at(&value, "/delta", ""),
+                            arguments: if tool.custom {
+                                encode_custom_input_delta(&delta, first_delta)
+                            } else {
+                                delta
+                            },
                         });
+                    }
+                }
+            }
+            "response.function_call_arguments.done" | "response.custom_tool_call_input.done" => {
+                let output_index = u64_at(&value, "/output_index").unwrap_or(0);
+                if !self.input.response_tools.contains_key(&output_index) {
+                    events.extend(self.start_response_tool(output_index, &value));
+                }
+                if let Some(tool) = self.input.response_tools.get_mut(&output_index) {
+                    if event_type == "response.custom_tool_call_input.done" {
+                        tool.custom = true;
+                    }
+                    if let Some(index) = tool.block {
+                        if !tool.arguments_seen {
+                            let arguments = if tool.custom {
+                                json!({"input": string_at(&value, "/input", "")}).to_string()
+                            } else {
+                                string_at(&value, "/arguments", "")
+                            };
+                            events.push(PivotEvent::ArgumentsDelta { index, arguments });
+                            tool.arguments_seen = true;
+                            tool.arguments_closed = true;
+                        } else if tool.custom && !tool.arguments_closed {
+                            events.push(PivotEvent::ArgumentsDelta {
+                                index,
+                                arguments: "\"}".to_string(),
+                            });
+                            tool.arguments_closed = true;
+                        } else {
+                            tool.arguments_closed = true;
+                        }
                     }
                 }
             }
@@ -872,6 +1757,7 @@ impl StreamConverter {
             .and_then(Value::as_str)
             .unwrap_or("tool")
             .to_string();
+        let custom = item.get("type").and_then(Value::as_str) == Some("custom_tool_call");
         let (index, start) = self.next_block(BlockKind::Tool {
             id: id.clone(),
             name: name.clone(),
@@ -882,6 +1768,8 @@ impl StreamConverter {
             ResponseTool {
                 block: Some(index),
                 arguments_seen: false,
+                arguments_closed: false,
+                custom,
             },
         );
         vec![start]
@@ -890,23 +1778,43 @@ impl StreamConverter {
     fn complete_response_item(&mut self, output_index: u64, item: &Value) -> Vec<PivotEvent> {
         let mut events = Vec::new();
         match item.get("type").and_then(Value::as_str).unwrap_or("") {
-            "function_call" => {
+            "function_call" | "custom_tool_call" => {
                 events.extend(self.start_response_tool(output_index, item));
-                if let Some(tool) = self.input.response_tools.get(&output_index) {
+                let mut stop_index = None;
+                if let Some(tool) = self.input.response_tools.get_mut(&output_index) {
                     if !tool.arguments_seen {
-                        if let (Some(index), Some(arguments)) =
-                            (tool.block, item.get("arguments").and_then(Value::as_str))
-                        {
+                        let value = if tool.custom {
+                            item.get("input").and_then(Value::as_str)
+                        } else {
+                            item.get("arguments").and_then(Value::as_str)
+                        };
+                        if let (Some(index), Some(arguments)) = (tool.block, value) {
                             events.push(PivotEvent::ArgumentsDelta {
                                 index,
-                                arguments: arguments.to_string(),
+                                arguments: if tool.custom {
+                                    json!({"input":arguments}).to_string()
+                                } else {
+                                    arguments.to_string()
+                                },
                             });
                         }
+                        tool.arguments_seen = true;
+                        tool.arguments_closed = true;
+                    } else if tool.custom
+                        && !tool.arguments_closed
+                        && let Some(index) = tool.block
+                    {
+                        events.push(PivotEvent::ArgumentsDelta {
+                            index,
+                            arguments: "\"}".to_string(),
+                        });
+                        tool.arguments_closed = true;
                     }
-                    if let Some(index) = tool.block {
-                        self.input.active.remove(&index);
-                        events.push(PivotEvent::BlockStop { index });
-                    }
+                    stop_index = tool.block;
+                }
+                if let Some(index) = stop_index {
+                    self.input.active.remove(&index);
+                    events.push(PivotEvent::BlockStop { index });
                 }
             }
             "message" => {
@@ -1688,51 +2596,93 @@ fn done_frame() -> Bytes {
 /// Frames that do not need a correction are returned byte-for-byte unchanged. When a
 /// correction is needed, only the data field is replaced; event IDs, retry hints,
 /// comments, and the original line-ending style remain intact.
-fn sanitize_passthrough_sse_frame(format: ApiFormat, frame: &[u8], model_hint: &str) -> Bytes {
-    if !matches!(format, ApiFormat::ChatCompletions | ApiFormat::Messages) {
-        return Bytes::copy_from_slice(frame);
-    }
-    let (_, data) = match parse_sse_frame(frame) {
-        Ok(Some(parsed)) => parsed,
-        _ => return Bytes::copy_from_slice(frame),
-    };
-    let mut value: Value = match serde_json::from_str(&data) {
-        Ok(value) => value,
-        Err(_) => return Bytes::copy_from_slice(frame),
-    };
-    let original = value.clone();
-    match format {
-        ApiFormat::ChatCompletions => {
-            let model = value
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if let Some(usage) = value.get_mut("usage") {
-                sanitize_minimax_chat_usage(model.as_deref(), Some(model_hint), usage);
-            }
+fn sanitize_passthrough_sse_frame(
+    format: ApiFormat,
+    frame: &[u8],
+    model_hint: &str,
+    known_secret: Option<&str>,
+) -> Bytes {
+    let secret = known_secret.filter(|secret| !secret.is_empty());
+    let mut output = Bytes::copy_from_slice(frame);
+    if let Ok(Some((_, data))) = parse_sse_frame(frame)
+        && let Ok(mut value) = serde_json::from_str::<Value>(&data)
+    {
+        let original = value.clone();
+        if let Some(secret) = secret {
+            redact_known_secret_stream_values(&mut value, secret);
         }
-        ApiFormat::Messages => {
-            let model = value
-                .pointer("/message/model")
-                .or_else(|| value.get("model"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let has_top_level_usage = value.get("usage").is_some();
-            let usage = if has_top_level_usage {
-                value.get_mut("usage")
-            } else {
-                value.pointer_mut("/message/usage")
-            };
-            if let Some(usage) = usage {
-                sanitize_minimax_anthropic_usage(model.as_deref(), Some(model_hint), usage);
+        match format {
+            ApiFormat::ChatCompletions => {
+                let model = value
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                if let Some(usage) = value.get_mut("usage") {
+                    sanitize_minimax_chat_usage(model.as_deref(), Some(model_hint), usage);
+                }
             }
+            ApiFormat::Messages => {
+                let model = value
+                    .pointer("/message/model")
+                    .or_else(|| value.get("model"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let has_top_level_usage = value.get("usage").is_some();
+                let usage = if has_top_level_usage {
+                    value.get_mut("usage")
+                } else {
+                    value.pointer_mut("/message/usage")
+                };
+                if let Some(usage) = usage {
+                    sanitize_minimax_anthropic_usage(model.as_deref(), Some(model_hint), usage);
+                }
+            }
+            ApiFormat::Responses | ApiFormat::Gemini => {}
         }
-        ApiFormat::Responses | ApiFormat::Gemini => return Bytes::copy_from_slice(frame),
+        if value != original {
+            output = rewrite_sse_data(frame, &value);
+        }
     }
-    if value == original {
+    secret.map_or(output.clone(), |secret| {
+        redact_sse_metadata(&output, secret)
+    })
+}
+
+fn redact_sse_metadata(frame: &[u8], known_secret: &str) -> Bytes {
+    let Ok(text) = std::str::from_utf8(frame) else {
         return Bytes::copy_from_slice(frame);
+    };
+    let mut output = String::with_capacity(text.len());
+    let mut changed = false;
+    for raw_line in text.split_inclusive('\n') {
+        let (line, ending) = if let Some(line) = raw_line.strip_suffix("\r\n") {
+            (line, "\r\n")
+        } else if let Some(line) = raw_line.strip_suffix('\n') {
+            (line, "\n")
+        } else {
+            (raw_line, "")
+        };
+        let value = line.split_once(':').and_then(|(field, value)| {
+            // Data lines are parsed and redacted as JSON above. Every other
+            // field is metadata, including provider extension fields.
+            (field != "data").then_some((field, value))
+        });
+        if let Some((field, value)) = value {
+            let redacted = redact_known_secret(value, known_secret);
+            changed |= redacted != value;
+            output.push_str(field);
+            output.push(':');
+            output.push_str(&redacted);
+            output.push_str(ending);
+        } else {
+            output.push_str(raw_line);
+        }
     }
-    rewrite_sse_data(frame, &value)
+    if changed {
+        Bytes::from(output)
+    } else {
+        Bytes::copy_from_slice(frame)
+    }
 }
 
 fn rewrite_sse_data(frame: &[u8], value: &Value) -> Bytes {
@@ -1803,6 +2753,19 @@ fn custom_tool_input(arguments: &str) -> String {
                 .or_else(|| value.as_str().map(str::to_string))
         })
         .unwrap_or_else(|| arguments.to_string())
+}
+
+fn encode_custom_input_delta(delta: &str, first: bool) -> String {
+    let encoded = serde_json::to_string(delta).unwrap_or_else(|_| "\"\"".to_string());
+    let inner = encoded
+        .strip_prefix('"')
+        .and_then(|encoded| encoded.strip_suffix('"'))
+        .unwrap_or_default();
+    if first {
+        format!("{{\"input\":\"{inner}")
+    } else {
+        inner.to_string()
+    }
 }
 
 fn custom_tool_input_prefix(arguments: &str) -> Option<String> {
@@ -2030,6 +2993,71 @@ mod tests {
         String::from_utf8(output.concat()).expect("output must be UTF-8")
     }
 
+    fn messages_text(output: &str) -> String {
+        output
+            .split("\n\n")
+            .filter_map(|frame| parse_sse_frame(frame.as_bytes()).ok().flatten())
+            .filter_map(|(_, payload)| serde_json::from_str::<Value>(&payload).ok())
+            .filter_map(|value| {
+                (value.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta")).then(
+                    || {
+                        value
+                            .pointer("/delta/text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn messages_arguments(output: &str) -> String {
+        output
+            .split("\n\n")
+            .filter_map(|frame| parse_sse_frame(frame.as_bytes()).ok().flatten())
+            .filter_map(|(_, payload)| serde_json::from_str::<Value>(&payload).ok())
+            .filter_map(|value| {
+                (value.pointer("/delta/type").and_then(Value::as_str) == Some("input_json_delta"))
+                    .then(|| {
+                        value
+                            .pointer("/delta/partial_json")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+            })
+            .collect()
+    }
+
+    fn pivot_text(events: Vec<PivotEvent>) -> String {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                PivotEvent::TextDelta { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn responses_custom_input(output: &str) -> String {
+        output
+            .split("\n\n")
+            .filter_map(|frame| parse_sse_frame(frame.as_bytes()).ok().flatten())
+            .filter_map(|(_, payload)| serde_json::from_str::<Value>(&payload).ok())
+            .filter(|value| {
+                value.get("type").and_then(Value::as_str)
+                    == Some("response.custom_tool_call_input.delta")
+            })
+            .filter_map(|value| {
+                value
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
     #[test]
     fn same_protocol_is_byte_passthrough() {
         let mut converter = StreamConverter::new(&plan(ApiFormat::Messages, ApiFormat::Messages));
@@ -2041,6 +3069,596 @@ mod tests {
             chunk.as_ref()
         );
         assert!(converter.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn same_protocol_redacts_a_secret_split_across_text_deltas() {
+        let secret = "opaque/account+key=42";
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Messages, ApiFormat::Messages),
+            Some(secret),
+        );
+        let source = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"before opaque/account+\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"key=42 after\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(!output.contains(secret), "stream leaked secret: {output}");
+        assert_eq!(messages_text(&output), "before  after");
+    }
+
+    #[test]
+    fn same_protocol_keeps_unknown_fields_after_a_false_key_prefix() {
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions),
+            Some("sk-real"),
+        );
+        let source = concat!(
+            "event: chunk\ndata: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"s\"}}],\"logprobs\":{\"content\":[{\"token\":\"s\",\"vendor_score\":0.7}]},\"vendor_extension\":{\"trace_id\":\"trace_1\"}}\n\n",
+            "event: chunk\ndata: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"afe\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut output = converter
+            .process_chunk(Bytes::from_static(source.as_bytes()))
+            .unwrap();
+        output.extend(converter.finish().unwrap());
+        assert_eq!(output.concat(), source.as_bytes());
+    }
+
+    #[test]
+    fn same_protocol_false_prefix_buffer_is_bounded() {
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions),
+            Some("sk-real"),
+        );
+        let prefix = Bytes::from_static(
+            b"data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"s\"}}]}\n\n",
+        );
+        assert!(converter.process_chunk(prefix).unwrap().is_empty());
+
+        let filler = "x".repeat(MAX_PENDING_SSE_BYTES / 4);
+        let heartbeat = Bytes::from(format!(
+            "data: {}\n\n",
+            json!({
+                "id":"c",
+                "model":"m",
+                "choices":[],
+                "vendor_extension":filler
+            })
+        ));
+        for _ in 0..5 {
+            let _ = converter.process_chunk(heartbeat.clone()).unwrap();
+        }
+
+        assert!(converter.passthrough_tainted);
+        assert!(converter.deferred_passthrough.is_empty());
+        assert_eq!(converter.deferred_passthrough_bytes, 0);
+    }
+
+    #[test]
+    fn same_protocol_false_prefix_frame_count_is_bounded() {
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions),
+            Some("sk-real"),
+        );
+        let prefix = Bytes::from_static(
+            b"data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"s\"}}]}\n\n",
+        );
+        assert!(converter.process_chunk(prefix).unwrap().is_empty());
+
+        for _ in 0..MAX_DEFERRED_SSE_FRAMES {
+            let _ = converter
+                .process_chunk(Bytes::from_static(b"data:\n\n"))
+                .unwrap();
+        }
+
+        assert!(converter.passthrough_tainted);
+        assert!(converter.deferred_passthrough.is_empty());
+        assert_eq!(converter.deferred_passthrough_bytes, 0);
+    }
+
+    #[test]
+    fn messages_text_start_and_delta_cannot_reconstruct_a_secret() {
+        let secret = "opaque/account+key=42";
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Messages, ApiFormat::Messages),
+            Some(secret),
+        );
+        let source = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"opaque/account+\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"key=42\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(!output.contains(secret), "start+delta leaked Key: {output}");
+        assert!(!messages_text(&output).contains(secret), "{output}");
+    }
+
+    #[test]
+    fn responses_text_start_and_delta_cannot_reconstruct_a_secret() {
+        let secret = "opaque/account+key=42";
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Responses, ApiFormat::Responses),
+            Some(secret),
+        );
+        let source = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"opaque/account+\"}}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"key=42\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_0\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"opaque/account+key=42\"}]}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"status\":\"completed\"}}\n\n"
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(!output.contains(secret), "start+delta leaked Key: {output}");
+    }
+
+    #[test]
+    fn adjacent_text_blocks_cannot_reconstruct_a_split_secret() {
+        let secret = "opaque/account+key=42";
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Messages, ApiFormat::Messages),
+            Some(secret),
+        );
+        let source = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"opaque/account+\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"key=42\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        let reconstructed = messages_text(&output);
+        assert!(!output.contains(secret), "stream leaked secret: {output}");
+        assert!(
+            !reconstructed.contains(secret),
+            "text blocks reconstructed secret: {reconstructed}"
+        );
+    }
+
+    #[test]
+    fn signature_prefix_stays_with_its_original_reasoning_block() {
+        let mut redactor = StreamSecretRedactor::new(Some("data"));
+        let first = redactor.redact_events(vec![
+            PivotEvent::BlockStart {
+                index: 0,
+                kind: BlockKind::Reasoning,
+            },
+            PivotEvent::SignatureDelta {
+                index: 0,
+                signature: "da".into(),
+            },
+            PivotEvent::BlockStop { index: 0 },
+        ]);
+        assert!(
+            first
+                .events
+                .iter()
+                .all(|event| !matches!(event, PivotEvent::SignatureDelta { .. }))
+        );
+
+        let second = redactor.redact_events(vec![
+            PivotEvent::BlockStart {
+                index: 1,
+                kind: BlockKind::Reasoning,
+            },
+            PivotEvent::SignatureDelta {
+                index: 1,
+                signature: "sig".into(),
+            },
+            PivotEvent::BlockStop { index: 1 },
+            PivotEvent::Stop,
+        ]);
+        let signatures = second
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                PivotEvent::SignatureDelta { index, signature } => Some((index, signature)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(signatures, vec![(0, "da".into()), (1, "sig".into())]);
+    }
+
+    #[test]
+    fn converted_stream_redacts_a_secret_split_across_text_deltas() {
+        let secret = "opaque/account+key=42";
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Responses, ApiFormat::Messages),
+            Some(secret),
+        );
+        let source = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"opaque/account+\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"key=42\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(!output.contains(secret), "stream leaked secret: {output}");
+        assert!(output.contains("response.completed"), "{output}");
+    }
+
+    #[test]
+    fn stream_secret_redactor_releases_false_prefixes_and_handles_overlap() {
+        let mut false_prefix = StreamSecretRedactor::new(Some("opaque/account+key=42"));
+        let first = false_prefix.redact_events(vec![PivotEvent::TextDelta {
+            index: 0,
+            text: "opaque/".into(),
+        }]);
+        assert!(first.events.is_empty());
+        let second = false_prefix.redact_events(vec![PivotEvent::TextDelta {
+            index: 0,
+            text: "other".into(),
+        }]);
+        assert_eq!(pivot_text(second.events), "opaque/other");
+
+        let mut overlap = StreamSecretRedactor::new(Some("aaaa"));
+        let first = overlap.redact_events(vec![PivotEvent::TextDelta {
+            index: 0,
+            text: "aa".into(),
+        }]);
+        assert!(first.events.is_empty());
+        let second = overlap.redact_events(vec![
+            PivotEvent::TextDelta {
+                index: 0,
+                text: "aaa".into(),
+            },
+            PivotEvent::BlockStop { index: 0 },
+        ]);
+        assert!(pivot_text(second.events).is_empty());
+        let terminal = overlap.redact_events(vec![PivotEvent::Stop]);
+        assert_eq!(pivot_text(terminal.events), "a");
+    }
+
+    #[test]
+    fn safe_secret_prefix_is_released_at_the_message_boundary() {
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Messages, ApiFormat::Messages),
+            Some("data"),
+        );
+        let source = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"panda\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert_eq!(messages_text(&output), "panda", "{output}");
+    }
+
+    #[test]
+    fn short_secret_redaction_preserves_sse_framing_and_json_keys() {
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions),
+            Some("data"),
+        );
+        let source = concat!(
+            "data: {\"id\":\"c\",\"model\":\"m\",\"metadata\":{\"database\":\"safe\",\"echo\":\"data\"},\"choices\":[]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let output = converter
+            .process_chunk(Bytes::from_static(source.as_bytes()))
+            .unwrap()
+            .concat();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("data: "), "{output}");
+        assert!(output.contains("\"metadata\""), "{output}");
+        assert!(output.contains("\"database\""), "{output}");
+        assert!(output.contains("\"echo\":\"<redacted>\""), "{output}");
+        assert!(output.contains("data: [DONE]"), "{output}");
+    }
+
+    #[test]
+    fn tool_arguments_are_redacted_across_delta_boundaries() {
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Messages, ApiFormat::Messages),
+            Some("data"),
+        );
+        let source = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"run\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"data\\\":\\\"safe\\\",\\\"token\\\":\\\"da\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ta\\\"}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        let arguments = messages_arguments(&output);
+        assert_eq!(
+            serde_json::from_str::<Value>(&arguments).unwrap(),
+            json!({"data":"safe","token":""})
+        );
+    }
+
+    #[test]
+    fn json_argument_redactor_preserves_keys_and_handles_escaped_secrets() {
+        for secret in ["data", "a\"b", "a\\b"] {
+            let source = json!({"data":"safe","token":secret}).to_string();
+            let encoded_secret = json_string_contents(secret);
+            let start = source.find(&encoded_secret).unwrap();
+            let split = start + encoded_secret.len() / 2;
+            let mut redactor = JsonArgumentRedactor::default();
+            let (first, _, _) = redactor.process(&source[..split], secret);
+            let (second, _, _) = redactor.process(&source[split..], secret);
+            let output = format!("{first}{second}{}", redactor.finish(secret));
+            assert_eq!(
+                serde_json::from_str::<Value>(&output).unwrap(),
+                json!({"data":"safe","token":""}),
+                "failed to redact {secret:?}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_argument_redactor_decodes_equivalent_json_escapes_across_chunks() {
+        for (secret, source) in [
+            ("A", r#"{"data":"safe","token":"\u0041"}"#),
+            ("/", r#"{"data":"safe","token":"\/"}"#),
+            ("😀", r#"{"data":"safe","token":"\uD83D\uDE00"}"#),
+        ] {
+            for split in 1..source.len() {
+                let mut redactor = JsonArgumentRedactor::default();
+                let (first, _, _) = redactor.process(&source[..split], secret);
+                let (second, _, _) = redactor.process(&source[split..], secret);
+                let output = format!("{first}{second}{}", redactor.finish(secret));
+                assert_eq!(
+                    serde_json::from_str::<Value>(&output).unwrap(),
+                    json!({"data":"safe","token":""}),
+                    "failed to redact {secret:?} at split {split}: {output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn json_argument_redactor_streams_safe_open_string_content_immediately() {
+        let source = r#"{"input":"hello world"#;
+        let mut redactor = JsonArgumentRedactor::default();
+        let (output, changed, _) = redactor.process(source, "opaque/account+key=42");
+        assert_eq!(output, source);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn legacy_chat_function_arguments_are_semantically_redacted() {
+        let secret = "A";
+        let arguments = r#"{"data":"safe","token":"\u0041"}"#;
+        let source = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"id":"c","model":"m","choices":[{"delta":{"function_call":{"name":"run","arguments":arguments}},"finish_reason":null}]}),
+            json!({"id":"c","model":"m","choices":[{"delta":{},"finish_reason":"function_call"}]})
+        );
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions),
+            Some(secret),
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(!output.contains("\\u0041"), "escaped Key leaked: {output}");
+
+        let arguments = output
+            .split("\n\n")
+            .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .filter_map(|value| {
+                value
+                    .pointer("/choices/0/delta/tool_calls/0/function/arguments")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<String>();
+        assert_eq!(
+            serde_json::from_str::<Value>(&arguments).unwrap(),
+            json!({"data":"safe","token":""})
+        );
+    }
+
+    #[test]
+    fn chat_refusal_key_is_redacted_across_delta_boundaries() {
+        let secret = "opaque/account+key=42";
+        let source = concat!(
+            "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"delta\":{\"refusal\":\"opaque/account+\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"delta\":{\"refusal\":\"key=42\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions),
+            Some(secret),
+        );
+        let mut output = converter
+            .process_chunk(Bytes::from_static(source.as_bytes()))
+            .unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(
+            !output.contains(secret),
+            "refusal stream leaked Key: {output}"
+        );
+        assert!(output.contains("data: [DONE]"), "{output}");
+    }
+
+    #[test]
+    fn responses_custom_tool_input_is_redacted_across_delta_and_done_events() {
+        let secret = "opaque/account+key=42";
+        let mut custom_plan = plan(ApiFormat::Responses, ApiFormat::Responses);
+        custom_plan.custom_tools = vec!["apply_patch".to_string()];
+        let mut converter = StreamConverter::new_with_known_secret(&custom_plan, Some(secret));
+        let source = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_0\",\"call_id\":\"call_0\",\"name\":\"apply_patch\",\"input\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.custom_tool_call_input.delta\ndata: {\"type\":\"response.custom_tool_call_input.delta\",\"output_index\":0,\"delta\":\"before opaque/account+\"}\n\n",
+            "event: response.custom_tool_call_input.delta\ndata: {\"type\":\"response.custom_tool_call_input.delta\",\"output_index\":0,\"delta\":\"key=42 after\"}\n\n",
+            "event: response.custom_tool_call_input.done\ndata: {\"type\":\"response.custom_tool_call_input.done\",\"output_index\":0,\"input\":\"before opaque/account+key=42 after\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_0\",\"call_id\":\"call_0\",\"name\":\"apply_patch\",\"input\":\"before opaque/account+key=42 after\",\"status\":\"completed\"}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"status\":\"completed\"}}\n\n"
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(
+            !output.contains(secret),
+            "custom stream leaked Key: {output}"
+        );
+        assert_eq!(responses_custom_input(&output), "before  after");
+        assert!(output.contains("response.completed"), "{output}");
+    }
+
+    #[test]
+    fn responses_initial_tool_payload_is_redacted_before_the_first_chunk_returns() {
+        let secret = "opaque/account+key=42";
+        for item in [
+            json!({
+                "type":"function_call",
+                "id":"fc_0",
+                "call_id":"call_0",
+                "name":"run",
+                "arguments":json!({"token":secret}).to_string(),
+                "status":"in_progress"
+            }),
+            json!({
+                "type":"custom_tool_call",
+                "id":"ctc_0",
+                "call_id":"call_0",
+                "name":"apply_patch",
+                "input":format!("before {secret} after"),
+                "status":"in_progress"
+            }),
+        ] {
+            let mut converter = StreamConverter::new_with_known_secret(
+                &plan(ApiFormat::Responses, ApiFormat::Responses),
+                Some(secret),
+            );
+            let source = format!(
+                "event: response.created\ndata: {}\n\nevent: response.output_item.added\ndata: {}\n\n",
+                json!({"type":"response.created","response":{"id":"r","model":"m","status":"in_progress"}}),
+                json!({"type":"response.output_item.added","output_index":0,"item":item})
+            );
+            let output = converter
+                .process_chunk(Bytes::from(source))
+                .unwrap()
+                .concat();
+            let output = String::from_utf8(output).unwrap();
+            assert!(
+                !output.contains(secret),
+                "initial tool payload leaked: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn responses_empty_tool_delta_does_not_hide_authoritative_done_arguments() {
+        let secret = "opaque/account+key=42";
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Responses, ApiFormat::Responses),
+            Some(secret),
+        );
+        let arguments = json!({"token":secret}).to_string();
+        let source = format!(
+            "event: response.created\ndata: {}\n\nevent: response.output_item.added\ndata: {}\n\nevent: response.function_call_arguments.delta\ndata: {}\n\nevent: response.function_call_arguments.done\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+            json!({"type":"response.created","response":{"id":"r","model":"m","status":"in_progress"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"run","arguments":"","status":"in_progress"}}),
+            json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":""}),
+            json!({"type":"response.function_call_arguments.done","output_index":0,"arguments":arguments}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"run","arguments":arguments,"status":"completed"}}),
+            json!({"type":"response.completed","response":{"id":"r","model":"m","status":"completed"}})
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(
+            !output.contains(secret),
+            "empty delta bypass leaked Key: {output}"
+        );
+        let done = output
+            .split("\n\n")
+            .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .find(|value| {
+                value.get("type").and_then(Value::as_str)
+                    == Some("response.function_call_arguments.done")
+            })
+            .expect("arguments done event");
+        assert_eq!(
+            serde_json::from_str::<Value>(done["arguments"].as_str().unwrap()).unwrap(),
+            json!({"token":""})
+        );
+    }
+
+    #[test]
+    fn same_protocol_redacts_all_non_data_sse_metadata_values() {
+        let secret = "opaque/account+key=42";
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions),
+            Some(secret),
+        );
+        let source = format!(
+            ": keep {secret}\r\nid: request-{secret}\r\nevent: chunk-{secret}\r\nretry: 500-{secret}\r\nx-provider-meta: trace-{secret}\r\ndata: {{\"id\":\"c\",\"model\":\"m\",\"choices\":[]}}\r\n\r\ndata: [DONE]\r\n\r\n"
+        );
+        let output = converter
+            .process_chunk(Bytes::from(source))
+            .unwrap()
+            .concat();
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            !output.contains(secret),
+            "SSE metadata leaked Key: {output}"
+        );
+        assert!(output.contains(": keep <redacted>\r\n"), "{output}");
+        assert!(output.contains("id: request-<redacted>\r\n"), "{output}");
+        assert!(output.contains("event: chunk-<redacted>\r\n"), "{output}");
+        assert!(output.contains("retry: 500-<redacted>\r\n"), "{output}");
+        assert!(
+            output.contains("x-provider-meta: trace-<redacted>\r\n"),
+            "{output}"
+        );
+        assert!(output.contains("data: "), "{output}");
+        assert!(output.contains("data: [DONE]\r\n\r\n"), "{output}");
+    }
+
+    #[test]
+    fn generated_stream_errors_redact_the_known_secret() {
+        let converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Responses, ApiFormat::Messages),
+            Some("opaque/account+key=42"),
+        );
+        let output = converter
+            .outcome_unknown_event("provider echoed opaque/account+key=42")
+            .concat();
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains("opaque/account+key=42"), "{output}");
     }
 
     #[test]
@@ -2573,6 +4191,126 @@ mod tests {
         .expect("signed block decodes");
         assert_eq!(restored["thinking"], "check");
         assert_eq!(restored["signature"], "sig_123");
+    }
+
+    #[test]
+    fn safe_reasoning_prefix_does_not_invalidate_signed_replay() {
+        let source = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"panda\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_123\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Responses, ApiFormat::Messages),
+            Some("data"),
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        let frame = output
+            .split("\n\n")
+            .find(|frame| {
+                frame.contains("response.output_item.done")
+                    && frame.contains("\"type\":\"reasoning\"")
+            })
+            .expect("reasoning output item");
+        let payload = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let value: Value = serde_json::from_str(payload).unwrap();
+        let restored = super::super::protocol::decode_anthropic_thinking_block(
+            value["item"]["encrypted_content"].as_str().unwrap(),
+        )
+        .expect("signed block decodes");
+        assert_eq!(restored["thinking"], "panda");
+        assert_eq!(restored["signature"], "sig_123");
+    }
+
+    #[test]
+    fn unsafe_initial_reasoning_is_never_preserved_in_opaque_replay() {
+        for content_block in [
+            json!({"type":"thinking","thinking":"opaque/account+key=42","signature":"sig_123"}),
+            json!({"type":"redacted_thinking","data":"opaque/account+key=42"}),
+        ] {
+            let source = format!(
+                "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_1\",\"model\":\"m\"}}}}\n\nevent: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{content_block}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":1}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+            );
+            let mut converter = StreamConverter::new_with_known_secret(
+                &plan(ApiFormat::Responses, ApiFormat::Messages),
+                Some("opaque/account+key=42"),
+            );
+            let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+            output.extend(converter.finish().unwrap());
+            let output = String::from_utf8(output.concat()).unwrap();
+            assert!(!output.contains("opaque/account+key=42"), "{output}");
+            assert!(!output.contains("encrypted_content"), "{output}");
+        }
+    }
+
+    #[test]
+    fn same_protocol_removes_known_opaque_replays_that_decode_to_the_secret() {
+        let secret = "opaque/account+key=42";
+        let wrappers = [
+            super::super::protocol::encode_anthropic_thinking_block(&json!({
+                "type":"thinking",
+                "thinking":format!("before {secret} after"),
+                "signature":"sig_123"
+            }))
+            .unwrap(),
+            super::super::protocol::encode_chat_reasoning(&format!("before {secret} after"))
+                .unwrap(),
+        ];
+        for encrypted_content in wrappers {
+            let mut converter = StreamConverter::new_with_known_secret(
+                &plan(ApiFormat::Responses, ApiFormat::Responses),
+                Some(secret),
+            );
+            let source = format!(
+                "event: response.created\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                json!({"type":"response.created","response":{"id":"r","model":"m","status":"in_progress"}}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_0","summary":[],"encrypted_content":encrypted_content}}),
+                json!({"type":"response.completed","response":{"id":"r","model":"m","status":"completed"}})
+            );
+            let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+            output.extend(converter.finish().unwrap());
+            let output = String::from_utf8(output.concat()).unwrap();
+            let item = output
+                .split("\n\n")
+                .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+                .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+                .find(|value| {
+                    value.get("type").and_then(Value::as_str) == Some("response.output_item.done")
+                })
+                .expect("reasoning done event");
+            assert_eq!(item["item"]["encrypted_content"], "", "{output}");
+        }
+    }
+
+    #[test]
+    fn reasoning_split_between_block_start_and_delta_cannot_enter_opaque_replay() {
+        let source = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"opaque/account+\",\"signature\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"key=42\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_123\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let mut converter = StreamConverter::new_with_known_secret(
+            &plan(ApiFormat::Responses, ApiFormat::Messages),
+            Some("opaque/account+key=42"),
+        );
+        let mut output = converter.process_chunk(Bytes::from(source)).unwrap();
+        output.extend(converter.finish().unwrap());
+        let output = String::from_utf8(output.concat()).unwrap();
+        assert!(!output.contains("opaque/account+key=42"), "{output}");
+        assert!(!output.contains("encrypted_content"), "{output}");
     }
 
     #[test]

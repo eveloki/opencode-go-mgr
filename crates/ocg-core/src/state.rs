@@ -1,6 +1,6 @@
 use crate::crypto::KeyCipher;
 use crate::db::Database;
-use crate::models::{AppConfig, normalize_client_root_url};
+use crate::models::{AppConfig, normalize_client_root_url, normalize_opencode_invite_url};
 use crate::pricing::{
     PricingEstimate, PricingSnapshot, embedded_seed, ensure_current_adjustment_policy,
 };
@@ -105,7 +105,7 @@ pub struct CoreStateInner {
     pub settings_update: Mutex<()>,
     settings_revision: AtomicU64,
     pub gateway: Mutex<Option<GatewayHandle>>,
-    pub dashboard_session_token: String,
+    pub dashboard_session_token: Mutex<String>,
     dashboard_local_mode: AtomicBool,
     auto_start_sync: OnceLock<AutoStartSync>,
     dock_visibility_sync: OnceLock<DockVisibilitySync>,
@@ -116,6 +116,7 @@ pub struct CoreStateInner {
     pricing: RwLock<Arc<PricingSnapshot>>,
     pub pricing_refresh: tokio::sync::Mutex<()>,
     pub routing: crate::gateway::routing::RoutingRuntime,
+    pub browser: crate::browser::BrowserRuntime,
     pub data_dir: PathBuf,
     pub cipher: Arc<dyn KeyCipher + Send + Sync>,
 }
@@ -139,6 +140,20 @@ impl CoreStateInner {
         client_root_url_override: Option<String>,
     ) -> crate::Result<Self> {
         crate::auth::bootstrap_admin_from_env(&db)?;
+        let browser_recovery =
+            crate::browser::recover_staged_browser_profiles(&data_dir, |account_id| {
+                Ok(db.get_account(account_id)?.is_some())
+            });
+        if browser_recovery.has_activity() {
+            let summary = browser_recovery.summary();
+            let level = if browser_recovery.issues.is_empty() {
+                "info"
+            } else {
+                eprintln!("warning: {summary}: {}", browser_recovery.issues.join("; "));
+                "warn"
+            };
+            let _ = db.log_gateway(level, "browser", &summary);
+        }
         let (config, needs_persist) = load_config(&db)?;
         config.validate().map_err(anyhow::Error::msg)?;
         if needs_persist {
@@ -173,7 +188,7 @@ impl CoreStateInner {
                 (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF,
             ),
             gateway: Mutex::new(None),
-            dashboard_session_token: uuid::Uuid::new_v4().simple().to_string(),
+            dashboard_session_token: Mutex::new(uuid::Uuid::new_v4().simple().to_string()),
             dashboard_local_mode: AtomicBool::new(false),
             auto_start_sync: OnceLock::new(),
             dock_visibility_sync: OnceLock::new(),
@@ -184,6 +199,7 @@ impl CoreStateInner {
             pricing: RwLock::new(Arc::new(pricing)),
             pricing_refresh: tokio::sync::Mutex::new(()),
             routing: crate::gateway::routing::RoutingRuntime::new(),
+            browser: crate::browser::BrowserRuntime::new(),
             data_dir,
             cipher,
         })
@@ -395,6 +411,8 @@ impl CoreStateInner {
             config.client_root_url = self.config.lock().client_root_url.clone();
         }
         config.claude_desktop_models.normalize();
+        config.opencode_invite_url = normalize_opencode_invite_url(&config.opencode_invite_url)
+            .map_err(anyhow::Error::msg)?;
         config.validate().map_err(anyhow::Error::msg)?;
         let http_client = build_http_client(&config)?;
         {
@@ -420,6 +438,21 @@ impl CoreStateInner {
 
     pub fn data_dir(&self) -> PathBuf {
         self.data_dir.clone()
+    }
+
+    pub fn recover_browser_profiles_for_account(
+        &self,
+        account_id: &str,
+    ) -> crate::Result<crate::browser::BrowserProfileRecoveryReport> {
+        let db = self.db.lock();
+        let account_exists = db.get_account(account_id)?.is_some();
+        let report = crate::browser::recover_staged_browser_profiles_for_account(
+            &self.data_dir,
+            account_id,
+            account_exists,
+        );
+        drop(db);
+        report
     }
 
     pub fn set_dashboard_dir(&self, dir: Option<PathBuf>) {
@@ -466,6 +499,12 @@ fn load_config(db: &Database) -> crate::Result<(AppConfig, bool)> {
         config = serde_json::from_str(&value)?;
         config.claude_desktop_models.normalize();
         needs_persist = serde_json::to_string(&config)? != value;
+    }
+    let invite_url =
+        normalize_opencode_invite_url(&config.opencode_invite_url).map_err(anyhow::Error::msg)?;
+    if invite_url != config.opencode_invite_url {
+        config.opencode_invite_url = invite_url;
+        needs_persist = true;
     }
     // v1.4.2 shipped 30/120/300 as one default tuple. Migrate that exact,
     // untouched tuple once while preserving every user-customized combination.
@@ -597,6 +636,88 @@ mod tests {
     }
 
     #[test]
+    fn startup_retries_committed_browser_profile_cleanup() {
+        let dir = temp_data_dir("browser-profile-recovery");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let profile_root = dir.join("profiles");
+        fs::create_dir_all(&profile_root).expect("legacy profile root should be created");
+        let tombstone = profile_root.join(format!(
+            ".ocg-profile-delete-deleted-account-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir(&tombstone).expect("profile tombstone should be created");
+        fs::write(tombstone.join("Cookies"), b"sensitive").expect("profile data should be created");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+
+        assert!(!tombstone.exists());
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn startup_finishes_reset_profile_journal_without_restoring_cookies() {
+        use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
+        use crate::models::{Account, AccountSetupStep, AccountType};
+
+        let dir = temp_data_dir("browser-profile-reset-journal");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let now = chrono::Utc::now();
+        let account = Account {
+            id: "existing-account".into(),
+            name: "existing-account".into(),
+            username: None,
+            password_cipher: None,
+            key_cipher: cipher.encrypt("opaque-key").unwrap(),
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            last_error: None,
+            auth_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.create_account(&account)
+            .expect("test account should be created");
+        let profile = dir.join("browser-profiles").join(&account.id);
+        fs::create_dir_all(&profile).expect("browser profile should be created");
+        fs::write(profile.join("Cookies"), b"old-cookie")
+            .expect("browser cookie should be created");
+        let staged = StagedBrowserProfiles::stage(
+            &dir,
+            &account.id,
+            BrowserProfileOperationKind::ResetProfile,
+        )
+        .expect("profile reset should be journaled and staged");
+        assert!(!profile.exists());
+        drop(staged); // simulate a crash before the normal purge step
+
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+
+        assert!(state.db.lock().get_account(&account.id).unwrap().is_some());
+        assert!(!profile.exists(), "reset recovery must not restore cookies");
+        assert_eq!(
+            fs::read_dir(dir.join("browser-profile-operations"))
+                .unwrap()
+                .count(),
+            0,
+            "completed recovery should remove its journal"
+        );
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
     fn routing_runtime_resets_when_routing_fields_or_gateway_key_change() {
         use crate::crypto::{KeyCipher, StaticKeyCipher};
         use crate::models::{Account, RoutingMode};
@@ -610,6 +731,8 @@ mod tests {
                 password_cipher: None,
                 key_cipher: cipher.encrypt(id).unwrap(),
                 enabled: true,
+                account_type: crate::models::AccountType::Key,
+                setup_step: crate::models::AccountSetupStep::Ready,
                 referral_code: None,
                 purchase_date: String::new(),
                 expires_on: String::new(),

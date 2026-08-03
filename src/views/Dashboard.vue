@@ -195,10 +195,10 @@
             <strong>{{ account.name }}</strong>
             <span
               class="account-status"
-              :class="account.auth_error ? 'auth-error' : account.enabled ? (isCoolingDown(account) ? 'cooling' : 'active') : 'disabled'"
+              :class="account.setup_step !== 'ready' ? 'pending' : account.auth_error ? 'auth-error' : account.enabled ? (isCoolingDown(account) ? 'cooling' : 'active') : 'disabled'"
             >{{ statusLabel(account) }}</span>
           </div>
-          <n-tooltip trigger="click">
+          <n-tooltip v-if="account.setup_step === 'ready'" trigger="click">
             <template #trigger>
               <n-button
                 text
@@ -218,7 +218,10 @@
             <div>{{ t("购买于 {date}", { date: account.purchase_date }) }}</div>
             <div>{{ t("到期于 {date}", { date: account.expires_on }) }}</div>
           </n-tooltip>
-          <div v-if="usageMap[account.id]" class="account-usage mono">
+          <div v-if="account.setup_step !== 'ready'" class="account-usage-empty account-usage-empty--pending">
+            {{ t("注册进度已保存，请前往账号页继续") }}
+          </div>
+          <div v-else-if="usageMap[account.id]" class="account-usage mono">
             <div v-for="row in getUsageRows(account.id)" :key="row.label" class="account-usage-row">
               <span>{{ row.label }}</span>
               <strong>{{ row.value }}</strong>
@@ -327,6 +330,7 @@ function isCoolingDown(account: Account): boolean {
 }
 
 function statusLabel(account: Account): string {
+  if (account.setup_step !== "ready") return t("注册中");
   if (account.auth_error) {
     return account.enabled
       ? t("认证失效（401 熔断）")
@@ -447,8 +451,9 @@ async function loadDashboard() {
     accounts.value = loadedAccounts.value;
     accountsLoaded.value = true;
     // 限流并发拉取每账号用量，避免账号多时 N 次请求同时打到后端
+    const readyAccounts = loadedAccounts.value.filter(({ setup_step }) => setup_step === "ready");
     const settled = await mapWithConcurrency(
-      loadedAccounts.value,
+      readyAccounts,
       4,
       async (account) => [account.id, await tauriApi.getAccountUsage(account.id)] as const,
     );
@@ -456,8 +461,8 @@ async function loadDashboard() {
       settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
     );
     usageFailedAccountIds.value = new Set(settled.flatMap((result, index) => (
-      result.status === "rejected" && loadedAccounts.value[index]
-        ? [loadedAccounts.value[index].id]
+      result.status === "rejected" && readyAccounts[index]
+        ? [readyAccounts[index].id]
         : []
     )));
   }
@@ -784,6 +789,7 @@ onUnmounted(() => {
 }
 .account-status.active { color: var(--ocg-success); }
 .account-status.cooling { color: var(--ocg-warning); }
+.account-status.pending { color: var(--ocg-primary); }
 .account-status.auth-error { color: var(--ocg-error); }
 .account-status.disabled { color: var(--ocg-subtle); }
 .account-expiry {
@@ -812,6 +818,10 @@ onUnmounted(() => {
 .account-usage-empty {
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-sm);
+}
+
+.account-usage-empty--pending {
+  color: var(--ocg-primary);
 }
 .section-state {
   min-height: 96px;

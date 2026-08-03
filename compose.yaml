@@ -12,10 +12,15 @@ services:
       - OCG_ADMIN_PASSWORD
       - OCG_MANAGER_ENCRYPTION_KEY
       - OCG_CLIENT_ROOT_URL
+      - OCG_BROWSER_WORKER_URL=${OCG_BROWSER_WORKER_URL:-http://browser:9080}
+      - OCG_BROWSER_CONTROL_TOKEN_FILE=/run/ocg-browser/control-token
+      - OCG_BROWSER_PROFILES_DIR=/browser-profiles
     ports:
       - "127.0.0.1:${OCG_PORT:-9042}:9042"
     volumes:
       - ocg-data:/data
+      - ocg-browser-profiles:/browser-profiles
+      - ocg-browser-runtime:/run/ocg-browser:ro
     read_only: true
     tmpfs:
       - /tmp
@@ -23,6 +28,54 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    networks:
+      - default
+      - browser-private
+
+  # Optional remote browser. Start the published images with:
+  #   docker compose --profile browser up -d
+  # For a local source build, also set OCG_BROWSER_IMAGE=ocg-manager-browser:local
+  # and include --build. Reserve at least 2 CPU, 2 GiB RAM, and 1 GiB shared memory.
+  browser:
+    profiles: ["browser"]
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+      args:
+        CARGO_REGISTRY: ${CARGO_REGISTRY:-sparse+https://index.crates.io/}
+    image: ${OCG_BROWSER_IMAGE:-ghcr.io/klarkxy/opencode-go-mgr-browser:latest}
+    restart: unless-stopped
+    environment:
+      - OCG_BROWSER_CONTROL_ADDR=0.0.0.0:9080
+      - OCG_BROWSER_CONTROL_TOKEN_FILE=/run/ocg-browser/control-token
+      - OCG_BROWSER_PROFILE_ROOT=/profiles
+      - OCG_BROWSER_VNC_WS_URL=ws://browser:6080/websockify
+    expose:
+      - "9080"
+      - "6080"
+    volumes:
+      - ocg-browser-profiles:/profiles
+      - ocg-browser-runtime:/run/ocg-browser
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=1777
+      - /home/ocg:rw,nosuid,nodev,size=128m,uid=10001,gid=10001,mode=0700
+    shm_size: 1gb
+    cap_drop:
+      - ALL
+    security_opt:
+      - seccomp=unconfined
+    stop_grace_period: 30s
+    networks:
+      - browser-private
 
 volumes:
   ocg-data:
+  # Browser profiles contain long-lived cookies and are sensitive backup data.
+  ocg-browser-profiles:
+  ocg-browser-runtime:
+
+networks:
+  # Project-scoped bridge: browser control/VNC stay unpublished while Chromium
+  # retains outbound HTTPS access for Google and OpenCode.
+  browser-private: {}
