@@ -566,6 +566,8 @@ fn browser_args(profile_dir: &Path, target_url: &str, new_tab: bool) -> Vec<Stri
         format!("--user-data-dir={}", profile_dir.display()),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
+        // Keep the sidecar profile self-contained; it has no desktop keyring.
+        "--password-store=basic".into(),
         "--ozone-platform=x11".into(),
         "--window-size=1440,900".into(),
     ];
@@ -671,7 +673,13 @@ fn validate_target_url(value: &str) -> std::result::Result<Url, String> {
         return Err("url must not contain credentials".into());
     }
     match parsed.host_str() {
-        Some("accounts.google.com" | "opencode.ai" | "console.opencode.ai") => Ok(parsed),
+        Some(
+            "accounts.google.com"
+            | "github.com"
+            | "opencode.ai"
+            | "console.opencode.ai"
+            | "auth.opencode.ai",
+        ) => Ok(parsed),
         _ => Err("url host is not allowed".into()),
     }
 }
@@ -959,8 +967,10 @@ mod tests {
     fn target_urls_are_limited_to_signup_and_opencode_hosts() {
         for valid in [
             "https://accounts.google.com/signup",
+            "https://github.com/login",
             "https://opencode.ai/zen/go",
             "https://console.opencode.ai/invite?code=test",
+            "https://auth.opencode.ai/authorize",
         ] {
             assert!(validate_target_url(valid).is_ok(), "{valid}");
         }
@@ -983,6 +993,7 @@ mod tests {
         );
         assert!(args.iter().any(|arg| arg == "--no-first-run"));
         assert!(args.iter().any(|arg| arg == "--no-default-browser-check"));
+        assert!(args.iter().any(|arg| arg == "--password-store=basic"));
         assert!(!args.iter().any(|arg| arg == "--no-sandbox"));
         assert!(!args.iter().any(|arg| arg.contains("remote-debugging")));
         assert!(!args.iter().any(|arg| arg == "--disable-web-security"));
