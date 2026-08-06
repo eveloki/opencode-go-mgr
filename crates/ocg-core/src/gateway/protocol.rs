@@ -1,3 +1,4 @@
+use crate::models::UpstreamChannel;
 use crate::pricing::normalize_model_name;
 use axum::http::StatusCode;
 use base64::{
@@ -38,6 +39,14 @@ pub struct RequestPlan {
     pub model: String,
     pub stream: bool,
     pub body: Bytes,
+    /// Resolved upstream product channel (Go vs Zen free).
+    pub channel: UpstreamChannel,
+    /// Optional override for `AppConfig.upstream_base_url` (Zen free base).
+    pub upstream_base_override: Option<String>,
+    /// Client-requested model before prefer mapping, when different.
+    pub original_model: Option<String>,
+    /// When free pool is exhausted, retry once on Go with `original_model`.
+    pub allow_go_fallback: bool,
     pub(crate) service_tier: Option<String>,
     pub(crate) custom_tools: Vec<String>,
     pub(crate) namespace_tools: Vec<NamespaceToolMapping>,
@@ -229,6 +238,46 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
     },
+    ModelProtocol {
+        id: "big-pickle",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "deepseek-v4-flash-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "mimo-v2.5-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "ling-3.0-flash-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "laguna-s-2.1-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "longcat-2.0-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "north-mini-code-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
+    ModelProtocol {
+        id: "nemotron-3-ultra-free",
+        preferred: ApiFormat::ChatCompletions,
+        supported: CHAT_ONLY,
+    },
 ];
 
 /// Returns every model ID with a known preferred upstream protocol.
@@ -310,6 +359,10 @@ fn prepare_parsed_request(
         model,
         stream,
         body,
+        channel: UpstreamChannel::Go,
+        upstream_base_override: None,
+        original_model: None,
+        allow_go_fallback: false,
         service_tier,
         custom_tools: tool_context.custom_tools,
         namespace_tools: tool_context.namespace_tools,
@@ -3256,6 +3309,10 @@ mod tests {
             model: model.into(),
             stream: false,
             body: Bytes::new(),
+            channel: UpstreamChannel::Go,
+            upstream_base_override: None,
+            original_model: None,
+            allow_go_fallback: false,
             service_tier: None,
             custom_tools: Vec::new(),
             namespace_tools: Vec::new(),
@@ -3293,6 +3350,14 @@ mod tests {
                 "qwen3.7-plus",
                 "qwen3.6-plus",
                 "qwen3.5-plus",
+                "big-pickle",
+                "deepseek-v4-flash-free",
+                "mimo-v2.5-free",
+                "ling-3.0-flash-free",
+                "laguna-s-2.1-free",
+                "longcat-2.0-free",
+                "north-mini-code-free",
+                "nemotron-3-ultra-free",
             ]
         );
     }

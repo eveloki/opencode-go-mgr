@@ -655,7 +655,7 @@ GHCR 上的公开无头镜像无需登录即可拉取。它是 Linux 容器，�
 与 `.env.example` 的仓库目录中运行（建议检出对应 Release tag）：
 
 ```bash
-git clone --branch v1.5.9 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.10 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell：Copy-Item .env.example .env
@@ -671,7 +671,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`；Release 中的 `compose.example.yaml`
   默认固定对应的完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:1.5.9`。
+  `ghcr.io/klarkxy/opencode-go-mgr:1.5.10`。
 - 完整版本与 `sha-<commit>` 标签用于标识单次发布，按发布策略不应移动；`1.5`
   与 `latest` 会继续移动。技术上只有
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` digest 真正不可变。
@@ -791,13 +791,13 @@ curl --fail http://127.0.0.1:9042/dashboard/
 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.9
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.9
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.10
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.10
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.9 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.10 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.9 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.10 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -909,3 +909,16 @@ ocg.example.com {
 [English user guide](USER.md) · [Maintainer guide](MAINTAINER.md) ·
 [维护者指南](MAINTAINER.zh-CN.md) · [文档索引](README.md) ·
 [回到 README](../README.zh-CN.md)
+
+## Free 模型策略
+
+设置页可选择三档 OpenCode Zen free 路由：
+
+| 档位 | 行为 |
+| --- | --- |
+| **禁止 Free 模型** | 拒绝 `*-free` / `big-pickle`，也不把 Go 模型改写到 free |
+| **仅显式使用 Free 模型**（默认） | 只有客户端显式请求 free 才走 `https://opencode.ai/zen`；Go 模型仍走 Go 上游 |
+| **自动优先同名 Free 模型** | 当前映射：`deepseek-v4-flash` → `deepseek-v4-flash-free`，`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽或超长后回落 Go |
+
+Free 与 Go 使用**独立冷却窗口**；多账号会按现有路由方案在对应通道内轮询。 sticky-global 路由下，Free 与 Go 目前共享同一个全局偏好账号（跨通道不单独记粘性）。Free 为限时促销，额度独立，且请求数据可能用于改进模型——不要提交机密内容。
+

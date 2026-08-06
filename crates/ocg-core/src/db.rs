@@ -377,6 +377,8 @@ impl Database {
                 "cooldown_5h_until",
                 "cooldown_week_until",
                 "cooldown_month_until",
+                // compute_cooldown_until also reads free; ensure before recompute.
+                "cooldown_free_until",
             ] {
                 ensure_column(&tx, "accounts", column, "TEXT")?;
             }
@@ -751,6 +753,12 @@ impl Database {
             )?;
         }
 
+        // v17: independent Zen free-model promo cooldown window.
+        if version < 17 {
+            ensure_column(&tx, "accounts", "cooldown_free_until", "TEXT")?;
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (17);")?;
+        }
+
         // Detailed diagnostics are intentionally short-lived. Keep the base log row,
         // stable request id, source, stage, and original compact error indefinitely.
         tx.execute(
@@ -811,8 +819,8 @@ impl Database {
             normalize_purchase_date(&account.purchase_date)?
         };
         self.conn.execute(
-            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, auth_error, account_type, setup_step, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 account.id,
                 account.name,
@@ -827,6 +835,7 @@ impl Database {
                 account.cooldown_5h_until.map(|t| t.to_rfc3339()),
                 account.cooldown_week_until.map(|t| t.to_rfc3339()),
                 account.cooldown_month_until.map(|t| t.to_rfc3339()),
+                account.cooldown_free_until.map(|t| t.to_rfc3339()),
                 account.last_error,
                 account.auth_error,
                 account.account_type.as_str(),
@@ -903,7 +912,7 @@ impl Database {
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, created_at, updated_at, auth_error, account_type, setup_step FROM accounts WHERE id = ?1"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step FROM accounts WHERE id = ?1"
         )?;
         let account = stmt.query_row([id], account_from_row).optional()?;
         Ok(account)
@@ -911,7 +920,7 @@ impl Database {
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, last_error, created_at, updated_at, auth_error, account_type, setup_step FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
         )?;
         let rows = stmt.query_map([], account_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
@@ -985,7 +994,7 @@ impl Database {
              SET setup_step = 'google_account', key_cipher = '', enabled = 0,
                  auth_error = NULL, last_error = NULL, cooldown_until = NULL,
                  cooldown_generic_until = NULL, cooldown_5h_until = NULL,
-                 cooldown_week_until = NULL, cooldown_month_until = NULL,
+                 cooldown_week_until = NULL, cooldown_month_until = NULL, cooldown_free_until = NULL,
                  updated_at = ?1
              WHERE id = ?2 AND account_type = 'managed' AND setup_step <> 'ready'",
             params![Utc::now().to_rfc3339(), id],
@@ -1366,6 +1375,7 @@ impl Database {
                      cooldown_5h_until = NULL,
                      cooldown_week_until = NULL,
                      cooldown_month_until = NULL,
+                     cooldown_free_until = NULL,
                      last_error = NULL,
                      updated_at = ?2
                  WHERE id = ?1",
@@ -1465,6 +1475,7 @@ impl Database {
             Some(UsageWindowKind::FiveHours) => "cooldown_5h_until",
             Some(UsageWindowKind::Week) => "cooldown_week_until",
             Some(UsageWindowKind::Month) => "cooldown_month_until",
+            Some(UsageWindowKind::Free) => "cooldown_free_until",
             None => "cooldown_generic_until",
         };
         let updated = tx.execute(
@@ -1506,6 +1517,8 @@ impl Database {
                 SELECT cooldown_week_until FROM accounts WHERE id = ?1
                 UNION ALL
                 SELECT cooldown_month_until FROM accounts WHERE id = ?1
+                UNION ALL
+                SELECT cooldown_free_until FROM accounts WHERE id = ?1
             ) WHERE until IS NOT NULL AND until > ?2",
             params![id, now_rfc],
             |row| row.get(0),
@@ -1582,6 +1595,9 @@ impl Database {
                     // 月窗口的起点/终点由 purchase_date 决定，不写 started_at 列。
                     // resets_in_minutes 被忽略——窗口已由账号购买日期固定。
                     (None, "", "usage_month_window_cost_offset")
+                }
+                UsageWindowKind::Free => {
+                    anyhow::bail!("free promo quota cannot be calibrated as a Go usage window")
                 }
             };
 
@@ -2094,12 +2110,14 @@ fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog>
 }
 
 fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
-    let created_at = row.get::<_, String>(14)?;
+    // SELECT order: id,name,username,password,key,enabled,referral,recharge,
+    // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup
+    let created_at = row.get::<_, String>(15)?;
     let purchase_date = match row.get::<_, Option<String>>(7)? {
         Some(value) if normalize_purchase_date(&value).is_ok() => value,
         _ => migration_fallback_purchase_date(&created_at).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                14,
+                15,
                 Type::Text,
                 Box::new(std::io::Error::other(error.to_string())),
             )
@@ -2108,18 +2126,18 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     let expires_on = purchase_expires_on(&purchase_date).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
     })?;
-    let account_type_value = row.get::<_, String>(17)?;
+    let account_type_value = row.get::<_, String>(18)?;
     let account_type = AccountType::try_from(account_type_value.as_str()).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
-            17,
+            18,
             Type::Text,
             Box::new(std::io::Error::other(error)),
         )
     })?;
-    let setup_step_value = row.get::<_, String>(18)?;
+    let setup_step_value = row.get::<_, String>(19)?;
     let setup_step = AccountSetupStep::try_from(setup_step_value.as_str()).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
-            18,
+            19,
             Type::Text,
             Box::new(std::io::Error::other(error)),
         )
@@ -2141,10 +2159,11 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         cooldown_5h_until: row.get::<_, Option<String>>(10)?.map(parse_datetime),
         cooldown_week_until: row.get::<_, Option<String>>(11)?.map(parse_datetime),
         cooldown_month_until: row.get::<_, Option<String>>(12)?.map(parse_datetime),
-        last_error: row.get(13)?,
-        auth_error: row.get(16)?,
+        cooldown_free_until: row.get::<_, Option<String>>(13)?.map(parse_datetime),
+        last_error: row.get(14)?,
+        auth_error: row.get(17)?,
         created_at: parse_datetime(created_at),
-        updated_at: parse_datetime(row.get::<_, String>(15)?),
+        updated_at: parse_datetime(row.get::<_, String>(16)?),
     })
 }
 
@@ -2204,6 +2223,7 @@ mod tests {
             cooldown_5h_until: None,
             cooldown_week_until: None,
             cooldown_month_until: None,
+            cooldown_free_until: None,
             last_error: None,
             auth_error: None,
             created_at: Utc::now(),
@@ -2290,7 +2310,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
 
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -2518,7 +2538,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 16, "{label}");
+            assert_eq!(version, 17, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -2596,7 +2616,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -2745,7 +2765,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -2889,7 +2909,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -2938,7 +2958,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
 
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
@@ -3193,6 +3213,44 @@ mod tests {
     }
 
     #[test]
+    fn clear_account_cooldown_clears_free_window() {
+        let dir = temp_data_dir("clear-free-cooldown");
+        let db = Database::open(dir.clone()).expect("db should open");
+        db.create_account(&account("free-cd"))
+            .expect("account should be created");
+
+        let until = Utc::now() + Duration::minutes(30);
+        db.set_account_rate_limit(
+            "free-cd",
+            until,
+            r#"{"type":"FreeUsageLimitError","message":"Free usage exceeded"}"#,
+            Some(UsageWindowKind::Free),
+        )
+        .expect("free rate limit should save");
+
+        let cooled = db
+            .get_account("free-cd")
+            .expect("account should load")
+            .expect("account should exist");
+        assert!(cooled.cooldown_free_until.is_some());
+        assert!(cooled.cooldown_until.is_some());
+
+        db.clear_account_cooldown("free-cd")
+            .expect("clear should succeed");
+        let cleared = db
+            .get_account("free-cd")
+            .expect("account should load")
+            .expect("account should exist");
+        assert!(cleared.cooldown_free_until.is_none());
+        assert!(cleared.cooldown_until.is_none());
+        assert!(cleared.cooldown_generic_until.is_none());
+        assert!(cleared.last_error.is_none());
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
     fn account_stays_cooling_until_all_windows_expire() {
         let dir = temp_data_dir("multi-window-cooldown");
         let db = Database::open(dir.clone()).expect("db should open");
@@ -3287,7 +3345,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -3341,7 +3399,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -3415,7 +3473,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         assert!(auth_error.is_none());
 
         drop(db);

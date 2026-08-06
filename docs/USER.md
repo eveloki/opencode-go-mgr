@@ -797,7 +797,7 @@ checkout containing `compose.yaml` and `.env.example` (preferably the
 matching release tag):
 
 ```bash
-git clone --branch v1.5.9 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.10 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -813,7 +813,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`; the Release
   `compose.example.yaml` defaults to its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.5.9`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.5.10`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `1.5` and `latest` move forward. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is technically immutable.
@@ -959,13 +959,13 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.9
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.9
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.10
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.10
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.9 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.10 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.9 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.10 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -1111,3 +1111,16 @@ and browser profiles.
 [中文用户指南](USER.zh-CN.md) · [Maintainer guide](MAINTAINER.md) ·
 [维护者指南](MAINTAINER.zh-CN.md) · [Docs index](README.md) ·
 [Back to README](../README.md)
+
+## Free model policy
+
+Settings expose three OpenCode Zen free-routing modes:
+
+| Mode | Behavior |
+| --- | --- |
+| **Deny free models** | Reject `*-free` / `big-pickle` and never rewrite Go models onto free |
+| **Explicit free only** (default) | Only client-requested free models use `https://opencode.ai/zen`; Go models stay on Go |
+| **Prefer mapped free models** | Current maps: `deepseek-v4-flash` → `deepseek-v4-flash-free`, `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted fall back to Go |
+
+Free and Go cooldowns are **independent**; multi-account routing still applies within each channel. Under sticky-global routing, Free and Go currently share one preferred account id across channels. Free models are promotional, use a separate quota, and may use request data to improve models—do not submit confidential content.
+

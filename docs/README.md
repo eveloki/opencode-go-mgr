@@ -45,10 +45,10 @@ When docs disagree, prefer the source below and fix the other side.
 | Agent coding constraints / 助手约束 | [../AGENTS.md](../AGENTS.md) |
 
 Example version in Docker snippets should match the current release line
-(currently **v1.5.9**). Do not leave older patch pins in README / USER /
+(currently **v1.5.10**). Do not leave older patch pins in README / USER /
 `.env.example` after a version bump.
 
-Docker 示例里的版本钉应与当前发版线一致（现为 **v1.5.9**）。升版后不要把
+Docker 示例里的版本钉应与当前发版线一致（现为 **v1.5.10**）。升版后不要把
 README / USER / `.env.example` 留在旧 patch。
 
 ## Reading order / 阅读顺序

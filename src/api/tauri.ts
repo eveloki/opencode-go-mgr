@@ -16,6 +16,7 @@ export interface Account {
   cooldown_5h_until: string | null;
   cooldown_week_until: string | null;
   cooldown_month_until: string | null;
+  cooldown_free_until: string | null;
   last_error: string | null;
   auth_error: string | null;
   created_at: string;
@@ -49,6 +50,7 @@ export interface AccountUpdate {
 }
 
 export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
+export type FreeModelRouting = "deny" | "explicit" | "prefer";
 
 export interface AppConfig {
   revision: number;
@@ -67,6 +69,7 @@ export interface AppConfig {
   stream_idle_timeout_secs: number;
   routing_mode: RoutingMode;
   conversation_sticky: boolean;
+  free_model_routing: FreeModelRouting;
 }
 
 export type BrowserMode = "native" | "remote" | "unsupported";

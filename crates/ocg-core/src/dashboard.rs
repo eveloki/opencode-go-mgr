@@ -427,6 +427,7 @@ struct DashboardAccount {
     cooldown_5h_until: Option<String>,
     cooldown_week_until: Option<String>,
     cooldown_month_until: Option<String>,
+    cooldown_free_until: Option<String>,
     last_error: Option<String>,
     auth_error: Option<String>,
     created_at: String,
@@ -462,6 +463,7 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
         cooldown_5h_until: account.cooldown_5h_until.map(|t| t.to_rfc3339()),
         cooldown_week_until: account.cooldown_week_until.map(|t| t.to_rfc3339()),
         cooldown_month_until: account.cooldown_month_until.map(|t| t.to_rfc3339()),
+        cooldown_free_until: account.cooldown_free_until.map(|t| t.to_rfc3339()),
         last_error: sanitize_persisted_error(account.last_error),
         auth_error: sanitize_persisted_error(account.auth_error),
         created_at: account.created_at.to_rfc3339(),
@@ -817,6 +819,7 @@ async fn create_account(
         cooldown_5h_until: None,
         cooldown_week_until: None,
         cooldown_month_until: None,
+        cooldown_free_until: None,
         last_error: None,
         auth_error: None,
         created_at: now,
@@ -882,6 +885,7 @@ async fn create_managed_account(
         cooldown_5h_until: None,
         cooldown_week_until: None,
         cooldown_month_until: None,
+        cooldown_free_until: None,
         last_error: None,
         auth_error: None,
         created_at: now,
@@ -1803,7 +1807,7 @@ async fn update_account_usage(
         let max = match window {
             UsageWindowKind::FiveHours => Some(5 * 60),
             UsageWindowKind::Week => Some(7 * 24 * 60),
-            UsageWindowKind::Month => None,
+            UsageWindowKind::Month | UsageWindowKind::Free => None,
         };
         if mins < 0 || max.is_some_and(|max| mins > max) {
             return Err(ApiError::bad_request(match max {
@@ -1818,6 +1822,11 @@ async fn update_account_usage(
         UsageWindowKind::FiveHours => limits.window_5h,
         UsageWindowKind::Week => limits.window_week,
         UsageWindowKind::Month => limits.window_month,
+        UsageWindowKind::Free => {
+            return Err(ApiError::bad_request(
+                "free promo quota cannot be calibrated as a Go usage window",
+            ));
+        }
     };
     let db = state.db.lock();
     if !db
@@ -2644,6 +2653,7 @@ mod tests {
             cooldown_5h_until: None,
             cooldown_week_until: None,
             cooldown_month_until: None,
+            cooldown_free_until: None,
             last_error: None,
             auth_error: None,
             created_at: now,
@@ -3142,6 +3152,7 @@ mod tests {
             cooldown_5h_until: None,
             cooldown_week_until: None,
             cooldown_month_until: None,
+            cooldown_free_until: None,
             last_error: Some(format!("legacy rate limit echoed {OPAQUE_KEY}")),
             auth_error: Some(format!("legacy auth failure echoed {OPAQUE_KEY}")),
             created_at: Utc::now(),
@@ -3608,6 +3619,7 @@ mod tests {
             cooldown_5h_until: None,
             cooldown_week_until: None,
             cooldown_month_until: None,
+            cooldown_free_until: None,
             last_error: None,
             auth_error: None,
             created_at: Utc::now(),

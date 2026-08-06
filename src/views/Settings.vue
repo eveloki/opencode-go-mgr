@@ -233,6 +233,39 @@
             </p>
           </div>
         </section>
+        <section class="settings-subsection" aria-labelledby="free-routing-title">
+          <h3 id="free-routing-title">{{ t("Free 模型策略") }}</h3>
+          <p class="field-caption routing-intro">
+            {{ t("控制是否允许使用 OpenCode Zen 免费模型，以及是否在上下文允许时把同名 Go 请求优先路由到 free。") }}
+          </p>
+          <n-radio-group
+            v-model:value="config.free_model_routing"
+            name="free-model-routing"
+            class="routing-mode-group"
+            :disabled="!loaded || regenerating || saving"
+          >
+            <div
+              v-for="option in freeModelRoutingOptions"
+              :key="option.value"
+              class="routing-option"
+              :class="{ 'routing-option--selected': config.free_model_routing === option.value }"
+            >
+              <n-radio
+                :value="option.value"
+                :aria-label="t(option.label)"
+                :aria-describedby="`free-routing-option-desc-${option.value}`"
+              >
+                <span class="routing-option-title">{{ t(option.label) }}</span>
+              </n-radio>
+              <div :id="`free-routing-option-desc-${option.value}`">
+                <p class="field-caption">{{ t(option.behavior) }}</p>
+              </div>
+            </div>
+          </n-radio-group>
+          <p class="field-caption">
+            {{ t("Free 模型为限时促销，有独立额度，且请求数据可能用于改进模型；请勿提交机密内容。") }}
+          </p>
+        </section>
         <section class="settings-subsection" aria-labelledby="request-timeout-title">
           <h3 id="request-timeout-title">{{ t("请求超时") }}</h3>
           <n-form-item :label="t('连接超时')">
@@ -467,7 +500,7 @@ import {
   CloudSyncOutlined,
 } from "@vicons/antd";
 import { DashboardRequestError, tauriApi } from "../api/tauri";
-import type { AppConfig, RoutingMode, UpdateCheckResult, UpdateStatus } from "../api/tauri";
+import type { AppConfig, FreeModelRouting, RoutingMode, UpdateCheckResult, UpdateStatus } from "../api/tauri";
 import { THEME_OPTIONS } from "../theme";
 import type { ResolvedTheme, ThemeName } from "../theme";
 import { t } from "../i18n/index.ts";
@@ -541,7 +574,30 @@ const config = ref<AppConfig>({
   stream_idle_timeout_secs: 300,
   routing_mode: "strict-priority",
   conversation_sticky: false,
+  free_model_routing: "explicit",
 });
+
+const freeModelRoutingOptions: Array<{
+  value: FreeModelRouting;
+  label: MessageKey;
+  behavior: MessageKey;
+}> = [
+  {
+    value: "deny",
+    label: "禁止 Free 模型",
+    behavior: "拒绝所有 free / big-pickle 请求，也不会把 Go 模型改写到 free。",
+  },
+  {
+    value: "explicit",
+    label: "仅显式使用 Free 模型",
+    behavior: "只有客户端显式请求 free 模型时才走 Zen free 通道；Go 模型保持 Go 上游。",
+  },
+  {
+    value: "prefer",
+    label: "自动优先同名 Free 模型",
+    behavior: "对已映射的 Go 模型（如 deepseek-v4-flash、mimo-v2.5），在上下文装得下时优先 free；耗尽或超长后回落 Go。",
+  },
+];
 
 const routingModeOptions: Array<{
   value: RoutingMode;
@@ -745,6 +801,7 @@ async function saveSettings() {
   const routingChanged = !!savedConfig.value && (
     savedConfig.value.routing_mode !== payload.routing_mode
     || savedConfig.value.conversation_sticky !== payload.conversation_sticky
+    || savedConfig.value.free_model_routing !== payload.free_model_routing
   );
   try {
     const result = await tauriApi.updateSettings(payload);

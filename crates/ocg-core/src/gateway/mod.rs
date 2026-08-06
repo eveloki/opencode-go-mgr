@@ -1,5 +1,6 @@
 pub mod diagnostics;
 pub mod forwarder;
+pub mod free_models;
 pub mod handler;
 pub mod limit;
 pub mod protocol;

@@ -21,6 +21,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     stream_idle_timeout_secs: 300,
     routing_mode: "strict-priority",
     conversation_sticky: true,
+    free_model_routing: "explicit",
     ...overrides,
   };
 }

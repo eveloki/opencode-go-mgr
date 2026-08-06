@@ -86,15 +86,23 @@ export function windowResetsAt(
   return usage[resetsFields[key]];
 }
 
+export function isFreeCooling(
+  account: Pick<Account, "cooldown_free_until">,
+  now = Date.now(),
+): boolean {
+  return account.cooldown_free_until !== null && Date.parse(account.cooldown_free_until) > now;
+}
+
 export function isCooling(
-  account: Pick<Account, "cooldown_until" | "cooldown_5h_until" | "cooldown_week_until" | "cooldown_month_until">,
+  account: Pick<Account, "cooldown_until" | "cooldown_5h_until" | "cooldown_week_until" | "cooldown_month_until" | "cooldown_free_until">,
   now = Date.now(),
 ): boolean {
   return (
     (account.cooldown_until !== null && Date.parse(account.cooldown_until) > now) ||
     isWindowCooling(account, "window_5h", now) ||
     isWindowCooling(account, "window_week", now) ||
-    isWindowCooling(account, "window_month", now)
+    isWindowCooling(account, "window_month", now) ||
+    isFreeCooling(account, now)
   );
 }
 

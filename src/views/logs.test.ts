@@ -133,6 +133,7 @@ test("settings API maps the loaded revision to conditional writes and returns ne
     stream_idle_timeout_secs: 300,
     routing_mode: "strict-priority",
     conversation_sticky: false,
+    free_model_routing: "explicit",
   });
   const regenerated = await tauriApi.regenerateGatewayKey();
 

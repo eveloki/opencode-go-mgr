@@ -1,6 +1,6 @@
 use crate::gateway::protocol::ApiFormat;
 use crate::gateway::selector::AccountSelector;
-use crate::models::{Account, RoutingMode};
+use crate::models::{Account, RoutingMode, UpstreamChannel};
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -17,6 +17,8 @@ const MAX_EXPLICIT_ID_LEN: usize = 256;
 #[derive(Debug, Clone)]
 struct ConversationBinding {
     account_id: String,
+    channel: UpstreamChannel,
+    resolved_model: String,
     last_seen: Instant,
 }
 
@@ -53,10 +55,19 @@ impl ConversationMap {
         }
     }
 
-    fn insert(&mut self, key: String, account_id: String, now: Instant) {
+    fn insert(
+        &mut self,
+        key: String,
+        account_id: String,
+        channel: UpstreamChannel,
+        resolved_model: String,
+        now: Instant,
+    ) {
         self.purge_expired(now);
         if let Some(existing) = self.entries.get_mut(&key) {
             existing.account_id = account_id;
+            existing.channel = channel;
+            existing.resolved_model = resolved_model;
             existing.last_seen = now;
             self.touch_order(&key);
             return;
@@ -72,6 +83,8 @@ impl ConversationMap {
             key.clone(),
             ConversationBinding {
                 account_id,
+                channel,
+                resolved_model,
                 last_seen: now,
             },
         );
@@ -125,13 +138,35 @@ impl RoutingRuntime {
         *state = RoutingRuntimeState::default();
     }
 
-    /// Select an account for a generation request and update sticky/round-robin state.
+    /// Select an account for Go channel requests (test and legacy callers).
     pub fn select_account(
         &self,
         accounts: &[Account],
         mode: RoutingMode,
         conversation_sticky: bool,
         conversation_key: Option<&str>,
+        exclude_ids: &[&str],
+    ) -> Option<Account> {
+        self.select_account_for(
+            accounts,
+            mode,
+            conversation_sticky,
+            conversation_key,
+            UpstreamChannel::Go,
+            "",
+            exclude_ids,
+        )
+    }
+
+    /// Select an account for a generation request and update sticky/round-robin state.
+    pub fn select_account_for(
+        &self,
+        accounts: &[Account],
+        mode: RoutingMode,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        channel: UpstreamChannel,
+        resolved_model: &str,
         exclude_ids: &[&str],
     ) -> Option<Account> {
         let now = Instant::now();
@@ -141,27 +176,59 @@ impl RoutingRuntime {
             && let Some(key) = conversation_key
             && let Some(binding) = state.conversations.get_fresh(key, now)
         {
-            let account_id = binding.account_id.clone();
-            if let Some(account) =
-                AccountSelector::find_available(accounts, &account_id, exclude_ids)
-            {
-                return Some(account);
+            // Sticky locks account + channel + resolved model for the session.
+            if binding.channel == channel && binding.resolved_model == resolved_model {
+                let account_id = binding.account_id.clone();
+                if let Some(account) =
+                    AccountSelector::find_available_for(accounts, channel, &account_id, exclude_ids)
+                {
+                    return Some(account);
+                }
             }
         }
 
         let selected = match mode {
-            RoutingMode::StrictPriority => AccountSelector::first_available(accounts, exclude_ids),
-            RoutingMode::StickyGlobal => select_sticky_global(&mut state, accounts, exclude_ids),
-            RoutingMode::RoundRobin => select_round_robin(&mut state, accounts, exclude_ids),
+            RoutingMode::StrictPriority => {
+                AccountSelector::first_available_for(accounts, channel, exclude_ids)
+            }
+            RoutingMode::StickyGlobal => {
+                select_sticky_global(&mut state, accounts, channel, exclude_ids)
+            }
+            RoutingMode::RoundRobin => {
+                select_round_robin(&mut state, accounts, channel, exclude_ids)
+            }
         }?;
 
         if conversation_sticky && let Some(key) = conversation_key {
-            state
-                .conversations
-                .insert(key.to_string(), selected.id.clone(), now);
+            state.conversations.insert(
+                key.to_string(),
+                selected.id.clone(),
+                channel,
+                resolved_model.to_string(),
+                now,
+            );
         }
 
         Some(selected)
+    }
+
+    /// Read sticky binding for a conversation if still fresh.
+    pub fn sticky_binding(
+        &self,
+        conversation_key: &str,
+    ) -> Option<(String, UpstreamChannel, String)> {
+        let now = Instant::now();
+        let mut state = self.inner.lock();
+        state
+            .conversations
+            .get_fresh(conversation_key, now)
+            .map(|binding| {
+                (
+                    binding.account_id.clone(),
+                    binding.channel,
+                    binding.resolved_model.clone(),
+                )
+            })
     }
 
     #[cfg(test)]
@@ -188,6 +255,8 @@ impl RoutingRuntime {
             key.to_string(),
             ConversationBinding {
                 account_id: account_id.to_string(),
+                channel: UpstreamChannel::Go,
+                resolved_model: "test-model".to_string(),
                 last_seen,
             },
         );
@@ -200,23 +269,26 @@ impl RoutingRuntime {
 fn select_sticky_global(
     state: &mut RoutingRuntimeState,
     accounts: &[Account],
+    channel: UpstreamChannel,
     exclude_ids: &[&str],
 ) -> Option<Account> {
     if let Some(current_id) = state.global_account_id.clone() {
-        if let Some(account) = AccountSelector::find_available(accounts, &current_id, exclude_ids) {
+        if let Some(account) =
+            AccountSelector::find_available_for(accounts, channel, &current_id, exclude_ids)
+        {
             return Some(account);
         }
         // Request-local exclude (e.g. transient 403 failover): pick another account for
         // this request only when the sticky account is still persistently available.
         let persistently_available =
-            AccountSelector::find_available(accounts, &current_id, &[]).is_some();
-        let selected = AccountSelector::first_available(accounts, exclude_ids)?;
+            AccountSelector::find_available_for(accounts, channel, &current_id, &[]).is_some();
+        let selected = AccountSelector::first_available_for(accounts, channel, exclude_ids)?;
         if !persistently_available {
             state.global_account_id = Some(selected.id.clone());
         }
         return Some(selected);
     }
-    let selected = AccountSelector::first_available(accounts, exclude_ids)?;
+    let selected = AccountSelector::first_available_for(accounts, channel, exclude_ids)?;
     state.global_account_id = Some(selected.id.clone());
     Some(selected)
 }
@@ -224,6 +296,7 @@ fn select_sticky_global(
 fn select_round_robin(
     state: &mut RoutingRuntimeState,
     accounts: &[Account],
+    channel: UpstreamChannel,
     exclude_ids: &[&str],
 ) -> Option<Account> {
     if accounts.is_empty() {
@@ -238,7 +311,7 @@ fn select_round_robin(
     for offset in 0..accounts.len() {
         let index = (start + offset) % accounts.len();
         let account = &accounts[index];
-        if AccountSelector::is_available(account, exclude_ids) {
+        if AccountSelector::is_available_for(account, channel, exclude_ids) {
             state.round_robin_after = Some(account.id.clone());
             return Some(account.clone());
         }
@@ -484,6 +557,7 @@ mod tests {
             cooldown_5h_until: None,
             cooldown_week_until: None,
             cooldown_month_until: None,
+            cooldown_free_until: None,
             last_error: None,
             auth_error: None,
             created_at: Utc::now(),

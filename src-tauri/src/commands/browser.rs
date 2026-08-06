@@ -878,6 +878,7 @@ mod tests {
             cooldown_5h_until: None,
             cooldown_week_until: None,
             cooldown_month_until: None,
+            cooldown_free_until: None,
             last_error: None,
             auth_error: None,
             created_at: now,

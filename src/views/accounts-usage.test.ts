@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   isCooling,
+  isFreeCooling,
   isUsageLimitReached,
   mergeUsageEdit,
   normalizeUsagePercent,
@@ -56,12 +57,37 @@ test("fills every active 5-hour, weekly, or monthly limit", () => {
   );
 });
 
+
+test("treats free promo cooldown as cooling without Go usage windows", () => {
+  assert.equal(isFreeCooling({
+    cooldown_free_until: "2099-01-01T00:00:00Z",
+  }), true);
+  assert.equal(isFreeCooling({
+    cooldown_free_until: null,
+  }), false);
+  assert.equal(isCooling({
+    cooldown_until: null,
+    cooldown_5h_until: null,
+    cooldown_week_until: null,
+    cooldown_month_until: null,
+    cooldown_free_until: "2099-01-01T00:00:00Z",
+  }), true);
+  assert.equal(isCooling({
+    cooldown_until: null,
+    cooldown_5h_until: null,
+    cooldown_week_until: null,
+    cooldown_month_until: null,
+    cooldown_free_until: null,
+  }), false);
+});
+
 test("keeps generic and overlapping window cooldowns visible", () => {
   assert.equal(isCooling({
     cooldown_until: "2099-01-01T00:00:00Z",
     cooldown_5h_until: null,
     cooldown_week_until: null,
     cooldown_month_until: null,
+    cooldown_free_until: null,
   }), true);
 
   const overlapping = {

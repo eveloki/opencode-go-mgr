@@ -1,5 +1,5 @@
 use crate::db::Database;
-use crate::models::Account;
+use crate::models::{Account, UpstreamChannel};
 use anyhow::Result;
 use chrono::Utc;
 
@@ -17,24 +17,49 @@ impl AccountSelector {
     }
 
     pub fn select_excluding(&self, db: &Database, exclude_ids: &[&str]) -> Result<Option<Account>> {
+        self.select_excluding_for(db, UpstreamChannel::Go, exclude_ids)
+    }
+
+    pub fn select_excluding_for(
+        &self,
+        db: &Database,
+        channel: UpstreamChannel,
+        exclude_ids: &[&str],
+    ) -> Result<Option<Account>> {
         let accounts = db.list_accounts()?;
-        Ok(Self::first_available(&accounts, exclude_ids))
+        Ok(Self::first_available_for(&accounts, channel, exclude_ids))
     }
 
     pub fn is_available(account: &Account, exclude_ids: &[&str]) -> bool {
+        Self::is_available_for(account, UpstreamChannel::Go, exclude_ids)
+    }
+
+    pub fn is_available_for(
+        account: &Account,
+        channel: UpstreamChannel,
+        exclude_ids: &[&str],
+    ) -> bool {
         let now = Utc::now();
         account.enabled
             && account.setup_step.is_ready()
             && !account.key_cipher.is_empty()
             && account.auth_error.is_none()
             && !exclude_ids.iter().any(|excluded| account.id == *excluded)
-            && !account.is_cooling_at(now)
+            && !account.is_cooling_for(channel, now)
     }
 
     pub fn first_available(accounts: &[Account], exclude_ids: &[&str]) -> Option<Account> {
+        Self::first_available_for(accounts, UpstreamChannel::Go, exclude_ids)
+    }
+
+    pub fn first_available_for(
+        accounts: &[Account],
+        channel: UpstreamChannel,
+        exclude_ids: &[&str],
+    ) -> Option<Account> {
         accounts
             .iter()
-            .find(|account| Self::is_available(account, exclude_ids))
+            .find(|account| Self::is_available_for(account, channel, exclude_ids))
             .cloned()
     }
 
@@ -43,9 +68,20 @@ impl AccountSelector {
         account_id: &str,
         exclude_ids: &[&str],
     ) -> Option<Account> {
+        Self::find_available_for(accounts, UpstreamChannel::Go, account_id, exclude_ids)
+    }
+
+    pub fn find_available_for(
+        accounts: &[Account],
+        channel: UpstreamChannel,
+        account_id: &str,
+        exclude_ids: &[&str],
+    ) -> Option<Account> {
         accounts
             .iter()
-            .find(|account| account.id == account_id && Self::is_available(account, exclude_ids))
+            .find(|account| {
+                account.id == account_id && Self::is_available_for(account, channel, exclude_ids)
+            })
             .cloned()
     }
 }
@@ -90,6 +126,7 @@ mod tests {
             cooldown_5h_until: None,
             cooldown_week_until: None,
             cooldown_month_until: None,
+            cooldown_free_until: None,
             last_error: None,
             auth_error: None,
             created_at: Utc::now(),

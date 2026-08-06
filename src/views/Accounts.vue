@@ -543,6 +543,7 @@ import type {
 import {
   defaultResetsInMinutes,
   isCooling,
+  isFreeCooling,
   isUsageLimitReached,
   isWindowCooling,
   mergeUsageEdit,
@@ -961,6 +962,9 @@ function cooldownDetails(account: Account): string {
     && Date.parse(account.cooldown_generic_until) > now.value
   ) {
     active.unshift(t("冷却中"));
+  }
+  if (isFreeCooling(account, now.value)) {
+    active.push(t("Free"));
   }
   return active.length > 0 ? active.join(" · ") : t("冷却中");
 }

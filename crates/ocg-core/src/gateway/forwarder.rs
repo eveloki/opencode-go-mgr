@@ -4,14 +4,16 @@ use crate::gateway::diagnostics::{
     redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
-use crate::gateway::limit::{parse_reset, parse_usage_limit_window};
+use crate::gateway::limit::{parse_free_reset_or_default, parse_reset, parse_usage_limit_window};
 use crate::gateway::protocol::{
     ApiFormat, RequestPlan, UsageCounts, error_body, extract_usage, format_error,
     has_complete_usage, has_usage, merge_stream_usage, transform_response,
 };
 use crate::gateway::protocol_stream::StreamConverter;
 use crate::gateway::selector::AccountSelector;
-use crate::models::{Account, AppConfig, ForwardLog, ForwardMetrics};
+use crate::models::{
+    Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
+};
 use crate::pricing::PricingSnapshot;
 use crate::state::CoreState;
 use anyhow::Result;
@@ -213,7 +215,11 @@ async fn forward_request_impl(
     pricing_snapshot: Arc<PricingSnapshot>,
 ) -> Result<ForwardResult> {
     let mut attempt_context = ForwardAttemptContext::new(trace, client_body.len(), attempt, plan);
-    ensure_safe_upstream_base_url(&config.upstream_base_url)?;
+    let upstream_base = plan
+        .upstream_base_override
+        .as_deref()
+        .unwrap_or(config.upstream_base_url.as_str());
+    ensure_safe_upstream_base_url(upstream_base)?;
     let key = match state.decrypt_key(&account.key_cipher) {
         Ok(key) => key,
         Err(error) => {
@@ -364,11 +370,7 @@ async fn forward_request_impl(
         .upstream
         .upstream_path()
         .ok_or_else(|| anyhow::anyhow!("Gemini is a client-only protocol"))?;
-    let url = format!(
-        "{}{}",
-        config.upstream_base_url.trim_end_matches('/'),
-        upstream_path
-    );
+    let url = format!("{}{}", upstream_base.trim_end_matches('/'), upstream_path);
 
     let model = plan.model.clone();
     let upstream_req = client
@@ -601,10 +603,16 @@ async fn forward_request_impl(
         .unwrap_or_else(ResponseBodyFailure::into_detail);
 
         if status.as_u16() == 429 {
-            // 429 from opencode-go carries the exact reset window ("Resets in 13 days" / "4 days" / "13min").
-            // Parse it, cool the account down until then, and fail over to the next account.
+            // Go usage windows and Zen free promo limits both arrive as 429; cool the matching channel.
             // Unlike a rejected 429, ambiguous transport failures and 5xx responses are not replayed.
-            let cooldown = parse_reset(&text).unwrap_or_else(|| Duration::minutes(5));
+            let window = parse_usage_limit_window(&text).or_else(|| {
+                (plan.channel == UpstreamChannel::Free).then_some(UsageWindowKind::Free)
+            });
+            let cooldown = if window == Some(UsageWindowKind::Free) {
+                parse_free_reset_or_default(&text)
+            } else {
+                parse_reset(&text).unwrap_or_else(|| Duration::minutes(5))
+            };
             let until = Utc::now() + cooldown;
             let sanitized = attempt_context.sanitize_upstream_error(&text);
             let error_message = format!(
@@ -645,7 +653,7 @@ async fn forward_request_impl(
                     &account.key_cipher,
                     until,
                     &sanitized,
-                    parse_usage_limit_window(&text),
+                    window,
                 )?;
             }
             return Ok(ForwardResult {

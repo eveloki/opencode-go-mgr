@@ -32,6 +32,8 @@ pub struct Account {
     pub cooldown_week_until: Option<DateTime<Utc>>,
     #[serde(default)]
     pub cooldown_month_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub cooldown_free_until: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
     /// A persisted upstream 401 marker. Accounts with an auth error remain
     /// enabled for management purposes, but are excluded from gateway routing
@@ -145,12 +147,14 @@ impl TryFrom<&str> for AccountSetupStep {
 }
 
 impl Account {
+    /// Latest end among every cooldown window (UI / any-channel busy).
     pub fn cooldown_ends_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         [
             self.cooldown_generic_until,
             self.cooldown_5h_until,
             self.cooldown_week_until,
             self.cooldown_month_until,
+            self.cooldown_free_until,
         ]
         .into_iter()
         .flatten()
@@ -160,6 +164,33 @@ impl Account {
 
     pub fn is_cooling_at(&self, now: DateTime<Utc>) -> bool {
         self.cooldown_ends_at(now).is_some()
+    }
+
+    /// Go routing ignores free promo cooldown; free routing ignores Go usage windows.
+    pub fn cooldown_ends_at_for(
+        &self,
+        channel: UpstreamChannel,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        let windows: &[Option<DateTime<Utc>>] = match channel {
+            UpstreamChannel::Go => &[
+                self.cooldown_generic_until,
+                self.cooldown_5h_until,
+                self.cooldown_week_until,
+                self.cooldown_month_until,
+            ],
+            UpstreamChannel::Free => &[self.cooldown_generic_until, self.cooldown_free_until],
+        };
+        windows
+            .iter()
+            .copied()
+            .flatten()
+            .filter(|until| *until > now)
+            .max()
+    }
+
+    pub fn is_cooling_for(&self, channel: UpstreamChannel, now: DateTime<Utc>) -> bool {
+        self.cooldown_ends_at_for(channel, now).is_some()
     }
 }
 
@@ -246,6 +277,25 @@ fn format_date(date: NaiveDate) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
+pub enum FreeModelRouting {
+    /// Reject free model ids; never map Go requests onto free twins.
+    Deny,
+    /// Only explicit free model ids use the Zen free channel (default).
+    #[default]
+    Explicit,
+    /// Prefer mapped free twins when context fits; fall back to Go.
+    Prefer,
+}
+
+/// Upstream product channel for account selection and cooldown windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamChannel {
+    Go,
+    Free,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
 pub enum RoutingMode {
     #[default]
     StrictPriority,
@@ -270,6 +320,8 @@ pub struct AppConfig {
     pub stream_idle_timeout_secs: u64,
     pub routing_mode: RoutingMode,
     pub conversation_sticky: bool,
+    #[serde(default)]
+    pub free_model_routing: FreeModelRouting,
     pub claude_desktop_models: ClaudeDesktopModels,
 }
 
@@ -288,6 +340,7 @@ impl Default for AppConfig {
             stream_idle_timeout_secs: 300,
             routing_mode: RoutingMode::StrictPriority,
             conversation_sticky: false,
+            free_model_routing: FreeModelRouting::Explicit,
             claude_desktop_models: ClaudeDesktopModels::default(),
         }
     }
@@ -326,9 +379,15 @@ impl ClaudeDesktopModels {
             ("opus", self.opus.as_str()),
             ("haiku", self.haiku.as_str()),
         ] {
-            if !model.is_empty()
-                && !crate::gateway::protocol::supported_model_ids()
-                    .any(|supported| supported == model)
+            if model.is_empty() {
+                continue;
+            }
+            if crate::gateway::free_models::is_free_model(model) {
+                return Err(format!(
+                    "Claude Desktop {role} model `{model}` cannot be a Zen free model"
+                ));
+            }
+            if !crate::gateway::protocol::supported_model_ids().any(|supported| supported == model)
             {
                 return Err(format!("unsupported Claude Desktop {role} model `{model}`"));
             }
@@ -598,6 +657,8 @@ pub enum UsageWindowKind {
     FiveHours,
     Week,
     Month,
+    /// Zen free-model promo quota (independent of Go usage windows).
+    Free,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -633,8 +694,9 @@ pub struct DailyModelCost {
 mod tests {
     use super::{
         AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
-        CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL, RoutingMode,
-        normalize_opencode_invite_url, normalize_purchase_date, purchase_expires_on,
+        CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL,
+        FreeModelRouting, RoutingMode, normalize_opencode_invite_url, normalize_purchase_date,
+        purchase_expires_on,
     };
 
     #[test]
@@ -730,6 +792,7 @@ mod tests {
         .expect("missing routing fields should default");
         assert_eq!(missing.routing_mode, RoutingMode::StrictPriority);
         assert!(!missing.conversation_sticky);
+        assert_eq!(missing.free_model_routing, FreeModelRouting::Explicit);
 
         for mode in [
             RoutingMode::StrictPriority,

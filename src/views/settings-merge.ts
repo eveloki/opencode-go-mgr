@@ -12,6 +12,7 @@ const EDITABLE_SETTING_KEYS = [
   "stream_idle_timeout_secs",
   "routing_mode",
   "conversation_sticky",
+  "free_model_routing",
 ] as const satisfies readonly (keyof AppConfig)[];
 
 /**

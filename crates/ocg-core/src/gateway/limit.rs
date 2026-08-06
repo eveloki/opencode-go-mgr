@@ -10,9 +10,32 @@ pub fn parse_usage_limit_window(text: &str) -> Option<UsageWindowKind> {
         Some(UsageWindowKind::Week)
     } else if text.contains("monthly usage limit") {
         Some(UsageWindowKind::Month)
+    } else if text.contains("freeusagelimiterror")
+        || text.contains("free usage exceeded")
+        || text.contains("free usage limit")
+        || text.contains("free couta")
+        || text.contains("free quota")
+    {
+        Some(UsageWindowKind::Free)
     } else {
         None
     }
+}
+
+/// Parse free-promo reset hints (`Resets in` / `retrying in`). Falls back to default.
+pub fn parse_free_reset_or_default(text: &str) -> chrono::Duration {
+    if let Some(duration) = parse_reset(text) {
+        return duration;
+    }
+    // Also accept "retrying in 17h 42m"
+    if let Some(idx) = text.to_ascii_lowercase().find("retrying in") {
+        if let Some(duration) =
+            parse_reset(&format!("Resets in {}", &text[idx + "retrying in".len()..]))
+        {
+            return duration;
+        }
+    }
+    chrono::Duration::minutes(crate::gateway::free_models::DEFAULT_FREE_COOLDOWN_MINUTES)
 }
 
 /// 解析 opencode-go 429 消息中的重置时长。
@@ -100,6 +123,12 @@ mod tests {
         assert_eq!(
             parse_usage_limit_window("5-hour usage limit reached. Resets in 13min."),
             Some(UsageWindowKind::FiveHours)
+        );
+        assert_eq!(
+            parse_usage_limit_window(
+                r#"{"type":"FreeUsageLimitError","message":"Free usage exceeded"}"#
+            ),
+            Some(UsageWindowKind::Free)
         );
         assert_eq!(
             parse_usage_limit_window(
