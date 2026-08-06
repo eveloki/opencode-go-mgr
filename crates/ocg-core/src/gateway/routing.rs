@@ -159,6 +159,7 @@ impl RoutingRuntime {
     }
 
     /// Select an account for a generation request and update sticky/round-robin state.
+    #[allow(clippy::too_many_arguments)]
     pub fn select_account_for(
         &self,
         accounts: &[Account],
