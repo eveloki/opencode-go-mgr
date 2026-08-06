@@ -7,7 +7,7 @@ WORKDIR /src
 ENV npm_config_registry=$NPM_REGISTRY
 RUN npm install --global pnpm@10.29.2
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile --network-concurrency=1
+RUN pnpm install --frozen-lockfile --ignore-scripts --network-concurrency=1
 COPY . .
 RUN pnpm run build:web
 
