@@ -5,6 +5,8 @@
   "packageManager": "pnpm@10.29.2",
   "type": "module",
   "scripts": {
+    "prepare": "node scripts/install-git-hooks.mjs",
+    "hooks:install": "node scripts/install-git-hooks.mjs",
     "predev": "node scripts/free-dev-port.mjs",
     "dev": "tauri dev",
     "build": "node scripts/release.mjs",

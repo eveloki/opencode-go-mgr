@@ -78,6 +78,17 @@ Vite 进程。Tauri 启动 Vite，等 Gateway 就绪后打开
 - Rust 改动走 Tauri watcher + Cargo 增量编译，然后重启进程。Rust 代码 **不会**
   在进程内热替换，需要重启。
 
+克隆后启用一次共享 git hooks（`pnpm install` 的 `prepare` 脚本也会执行）：
+
+```bash
+pnpm run hooks:install
+# 等价：git config core.hooksPath .githooks
+```
+
+当本次提交暂存了任意 `*.rs` 文件时，`.githooks/pre-commit` 会运行
+`cargo fmt --all`，并把这些 Rust 文件重新 `git add`，保证提交内容符合
+rustfmt（与 CI 的 `cargo fmt --all -- --check` 同一套工具）。
+
 ## 检查与构建
 
 ```bash
@@ -107,7 +118,7 @@ cargo check --workspace --all-targets
 cargo test --workspace
 ```
 
-第一条命令只检查格式，不修改文件；需要格式化时运行 `cargo fmt --all`。
+第一条命令只检查格式，不修改文件；需要格式化时运行 `cargo fmt --all`。启用 hooks 后，暂存了 Rust 文件的 commit 会由 `.githooks/pre-commit` 自动执行格式化。
 
 聚焦工作：
 

@@ -52,6 +52,7 @@
 
 ```powershell
 pnpm install
+pnpm run hooks:install   # once per clone; enables pre-commit cargo fmt
 pnpm run dev
 pnpm run build:web
 pnpm run test

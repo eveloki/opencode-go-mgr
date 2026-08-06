@@ -1,0 +1,2 @@
+# Keep git hooks executable and LF-only on all platforms.
+.githooks/** text eol=lf

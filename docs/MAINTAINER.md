@@ -83,6 +83,18 @@ to be ready, then opens `http://127.0.0.1:30001/dashboard/`.
   restart the process. Rust code is **not** replaced inside a running
   process — expect a restart.
 
+After cloning, enable the shared git hooks once (also runs from `pnpm install`
+via the `prepare` script):
+
+```bash
+pnpm run hooks:install
+# equivalent: git config core.hooksPath .githooks
+```
+
+When a commit stages any `*.rs` file, `.githooks/pre-commit` runs
+`cargo fmt --all` and re-stages those Rust files so the commit stays
+rustfmt-clean (same tool CI checks with `cargo fmt --all -- --check`).
+
 ## Checks And Builds
 
 ```bash
@@ -116,7 +128,7 @@ cargo test --workspace
 ```
 
 The first command checks formatting without changing files. Run
-`cargo fmt --all` to apply formatting.
+`cargo fmt --all` to apply formatting. With hooks enabled, staged Rust commits auto-run that format step via `.githooks/pre-commit`.
 
 For focused work:
 
