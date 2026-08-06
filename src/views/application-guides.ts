@@ -11,6 +11,8 @@ export interface GuideContext {
   actualKey: string;
   modelId: string;
   modelIds: readonly string[];
+  /** All Applications-selectable model IDs (used by Codex catalog, etc.). */
+  availableModelIds: readonly string[];
   modelValues: Readonly<Record<string, string>>;
   iconUrl: string;
 }
@@ -428,6 +430,65 @@ function applicationModelMetadata(modelId: string): ApplicationModelMetadata {
   return metadata;
 }
 
+function codexCatalogModelIds(context: GuideContext): string[] {
+  const fallback = context.modelValues.model || context.modelId;
+  const source = context.availableModelIds.length
+    ? context.availableModelIds
+    : fallback && fallback !== "<MODEL_ID>"
+      ? [fallback]
+      : [];
+  return [...new Set(source.filter((modelId) => modelId && modelId !== "<MODEL_ID>"))];
+}
+
+export function buildCodexModelCatalog(context: GuideContext) {
+  return {
+    models: codexCatalogModelIds(context).map((modelId) => {
+      const metadata = applicationModelMetadata(modelId);
+      const effectiveInput = metadata.ocgInput ?? metadata.input;
+      const entry: Record<string, unknown> = {
+        slug: modelId,
+        display_name: modelId,
+        description: `${modelId} via OCG Manager`,
+        context_window: metadata.contextWindow,
+        max_context_window: metadata.contextWindow,
+        effective_context_window_percent: 95,
+        input_modalities: effectiveInput.includes("image") ? ["text", "image"] : ["text"],
+        supported_in_api: true,
+        supports_parallel_tool_calls: metadata.toolUse,
+        visibility: "list",
+      };
+      if (metadata.efforts?.length) {
+        entry.supported_reasoning_levels = metadata.efforts.map((effort) => ({
+          effort,
+          description: effort,
+        }));
+        if (metadata.defaultEffort) {
+          entry.default_reasoning_level = metadata.defaultEffort;
+        }
+      }
+      return entry;
+    }),
+  };
+}
+
+function buildCodexProviderConfig(context: GuideContext): string {
+  const model = context.modelValues.model || context.modelId;
+  const reviewModel = context.modelValues.review_model || context.modelId;
+  return [
+    `model = ${JSON.stringify(model)}`,
+    `review_model = ${JSON.stringify(reviewModel)}`,
+    `model_provider = "ocg"`,
+    `model_catalog_json = "ocg-model-catalog.json"`,
+    "",
+    "[model_providers.ocg]",
+    'name = "OCG Manager"',
+    `base_url = ${JSON.stringify(context.apiBaseUrl)}`,
+    'env_key = "OCG_API_KEY"',
+    'wire_api = "responses"',
+    "requires_openai_auth = false",
+  ].join("\n");
+}
+
 function piThinkingLevelMap(metadata: ApplicationModelMetadata): Readonly<Record<string, string | null>> | undefined {
   if (metadata.piThinkingLevelMap) return metadata.piThinkingLevelMap;
   const mapping: Record<string, string | null> = {};
@@ -640,39 +701,61 @@ export const APPLICATION_GUIDES = [
     category: "OpenAI 兼容",
     protocol: "OpenAI Responses",
     endpointKind: "responses",
-    officialUrl: "https://learn.chatgpt.com/docs/config-file/config-reference#configtoml",
+    officialUrl: "https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers",
     badge: "Responses",
     summary: "注册 OCG Manager 为 Codex 自定义模型提供商，通过 Responses 接口调用。",
     steps: [
-      "把模型与 provider 配置保存为 ~/.codex/ocg.config.toml，避免改动默认配置。",
-      "设置 OCG_API_KEY 后运行 codex --profile ocg。",
+      "把模型目录保存为 ~/.codex/ocg-model-catalog.json。",
+      "CLI 切换：保存 ~/.codex/ocg.config.toml 后运行 codex --profile ocg；Desktop 或默认提供商：把相同配置合并进用户级 ~/.codex/config.toml。",
+      "在启动 Codex 的同一终端设置 OCG_API_KEY 环境变量。",
       "启动 Codex 并发送一条测试消息，再到 OCG Manager 的请求日志确认成功记录。",
     ],
     notes: [
+      "Codex 自定义 provider 必须 wire_api = \"responses\"；当前 Codex 不再支持 chat wire_api。",
+      "OCG Manager 原生接收 /v1/responses；若上游更偏好其他协议，Gateway 会转换，无需再叠一层 Chat 转换器。",
+      "model_catalog_json 只提供模型元数据（选择器、上下文窗口、推理档位），不负责协议转换；不写 catalog 时直接设置 model 通常仍可请求。",
       "OCG Manager 当前提供无状态 Responses 转发，不要依赖 previous_response_id 延续服务端状态。",
+      "项目内 .codex/config.toml 不能配置 model_providers；provider 必须写在用户级配置或 profile 文件。",
+      "Desktop 更适合合并用户级 config.toml；CLI 可用 profile 避免改默认配置。合并 config.toml 会切换默认 model_provider。",
       "模型能力由实际上游决定；Agent 工具调用需要所选模型正确支持 tools。",
     ],
     modelFields: ["model", "review_model"],
-    snippets: (context) => [
-      {
-        label: "~/.codex/ocg.config.toml",
-        language: "toml",
-        display: `model = ${JSON.stringify(context.modelValues.model || context.modelId)}\nreview_model = ${JSON.stringify(context.modelValues.review_model || context.modelId)}\nmodel_provider = "ocg"\n\n[model_providers.ocg]\nname = "OCG Manager"\nbase_url = "${context.apiBaseUrl}"\nenv_key = "OCG_API_KEY"\nwire_api = "responses"`,
-        copy: `model = ${JSON.stringify(context.modelValues.model || context.modelId)}\nreview_model = ${JSON.stringify(context.modelValues.review_model || context.modelId)}\nmodel_provider = "ocg"\n\n[model_providers.ocg]\nname = "OCG Manager"\nbase_url = "${context.apiBaseUrl}"\nenv_key = "OCG_API_KEY"\nwire_api = "responses"`,
-      },
-      keyedSnippet(
-        context,
-        t("当前 PowerShell 会话"),
-        "powershell",
-        (key) => `$env:OCG_API_KEY = ${powerShellLiteral(key)}\ncodex --profile ocg`,
-      ),
-      keyedSnippet(
-        context,
-        "macOS / Linux shell",
-        "bash",
-        (key) => `export OCG_API_KEY=${posixShellLiteral(key)}\ncodex --profile ocg`,
-      ),
-    ],
+    snippets: (context) => {
+      const providerConfig = buildCodexProviderConfig(context);
+      const catalog = JSON.stringify(buildCodexModelCatalog(context), null, 2);
+      return [
+        {
+          label: "~/.codex/ocg-model-catalog.json",
+          language: "json",
+          display: catalog,
+          copy: catalog,
+        },
+        {
+          label: "~/.codex/ocg.config.toml",
+          language: "toml",
+          display: providerConfig,
+          copy: providerConfig,
+        },
+        {
+          label: "~/.codex/config.toml",
+          language: "toml",
+          display: `# Merge into user-level ~/.codex/config.toml (changes default model_provider)\n${providerConfig}`,
+          copy: `# Merge into user-level ~/.codex/config.toml (changes default model_provider)\n${providerConfig}`,
+        },
+        keyedSnippet(
+          context,
+          t("当前 PowerShell 会话"),
+          "powershell",
+          (key) => `$env:OCG_API_KEY = ${powerShellLiteral(key)}\n# Profile (recommended for CLI):\ncodex --profile ocg\n# After merging ~/.codex/config.toml:\n# codex`,
+        ),
+        keyedSnippet(
+          context,
+          "macOS / Linux shell",
+          "bash",
+          (key) => `export OCG_API_KEY=${posixShellLiteral(key)}\n# Profile (recommended for CLI):\ncodex --profile ocg\n# After merging ~/.codex/config.toml:\n# codex`,
+        ),
+      ];
+    },
   },
   {
     id: "gemini-cli",

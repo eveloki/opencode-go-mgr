@@ -293,8 +293,12 @@ Cherry Studio、VS Code Copilot Chat、Cline、Roo Code、Continue、Chatbox。�
   出的根地址不符合该客户端限制时，应用页会禁用 Gemini 配置复制。
 - Pi、Kimi Code CLI、OpenCode、OpenClaw、Hermes、Cline、Roo Code、Continue
   使用带 `/v1` 的 API Base URL。
-- VS Code Copilot Chat 与 WorkBuddy 使用完整 `/v1/chat/completions` 端点；Codex 除
-  `/v1` Base URL 外还需 `wire_api = "responses"`。
+- VS Code Copilot Chat 与 WorkBuddy 使用完整 `/v1/chat/completions` 端点。Codex
+  使用带 `/v1` 的 API Base URL，且必须 `wire_api = "responses"`。可复制
+  `~/.codex/ocg-model-catalog.json` 作为模型目录；CLI 用
+  `~/.codex/ocg.config.toml` + `codex --profile ocg`，Desktop 或常驻默认则合并进
+  用户级 `~/.codex/config.toml`。catalog 只提供元数据，不负责协议转换；请求始终
+  走 OCG Manager 的 Responses 入口。
 
 可选模型是上游当前公布、Gateway 已知可路由且存在于活动价格快照中的交集；每次
 返回应用页都会重新同步，因此确认价格刷新后模型类型也会跟着更新。模型选择和编辑

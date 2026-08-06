@@ -6,6 +6,7 @@ import {
   APPLICATION_MODEL_METADATA,
   buildChatboxConfig,
   buildChatboxUrl,
+  buildCodexModelCatalog,
   recommendClaudeCodeModel,
   reconcileApplicationModelSelection,
 } from "./application-guides.ts";
@@ -184,7 +185,7 @@ test("application catalog has sixteen verified clients and never displays a comp
   const officialUrls = new Map([
     ["claude-code", "https://code.claude.com/docs/en/llm-gateway-connect"],
     ["claude-desktop", "https://claude.com/docs/third-party/claude-desktop/gateway"],
-    ["codex", "https://learn.chatgpt.com/docs/config-file/config-reference#configtoml"],
+    ["codex", "https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers"],
     ["gemini-cli", "https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md"],
     ["pi", "https://pi.dev/docs/latest/models"],
     ["kimi-code", "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html"],
@@ -244,6 +245,7 @@ test("application catalog has sixteen verified clients and never displays a comp
     actualKey,
     modelId: "kimi-k3",
     modelIds: ["kimi-k3", "glm-5.1"],
+    availableModelIds: ["kimi-k3", "glm-5.1"],
     modelValues,
     iconUrl: "https://edge.example.com/dashboard/ocg.png",
   };
@@ -300,11 +302,40 @@ test("application catalog has sixteen verified clients and never displays a comp
   assert.ok(codex);
   assert.deepEqual(codex.modelFields, ["model", "review_model"]);
   const codexSnippets = codex.snippets(context);
-  assert.equal(codexSnippets[0].label, "~/.codex/ocg.config.toml");
-  const codexConfig = codexSnippets[0].copy;
-  assert.match(codexConfig, /model = "kimi-k3"/);
-  assert.match(codexConfig, /review_model = "glm-5.1"/);
+  assert.equal(codexSnippets[0].label, "~/.codex/ocg-model-catalog.json");
+  const codexCatalog = JSON.parse(codexSnippets[0].copy);
+  const catalogModels = codexCatalog.models as Array<{
+    slug: string;
+    context_window: number;
+    supported_in_api: boolean;
+    visibility: string;
+  }>;
+  assert.deepEqual(
+    catalogModels.map((model) => model.slug),
+    ["kimi-k3", "glm-5.1"],
+  );
+  for (const model of catalogModels) {
+    assert.equal(model.context_window, APPLICATION_MODEL_METADATA[model.slug].contextWindow);
+    assert.equal(model.supported_in_api, true);
+    assert.equal(model.visibility, "list");
+  }
+  assert.deepEqual(buildCodexModelCatalog(context), codexCatalog);
+  assert.equal(codexSnippets[1].label, "~/.codex/ocg.config.toml");
+  assert.equal(codexSnippets[2].label, "~/.codex/config.toml");
+  for (const label of ["~/.codex/ocg.config.toml", "~/.codex/config.toml"]) {
+    const codexConfig = codexSnippets.find((snippet) => snippet.label === label)?.copy ?? "";
+    assert.match(codexConfig, /model = "kimi-k3"/, label);
+    assert.match(codexConfig, /review_model = "glm-5.1"/, label);
+    assert.match(codexConfig, /model_provider = "ocg"/, label);
+    assert.match(codexConfig, /model_catalog_json = "ocg-model-catalog.json"/, label);
+    assert.match(codexConfig, /wire_api = "responses"/, label);
+    assert.match(codexConfig, /requires_openai_auth = false/, label);
+    assert.match(codexConfig, new RegExp(`base_url = "${urls.apiBaseUrl}"`), label);
+  }
+  assert.match(codexSnippets[2].copy, /Merge into user-level/);
   assert.ok(codexSnippets.some((snippet) => snippet.copy.includes("codex --profile ocg")));
+  assert.ok(codexSnippets.some((snippet) => snippet.language === "powershell" && snippet.copy.includes(actualKey)));
+  assert.ok(codexSnippets.some((snippet) => snippet.language === "bash" && snippet.copy.includes(actualKey)));
 
   const claudeDesktop = APPLICATION_GUIDES.find((guide) => guide.id === "claude-desktop");
   assert.ok(claudeDesktop);
@@ -548,6 +579,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
     actualKey: "ocg-secret-key",
     modelId: expected.keys().next().value!,
     modelIds: [...expected.keys()],
+    availableModelIds: [...expected.keys()],
     modelValues: {},
     iconUrl: "https://edge.example.com/dashboard/ocg.png",
   };
@@ -696,6 +728,7 @@ test("dotenv snippets quote keys containing comments and replacement tokens", ()
     actualKey,
     modelId: "kimi-k3",
     modelIds: ["kimi-k3"],
+    availableModelIds: ["kimi-k3"],
     modelValues: {},
     iconUrl: "https://edge.example.com/dashboard/ocg.png",
   };
@@ -713,6 +746,7 @@ test("Chatbox import encodes the exact key and every selected model", () => {
     actualKey: "ocg-secret-key",
     modelId: "selected-model",
     modelIds: ["selected-model", "second-model"],
+    availableModelIds: ["selected-model", "second-model"],
     modelValues: {},
     iconUrl: "https://edge.example.com/dashboard/ocg.png",
   };
@@ -743,6 +777,7 @@ test("generated VS Code and Continue configs use their current complete shapes",
     actualKey: "ocg-secret-key",
     modelId: "selected-model",
     modelIds: ["selected-model", "second-model"],
+    availableModelIds: ["selected-model", "second-model"],
     modelValues: {},
     iconUrl: "https://edge.example.com/dashboard/ocg.png",
   };
@@ -766,6 +801,7 @@ test("generated VS Code and Continue configs use their current complete shapes",
     ...context,
     modelId: "glm-5.2",
     modelIds: [...vscodeWindows.keys()],
+    availableModelIds: [...vscodeWindows.keys()],
   };
   const vscode = APPLICATION_GUIDES.find((guide) => guide.id === "vscode-copilot")!;
   const vscodeConfig = JSON.parse(vscode.snippets(vscodeContext)[0].copy);

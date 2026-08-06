@@ -333,7 +333,12 @@ Base URL conventions per client:
 - Pi, Kimi Code CLI, OpenCode, OpenClaw, Hermes, Cline, Roo Code, and Continue
   use the API Base URL ending in `/v1`.
 - VS Code Copilot Chat and WorkBuddy need the full `/v1/chat/completions` URL.
-  Codex needs `/v1` plus `wire_api = "responses"`.
+  Codex needs the API Base URL ending in `/v1` plus `wire_api = "responses"`.
+  Copy `~/.codex/ocg-model-catalog.json` for model picker metadata, then either
+  use `~/.codex/ocg.config.toml` with `codex --profile ocg` (CLI) or merge the
+  same provider block into user-level `~/.codex/config.toml` (Desktop / default
+  provider). The catalog is optional metadata only; Codex still talks Responses
+  to OCG Manager either way.
 
 Selectable models are the intersection of the upstream's current catalog,
 models the gateway knows how to route, and the active pricing snapshot. The

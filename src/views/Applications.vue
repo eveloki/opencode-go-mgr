@@ -514,6 +514,7 @@ const guideContext = computed<GuideContext>(() => ({
     ? modelValues.value[activeGuide.value.modelFields[0]] || "<MODEL_ID>"
     : selectedModel.value?.trim() || "<MODEL_ID>",
   modelIds: selectedModels.value,
+  availableModelIds: applicationModelIds.value,
   modelValues: modelValues.value,
   iconUrl: new URL(logoUrl, window.location.origin).href,
 }));
