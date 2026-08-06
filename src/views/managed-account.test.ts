@@ -10,6 +10,10 @@ import {
   setupStepIndex,
 } from "./managed-account.ts";
 
+async function readSource(url: string | URL): Promise<string> {
+  return (await readFile(url, "utf8")).replace(/\r\n/g, "\n");
+}
+
 test("managed signup steps advance in order and map to allowed browser targets", () => {
   assert.equal(setupStepIndex("google_account"), 0);
   assert.equal(nextSetupStep("google_account"), "opencode_registration");
@@ -56,11 +60,11 @@ test("remote browser view URL preserves dashboard location and carries the opaqu
 
 test("managed account UI isolates pending controls and renders noVNC in a dedicated view", async () => {
   const [accounts, chooser, wizard, browser, app] = await Promise.all([
-    readFile(new URL("./Accounts.vue", import.meta.url), "utf8"),
-    readFile(new URL("../components/AccountAddModal.vue", import.meta.url), "utf8"),
-    readFile(new URL("../components/ManagedAccountWizard.vue", import.meta.url), "utf8"),
-    readFile(new URL("./BrowserSession.vue", import.meta.url), "utf8"),
-    readFile(new URL("../App.vue", import.meta.url), "utf8"),
+    readSource(new URL("./Accounts.vue", import.meta.url)),
+    readSource(new URL("../components/AccountAddModal.vue", import.meta.url)),
+    readSource(new URL("../components/ManagedAccountWizard.vue", import.meta.url)),
+    readSource(new URL("./BrowserSession.vue", import.meta.url)),
+    readSource(new URL("../App.vue", import.meta.url)),
   ]);
 
   assert.match(chooser, /导入已有 Key/);
@@ -121,7 +125,7 @@ test("managed account UI isolates pending controls and renders noVNC in a dedica
 });
 
 test("managed account creation cannot be cancelled while its request is pending", async () => {
-  const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const accounts = await readSource(new URL("./Accounts.vue", import.meta.url));
   const managedCreateModal = accounts.slice(
     accounts.indexOf('<n-modal\n      :show="showManagedCreate"'),
     accounts.indexOf("<ManagedAccountWizard"),
@@ -134,6 +138,6 @@ test("managed account creation cannot be cancelled while its request is pending"
 });
 
 test("Vite proxies remote browser WebSockets during dashboard development", async () => {
-  const source = await readFile(new URL("../../vite.config.ts", import.meta.url), "utf8");
+  const source = await readSource(new URL("../../vite.config.ts", import.meta.url));
   assert.match(source, /"\/dashboard\/api": \{[\s\S]*?target: "http:\/\/127\.0\.0\.1:9042"[\s\S]*?ws: true/);
 });
