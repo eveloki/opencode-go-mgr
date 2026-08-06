@@ -69,15 +69,14 @@ Gateway: http://127.0.0.1:9042/v1
 Auth:    Authorization: Bearer <key>
 ```
 
-The key shown in the dashboard is the **Gateway Key** — the only secret your
-client needs. The gateway injects the stored OpenCode-Go account key on the
-upstream side.
+The dashboard shows a **Key** — the only secret your client needs. The
+gateway injects the stored OpenCode-Go account key on the upstream side.
 
 1. Install and launch OCG Manager. The dashboard opens in your system browser
    once the gateway is ready; use the tray icon to reopen it.
 2. Import an existing key in **Accounts**, or use managed onboarding (edit the
    invite URL on the create-draft form; replace the demo default with your own
-   before a real signup); then copy the Gateway Key.
+   before a real signup); then copy the Key.
 3. Point your client at `http://127.0.0.1:9042/v1`. The **Applications** view
    has per-client configuration guides.
 
@@ -99,10 +98,10 @@ attached to each Release) as `compose.yaml` and optionally create a
 neighboring `.env`. Or run from a checkout:
 
 ```bash
-git clone --branch v1.5.7 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.9 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
-# Edit .env: choose first-run administrator setup and pin OCG_IMAGE to 1.5.7.
+# Edit .env: choose first-run administrator setup and pin OCG_IMAGE to 1.5.9.
 docker compose pull
 docker compose up -d --no-build
 docker compose ps
@@ -207,7 +206,9 @@ to 100% and marks it as an error. The account recovers automatically after
 | Maintainers | [Maintainer guide](docs/MAINTAINER.md) | [维护者指南](docs/MAINTAINER.zh-CN.md) |
 | Policy | [Anti-abuse statement](docs/OPENCODE_GO_ANTI_ABUSE.md) | [防滥用声明](docs/OPENCODE_GO_ANTI_ABUSE.zh-CN.md) |
 | Credits | [Contributors](docs/CONTRIBUTORS.md) | same file |
-| Index | [docs/](docs/README.md) | — |
+| Design system | [DESIGN.md](DESIGN.md) | English source of truth |
+| AI agents | [AGENTS.md](AGENTS.md) | 中文 |
+| Index | [docs/](docs/README.md) | bilingual |
 
 ## Development
 

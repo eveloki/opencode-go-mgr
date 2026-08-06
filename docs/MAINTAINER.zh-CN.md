@@ -158,7 +158,7 @@ Desktop 三个角色模型的持久化行为。
 - Gateway 在 `crates/ocg-core/src/gateway/`，使用 Axum + Tokio + reqwest，
   默认监听 `127.0.0.1:9042`。
 - 处理器接受客户端的 `Authorization: Bearer <gateway-key>`、`x-api-key` 或
-  `x-goog-api-key`，与配置里的 Gateway Key 比对。`forwarder.rs` 必须移除这些
+  `x-goog-api-key`，与配置里的 Key 比对。`forwarder.rs` 必须移除这些
   客户端凭据，再按实际 Chat/Messages 上游协议注入所选账号 Key；不要把 Gemini
   或 Anthropic 客户端凭据透传到 OpenCode-Go。
 - 标准入口是 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 与

@@ -44,7 +44,7 @@ Admin API, and no telemetry.
 
 The gateway does four jobs:
 
-1. Authenticate the client with the **Gateway Key** issued by the dashboard.
+1. Authenticate the client with the **Key** issued by the dashboard.
 2. Pick a usable OpenCode-Go account for the request.
 3. Convert the request to that model's native OpenCode-Go protocol, and the
    response back to the client protocol.
@@ -61,7 +61,7 @@ The gateway does four jobs:
    system browser; use the tray icon to open it again later.
 3. Current Windows builds are unsigned, so SmartScreen may warn. Click
    **More info → Run anyway** to continue.
-4. Add an OpenCode-Go account in the **Accounts** view, copy the Gateway Key,
+4. Add an OpenCode-Go account in the **Accounts** view, copy the Key,
    and point your client at `http://127.0.0.1:9042/v1`.
 5. The uninstaller asks whether to delete `%USERPROFILE%\.ocg-mgr`; silent
    upgrades and uninstalls preserve it.
@@ -72,7 +72,7 @@ The gateway does four jobs:
 2. The app is ad-hoc signed, so the first launch may be blocked. Open
    **Privacy & Security** and click **Open Anyway**.
 3. Launch the app. The dashboard opens in your system browser; use the tray
-   icon to reopen it. Add an account, copy the Gateway Key, and configure
+   icon to reopen it. Add an account, copy the Key, and configure
    your client.
 
 ### Linux x64
@@ -93,13 +93,13 @@ browser.
    is optional; when entered first, it is copied into the required display
    name until you edit that name yourself. The dashboard does not collect or
    manage the OpenCode-Go login password.
-2. In the dashboard's **Connection Center**, copy the **Gateway Key** and the
+2. In the dashboard's **Connection Center**, copy the **Key** and the
    **API Base URL** (`http://127.0.0.1:9042/v1`).
-3. Point your client at the base URL with the Gateway Key. The
+3. Point your client at the base URL with the Key. The
    **Applications** view has a per-client guide for 16 common tools.
 4. Verify the setup with a real request.
 
-The Gateway Key is the only credential a client needs, and it works in three
+The Key is the only credential a client needs, and it works in three
 header forms: `Authorization: Bearer <key>`, the Anthropic-compatible
 `x-api-key: <key>`, or the Gemini-compatible `x-goog-api-key: <key>`. It is a
 local secret unrelated to the OpenCode-Go account key, which the gateway
@@ -280,13 +280,13 @@ private window), the in-memory locale still works for the current session.
 The first panel above the fold — and the only panel that always stays on
 top — is the **Connection Center**. It contains:
 
-- The **Gateway Key** (also called the *Key*) with a regenerate action and
-  one-click copy. Regenerating invalidates the previous key immediately.
+- The **Key**, with regenerate and one-click copy. Regenerating invalidates
+  the previous key immediately.
 - The **API Base URL** (e.g. `http://127.0.0.1:9042/v1`) with one-click copy,
   plus the full Chat Completions, Responses, and Messages endpoints.
 - The **Upstream URL** the gateway forwards to, with a copy action.
 - An **HTTP warning** that appears whenever the resolved root URL is a
-  non-loopback `http://` URL, warning that the Gateway Key and request
+  non-loopback `http://` URL, warning that the Key and request
   contents would be transmitted in clear text.
 
 The **Downstream Access Root** setting in **Settings** controls only the URLs
@@ -307,7 +307,7 @@ clients reach the gateway through a reverse proxy or a different host. A
 trailing `/v1` is accepted and removed automatically. This setting does
 **not** change the gateway bind address, configure DNS, or create a reverse
 proxy — those must already route to the running gateway. Plain HTTP is
-allowed for LAN deployments, but it exposes the Gateway Key and request
+allowed for LAN deployments, but it exposes the Key and request
 contents to the network.
 
 ### Application Guides
@@ -318,7 +318,7 @@ OpenCode, WorkBuddy, OpenClaw, Hermes, Cherry Studio, VS Code Copilot Chat,
 Cline, Roo Code, Continue, and Chatbox. Each guide shows the protocol the tool
 speaks, the official documentation URL, step-by-step instructions, model
 selectors, and one or more editable code blocks with a **Copy** button. The displayed
-block masks the Gateway Key; copying restores the real key, so screenshots
+block masks the Key; copying restores the real key, so screenshots
 remain shareable without producing an unusable configuration.
 
 Base URL conventions per client:
@@ -495,7 +495,7 @@ if any, and the streamed usage when the upstream emitted a usage chunk.
 The **Settings** view exposes the persistent gateway configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`).
-- **Gateway Key** — the same value shown in the Connection Center.
+- **Key** — the same value shown in the Connection Center.
 - **Upstream URL** — the OpenCode-Go base URL.
 - **OpenCode Go invite URL** — the restricted HTTPS invite used by managed
   account onboarding. Fresh installs may ship a demo default; replace it with
@@ -552,7 +552,7 @@ Docker checks container-internal TCP port `9042`.
 
 ### Authentication
 
-Gateway API endpoints require the **Gateway Key** in one of three header
+Gateway API endpoints require the **Key** in one of three header
 forms: `Authorization: Bearer <key>`, `x-api-key: <key>`, or
 `x-goog-api-key: <key>`. Before forwarding, the gateway strips the client
 auth header and injects the selected OpenCode-Go account key instead:
@@ -564,7 +564,7 @@ Dashboard authentication depends on the listener bind:
 - **Loopback binds (the default).** Requests that come straight to the
   loopback address skip dashboard login unless they carry `Forwarded`,
   `x-forwarded-for`, `x-forwarded-proto`, or `x-real-ip`; any of those
-  headers requires login. The client still needs the **Gateway Key** to reach
+  headers requires login. The client still needs the **Key** to reach
   the upstream endpoints. This is what the desktop app and the default CLI
   use.
 - **Non-loopback binds.** A single administrator account, stored as an
@@ -797,7 +797,7 @@ checkout containing `compose.yaml` and `.env.example` (preferably the
 matching release tag):
 
 ```bash
-git clone --branch v1.5.7 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.9 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -813,7 +813,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`; the Release
   `compose.example.yaml` defaults to its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.5.7`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.5.9`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `1.5` and `latest` move forward. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is technically immutable.
@@ -935,7 +935,7 @@ port `9042`. Open `http://127.0.0.1:<OCG_PORT>/dashboard/` and sign in. Use
   sandboxes. The sidecar does not use `--no-sandbox` and has 1 GiB of shared
   memory. `ocg-data` and `ocg-browser-profiles` are the two persistent state
   volumes.
-- The startup log contains the Gateway Key, so log output and Docker daemon
+- The startup log contains the Key, so log output and Docker daemon
   access are sensitive. Configure log rotation on the Docker host if its
   defaults are not bounded.
 
@@ -959,13 +959,13 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.7
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.7
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.9
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.9
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.7 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.9 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.7 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.9 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -974,7 +974,7 @@ anonymous; if the OCI client still requests registry credentials,
 authenticate to `ghcr.io` with a token that can read packages. Provenance
 proves how the artifact was produced; it is not a vulnerability scan.
 
-Regenerate the Gateway Key if it leaks.
+Regenerate the Key if it leaks.
 
 ### HTTPS
 
@@ -987,7 +987,7 @@ ocg.example.com {
 }
 ```
 
-After signing in, set a non-empty Gateway Key before sending API traffic.
+After signing in, set a non-empty Key before sending API traffic.
 Stop the service with `docker compose down`; add `-v` only when you
 intentionally want to delete all stored accounts, credentials, keys, cookies,
 and browser profiles.
@@ -1012,9 +1012,8 @@ and browser profiles.
 - **No cross-node sync.** Each node manages its own accounts through its own
   dashboard. OCG Manager does not synchronize account credentials between
   nodes.
-- **Plain HTTP warning.** A non-loopback `http://` root URL exposes the
-  Gateway Key and request contents to the network. Use HTTPS or a trusted LAN
-  only.
+- **Plain HTTP warning.** A non-loopback `http://` root URL exposes the Key
+  and request contents to the network. Use HTTPS or a trusted LAN only.
 - **Administrator password.** The single administrator password is stored as
   an Argon2 hash in SQLite. There is no self-service password recovery —
   protect the data directory.

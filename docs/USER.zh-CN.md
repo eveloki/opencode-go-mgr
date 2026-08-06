@@ -42,7 +42,7 @@ OCG Manager 把 OpenCode-Go 账号 Key 保存在本地 SQLite，并通过回环 
 
 Gateway 的四件事：
 
-1. 用面板签发的 **Gateway Key** 验证客户端。
+1. 用面板签发的 **Key** 验证客户端。
 2. 为请求挑一个可用的 OpenCode-Go 账号。
 3. 把请求转换到该模型在 OpenCode-Go 上的原生协议，把响应再转回客户端协议。
 4. 把请求日志、用量、冷却全部写回 SQLite，并在面板里呈现。
@@ -57,7 +57,7 @@ Gateway 的四件事：
    可从托盘图标重新打开。
 3. 当前 Windows 包未签名，SmartScreen 可能弹出警告，点击 **更多信息 → 仍要运行**
    继续。
-4. 在 **账号** 视图添加 OpenCode-Go 账号，复制 Gateway Key，把客户端指向
+4. 在 **账号** 视图添加 OpenCode-Go 账号，复制 Key，把客户端指向
    `http://127.0.0.1:9042/v1`。
 5. 卸载时会询问是否删除 `%USERPROFILE%\.ocg-mgr`；静默升级与静默卸载保留数据
    目录。
@@ -68,7 +68,7 @@ Gateway 的四件事：
 2. 应用使用临时签名（ad-hoc），首次启动可能被 Gatekeeper 拦截。打开
    **Privacy & Security**，点击 **Open Anyway** 放行。
 3. 启动应用。正常启动会在系统浏览器打开管理面板；之后可从托盘图标重新打开。
-   添加账号，复制 Gateway Key，配置客户端。
+   添加账号，复制 Key，配置客户端。
 
 ### Linux x64
 
@@ -86,13 +86,13 @@ Gateway 的四件事：
 1. 在 **账号** 视图用 Key 添加一个 OpenCode-Go 账号。登录账号可选；新增时如果
    先填写账号，它会自动作为必填名称，直到你手动修改名称。面板不收集或维护
    OpenCode-Go 登录密码。
-2. 在面板的 **接入中心** 复制 **Gateway Key** 和 **API Base URL**
+2. 在面板的 **接入中心** 复制 **Key** 和 **API Base URL**
    （`http://127.0.0.1:9042/v1`）。
-3. 把客户端指向该 Base URL 并填入 Gateway Key。**应用** 视图内置了 16 个常见
+3. 把客户端指向该 Base URL 并填入 Key。**应用** 视图内置了 16 个常见
    客户端的教程。
 4. 发一个真实请求验证。
 
-Gateway Key 是客户端唯一需要的凭证，支持三种请求头：
+Key 是客户端唯一需要的凭证，支持三种请求头：
 `Authorization: Bearer <key>`、Anthropic 风格的 `x-api-key: <key>`、Gemini
 风格的 `x-goog-api-key: <key>`。它是本地密钥，与 OpenCode-Go 账号 Key 无关；
 账号 Key 由 Gateway 从 SQLite 取出后自行注入上游。
@@ -251,13 +251,11 @@ Français、Deutsch、Português (Brasil)、Русский，默认简体中文�
 首屏第一个面板——也是始终在最上方的面板——是 **接入中心**，它集中展示客户端
 需要的全部信息：
 
-- **Gateway Key**（也称 *Key*）：支持一键重新生成和复制。重新生成后旧 Key 立即
-  失效。
+- **Key**：支持一键重新生成和复制。重新生成后旧 Key 立即失效。
 - **API Base URL**（例如 `http://127.0.0.1:9042/v1`）：一键复制，另附 Chat
   Completions、Responses、Messages 的完整端点。
 - **Gateway 转发到的上游地址** 与复制按钮。
-- **HTTP 警告**：当解析出的根地址是非回环的明文 `http://` 时出现，提醒 Gateway
-  Key 与请求内容会明文传输。
+- **HTTP 警告**：当解析出的根地址是非回环的明文 `http://` 时出现，提醒 Key 与请求内容会明文传输。
 
 **设置 → 下游访问根地址（Downstream Access Root）** 只控制面板展示的 URL 和
 教程里复制的 URL。有效值按以下顺序决定：
@@ -273,7 +271,7 @@ Français、Deutsch、Português (Brasil)、Русский，默认简体中文�
 如果客户端通过反向代理或别的主机访问 Gateway，就设置外部可访问的根地址，例如
 `https://ocg.example.com`。尾部的 `/v1` 会被自动识别并去掉。**这个设置不会**
 改变 Gateway 的监听地址、配置 DNS、也不会创建反向代理——这些必须已经指向正在
-运行的 Gateway。明文 HTTP 允许用于局域网部署，但会暴露 Gateway Key 与请求内容。
+运行的 Gateway。明文 HTTP 允许用于局域网部署，但会暴露 Key 与请求内容。
 
 ### 应用教程
 
@@ -410,7 +408,7 @@ Manager 恢复，只能从备份恢复或重新登录。
 **设置** 视图暴露持久化的 Gateway 配置：
 
 - **Gateway 端口**：Gateway 监听端口（默认 `9042`）。
-- **Gateway Key**：与接入中心同一个值。
+- **Key**：与接入中心同一个值。
 - **上游地址**：OpenCode-Go 基础 URL。
 - **OpenCode Go 邀请链接**：托管账号注册向导使用的受限 HTTPS 邀请 URL。新安装
   可能带有演示默认值；正式注册前请改为你自己的链接。创建托管草稿时也可直接编辑
@@ -459,7 +457,7 @@ TCP `9042` 端口。
 
 ### 鉴权
 
-Gateway API 必须携带 **Gateway Key**，可使用 `Authorization: Bearer <key>`、
+Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 `x-api-key: <key>` 或 `x-goog-api-key: <key>` 三种请求头。转发前 Gateway 会
 移除客户端鉴权头，再按实际上游协议注入所选 OpenCode-Go 账号 Key：Messages 上
 游使用 `x-api-key`，Chat Completions 与 Responses 上游使用
@@ -469,7 +467,7 @@ Gateway API 必须携带 **Gateway Key**，可使用 `Authorization: Bearer <key
 
 - **回环监听（默认）**：直接发到回环地址的请求跳过面板登录；但只要带有
   `Forwarded`、`x-forwarded-for`、`x-forwarded-proto` 或 `x-real-ip` 中任一请求
-  头，仍必须登录。客户端还需要 **Gateway Key** 才能访问上游端点。桌面端与默认
+  头，仍必须登录。客户端还需要 **Key** 才能访问上游端点。桌面端与默认
   CLI 都走这个分支。
 - **非回环监听**：管理面板由唯一的 **管理员账号** 管控，密码以 Argon2 哈希存
   在 SQLite 中，登录后下发 HttpOnly 会话 Cookie。携带标准反向代理转发头但没有
@@ -657,7 +655,7 @@ GHCR 上的公开无头镜像无需登录即可拉取。它是 Linux 容器，�
 与 `.env.example` 的仓库目录中运行（建议检出对应 Release tag）：
 
 ```bash
-git clone --branch v1.5.7 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.5.9 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell：Copy-Item .env.example .env
@@ -673,7 +671,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`；Release 中的 `compose.example.yaml`
   默认固定对应的完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:1.5.7`。
+  `ghcr.io/klarkxy/opencode-go-mgr:1.5.9`。
 - 完整版本与 `sha-<commit>` 标签用于标识单次发布，按发布策略不应移动；`1.5`
   与 `latest` 会继续移动。技术上只有
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` digest 真正不可变。
@@ -772,7 +770,7 @@ OCG Manager 不绕过这类风控；遇到时由用户完成 Google 要求的验
   建立自身的 namespace 和 renderer seccomp 沙箱。Sidecar 不使用 `--no-sandbox`，
   另有 1 GiB 共享内存；命名卷 `ocg-data` 与 `ocg-browser-profiles` 是两类持久化
   应用状态。
-- 启动日志会打印 Gateway Key，因此日志输出和 Docker daemon 权限都属于敏感信息。
+- 启动日志会打印 Key，因此日志输出和 Docker daemon 权限都属于敏感信息。
   如果 Docker 主机默认没有限制日志大小，请由部署方配置日志轮转。
 
 常用检查命令：
@@ -793,13 +791,13 @@ curl --fail http://127.0.0.1:9042/dashboard/
 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.7
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.7
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.5.9
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.9
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.7 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.5.9 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.7 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.5.9 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -807,7 +805,7 @@ gh attestation verify \
 registry 凭据，请用具备 package 读取权限的 token 登录 `ghcr.io`。Provenance
 证明产物如何构建，不等于漏洞扫描。
 
-如果 Gateway Key 泄露，请重新生成。
+如果 Key 泄露，请重新生成。
 
 ### HTTPS
 
@@ -819,7 +817,7 @@ ocg.example.com {
 }
 ```
 
-登录后先在面板里设置一个非空的 Gateway Key，再发送 API 流量。用
+登录后先在面板里设置一个非空的 Key，再发送 API 流量。用
 `docker compose down` 停止服务；只有当你想彻底删除账号、凭据、Key、Cookie
 与浏览器 Profile 时才追加 `-v`。
 
@@ -838,7 +836,7 @@ ocg.example.com {
   加密。备份、传输、访问控制和销毁都应按数据库与账号 Key 的敏感级别处理。
 - **无跨节点同步**：每个节点由自己的面板管理，OCG Manager 不会在节点间同步账号
   凭据。
-- **明文 HTTP 警告**：非回环的 `http://` 根地址会把 Gateway Key 与请求内容明文
+- **明文 HTTP 警告**：非回环的 `http://` 根地址会把 Key 与请求内容明文
   传输到网络中。请使用 HTTPS 或仅在可信局域网使用。
 - **管理员密码**：唯一的管理员密码以 Argon2 哈希保存在 SQLite 中，没有自助找回
   流程——请保护好数据目录。

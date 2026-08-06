@@ -169,7 +169,7 @@ difference, and the Claude Desktop three-role persistence behavior.
 
 - The gateway is `crates/ocg-core/src/gateway/`: Axum + Tokio + reqwest,
   bound to `127.0.0.1:9042` by default.
-- The handler accepts the configured Gateway Key as `Authorization: Bearer`,
+- The handler accepts the configured Key as `Authorization: Bearer`,
   `x-api-key`, or `x-goog-api-key`. `forwarder.rs` must strip those client
   credentials and inject the selected account key per the actual
   Chat/Messages upstream protocol — never pass Gemini or Anthropic client
