@@ -166,6 +166,7 @@ export const enUSMessages = {
   "官方文档": "Official documentation",
   "配置步骤": "Setup steps",
   "配置示例": "Configuration examples",
+  "覆盖现有配置文件前，请先备份原文件。": "Back up the existing configuration file before overwriting it.",
   "已复制": "Copied",
   "复制配置": "Copy configuration",
   "选择模型 ID": "Select a model ID",

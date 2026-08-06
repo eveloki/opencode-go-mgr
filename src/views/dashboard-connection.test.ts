@@ -308,6 +308,7 @@ test("application catalog has sixteen verified clients and never displays a comp
     slug: string;
     context_window: number;
     supported_in_api: boolean;
+    supported_reasoning_levels: unknown[];
     visibility: string;
   }>;
   assert.deepEqual(
@@ -317,8 +318,10 @@ test("application catalog has sixteen verified clients and never displays a comp
   for (const model of catalogModels) {
     assert.equal(model.context_window, APPLICATION_MODEL_METADATA[model.slug].contextWindow);
     assert.equal(model.supported_in_api, true);
+    assert.ok(Array.isArray(model.supported_reasoning_levels));
     assert.equal(model.visibility, "list");
   }
+  assert.deepEqual(catalogModels.find((model) => model.slug === "glm-5.1")?.supported_reasoning_levels, []);
   assert.deepEqual(buildCodexModelCatalog(context), codexCatalog);
   assert.equal(codexSnippets[1].label, "~/.codex/ocg.config.toml");
   assert.equal(codexSnippets[2].label, "~/.codex/config.toml");

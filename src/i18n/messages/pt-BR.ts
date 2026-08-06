@@ -167,6 +167,7 @@ export const ptBRMessages = {
   "官方文档": "Documentação oficial",
   "配置步骤": "Etapas de configuração",
   "配置示例": "Exemplos de configuração",
+  "覆盖现有配置文件前，请先备份原文件。": "Faça backup do arquivo de configuração existente antes de sobrescrevê-lo.",
   "已复制": "Copiado",
   "复制配置": "Copiar configuração",
   "选择模型 ID": "Selecione um ID de modelo",

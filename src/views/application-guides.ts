@@ -455,16 +455,16 @@ export function buildCodexModelCatalog(context: GuideContext) {
         input_modalities: effectiveInput.includes("image") ? ["text", "image"] : ["text"],
         supported_in_api: true,
         supports_parallel_tool_calls: metadata.toolUse,
-        visibility: "list",
-      };
-      if (metadata.efforts?.length) {
-        entry.supported_reasoning_levels = metadata.efforts.map((effort) => ({
+        // Codex Desktop requires this field for every catalog model, including
+        // models that expose no selectable reasoning effort.
+        supported_reasoning_levels: (metadata.efforts ?? []).map((effort) => ({
           effort,
           description: effort,
-        }));
-        if (metadata.defaultEffort) {
-          entry.default_reasoning_level = metadata.defaultEffort;
-        }
+        })),
+        visibility: "list",
+      };
+      if (metadata.defaultEffort) {
+        entry.default_reasoning_level = metadata.defaultEffort;
       }
       return entry;
     }),

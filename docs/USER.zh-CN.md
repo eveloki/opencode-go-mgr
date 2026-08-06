@@ -281,6 +281,9 @@ Cherry Studio、VS Code Copilot Chat、Cline、Roo Code、Continue、Chatbox。�
 展示协议、官方文档链接、操作步骤、模型选择，以及一个或多个带 **复制** 按钮的代码块。屏幕上的
 代码块中 Key 已脱敏，复制出来的才是真实 Key，方便分享截图。
 
+覆盖任何现有配置文件前，请先备份原文件。应用页的代码块可以编辑，但复制或手动合并
+之前都应保留一份可恢复的原始配置。
+
 各客户端的 Base URL 约定：
 
 - Claude Code、Cherry Studio、Chatbox 使用不带 `/v1` 的根地址。
@@ -297,6 +300,11 @@ Cherry Studio、VS Code Copilot Chat、Cline、Roo Code、Continue、Chatbox。�
   `~/.codex/ocg.config.toml` + `codex --profile ocg`，Desktop 或常驻默认则合并进
   用户级 `~/.codex/config.toml`。catalog 只提供元数据，不负责协议转换；请求始终
   走 OCG Manager 的 Responses 入口。
+
+Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
+`~/.codex/config.toml` 都属于本机配置。覆盖或合并前先分别备份；如果使用 CC Switch
+的代理模式，请按 CC Switch 保存的配置目录单独备份，不要把 OCG 直连配置和代理配置
+混写。
 
 可选模型是上游当前公布、Gateway 已知可路由且存在于活动价格快照中的交集；每次
 返回应用页都会重新同步，因此确认价格刷新后模型类型也会跟着更新。模型选择和编辑

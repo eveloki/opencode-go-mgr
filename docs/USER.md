@@ -321,6 +321,10 @@ selectors, and one or more editable code blocks with a **Copy** button. The disp
 block masks the Key; copying restores the real key, so screenshots
 remain shareable without producing an unusable configuration.
 
+Before overwriting any existing configuration file, back up the original file. The code blocks
+in Applications are editable, but keep a recoverable copy before copying or manually merging
+their contents.
+
 Base URL conventions per client:
 
 - Claude Code, Cherry Studio, and Chatbox use the root URL without `/v1`.
@@ -339,6 +343,11 @@ Base URL conventions per client:
   same provider block into user-level `~/.codex/config.toml` (Desktop / default
   provider). The catalog is optional metadata only; Codex still talks Responses
   to OCG Manager either way.
+
+Codex's `~/.codex/ocg-model-catalog.json`, `~/.codex/ocg.config.toml`, and
+`~/.codex/config.toml` are local configuration files. Back up each file before overwriting
+or merging it. When using CC Switch proxy mode, back up the configuration directory saved by
+CC Switch separately; do not mix the direct OCG configuration with the proxy configuration.
 
 Selectable models are the intersection of the upstream's current catalog,
 models the gateway knows how to route, and the active pricing snapshot. The
