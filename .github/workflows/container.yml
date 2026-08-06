@@ -14,6 +14,11 @@ on:
         required: true
         default: false
         type: boolean
+      source_ref:
+        description: Optional git ref/SHA to build from (default = the release tag). Use main for hotfixes without retargeting the tag.
+        required: false
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -92,26 +97,37 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "browser_image=${image}-browser" >> "$GITHUB_OUTPUT"
 
-      - name: Check out release tag
+      - name: Check out release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: refs/tags/${{ steps.release.outputs.tag }}
-          fetch-depth: 1
+          # workflow_dispatch may build a hotfix ref while still publishing the release tag name.
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || format('refs/tags/{0}', steps.release.outputs.tag) }}
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify exact tag source and repository version
+      - name: Verify release source and repository version
         shell: bash
         env:
           OCG_RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          OCG_SOURCE_REF: ${{ inputs.source_ref || '' }}
         run: |
           set -euo pipefail
           expected_ref="refs/tags/$OCG_RELEASE_TAG"
+          # Ensure the release tag exists even when building from a hotfix ref.
+          git fetch --no-tags origin "+$expected_ref:$expected_ref" || true
+          if ! git show-ref --verify --quiet "$expected_ref"; then
+            git fetch --no-tags origin "refs/tags/$OCG_RELEASE_TAG:refs/tags/$OCG_RELEASE_TAG"
+          fi
           git show-ref --verify --quiet "$expected_ref"
           tag_commit=$(git rev-parse "$expected_ref^{commit}")
           head_commit=$(git rev-parse HEAD)
-          if [[ "$head_commit" != "$tag_commit" ]]; then
-            echo "Checked-out commit $head_commit does not match $expected_ref ($tag_commit)." >&2
-            exit 1
+          if [[ -z "${OCG_SOURCE_REF}" ]]; then
+            if [[ "$head_commit" != "$tag_commit" ]]; then
+              echo "Checked-out commit $head_commit does not match $expected_ref ($tag_commit)." >&2
+              exit 1
+            fi
+          else
+            echo "Building hotfix source $head_commit for image tag $OCG_RELEASE_TAG (tag commit $tag_commit)."
           fi
           node scripts/release.mjs --check
 
