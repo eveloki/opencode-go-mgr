@@ -167,6 +167,7 @@ export const deDEMessages = {
   "官方文档": "Offizielle Dokumentation",
   "配置步骤": "Einrichtungsschritte",
   "配置示例": "Konfigurationsbeispiele",
+  "覆盖现有配置文件前，请先备份原文件。": "Sichern Sie die vorhandene Konfigurationsdatei, bevor Sie sie überschreiben.",
   "已复制": "Kopiert",
   "复制配置": "Konfiguration kopieren",
   "选择模型 ID": "Modell-ID auswählen",

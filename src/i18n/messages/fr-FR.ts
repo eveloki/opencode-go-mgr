@@ -167,6 +167,7 @@ export const frFRMessages = {
   "官方文档": "Documentation officielle",
   "配置步骤": "Étapes de configuration",
   "配置示例": "Exemples de configuration",
+  "覆盖现有配置文件前，请先备份原文件。": "Sauvegardez le fichier de configuration existant avant de l’écraser.",
   "已复制": "Copié",
   "复制配置": "Copier la configuration",
   "选择模型 ID": "Sélectionner un ID de modèle",

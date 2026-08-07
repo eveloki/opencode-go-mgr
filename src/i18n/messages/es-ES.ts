@@ -167,6 +167,7 @@ export const esESMessages = {
   "官方文档": "Documentación oficial",
   "配置步骤": "Pasos de configuración",
   "配置示例": "Ejemplos de configuración",
+  "覆盖现有配置文件前，请先备份原文件。": "Haz una copia de seguridad del archivo de configuración existente antes de sobrescribirlo.",
   "已复制": "Copiado",
   "复制配置": "Copiar configuración",
   "选择模型 ID": "Selecciona un ID de modelo",

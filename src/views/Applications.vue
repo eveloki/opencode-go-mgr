@@ -293,6 +293,7 @@
 
             <section class="guide-section" :aria-labelledby="`${activeGuide.id}-snippets`">
               <h2 :id="`${activeGuide.id}-snippets`">{{ t("配置示例") }}</h2>
+              <p class="snippet-backup-warning">{{ t("覆盖现有配置文件前，请先备份原文件。") }}</p>
               <div class="snippet-grid">
                 <article
                   v-for="(snippet, index) in currentSnippets"
@@ -1148,6 +1149,13 @@ onUnmounted(() => {
   margin: 0 0 10px;
   color: var(--ocg-ink);
   font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
+}
+
+.snippet-backup-warning {
+  margin: -2px 0 12px;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
+  line-height: 1.5;
 }
 
 .guide-section ol,
