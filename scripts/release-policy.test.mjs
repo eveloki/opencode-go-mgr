@@ -152,12 +152,15 @@ test("the exact draft Release identity flows through verification and publicatio
   assert.doesNotMatch(publishJob, /releases\/tags\//);
 });
 
-test("container publication checks out an exact tag and validates source versions", () => {
+test("container publication checks out the release tag or an explicit source ref", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/container.yml", import.meta.url),
     "utf8",
   );
-  assert.match(workflow, /ref: refs\/tags\/\$\{\{ steps\.release\.outputs\.tag \}\}/);
+  assert.match(
+    workflow,
+    /ref: \$\{\{ inputs\.source_ref != '' && inputs\.source_ref \|\| format\('refs\/tags\/\{0\}', steps\.release\.outputs\.tag\) \}\}/,
+  );
   assert.match(workflow, /git show-ref --verify --quiet "\$expected_ref"/);
   assert.match(workflow, /tag_commit=\$\(git rev-parse "\$expected_ref\^\{commit\}"\)/);
   assert.match(workflow, /node scripts\/release\.mjs --check/);
