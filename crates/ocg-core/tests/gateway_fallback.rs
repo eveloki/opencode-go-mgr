@@ -1145,6 +1145,12 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         Case {
             client_path: "/v1/responses",
             model: "deepseek-v4-flash",
+            upstream_path: "/v1/responses",
+            upstream_body: RESPONSES_SUCCESS_BODY,
+        },
+        Case {
+            client_path: "/v1/responses",
+            model: "hy3",
             upstream_path: "/v1/chat/completions",
             upstream_body: SUCCESS_BODY,
         },
@@ -1163,6 +1169,12 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         Case {
             client_path: "/v1/messages",
             model: "deepseek-v4-flash",
+            upstream_path: "/v1/messages",
+            upstream_body: MESSAGES_SUCCESS_BODY,
+        },
+        Case {
+            client_path: "/v1/messages",
+            model: "hy3",
             upstream_path: "/v1/chat/completions",
             upstream_body: SUCCESS_BODY,
         },
@@ -1277,7 +1289,7 @@ async fn successful_inference_never_echoes_the_selected_account_key() {
         let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
         let (port, gateway_handle) = start_gateway(state).await;
 
-        let (status, response) = protocol_call(port, client_path, "deepseek-v4-flash").await;
+        let (status, response) = protocol_call(port, client_path, "hy3").await;
         assert_eq!(status, StatusCode::OK, "{client_path}: {response}");
         assert!(
             !response.to_string().contains(OPAQUE_ACCOUNT_KEY),
@@ -1304,7 +1316,7 @@ async fn common_short_key_redaction_preserves_non_stream_protocol_discriminators
         let (state, dir) = build_state(base_url, &["text"]);
         let (port, gateway_handle) = start_gateway(state).await;
 
-        let (status, response) = protocol_call(port, client_path, "deepseek-v4-flash").await;
+        let (status, response) = protocol_call(port, client_path, "hy3").await;
         assert_eq!(status, StatusCode::OK, "{client_path}: {response}");
         let content = match client_path {
             "/v1/chat/completions" => {
@@ -1411,7 +1423,7 @@ async fn streamed_inference_redacts_a_selected_key_split_across_events() {
         let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
         let (port, gateway_handle) = start_gateway(state).await;
 
-        let (status, body) = protocol_stream_call(port, client_path, "deepseek-v4-flash").await;
+        let (status, body) = protocol_stream_call(port, client_path, "hy3").await;
         assert_eq!(status, StatusCode::OK, "{client_path}: {body}");
         assert!(
             !body.contains(OPAQUE_ACCOUNT_KEY),
@@ -1440,7 +1452,7 @@ async fn common_short_key_redaction_preserves_stream_protocol_discriminators() {
         let (state, dir) = build_state(base_url, &["text"]);
         let (port, gateway_handle) = start_gateway(state).await;
 
-        let (status, body) = protocol_stream_call(port, client_path, "deepseek-v4-flash").await;
+        let (status, body) = protocol_stream_call(port, client_path, "hy3").await;
         assert_eq!(status, StatusCode::OK, "{client_path}: {body}");
         assert!(!body.contains("before text after"), "{client_path}: {body}");
         assert!(body.contains("before "), "{client_path}: {body}");
@@ -1481,8 +1493,8 @@ async fn inference_skips_accounts_with_unusable_stored_credentials() {
         Case {
             client_path: "/v1/responses",
             model: "deepseek-v4-flash",
-            upstream_path: "/v1/chat/completions",
-            upstream_body: SUCCESS_BODY,
+            upstream_path: "/v1/responses",
+            upstream_body: RESPONSES_SUCCESS_BODY,
         },
         Case {
             client_path: "/v1/messages",
@@ -1575,14 +1587,14 @@ async fn converts_streams_across_chat_messages_and_responses() {
     let cases = [
         Case {
             client_path: "/v1/messages",
-            model: "deepseek-v4-flash",
+            model: "hy3",
             upstream_path: "/v1/chat/completions",
             upstream_body: CHAT_STREAM_BODY,
             expected_events: &["event: message_start", "text_delta", "event: message_stop"],
         },
         Case {
             client_path: "/v1/responses",
-            model: "deepseek-v4-flash",
+            model: "hy3",
             upstream_path: "/v1/chat/completions",
             upstream_body: CHAT_STREAM_BODY,
             expected_events: &[
@@ -2223,7 +2235,7 @@ async fn converted_messages_request_does_not_replay_upstream_5xx() {
     let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state).await;
 
-    let (status, body) = protocol_call(port, "/v1/messages", "deepseek-v4-flash").await;
+    let (status, body) = protocol_call(port, "/v1/messages", "hy3").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body["type"], "error");
     let calls = calls.lock().unwrap();
