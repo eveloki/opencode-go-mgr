@@ -28,6 +28,7 @@ the true / false circuit breakers, and protocol conversion actually work.
   - [Account Selection And Failover](#account-selection-and-failover)
   - [Cost Accounting](#cost-accounting)
   - [True And False Circuit Breakers](#true-and-false-circuit-breakers)
+  - [Free model policy](#free-model-policy)
 - [CLI](#cli)
 - [Docker](#docker)
   - [Optional Remote Browser](#optional-remote-browser)
@@ -363,8 +364,8 @@ snippet drafts.
 
 Application snippets use the verified limits below
 (`src/views/application-guides.ts`, 2026-08-14). Input is what OCG can
-actually carry. Protocol conversion is a separate table in the
-[README](../README.md#supported-models-and-protocols).
+actually carry. The passthrough / conversion matrix is under
+[Protocol Conversion](#protocol-conversion).
 
 | Model | Context | Output | Input | Reasoning | Tools | Efforts |
 | --- | ---: | ---: | --- | --- | :---: | --- |
@@ -390,6 +391,10 @@ actually carry. Protocol conversion is a separate table in the
 | `deepseek-v4-pro` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
 | `deepseek-v4-flash` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
 | `hy3` | 256K | 64K | text | ✓ | ✓ | low / high (default high) |
+
+Rounded display: 198K = 202,752; 200K = 204,800; 256K = 262,144; 1M = 1,000,000
+or 1,048,576. `glm-5.3` uses the GLM-5.2 family limits until models.dev
+publishes a dedicated row.
 
 Claude Desktop is the exception with durable model mappings: before its
 configuration is copied, the selected `sonnet`, `opus`, and `haiku` targets
@@ -574,6 +579,8 @@ The **Settings** view exposes the persistent gateway configuration:
   direct overwrite install described above. Development builds, the CLI, and
   Docker keep the release-link/manual-upgrade path. The host must be able to
   reach GitHub; a failed check or install does not affect gateway forwarding.
+- **Free model routing** — three OpenCode Zen modes (`deny` / `explicit` /
+  `prefer`). See [Free model policy](#free-model-policy).
 
 Configuration settings are written to SQLite and reloaded on the next start.
 The update check is an on-demand action and is not persisted.
@@ -642,6 +649,45 @@ usage fields. Example: `glm-5.2` passthroughs Chat Completions, Responses, and
 Messages; `grok-4.5` is Responses-only and converts Chat / Messages / Gemini
 entries to Responses; `gpt-5.6-luna` prefers Responses and also passthroughs
 Chat; `glm-5.3` is Chat-only.
+
+| Preferred upstream | Models |
+| --- | --- |
+| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
+| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna` |
+| Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
+
+Passthrough matrix (live test-account probe, 2026-08-14). ✓ = client protocol
+is forwarded as-is; empty = converted to the model's preferred protocol.
+Source of truth: `MODEL_PROTOCOLS` in
+`crates/ocg-core/src/gateway/protocol.rs`.
+
+| Model | Preferred | Chat | Responses | Messages |
+| --- | --- | :---: | :---: | :---: |
+| `grok-4.5` | Responses | | ✓ | |
+| `glm-5.3` | Chat | ✓ | | |
+| `glm-5.2` | Chat | ✓ | ✓ | ✓ |
+| `glm-5.1` | Chat | ✓ | ✓ | ✓ |
+| `glm-5` | Chat | ✓ | ✓ | ✓ |
+| `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `kimi-k3` | Chat | ✓ | | ✓ |
+| `kimi-k2.7-code` | Chat | ✓ | | |
+| `kimi-k2.6` | Chat | ✓ | | |
+| `kimi-k2.5` | Chat | ✓ | | |
+| `deepseek-v4-pro` | Chat | ✓ | ✓ | ✓ |
+| `deepseek-v4-flash` | Chat | ✓ | ✓ | ✓ |
+| `mimo-v2.5` | Chat | ✓ | | |
+| `mimo-v2.5-pro` | Chat | ✓ | | |
+| `hy3` | Chat | ✓ | | |
+| `minimax-m3` | Messages | ✓ | | ✓ |
+| `minimax-m2.7` | Messages | ✓ | | ✓ |
+| `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
+| `minimax-m2.5` | Messages | ✓ | | ✓ |
+| `minimax-m2.5-highspeed` | Messages | ✓ | | ✓ |
+| `qwen3.8-max` | Messages | ✓ | | ✓ |
+| `qwen3.7-max` | Messages | ✓ | | ✓ |
+| `qwen3.7-plus` | Messages | ✓ | | ✓ |
+| `qwen3.6-plus` | Messages | ✓ | | ✓ |
+| `qwen3.5-plus` | Messages | ✓ | | ✓ |
 
 Unknown models keep the request's native Chat Completions or Messages
 protocol. Unknown models requested through Responses or Gemini, and unknown
@@ -789,6 +835,22 @@ next section.
   even when the local estimate is lower. The account becomes eligible
   automatically after `cooldown_until`, or immediately after you reset its
   cooldown in the dashboard.
+
+### Free model policy
+
+Settings expose three OpenCode Zen free-routing modes:
+
+| Mode | Behavior |
+| --- | --- |
+| **Deny free models** | Reject `*-free` / `big-pickle` and never rewrite Go models onto free |
+| **Explicit free only** (default) | Only client-requested free models use `https://opencode.ai/zen`; Go models stay on Go |
+| **Prefer mapped free models** | Current maps: `deepseek-v4-flash` → `deepseek-v4-flash-free`, `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted fall back to Go |
+
+Free and Go cooldowns are **independent**; multi-account routing still applies
+within each channel. Under sticky-global routing, Free and Go currently share
+one preferred account id across channels. Free models are promotional, use a
+separate quota, and may use request data to improve models — do not submit
+confidential content.
 
 ## CLI
 
@@ -1167,16 +1229,4 @@ and browser profiles.
 [中文用户指南](USER.zh-CN.md) · [Maintainer guide](MAINTAINER.md) ·
 [维护者指南](MAINTAINER.zh-CN.md) · [Docs index](README.md) ·
 [Back to README](../README.md)
-
-## Free model policy
-
-Settings expose three OpenCode Zen free-routing modes:
-
-| Mode | Behavior |
-| --- | --- |
-| **Deny free models** | Reject `*-free` / `big-pickle` and never rewrite Go models onto free |
-| **Explicit free only** (default) | Only client-requested free models use `https://opencode.ai/zen`; Go models stay on Go |
-| **Prefer mapped free models** | Current maps: `deepseek-v4-flash` → `deepseek-v4-flash-free`, `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted fall back to Go |
-
-Free and Go cooldowns are **independent**; multi-account routing still applies within each channel. Under sticky-global routing, Free and Go currently share one preferred account id across channels. Free models are promotional, use a separate quota, and may use request data to improve models—do not submit confidential content.
 

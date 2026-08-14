@@ -1,7 +1,7 @@
 # AGENTS.md — ocg-manager
 
 本文件给 AI 编码助手使用。以当前代码为准，别按旧 README 或过期需求文档补不存在的东西。
-用户文档见 `docs/`；发版细节以 `docs/MAINTAINER.md` 为准。
+用户文档见 `docs/USER*.md`；产品 README 只做仓库入口（定位、下载、三步上手、推荐协议分组），不要按旧 README 里的长表补文档。发版细节以 `docs/MAINTAINER.md` 为准。
 
 ## 项目事实
 
@@ -46,10 +46,10 @@
 - `src-tauri/src/tray.rs`：托盘菜单和 dashboard 打开逻辑。
 - `src/views/`：Dashboard / Accounts / Pricing / Applications / Logs / Settings。
 - `src/components/ManagedAccountWizard.vue`：托管注册向导（步骤回退、Google/GitHub）。
-- `src/views/application-guides.ts`：16 个应用教程注册表和 `APPLICATION_MODEL_METADATA` 能力表（改数量/协议/脱敏/能力时同步测，并同步 README / USER 能力表）。
+- `src/views/application-guides.ts`：16 个应用教程注册表和 `APPLICATION_MODEL_METADATA` 能力表（改数量/协议/脱敏/能力时同步测，并同步 USER 能力表；README 只保留推荐协议分组）。
 - `src/theme.ts` + `DESIGN.md`：主题 token 与设计规范；改色/字号时两边一起改。
 - `vite.config.ts`：`build.target`/`esbuild` 须支持 top-level await（`@novnc/novnc`）。
-- `docs/`：USER、MAINTAINER、防滥用声明、CONTRIBUTORS、文档索引。
+- `docs/`：USER（用户可见事实与模型表）、MAINTAINER、防滥用声明、CONTRIBUTORS、文档索引。根目录 README 是落地页，不是能力表/协议表的权威副本。
 
 ## 常用命令
 
@@ -107,7 +107,7 @@ git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json s
 - 不要重新引入远端同步；远端节点通过自己的 dashboard 管理。
 - `auto_start` 仅在 Windows release/安装版 Tauri 桌面进程中可用；HTTP dashboard 依据运行时能力显示开关，开发构建、CLI、Docker、macOS 和 Linux 不暴露该设置。
 - `show_dock_icon` 仅在 macOS Tauri 桌面进程中可用；关闭后保留菜单栏托盘图标。Windows、Linux、CLI 与 Docker 不暴露该设置。
-- 改文档时保持中英对、路径与 TOC 一致；用户可见事实以代码与 `docs/USER*.md` 为准。
+- 改文档时保持中英对、路径与 TOC 一致；用户可见事实以代码与 `docs/USER*.md` 为准。协议表跟 `protocol.rs`，能力表跟 `application-guides.ts`，由 USER 镜像。不要把透传矩阵、能力表或熔断长文再写回 README。
 - 改 UI 外观时遵循 `DESIGN.md`：六档字号、七主题、接入中心首屏、Key 命名；主题实现以 `src/theme.ts` 为准。
 
 ## 测试策略

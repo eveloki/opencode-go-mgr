@@ -2,11 +2,10 @@
 
 # OCG Manager
 
-OCG Manager 是一个本地 OpenCode-Go 多账号运维控制台。它把账号 Key 保存在本地
-SQLite，并通过 `http://127.0.0.1:9042` 上的多协议 Gateway 暴露给客户端——管理
-面板也由同一个端口提供。客户端可以使用 OpenAI、Anthropic、Gemini 或 Claude
-Desktop 协议；Gateway 会把请求转换到模型的 OpenCode-Go 原生协议，再把响应转回
-客户端协议。
+OCG Manager 是一个本地 OpenCode-Go 多账号运维控制台。它把账号 Key 保存在
+SQLite，并在 `http://127.0.0.1:9042` 上同时提供多协议 Gateway 与管理面板。
+客户端可以使用 OpenAI、Anthropic、Gemini 或 Claude Desktop 协议；Gateway 把
+请求转换到模型的 OpenCode-Go 原生协议，再把响应转回客户端。
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
@@ -16,25 +15,19 @@ Desktop 协议；Gateway 会把请求转换到模型的 OpenCode-Go 原生协议
 
 ## 主要特性
 
-- **多协议 Gateway**：同一端口支持 OpenAI Chat Completions / Responses、
+- **一个端口，四类客户端协议**：OpenAI Chat Completions / Responses、
   Anthropic Messages、Gemini `generateContent` / `streamGenerateContent`、
   模型列表与 Claude Desktop 别名入口。
 - **本地多账号轮询**：拖动账号卡片即可持久调整优先级；Gateway 自动跳过已禁用、
   冷却中或本次请求已失败的账号。
-- **托管注册与独立 Profile（Beta）**：用邀请链接人工完成登录身份（可选 Google/
-  GitHub）、OpenCode Go、支付与 Key 验证；步骤可回退；每个账号保留独立浏览器
-  登录状态，Docker 可选 noVNC Sidecar。该功能尚未经过充分测试，请勿依赖其用于
-  生产环境。
-- **购买周期提醒**：每个账号记录购买日期，按自然月计算到期日并显示剩余天数；
-  提醒不会自动禁用账号。
-- **OpenCode Go 额度估算**：5 小时、本周、本月用量条按官方文档美元快照估算。
-  Key 账号可手动校准；已完成的托管账号可从控制台会话 **刷新额度**。
-- **16 个应用配置教程**：为 Claude Code、Claude Desktop、Codex、Gemini CLI、
-  Pi、Kimi Code CLI、WorkBuddy 等 16 个客户端生成可直接复制的配置片段。
-- **托盘应用与无头 CLI**：Tauri v2 托盘应用覆盖 Windows、macOS、Linux；
-  `ocg-manager-cli` 适合服务器与 Docker。
-- **签名桌面升级**：已安装的桌面版可在设置页检查、验签并原位安装更新。
-- **无远端同步、无遥测**：每个节点独立管理自己的数据。
+- **额度条只是警告**：5 小时 / 本周 / 本月用量是本地估算。满格不会停流量；只有
+  上游 `429` 才会让账号进入冷却。
+- **16 个应用配置教程**：Claude Code、Codex、Gemini CLI 等 16 个客户端可直接
+  复制配置片段。
+- **桌面端、CLI 与 Docker**：Tauri v2 托盘应用、`ocg-manager-cli`，以及
+  `ghcr.io/klarkxy/opencode-go-mgr`。已安装的桌面版可在设置页安装签名更新。
+- **无远端同步、无遥测**：每个节点独立管理自己的数据。托管注册仍是 Beta，请勿
+  依赖其用于生产环境。
 
 ## 下载
 
@@ -49,10 +42,10 @@ Desktop 协议；Gateway 会把请求转换到模型的 OpenCode-Go 原生协议
 | macOS 11+ Intel 与 Apple Silicon | `ocg-manager_<version>_macos-universal.dmg` | `ocg-manager-cli_<version>_macos-universal.tar.gz` |
 | Linux x64 | `ocg-manager_<version>_linux-x64.AppImage` 和 `.deb` | `ocg-manager-cli_<version>_linux-x64.tar.gz` |
 
-CLI 压缩包包含可执行文件、`dist/` 与 `LICENSE`；`dist/` 必须与可执行文件同级，
-`serve` 才能提供管理面板。项目不做交叉编译：`pnpm run build` 只构建当前原生平台
-的产物。签名升级行为、SmartScreen/Gatekeeper 提示与不支持清单（ARM64、32 位
-x86、RPM、Snap、应用商店）见 [维护者指南](docs/MAINTAINER.zh-CN.md)。
+CLI 的 `dist/` 必须与可执行文件同级，`serve` 才能提供管理面板。平台注意
+（SmartScreen、Gatekeeper、Windows 未签名、无 ARM64 / RPM / Snap / 应用商店）
+见[用户指南](docs/USER.zh-CN.md#安装与首次启动)和
+[维护者指南](docs/MAINTAINER.zh-CN.md)。
 
 ## 快速开始
 
@@ -61,17 +54,13 @@ Gateway: http://127.0.0.1:9042/v1
 鉴权:    Authorization: Bearer <key>
 ```
 
-`Bearer` 后面跟的是管理面板里显示的 **Key**，也是客户端唯一需要配置的
-密钥；Gateway 会在上游侧注入已保存的 OpenCode-Go 账号 Key。
+面板里的 **Key** 是客户端唯一需要配置的密钥；Gateway 会在上游侧注入已保存的
+OpenCode-Go 账号 Key。
 
 1. 安装并启动 OCG Manager。Gateway 就绪后管理面板会在系统浏览器中打开；之后可
    通过托盘图标重新打开。
-2. 在 **账号** 视图导入已有 Key，或用托管向导注册新账号（创建草稿时可编辑邀请
-   链接；正式注册前请换成你自己的链接）；复制 Key。
-3. 把客户端指向 `http://127.0.0.1:9042/v1`。**应用** 视图提供了各客户端的配置
-   教程。
-
-最小端到端验证——一次流式 Chat Completions 请求：
+2. 在 **账号** 视图导入已有 Key，或用托管向导注册（Beta）。复制 Key。
+3. 把客户端指向 `http://127.0.0.1:9042/v1`。**应用** 视图提供各客户端配置教程。
 
 ```bash
 curl http://127.0.0.1:9042/v1/chat/completions \
@@ -80,37 +69,28 @@ curl http://127.0.0.1:9042/v1/chat/completions \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}],"stream":true}'
 ```
 
-### Docker 快速启动
+安装、五种协议的最小检查、备份与升级见[用户指南](docs/USER.zh-CN.md)。
 
-公开无头镜像为 `ghcr.io/klarkxy/opencode-go-mgr`（当前只发布 `linux/amd64`，
-匿名即可拉取）。不需要源码时，把仓库中的
-[`compose.example.yaml`](compose.example.yaml)（每个 Release 也会附带）保存为
-`compose.yaml`，并按需在同目录创建 `.env`。也可以在仓库检出中直接运行：
+## Docker
+
+公开镜像：`ghcr.io/klarkxy/opencode-go-mgr`（当前只发布 `linux/amd64`，匿名即可
+拉取）。把 [`compose.example.yaml`](compose.example.yaml)（每个 Release 也会附带）
+保存为 `compose.yaml` 后运行：
 
 ```bash
-git clone --branch v1.6.0 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
-cd opencode-go-mgr
-cp .env.example .env
-# 编辑 .env：选择首次管理员创建方式，并把 OCG_IMAGE 固定到 1.6.0。
 docker compose pull
 docker compose up -d --no-build
-docker compose ps
 ```
 
-Linux 服务器需要托管注册/官网登录时，至少预留 2 CPU、2 GiB 内存与 1 GiB
-`/dev/shm`，再执行 `docker compose --profile browser up -d`。它会启用可选的
-`ghcr.io/klarkxy/opencode-go-mgr-browser` Sidecar；`ocg-data` 与
-`ocg-browser-profiles` 两个敏感卷必须一起备份。
+打开 `http://127.0.0.1:9042/dashboard/`；服务根路径 `/` 不是管理面板。管理员、
+可选浏览器 Sidecar、备份、HTTPS、镜像钉和源码构建见
+[用户指南的 Docker 章节](docs/USER.zh-CN.md#docker)。
 
-打开 `http://127.0.0.1:9042/dashboard/`；服务根路径 `/` 不是管理面板地址。
-管理员、持久化、备份恢复、HTTPS、升级、digest/attestation 校验和本地源码构建
-方法见[用户指南的 Docker 章节](docs/USER.zh-CN.md#docker)。
+## 模型
 
-## 模型与协议
-
-每个已知模型有硬编码的 **推荐协议**（对齐官方 docs endpoint 表）与 **已验证可用
-协议集合**。客户端协议落在集合内时 **透传**；否则转换到推荐协议（文本、system、
-图像、工具调用与结果、推理内容、完成状态、错误和 usage）。
+每个已知模型有硬编码的 **推荐协议** 与实测 **已验证可用协议集合**。客户端协议
+落在集合内时透传，否则转换到推荐协议。请求路径不会试探协议——否则可能把同一
+请求重复计费。
 
 | 推荐上游协议 | 模型 |
 | --- | --- |
@@ -118,109 +98,25 @@ Linux 服务器需要托管注册/官网登录时，至少预留 2 CPU、2 GiB �
 | OpenAI Responses | `grok-4.5`、`gpt-5.6-luna` |
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
 
-透传矩阵（测试账号实测，2026-08-14）。✓ = 客户端协议原样转发；空 = 转换到该模型推荐协议。权威来源：`crates/ocg-core/src/gateway/protocol.rs` 的 `MODEL_PROTOCOLS`。
+Gemini 只是客户端格式（请求不会发往 Google）。Claude Desktop 别名会改写为
+**应用** 视图里保存的映射。Chat / Messages 上的未知模型保留请求自身协议；
+Responses、Gemini 或未知 Claude Desktop 别名直接 `400`。
 
-| 模型 | 推荐 | Chat | Responses | Messages |
-| --- | --- | :---: | :---: | :---: |
-| `grok-4.5` | Responses | | ✓ | |
-| `glm-5.3` | Chat | ✓ | | |
-| `glm-5.2` | Chat | ✓ | ✓ | ✓ |
-| `glm-5.1` | Chat | ✓ | ✓ | ✓ |
-| `glm-5` | Chat | ✓ | ✓ | ✓ |
-| `gpt-5.6-luna` | Responses | ✓ | ✓ | |
-| `kimi-k3` | Chat | ✓ | | ✓ |
-| `kimi-k2.7-code` | Chat | ✓ | | |
-| `kimi-k2.6` | Chat | ✓ | | |
-| `kimi-k2.5` | Chat | ✓ | | |
-| `deepseek-v4-pro` | Chat | ✓ | ✓ | ✓ |
-| `deepseek-v4-flash` | Chat | ✓ | ✓ | ✓ |
-| `mimo-v2.5` | Chat | ✓ | | |
-| `mimo-v2.5-pro` | Chat | ✓ | | |
-| `hy3` | Chat | ✓ | | |
-| `minimax-m3` | Messages | ✓ | | ✓ |
-| `minimax-m2.7` | Messages | ✓ | | ✓ |
-| `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
-| `minimax-m2.5` | Messages | ✓ | | ✓ |
-| `minimax-m2.5-highspeed` | Messages | ✓ | | ✓ |
-| `qwen3.8-max` | Messages | ✓ | | ✓ |
-| `qwen3.7-max` | Messages | ✓ | | ✓ |
-| `qwen3.7-plus` | Messages | ✓ | | ✓ |
-| `qwen3.6-plus` | Messages | ✓ | | ✓ |
-| `qwen3.5-plus` | Messages | ✓ | | ✓ |
-
-应用教程使用的有效限额与能力（`src/views/application-guides.ts`，2026-08-14
-核过）。输入列是 OCG 实际能带上的模态；`minimax-m3` 与 Qwen Plus 原生还支持
-视频，转换时会丢掉。
-
-| 模型 | 上下文 | 输出 | 输入 | 推理 | 工具 | 力度 |
-| --- | ---: | ---: | --- | --- | :---: | --- |
-| `grok-4.5` | 500K | 500K | 文本、图像 | 始终 | ✓ | low / medium / high（默认 high） |
-| `gpt-5.6-luna` | 1.05M | 128K | 文本、图像 | ✓ | ✓ | low / medium / high / max（默认 medium） |
-| `glm-5.3` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
-| `glm-5.2` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
-| `glm-5.1` | 198K | 32K | 文本 | ✓ | ✓ | — |
-| `kimi-k3` | 1M | 128K | 文本、图像、视频 | 始终 | ✓ | max |
-| `kimi-k2.7-code` | 256K | 256K | 文本、图像、视频 | 始终 | ✓ | — |
-| `kimi-k2.6` | 256K | 64K | 文本、图像、视频 | ✓ | ✓ | — |
-| `mimo-v2.5` | 1M | 128K | 文本、图像、音频、视频 | ✓ | ✓ | — |
-| `mimo-v2.5-pro` | 1M | 128K | 文本 | ✓ | ✓ | — |
-| `minimax-m3` | 1M | 128K | 文本、图像 | ✓ | ✓ | — |
-| `minimax-m2.7` | 200K | 128K | 文本 | 始终 | ✓ | — |
-| `minimax-m2.7-highspeed` | 200K | 128K | 文本 | 始终 | ✓ | — |
-| `minimax-m2.5` | 200K | 64K | 文本 | 始终 | ✓ | — |
-| `minimax-m2.5-highspeed` | 200K | 64K | 文本 | 始终 | ✓ | — |
-| `qwen3.8-max` | 1M | 128K | 文本 | ✓ | ✓ | — |
-| `qwen3.7-max` | 1M | 64K | 文本 | ✓ | ✓ | — |
-| `qwen3.7-plus` | 1M | 64K | 文本、图像 | ✓ | ✓ | — |
-| `qwen3.6-plus` | 1M | 64K | 文本、图像 | ✓ | ✓ | — |
-| `deepseek-v4-pro` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
-| `deepseek-v4-flash` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
-| `hy3` | 256K | 64K | 文本 | ✓ | ✓ | low / high（默认 high） |
-
-显示取整：198K = 202,752；200K = 204,800；256K = 262,144；1M = 1,000,000 或 1,048,576。`glm-5.3` 暂用 GLM-5.2 家族限额，等 models.dev 单独公布后再改。
-
-- **Gemini 只是客户端格式**：`/v1beta/models/{model}:generateContent` 与
-  `:streamGenerateContent`（也接受 `/v1/models/...`）会转换到所选模型的推荐
-  协议；客户端可用 `x-goog-api-key` 鉴权。请求不会发往 Google。
-- **Claude Desktop** 使用 `/claude-desktop/v1/...`，公布
-  `claude-sonnet-4-6`、`claude-opus-4-6`、`claude-haiku-4-5-20251001` 三个
-  别名，每个别名改写为面板中保存的模型映射。
-- **未知模型** 保留请求自身的 Chat Completions 或 Messages 协议；Responses 与
-  Gemini 上的未知模型、未知 Claude Desktop 别名直接 `400` 拒绝——Gateway 不会
-  靠试探选协议，否则可能把同一请求重复计费。
-
-自动重放采取保守策略：只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败才在同一
-账号重试一次；`401`/`403`/`429` 可切换账号；`408`、`5xx`、建连后失败、响应体
-超时与流式中断一律不重放。Gemini 兼容边界（`countTokens`/`embedContent` 返回
-`501`、被拒绝的字段）与完整重放规则见
-[用户指南](docs/USER.zh-CN.md#限制)。
-
-## 真熔断与假熔断
-
-5 小时、本周、本月进度条都是 **本地估算**，不是上游的权威账单视图。
-
-- **假熔断（本地估算）**：本地满格只是警告——Gateway **不会停用** 该账号，仍会
-  继续用它发请求。
-- **真熔断（上游 429）**：Gateway 解析响应中的 `Resets in …` 时间，写入
-  `cooldown_until`，并切换到下一个可用账号。无法识别的 429 默认冷却 5 分钟；
-  所有已启用账号都在冷却时返回 `429` 并带上最近的恢复时间。
-
-真熔断生效时，管理面板会把对应进度条拉满并标红。账号在 `cooldown_until` 到期
-后自动恢复，也可以在面板中手动解除冷却。详见
-[用户指南](docs/USER.zh-CN.md#真熔断与假熔断)。
+透传矩阵、上下文 / 输入 / 推理 / 工具、转换边界，以及真/假熔断见
+[用户指南 · 模型能力](docs/USER.zh-CN.md#模型能力)与
+[协议转换](docs/USER.zh-CN.md#协议转换)。
 
 ## 文档
 
 | 读者 | English | 简体中文 |
 | --- | --- | --- |
-| README | [README.md](README.md) | [README.zh-CN.md](README.zh-CN.md) |
 | 终端用户 | [User guide](docs/USER.md) | [用户指南](docs/USER.zh-CN.md) |
 | 维护者 | [Maintainer guide](docs/MAINTAINER.md) | [维护者指南](docs/MAINTAINER.zh-CN.md) |
 | 使用边界 | [Anti-abuse statement](docs/OPENCODE_GO_ANTI_ABUSE.md) | [防滥用声明](docs/OPENCODE_GO_ANTI_ABUSE.zh-CN.md) |
-| 贡献者 | [Contributors](docs/CONTRIBUTORS.md) | 同一文件 |
-| 设计系统 | [DESIGN.md](DESIGN.md) | 英文为准 |
-| AI 助手 | [AGENTS.md](AGENTS.md) | 中文 |
 | 文档索引 | [docs/](docs/README.md) | 中英同页 |
+
+另见：[Contributors](docs/CONTRIBUTORS.md)、[DESIGN.md](DESIGN.md)、
+[AGENTS.md](AGENTS.md)。
 
 ## 开发模式
 
@@ -230,9 +126,8 @@ pnpm run dev
 ```
 
 开发前先退出 release 托盘程序，释放单实例锁和 `9042` 端口。Tauri 会启动 Vite，
-并在 Gateway 就绪后打开 `http://127.0.0.1:30001/dashboard/`；前端热更新，Rust
-改动增量编译并重启进程。检查、构建与发布流水线见
-[维护者指南](docs/MAINTAINER.zh-CN.md)。
+并在 Gateway 就绪后打开 `http://127.0.0.1:30001/dashboard/`。检查、构建与发布
+流水线见[维护者指南](docs/MAINTAINER.zh-CN.md)。
 
 ## 许可证
 
