@@ -764,7 +764,7 @@ GHCR 上的公开无头镜像无需登录即可拉取。它是 Linux 容器，�
 与 `.env.example` 的仓库目录中运行（建议检出对应 Release tag）：
 
 ```bash
-git clone --branch v1.6.0 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.6.1 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell：Copy-Item .env.example .env
@@ -780,7 +780,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`；Release 中的 `compose.example.yaml`
   默认固定对应的完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:1.6.0`。
+  `ghcr.io/klarkxy/opencode-go-mgr:1.6.1`。
 - 完整版本与 `sha-<commit>` 标签用于标识单次发布，按发布策略不应移动；`1.5`
   与 `latest` 会继续移动。技术上只有
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` digest 真正不可变。
@@ -901,13 +901,13 @@ curl --fail http://127.0.0.1:9042/dashboard/
 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.6.0
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.0
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.6.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.1
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.6.0 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.6.1 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.0 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.1 \
   --repo klarkxy/opencode-go-mgr
 ```
 
