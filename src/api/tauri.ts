@@ -51,12 +51,15 @@ export interface AccountUpdate {
 
 export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 export type FreeModelRouting = "deny" | "explicit" | "prefer";
+export type ProxyMode = "auto" | "manual" | "direct";
 
 export interface AppConfig {
   revision: number;
   gateway_port: number;
   gateway_key: string;
   upstream_base_url: string;
+  proxy_mode: ProxyMode;
+  proxy_url: string;
   opencode_invite_url: string;
   client_root_url: string;
   client_root_url_from_env: boolean;
@@ -97,6 +100,12 @@ export interface UpdateCheckResult {
   update_available: boolean;
   install_supported: boolean;
   release_url: string;
+}
+
+export interface ProxyTestResult {
+  proxy_mode: ProxyMode;
+  status: number;
+  latency_ms: number;
 }
 
 export type UpdatePhase = "idle" | "checking" | "downloading" | "installing" | "failed";
@@ -461,6 +470,11 @@ export const tauriApi = {
     request<Account>(`/accounts/${id}/browser-profile`, { method: "DELETE" }),
 
   getSettings: () => request<AppConfig>("/settings"),
+  testProxy: (input: Pick<AppConfig, "proxy_mode" | "proxy_url" | "upstream_base_url">) =>
+    request<ProxyTestResult>("/settings/test-proxy", {
+      method: "POST",
+      body: jsonBody(input),
+    }),
   getPricing: () => request<PricingSnapshot>("/pricing"),
   refreshPricing: (refresh: PricingRefreshRequest = {}) => request<PricingRefreshResult>("/pricing/refresh", {
     method: "POST",

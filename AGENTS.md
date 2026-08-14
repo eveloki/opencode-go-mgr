@@ -16,6 +16,7 @@
 - 桌面端：Tauri v2 跨平台托盘应用，主窗口默认隐藏；托盘/单实例逻辑用系统浏览器打开 `http://127.0.0.1:<port>/dashboard/`，回环监听自动跳过登录。
 - Tauri commands 仍注册在 `src-tauri/src/commands/`，但不是当前 Vue dashboard 的主调用路径。
 - 每个节点都由自己的 dashboard 管理；项目不提供远端同步或 Admin API。
+- 全局出站代理保存在 `AppConfig`，模式为自动（系统/环境）、手动 HTTP、强制直连；模型、账号测试、用量、价格与已安装桌面版的签名升级下载必须遵守同一套策略。reqwest 路径复用 `http_client.rs`，Tauri updater 用其 `proxy` / `no_proxy` 对齐，不得按账号配置或绕过。
 - 非回环监听使用单管理员登录。Docker 可通过 `OCG_ADMIN_USERNAME` 和 `OCG_ADMIN_PASSWORD` 首次初始化（两个必须同时设置，只设一个会启动报错）；未提供时由首个注册者创建管理员。
 - 设置页通过受保护的 `/dashboard/api/settings/check-update` 手动检查 GitHub 最新 Release。内置升级公钥的已安装桌面版可继续下载、校验签名并原位安装；开发构建、CLI、Docker 与尚未进入升级通道的旧版保留发布页/手动覆盖路径。
 - 价格表通过受保护的 `GET /dashboard/api/pricing`、`PUT /dashboard/api/pricing/multipliers`、`POST /dashboard/api/pricing/refresh` 管理；只在用户点击刷新时访问 `https://opencode.ai/docs/go/`，不得自动轮询。
@@ -33,6 +34,7 @@
 ## 关键文件
 
 - `crates/ocg-core/src/gateway/`：OpenAI / Anthropic / Gemini 客户端协议路由与转换、Claude Desktop 别名改写、转发、选择器、冷却、费用统计。
+- `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略。
 - `crates/ocg-core/src/dashboard.rs`：当前 Vue 面板使用的 `/dashboard/api`。
 - `crates/ocg-core/src/console_usage.rs`：托管账号从浏览器 Profile 刷新 OpenCode Go 控制台用量。
 - `crates/ocg-core/src/db.rs`：SQLite schema、迁移、查询。
@@ -99,7 +101,7 @@ git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json s
 ## 开发约束
 
 - 工作区可能是脏树。先看 `git status --short`，不要回退不是你改的内容。
-- Ponytail 原则优先：能删就删，能复用现有代码就复用，别加“以后可能用”的抽象。
+- 复杂度控制以完整交付为前提：优先复用现有代码和简单架构，但不得因此省略需求明确要求的流程、状态、错误处理或用户体验。
 - 不要新增 Tauri `invoke` 前端路径，除非你明确要恢复桌面 WebView 内调用；当前主路径是 HTTP dashboard。
 - 安全边界别省：Gateway 鉴权、key 存储混淆、HTTP URL 校验、冷却状态写入、SSE 透传都不能为了简化拿掉。
 - 不要重新引入远端同步；远端节点通过自己的 dashboard 管理。

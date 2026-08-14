@@ -66,3 +66,7 @@ pnpm.cmd
 .release-backup-*/
 
 .appimage-prune*/
+
+# Local review / install verification artifacts
+.verify-gui-install/
+diff.txt

@@ -506,6 +506,19 @@ The **Settings** view exposes the persistent gateway configuration:
 - **Gateway Port** — the port the gateway binds (default `9042`).
 - **Key** — the same value shown in the Connection Center.
 - **Upstream URL** — the OpenCode-Go base URL.
+- **Outbound proxy** — a process-wide setting shared by every account.
+  `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY`, and `NO_PROXY`; Windows also reads the system proxy and connects
+  directly when none is configured. `Manual HTTP proxy` strictly routes all
+  HTTP/HTTPS targets through one `http://` or `https://` proxy such as
+  `http://127.0.0.1:7890`; a proxy failure never silently falls back to a direct
+  connection. `Force direct connection` ignores system and environment proxy
+  configuration. Proxy URLs cannot contain credentials. The policy covers core
+  HTTP requests including model forwarding, account-key tests, model listing,
+  OpenCode Console usage, pricing refreshes, release checks, and signed desktop
+  installer downloads; the browser sidecar is outside its scope. **Test connection** uses the unsaved form values
+  against the current upstream. Any HTTP status proves network reachability,
+  without running model inference or incurring model usage.
 - **OpenCode Go invite URL** — the restricted HTTPS invite used by managed
   account onboarding. Fresh installs may ship a demo default; replace it with
   your own link before a real signup. Creating a managed draft can also edit
@@ -838,6 +851,7 @@ docker compose ps
 | `OCG_PORT` | Compose | Host loopback port; the container still listens on `9042`. |
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | First start | Optional administrator bootstrap; both or neither. |
 | `OCG_CLIENT_ROOT_URL` | Runtime | Read-only external client root override. |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | Runtime | Standard proxy variables used by `Automatic (system / environment)` outbound proxy mode. |
 | `OCG_MANAGER_ENCRYPTION_KEY` | Runtime restore | Original explicit obfuscation key, when one was used. |
 | `NPM_REGISTRY` + `CARGO_REGISTRY` | Source build | Dependency registries used only by `--build`. |
 

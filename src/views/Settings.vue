@@ -10,11 +10,60 @@
         <n-form-item :label="t('上游地址')">
           <n-input
             v-model:value="config.upstream_base_url"
-            :disabled="!loaded || regenerating"
+            :disabled="!loaded || regenerating || testingProxy"
             :input-props="{ 'aria-label': t('上游地址') }"
             placeholder="https://opencode.ai/zen/go"
           />
         </n-form-item>
+        <section class="settings-subsection proxy-settings" aria-labelledby="proxy-title">
+          <h3 id="proxy-title">{{ t("出站代理") }}</h3>
+          <p class="field-caption routing-intro">
+            {{ t("统一用于模型转发、账号测试、用量与价格刷新等 OpenCode 出站请求。") }}
+          </p>
+          <n-radio-group
+            v-model:value="config.proxy_mode"
+            name="proxy-mode"
+            class="proxy-mode-group"
+            :disabled="!loaded || regenerating || saving || testingProxy"
+          >
+            <n-radio value="auto">{{ t("自动（系统 / 环境）") }}</n-radio>
+            <n-radio value="manual">{{ t("手动 HTTP 代理") }}</n-radio>
+            <n-radio value="direct">{{ t("强制直连") }}</n-radio>
+          </n-radio-group>
+          <p class="field-caption proxy-mode-help">{{ proxyModeHelp }}</p>
+          <n-form-item
+            v-if="config.proxy_mode === 'manual'"
+            :label="t('代理地址')"
+            :show-feedback="true"
+            :validation-status="proxyUrlPreview.status"
+            :feedback="proxyUrlPreview.feedback"
+          >
+            <n-input
+              v-model:value="config.proxy_url"
+              class="mono"
+              clearable
+              :disabled="!loaded || regenerating || saving || testingProxy"
+              placeholder="http://127.0.0.1:7890"
+              :input-props="{ 'aria-label': t('代理地址') }"
+              @blur="normalizeProxyInput"
+            />
+          </n-form-item>
+          <div class="proxy-test-row">
+            <n-button
+              secondary
+              :loading="testingProxy"
+              :disabled="!loaded || saving || regenerating || proxyUrlPreview.status === 'error'"
+              @click="testProxyConnection"
+            >{{ t("测试连接") }}</n-button>
+            <span class="field-caption">{{ t("测试当前表单值，不会保存设置；收到任意 HTTP 响应即表示链路可用。") }}</span>
+          </div>
+          <n-alert
+            v-if="proxyTestResult"
+            class="proxy-test-result"
+            :type="proxyTestResult.type"
+            :title="proxyTestResult.title"
+          >{{ proxyTestResult.message }}</n-alert>
+        </section>
         <n-form-item
           :label="t('OpenCode 邀请链接（注册新账号）')"
           :show-feedback="true"
@@ -324,7 +373,7 @@
       <n-button
         type="primary"
         :loading="saving"
-        :disabled="!loaded || regenerating || clientRootPreview.status === 'error' || inviteUrlPreview.status === 'error' || editingGatewayKey"
+        :disabled="!loaded || regenerating || testingProxy || proxyUrlPreview.status === 'error' || clientRootPreview.status === 'error' || inviteUrlPreview.status === 'error' || editingGatewayKey"
         @click="saveSettings"
       >{{ t("保存设置") }}</n-button>
     </section>
@@ -473,7 +522,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -500,7 +549,7 @@ import {
   CloudSyncOutlined,
 } from "@vicons/antd";
 import { DashboardRequestError, tauriApi } from "../api/tauri";
-import type { AppConfig, FreeModelRouting, RoutingMode, UpdateCheckResult, UpdateStatus } from "../api/tauri";
+import type { AppConfig, FreeModelRouting, ProxyMode, RoutingMode, UpdateCheckResult, UpdateStatus } from "../api/tauri";
 import { THEME_OPTIONS } from "../theme";
 import type { ResolvedTheme, ThemeName } from "../theme";
 import { t } from "../i18n/index.ts";
@@ -513,6 +562,7 @@ import {
 } from "./dashboard-connection";
 import { DEFAULT_OPENCODE_INVITE_URL, normalizeOpenCodeInviteUrl } from "./managed-account";
 import { mergeUnsavedSettings } from "./settings-merge";
+import { normalizeProxyUrl } from "./settings-proxy";
 import {
   clearUpdateTarget,
   decideInstallRequestFailure,
@@ -531,6 +581,12 @@ const emit = defineEmits<{ "update:themeName": [value: ThemeName] }>();
 const message = useMessage();
 const saving = ref(false);
 const regenerating = ref(false);
+const testingProxy = ref(false);
+const proxyTestResult = ref<{
+  type: "success" | "error";
+  title: string;
+  message: string;
+} | null>(null);
 const { copiedTarget: keyCopied, copy, cleanup } = useClipboard();
 const loaded = ref(false);
 const settingsLoadError = ref("");
@@ -562,6 +618,8 @@ const config = ref<AppConfig>({
   gateway_port: 9042,
   gateway_key: "",
   upstream_base_url: "https://opencode.ai/zen/go",
+  proxy_mode: "auto",
+  proxy_url: "",
   opencode_invite_url: DEFAULT_OPENCODE_INVITE_URL,
   client_root_url: "",
   client_root_url_from_env: false,
@@ -636,6 +694,35 @@ const themeLabel = computed(() => {
   return t("默认 · {theme}", { theme: resolved });
 });
 const maskedSettingsKey = computed(() => maskConnectionKey(config.value.gateway_key));
+const proxyModeHelp = computed(() => {
+  const help: Record<ProxyMode, MessageKey> = {
+    auto: "自动读取 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY、NO_PROXY；Windows 也会读取系统代理，未配置时直连。",
+    manual: "所有 HTTP 与 HTTPS 目标都走此代理；代理不可用时直接报错，不会静默回退直连。",
+    direct: "忽略系统代理和代理环境变量，始终直接连接。",
+  };
+  return t(help[config.value.proxy_mode]);
+});
+
+const proxyUrlPreview = computed<{ status?: "error"; feedback: string }>(() => {
+  try {
+    normalizeProxyUrl(config.value.proxy_mode, config.value.proxy_url);
+    return {
+      feedback: config.value.proxy_mode === "manual"
+        ? t("支持 http:// 或 https:// 代理地址，不支持在 URL 中保存用户名和密码。")
+        : "",
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      feedback: error instanceof Error ? t(error.message as MessageKey) : t("代理地址格式无效"),
+    };
+  }
+});
+
+watch(
+  () => [config.value.proxy_mode, config.value.proxy_url, config.value.upstream_base_url],
+  () => { proxyTestResult.value = null; },
+);
 
 const automaticClientRootUrls = computed(() => resolveConnectionUrls(
   "",
@@ -794,6 +881,7 @@ async function saveSettings() {
   if (!loaded.value) return;
   if (!normalizeClientRootInput()) return;
   if (!normalizeInviteUrlInput()) return;
+  if (!normalizeProxyInput()) return;
   if (!validateTimeouts()) return;
   saving.value = true;
   const payload = { ...config.value };
@@ -815,6 +903,60 @@ async function saveSettings() {
     }
   } finally {
     saving.value = false;
+  }
+}
+
+function normalizeProxyInput(): boolean {
+  try {
+    config.value.proxy_url = normalizeProxyUrl(config.value.proxy_mode, config.value.proxy_url);
+    return true;
+  } catch (error) {
+    message.error(error instanceof Error ? t(error.message as MessageKey) : t("代理地址格式无效"));
+    return false;
+  }
+}
+
+async function testProxyConnection() {
+  if (!loaded.value || testingProxy.value || !normalizeProxyInput()) return;
+  const request = {
+    proxy_mode: config.value.proxy_mode,
+    proxy_url: config.value.proxy_url,
+    upstream_base_url: config.value.upstream_base_url,
+  };
+  testingProxy.value = true;
+  proxyTestResult.value = null;
+  try {
+    const result = await tauriApi.testProxy(request);
+    if (
+      config.value.proxy_mode !== request.proxy_mode
+      || config.value.proxy_url !== request.proxy_url
+      || config.value.upstream_base_url !== request.upstream_base_url
+    ) {
+      return;
+    }
+    proxyTestResult.value = {
+      type: "success",
+      title: t("连接可用"),
+      message: t("收到 HTTP {status} 响应，耗时 {latency} ms。", {
+        status: result.status,
+        latency: result.latency_ms,
+      }),
+    };
+  } catch (error) {
+    if (
+      config.value.proxy_mode !== request.proxy_mode
+      || config.value.proxy_url !== request.proxy_url
+      || config.value.upstream_base_url !== request.upstream_base_url
+    ) {
+      return;
+    }
+    proxyTestResult.value = {
+      type: "error",
+      title: t("连接失败"),
+      message: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    testingProxy.value = false;
   }
 }
 
@@ -1368,6 +1510,24 @@ onUnmounted(() => {
   margin: 0;
   color: var(--ocg-ink);
   font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
+}
+.proxy-mode-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  width: 100%;
+}
+.proxy-mode-help {
+  min-height: 1.4em;
+  margin: 8px 0 12px;
+}
+.proxy-test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.proxy-test-result {
+  margin-top: 12px;
 }
 .settings-load-error {
   display: flex;

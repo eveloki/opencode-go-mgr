@@ -419,8 +419,8 @@ fn seed_tier_with_usage(
     model
 }
 
-pub async fn fetch_official_snapshot() -> Result<PricingSnapshot> {
-    let client = reqwest::Client::builder()
+pub async fn fetch_official_snapshot(config: &crate::models::AppConfig) -> Result<PricingSnapshot> {
+    let client = crate::http_client::configured_builder(config)?
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .redirect(Policy::custom(same_source_redirect))
@@ -1288,7 +1288,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live access to opencode.ai"]
     async fn live_official_document_still_matches_the_parser() {
-        let snapshot = fetch_official_snapshot().await.unwrap();
+        let snapshot = fetch_official_snapshot(&crate::models::AppConfig::default())
+            .await
+            .unwrap();
         assert_eq!(snapshot.source_url, super::SOURCE_URL);
         assert!(snapshot.models.len() >= 18);
     }

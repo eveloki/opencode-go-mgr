@@ -73,6 +73,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             post(reset_account_cooldown),
         )
         .route("/settings", get(get_settings).post(update_settings_route))
+        .route("/settings/test-proxy", post(test_proxy))
         .route(
             "/claude-desktop/models",
             get(get_claude_desktop_models).put(update_claude_desktop_models),
@@ -555,9 +556,10 @@ async fn refresh_pricing(
         ));
     }
 
+    let config = state.config();
     apply_pricing_refresh(
         &state,
-        fetch_official_snapshot().await,
+        fetch_official_snapshot(&config).await,
         request.policy,
         request.expected_official_content_hash.as_deref(),
     )
@@ -1770,19 +1772,21 @@ async fn refresh_account_usage_from_console(
 ) -> Result<Json<crate::console_usage::ConsoleUsageRefreshResult>, ApiError> {
     let limits = state.pricing_snapshot().limits.clone();
     let data_dir = state.data_dir.clone();
-    let refreshed =
-        crate::console_usage::refresh_managed_account_usage(&state.db, &data_dir, &id, &limits)
-            .await
-            .map_err(|error| {
-                let message = error.to_string();
-                if message.contains("only ready managed") {
-                    ApiError::bad_request(message)
-                } else if message.contains("not found") || message.contains("missing") {
-                    ApiError::not_found(message)
-                } else {
-                    ApiError::status(StatusCode::BAD_GATEWAY, message)
-                }
-            })?;
+    let config = state.config();
+    let refreshed = crate::console_usage::refresh_managed_account_usage(
+        &state.db, &data_dir, &id, &limits, &config,
+    )
+    .await
+    .map_err(|error| {
+        let message = error.to_string();
+        if message.contains("only ready managed") {
+            ApiError::bad_request(message)
+        } else if message.contains("not found") || message.contains("missing") {
+            ApiError::not_found(message)
+        } else {
+            ApiError::status(StatusCode::BAD_GATEWAY, message)
+        }
+    })?;
     Ok(Json(refreshed))
 }
 
@@ -1877,6 +1881,76 @@ async fn get_settings(State(state): State<CoreState>) -> Json<SettingsResponse> 
         dock_visibility_supported: state.dock_visibility_supported(),
         client_root_url_from_env: state.client_root_url_from_env(),
     })
+}
+
+#[derive(Deserialize)]
+struct ProxyTestRequest {
+    proxy_mode: ProxyMode,
+    #[serde(default)]
+    proxy_url: String,
+    upstream_base_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyTestResponse {
+    proxy_mode: ProxyMode,
+    status: u16,
+    latency_ms: u64,
+}
+
+async fn test_proxy(
+    State(state): State<CoreState>,
+    Json(input): Json<ProxyTestRequest>,
+) -> Result<Json<ProxyTestResponse>, ApiError> {
+    let mut config = state.config();
+    config.proxy_mode = input.proxy_mode;
+    config.proxy_url =
+        normalize_proxy_url(config.proxy_mode, &input.proxy_url).map_err(ApiError::bad_request)?;
+    config.upstream_base_url = input
+        .upstream_base_url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    validate_upstream_url(&config.upstream_base_url)?;
+
+    let client = crate::http_client::configured_builder(&config)
+        .map_err(ApiError::internal)?
+        .connect_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(ApiError::internal)?;
+    let started = std::time::Instant::now();
+    let response = client
+        .get(&config.upstream_base_url)
+        .timeout(std::time::Duration::from_secs(
+            config.connect_timeout_secs.min(30),
+        ))
+        .send()
+        .await
+        .map_err(|error| proxy_test_error(&error))?;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok(Json(ProxyTestResponse {
+        proxy_mode: config.proxy_mode,
+        status: response.status().as_u16(),
+        latency_ms,
+    }))
+}
+
+fn proxy_test_error(error: &reqwest::Error) -> ApiError {
+    let category = if error.is_timeout() {
+        "request timed out"
+    } else if error.is_connect() {
+        "connection failed"
+    } else {
+        "request failed"
+    };
+    ApiError::status(
+        StatusCode::BAD_GATEWAY,
+        format!(
+            "outbound connection test {category}: {}",
+            format_error_chain(error)
+        ),
+    )
 }
 
 async fn get_claude_desktop_models(State(state): State<CoreState>) -> Json<ClaudeDesktopModels> {
@@ -2559,22 +2633,22 @@ mod tests {
         AccountOrderInput, AccountSetupUpdate, AccountUsageUpdate, BrowserTarget, ForwardLogQuery,
         MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
         OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
-        SemverVersion, SettingsUpdateRequest, UpdateCheckResponse, VerifyManagedKeyInput,
-        advance_account_setup, apply_pricing_refresh, asset_path, create_account,
-        create_managed_account, dashboard_account, dashboard_summary, format_error_chain,
-        is_update_available, open_account_browser, parse_semver_version,
+        ProxyTestRequest, SemverVersion, SettingsUpdateRequest, UpdateCheckResponse,
+        VerifyManagedKeyInput, advance_account_setup, apply_pricing_refresh, asset_path,
+        create_account, create_managed_account, dashboard_account, dashboard_summary,
+        format_error_chain, is_update_available, open_account_browser, parse_semver_version,
         pricing_multiplier_changes, pricing_semantically_equal,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
-        reorder_accounts, update_account, update_account_usage, update_pricing_multipliers,
-        update_settings, validate_forward_log_query, validate_websocket_origin,
-        verify_managed_account_key,
+        reorder_accounts, test_proxy, update_account, update_account_usage,
+        update_pricing_multipliers, update_settings, validate_forward_log_query,
+        validate_websocket_origin, verify_managed_account_key,
     };
     use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::Database;
     use crate::models::{
         Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate, AppConfig,
-        ClaudeDesktopModels, normalize_purchase_date, purchase_expires_on,
+        ClaudeDesktopModels, ProxyMode, normalize_purchase_date, purchase_expires_on,
     };
     use crate::state::CoreStateInner;
     use axum::Json;
@@ -2696,6 +2770,53 @@ mod tests {
 
         headers.remove(header::ORIGIN);
         assert!(validate_websocket_origin(&headers).is_err());
+    }
+
+    #[tokio::test]
+    async fn proxy_test_accepts_any_upstream_status_and_manual_mode_never_falls_back() {
+        let dir = temp_data_dir("proxy-test");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let state = Arc::new(
+            CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+        );
+
+        let (address, upstream) =
+            spawn_key_verification_upstream(StatusCode::UNAUTHORIZED, "unauthorized").await;
+        let direct = test_proxy(
+            State(state.clone()),
+            Json(ProxyTestRequest {
+                proxy_mode: ProxyMode::Direct,
+                proxy_url: String::new(),
+                upstream_base_url: format!("http://{address}"),
+            }),
+        )
+        .await
+        .expect("an HTTP response should prove direct reachability")
+        .0;
+        assert_eq!(direct.status, StatusCode::UNAUTHORIZED.as_u16());
+        upstream.await.unwrap();
+
+        let closed_proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_proxy_address = closed_proxy.local_addr().unwrap();
+        drop(closed_proxy);
+        let (address, upstream) =
+            spawn_key_verification_upstream(StatusCode::OK, "direct fallback must not happen")
+                .await;
+        let error = test_proxy(
+            State(state.clone()),
+            Json(ProxyTestRequest {
+                proxy_mode: ProxyMode::Manual,
+                proxy_url: format!("http://{closed_proxy_address}"),
+                upstream_base_url: format!("http://{address}"),
+            }),
+        )
+        .await
+        .expect_err("a failed manual proxy must not fall back to the reachable upstream");
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        upstream.abort();
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

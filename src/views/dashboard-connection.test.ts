@@ -904,7 +904,7 @@ test("dashboard and settings keep partial data safe", async () => {
   const app = await readFile(new URL("../App.vue", import.meta.url), "utf8");
 
   assert.match(dashboard, /Promise\.allSettled/);
-  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error' \|\| editingGatewayKey"/);
+  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| testingProxy \|\| proxyUrlPreview\.status === 'error' \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error' \|\| editingGatewayKey"/);
   assert.match(settings, /if \(!loaded\.value\) return/);
   assert.match(settings, /\{\{ maskedSettingsKey \}\}/);
   assert.doesNotMatch(settings, /v-model:value="config\.gateway_key"/);
@@ -1006,6 +1006,12 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(settings, /\{\{ automaticClientRootFeedback \}\}/);
   assert.match(settings, /config\.client_root_url/);
   assert.match(settings, /client_root_url_from_env: false/);
+  assert.match(settings, /proxy_mode: "auto"/);
+  assert.match(settings, /v-model:value="config\.proxy_mode"/);
+  assert.match(settings, /v-model:value="config\.proxy_url"/);
+  assert.match(settings, /tauriApi\.testProxy/);
+  assert.match(api, /request<ProxyTestResult>\("\/settings\/test-proxy"/);
+  assert.match(settingsMerge, /"proxy_mode"[\s\S]*"proxy_url"/);
   assert.match(settings, /get: \(\) => config\.value\.client_root_url,/);
   assert.match(settings, /:placeholder="config\.client_root_url_from_env \? '' : automaticClientRootUrls\.rootUrl"/);
   assert.doesNotMatch(settings, /config\.value\.client_root_url = resolveConnectionUrls/);

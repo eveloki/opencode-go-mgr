@@ -418,6 +418,16 @@ Manager 恢复，只能从备份恢复或重新登录。
 - **Gateway 端口**：Gateway 监听端口（默认 `9042`）。
 - **Key**：与接入中心同一个值。
 - **上游地址**：OpenCode-Go 基础 URL。
+- **出站代理**：这是进程级设置，不区分账号。`自动（系统 / 环境）` 会读取
+  `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，Windows 还会读取系统
+  代理；没有代理时直接连接。`手动 HTTP 代理` 将所有 HTTP/HTTPS 目标严格送往
+  一个 `http://` 或 `https://` 代理（例如 `http://127.0.0.1:7890`），代理失败时
+  不会静默回退直连；`强制直连` 则忽略系统和环境代理。代理 URL 不能包含账号密码。
+  该策略覆盖模型转发、账号 Key 测试、模型列表、OpenCode Console 用量、价格刷新、
+  Release 检查以及已安装桌面版的签名升级下载等核心 HTTP 请求；浏览器 Sidecar 不在
+  此设置范围内。**测试连接**使用
+  尚未保存的表单值访问当前上游，收到任意 HTTP 状态都表示网络链路可用，且不会发起
+  模型推理或产生模型费用。
 - **OpenCode Go 邀请链接**：托管账号注册向导使用的受限 HTTPS 邀请 URL。新安装
   可能带有演示默认值；正式注册前请改为你自己的链接。创建托管草稿时也可直接编辑
   并写回此处。
@@ -694,6 +704,7 @@ docker compose ps
 | `OCG_PORT` | Compose | 宿主机回环端口；容器内仍监听 `9042`。 |
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | 首次启动 | 可选管理员引导；必须同时设置或都不设置。 |
 | `OCG_CLIENT_ROOT_URL` | 运行时 | 只读覆盖外部客户端根地址。 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | 运行时 | “自动（系统 / 环境）”出站代理模式使用的标准代理变量。 |
 | `OCG_MANAGER_ENCRYPTION_KEY` | 恢复时 | 原部署曾显式使用的混淆密钥。 |
 | `NPM_REGISTRY` + `CARGO_REGISTRY` | 源码构建 | 仅 `--build` 使用的依赖注册表。 |
 

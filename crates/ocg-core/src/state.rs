@@ -1,6 +1,8 @@
 use crate::crypto::KeyCipher;
 use crate::db::Database;
-use crate::models::{AppConfig, normalize_client_root_url, normalize_opencode_invite_url};
+use crate::models::{
+    AppConfig, normalize_client_root_url, normalize_opencode_invite_url, normalize_proxy_url,
+};
 use crate::pricing::{
     PricingEstimate, PricingSnapshot, embedded_seed, ensure_current_adjustment_policy,
 };
@@ -12,8 +14,6 @@ use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::Duration;
-
 const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 
 pub struct GatewayHandle {
@@ -175,7 +175,7 @@ impl CoreStateInner {
                 snapshot
             }
         };
-        let http_client = build_http_client(&config)?;
+        let http_client = crate::http_client::build(&config)?;
         Ok(Self {
             db: Mutex::new(db),
             config: Mutex::new(config),
@@ -413,8 +413,10 @@ impl CoreStateInner {
         config.claude_desktop_models.normalize();
         config.opencode_invite_url = normalize_opencode_invite_url(&config.opencode_invite_url)
             .map_err(anyhow::Error::msg)?;
+        config.proxy_url = normalize_proxy_url(config.proxy_mode, &config.proxy_url)
+            .map_err(anyhow::Error::msg)?;
         config.validate().map_err(anyhow::Error::msg)?;
-        let http_client = build_http_client(&config)?;
+        let http_client = crate::http_client::build(&config)?;
         {
             let db = self.db.lock();
             save_config(&db, &config)?;
@@ -506,6 +508,12 @@ fn load_config(db: &Database) -> crate::Result<(AppConfig, bool)> {
         config.opencode_invite_url = invite_url;
         needs_persist = true;
     }
+    let proxy_url =
+        normalize_proxy_url(config.proxy_mode, &config.proxy_url).map_err(anyhow::Error::msg)?;
+    if proxy_url != config.proxy_url {
+        config.proxy_url = proxy_url;
+        needs_persist = true;
+    }
     // v1.4.2 shipped 30/120/300 as one default tuple. Migrate that exact,
     // untouched tuple once while preserving every user-customized combination.
     if (
@@ -529,17 +537,6 @@ fn save_config(db: &Database, config: &AppConfig) -> crate::Result<()> {
     Ok(())
 }
 
-fn build_http_client(config: &AppConfig) -> crate::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
-        // Drop idle pooled connections earlier than the default so a stale connection
-        // closed by the upstream/CDN isn't reused. Keep-alive probes further reduce
-        // silent drops for long-lived gateways.
-        .pool_idle_timeout(Duration::from_secs(30))
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()?)
-}
-
 fn generate_gateway_key() -> String {
     format!("ocg-{}-{}", random_word(), random_word())
 }
@@ -557,7 +554,7 @@ mod tests {
     };
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::Database;
-    use crate::models::AppConfig;
+    use crate::models::{AppConfig, ProxyMode};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier, Mutex as StdMutex};
@@ -630,6 +627,56 @@ mod tests {
             serde_json::from_str(&stored).expect("stored config should deserialize");
         assert_eq!(stored.client_root_url, "https://saved.example.com");
         assert_eq!(stored.connect_timeout_secs, 45);
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn manual_proxy_config_is_normalized_and_persisted() {
+        let dir = temp_data_dir("manual-proxy");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+        let mut config = state.config();
+        config.proxy_mode = ProxyMode::Manual;
+        config.proxy_url = " http://127.0.0.1:7890/ ".to_string();
+
+        state
+            .set_config(config)
+            .expect("manual proxy configuration should save");
+        assert_eq!(state.config().proxy_mode, ProxyMode::Manual);
+        assert_eq!(state.config().proxy_url, "http://127.0.0.1:7890");
+
+        let stored = state
+            .db
+            .lock()
+            .get_setting("config")
+            .unwrap()
+            .expect("config should be stored");
+        let stored: AppConfig = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored.proxy_mode, ProxyMode::Manual);
+        assert_eq!(stored.proxy_url, "http://127.0.0.1:7890");
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn auto_proxy_saves_leftover_invalid_url_without_using_it() {
+        let dir = temp_data_dir("auto-proxy-leftover");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+        let mut config = state.config();
+        config.proxy_mode = ProxyMode::Auto;
+        config.proxy_url = "not-a-proxy".to_string();
+
+        state
+            .set_config(config)
+            .expect("auto mode should ignore leftover invalid proxy URLs");
+        assert_eq!(state.config().proxy_mode, ProxyMode::Auto);
+        assert_eq!(state.config().proxy_url, "not-a-proxy");
 
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");
@@ -969,6 +1016,8 @@ mod tests {
             legacy_object.remove("show_dock_icon");
             legacy_object.remove("routing_mode");
             legacy_object.remove("conversation_sticky");
+            legacy_object.remove("proxy_mode");
+            legacy_object.remove("proxy_url");
         }
         db.set_setting("config", &legacy.to_string())
             .expect("legacy config should persist");
@@ -985,6 +1034,8 @@ mod tests {
             crate::models::RoutingMode::StrictPriority
         );
         assert!(!state.config().conversation_sticky);
+        assert_eq!(state.config().proxy_mode, ProxyMode::Auto);
+        assert!(state.config().proxy_url.is_empty());
         let stored = state
             .db
             .lock()
@@ -993,6 +1044,8 @@ mod tests {
             .expect("stored config should exist");
         assert!(stored.contains("claude_desktop_models"));
         assert!(stored.contains("show_dock_icon"));
+        assert!(stored.contains("proxy_mode"));
+        assert!(stored.contains("proxy_url"));
 
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");

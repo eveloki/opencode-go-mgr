@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::{Duration as ChronoDuration, Utc};
 use reqwest::header::{COOKIE, HeaderValue, LOCATION, USER_AGENT};
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{StatusCode, Url};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::browser::browser_profile_paths;
 use crate::db::Database;
-use crate::models::{AccountType, UsageWindow, UsageWindowKind};
+use crate::models::{AccountType, AppConfig, UsageWindow, UsageWindowKind};
 use crate::pricing::PricingLimits;
 
 const AUTH_URL: &str = "https://opencode.ai/auth";
@@ -38,6 +38,7 @@ pub async fn refresh_managed_account_usage(
     data_dir: &Path,
     account_id: &str,
     limits: &PricingLimits,
+    config: &AppConfig,
 ) -> Result<ConsoleUsageRefreshResult> {
     let profile = {
         let db = db.lock();
@@ -56,7 +57,7 @@ pub async fn refresh_managed_account_usage(
         );
     }
 
-    let snapshot = fetch_console_usage(&cookies).await?;
+    let snapshot = fetch_console_usage(config, &cookies).await?;
     let db = db.lock();
     apply_snapshot(&db, account_id, limits, &snapshot)?;
     let usage = db.account_usage_with_limits(account_id, limits)?;
@@ -112,8 +113,11 @@ fn apply_snapshot(
     Ok(())
 }
 
-async fn fetch_console_usage(cookies: &BTreeMap<String, String>) -> Result<ConsoleUsageSnapshot> {
-    let client = Client::builder()
+async fn fetch_console_usage(
+    config: &AppConfig,
+    cookies: &BTreeMap<String, String>,
+) -> Result<ConsoleUsageSnapshot> {
+    let client = crate::http_client::configured_builder(config)?
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()

@@ -3,6 +3,8 @@ import type { AppConfig } from "../api/tauri";
 const EDITABLE_SETTING_KEYS = [
   "gateway_port",
   "upstream_base_url",
+  "proxy_mode",
+  "proxy_url",
   "opencode_invite_url",
   "client_root_url",
   "auto_start",
