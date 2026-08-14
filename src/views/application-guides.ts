@@ -204,7 +204,7 @@ function posixShellLiteral(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-// Effective OpenCode Go limits and capabilities, verified 2026-07-31; not generic vendor defaults.
+// Effective OpenCode Go limits and capabilities, verified 2026-08-14; not generic vendor defaults.
 // Source of truth: https://github.com/anomalyco/models.dev/tree/dev/providers/opencode-go/models
 // Keep this exhaustive for every model that application_models can return. Unknown IDs must fail
 // visibly instead of inheriting Pi/Kimi Code's misleading 128K defaults.
@@ -228,6 +228,26 @@ export const APPLICATION_MODEL_METADATA: Readonly<Record<string, ApplicationMode
     toolUse: true,
     efforts: ["low", "medium", "high", "max"],
     defaultEffort: "medium",
+  },
+  "glm-5.3": {
+    // Official Go list 2026-08-14. Context/output not independently published;
+    // keep GLM-5.2 family limits until a dedicated models.dev row exists.
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    input: ["text"],
+    reasoning: true,
+    toolUse: true,
+    efforts: ["high", "max"],
+    defaultEffort: "max",
+    piThinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max",
+    },
   },
   "glm-5.2": {
     contextWindow: 1_000_000,
@@ -357,6 +377,15 @@ export const APPLICATION_MODEL_METADATA: Readonly<Record<string, ApplicationMode
     toolUse: true,
     piThinkingLevelMap: PI_HIGH_ONLY,
     piCompat: PI_NO_REASONING_EFFORT,
+  },
+  "qwen3.8-max": {
+    // models.dev opencode-go/qwen3.8-max: context 1_000_000, output 131_072.
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    input: ["text"],
+    reasoning: true,
+    toolUse: true,
+    piThinkingLevelMap: PI_MINIMAL_TO_LOW,
   },
   "qwen3.7-max": {
     contextWindow: 1_000_000,

@@ -303,6 +303,18 @@ pub enum RoutingMode {
     RoundRobin,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProxyMode {
+    /// Use the platform/environment proxy configuration when available.
+    #[default]
+    Auto,
+    /// Route every supported outbound HTTP(S) request through one explicit proxy.
+    Manual,
+    /// Ignore platform/environment proxy configuration and connect directly.
+    Direct,
+}
+
 pub const DEFAULT_OPENCODE_INVITE_URL: &str = "https://opencode.ai/go?ref=68XPB6NP8V";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +323,8 @@ pub struct AppConfig {
     pub gateway_port: u16,
     pub gateway_key: String,
     pub upstream_base_url: String,
+    pub proxy_mode: ProxyMode,
+    pub proxy_url: String,
     pub opencode_invite_url: String,
     pub client_root_url: String,
     pub auto_start: bool,
@@ -331,6 +345,8 @@ impl Default for AppConfig {
             gateway_port: 9042,
             gateway_key: String::new(),
             upstream_base_url: "https://opencode.ai/zen/go".to_string(),
+            proxy_mode: ProxyMode::Auto,
+            proxy_url: String::new(),
             opencode_invite_url: DEFAULT_OPENCODE_INVITE_URL.to_string(),
             client_root_url: String::new(),
             auto_start: false,
@@ -492,6 +508,7 @@ pub fn normalize_client_root_url(value: &str) -> Result<String, String> {
 impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.validate_timeouts()?;
+        normalize_proxy_url(self.proxy_mode, &self.proxy_url)?;
         normalize_opencode_invite_url(&self.opencode_invite_url)?;
         // routing_mode is validated by serde enum decoding; unknown values never reach here.
         self.claude_desktop_models.validate()
@@ -517,6 +534,49 @@ impl AppConfig {
         }
         Ok(())
     }
+}
+
+/// Validates and canonicalizes the optional global outbound HTTP proxy URL.
+pub fn normalize_proxy_url(mode: ProxyMode, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return if mode == ProxyMode::Manual {
+            Err("manual proxy mode requires a proxy URL".to_string())
+        } else {
+            Ok(String::new())
+        };
+    }
+
+    match canonicalize_proxy_url(value) {
+        Ok(normalized) => Ok(normalized),
+        Err(error) if mode == ProxyMode::Manual => Err(error),
+        // Unused leftover values must not block Auto/Direct saves.
+        Err(_) => Ok(value.to_string()),
+    }
+}
+
+fn canonicalize_proxy_url(value: &str) -> Result<String, String> {
+    if value.len() > 2048 {
+        return Err("proxy URL is too long".to_string());
+    }
+
+    let parsed =
+        reqwest::Url::parse(value).map_err(|error| format!("invalid proxy URL: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("proxy URL must use http or https".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("proxy URL must include a host".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("proxy URL must not include credentials".to_string());
+    }
+    if !matches!(parsed.path(), "" | "/") || parsed.query().is_some() || parsed.fragment().is_some()
+    {
+        return Err("proxy URL must not include a path, query, or fragment".to_string());
+    }
+
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
 pub fn normalize_opencode_invite_url(value: &str) -> Result<String, String> {
@@ -695,8 +755,8 @@ mod tests {
     use super::{
         AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
         CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL,
-        FreeModelRouting, RoutingMode, normalize_opencode_invite_url, normalize_purchase_date,
-        purchase_expires_on,
+        FreeModelRouting, ProxyMode, RoutingMode, normalize_opencode_invite_url,
+        normalize_proxy_url, normalize_purchase_date, purchase_expires_on,
     };
 
     #[test]
@@ -793,6 +853,8 @@ mod tests {
         assert_eq!(missing.routing_mode, RoutingMode::StrictPriority);
         assert!(!missing.conversation_sticky);
         assert_eq!(missing.free_model_routing, FreeModelRouting::Explicit);
+        assert_eq!(missing.proxy_mode, ProxyMode::Auto);
+        assert!(missing.proxy_url.is_empty());
 
         for mode in [
             RoutingMode::StrictPriority,
@@ -820,6 +882,46 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn proxy_url_requires_a_supported_origin_without_credentials() {
+        assert_eq!(
+            normalize_proxy_url(ProxyMode::Manual, " http://127.0.0.1:7890/ ").unwrap(),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            normalize_proxy_url(ProxyMode::Auto, "").unwrap(),
+            String::new()
+        );
+        assert_eq!(
+            normalize_proxy_url(ProxyMode::Auto, " http://127.0.0.1:7890/ ").unwrap(),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            normalize_proxy_url(ProxyMode::Direct, "socks5://127.0.0.1:1080").unwrap(),
+            "socks5://127.0.0.1:1080"
+        );
+        assert!(normalize_proxy_url(ProxyMode::Manual, "").is_err());
+        for invalid in [
+            "socks5://127.0.0.1:1080",
+            "http://user:secret@127.0.0.1:7890",
+            "http://127.0.0.1:7890/proxy",
+            "http://127.0.0.1:7890?x=1",
+        ] {
+            assert!(
+                normalize_proxy_url(ProxyMode::Manual, invalid).is_err(),
+                "{invalid:?} should be rejected"
+            );
+        }
+
+        AppConfig {
+            proxy_mode: ProxyMode::Auto,
+            proxy_url: "not-a-proxy".to_string(),
+            ..AppConfig::default()
+        }
+        .validate()
+        .expect("auto mode must not reject leftover invalid proxy URLs");
     }
 
     #[test]

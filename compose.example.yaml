@@ -11,6 +11,10 @@ services:
       - OCG_ADMIN_PASSWORD
       - OCG_MANAGER_ENCRYPTION_KEY
       - OCG_CLIENT_ROOT_URL
+      - HTTP_PROXY
+      - HTTPS_PROXY
+      - ALL_PROXY
+      - NO_PROXY
       - OCG_BROWSER_WORKER_URL=${OCG_BROWSER_WORKER_URL:-http://browser:9080}
       - OCG_BROWSER_CONTROL_TOKEN_FILE=/run/ocg-browser/control-token
       - OCG_BROWSER_PROFILES_DIR=/browser-profiles

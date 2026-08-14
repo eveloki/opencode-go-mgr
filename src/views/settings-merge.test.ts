@@ -9,6 +9,8 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     gateway_port: 9042,
     gateway_key: "server-key-1",
     upstream_base_url: "https://opencode.ai/zen/go",
+    proxy_mode: "auto",
+    proxy_url: "",
     opencode_invite_url: "https://opencode.ai/go?ref=68XPB6NP8V",
     client_root_url: "",
     client_root_url_from_env: false,
@@ -30,6 +32,8 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
   const saved = config();
   const current = config({
     opencode_invite_url: "https://opencode.ai/invite/local",
+    proxy_mode: "manual",
+    proxy_url: "http://127.0.0.1:7890",
     connect_timeout_secs: 45,
   });
   const latest = config({
@@ -42,6 +46,8 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
 
   assert.equal(merged.revision, 2);
   assert.equal(merged.opencode_invite_url, "https://opencode.ai/invite/local");
+  assert.equal(merged.proxy_mode, "manual");
+  assert.equal(merged.proxy_url, "http://127.0.0.1:7890");
   assert.equal(merged.connect_timeout_secs, 45);
   assert.equal(merged.gateway_port, 9142);
   assert.equal(merged.non_stream_timeout_secs, 1_200);

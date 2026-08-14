@@ -15,6 +15,7 @@
 - [管理面板](#管理面板)
   - [接入中心](#接入中心)
   - [应用教程](#应用教程)
+  - [模型能力](#模型能力)
   - [账号](#账号)
   - [价格表](#价格表)
   - [日志](#日志)
@@ -26,6 +27,7 @@
   - [账号选择与切换](#账号选择与切换)
   - [用量估算](#用量估算)
   - [真熔断与假熔断](#真熔断与假熔断)
+  - [Free 模型策略](#free-模型策略)
 - [CLI](#cli)
 - [Docker](#docker)
   - [可选远程浏览器](#可选远程浏览器)
@@ -311,6 +313,40 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 过的代码片段按应用分别缓存在当前页面里，刷新页面后重置。
 **恢复默认** 会重置当前应用的模型选择与片段草稿。
 
+### 模型能力
+
+应用教程片段使用下面这张核过的限额表（`src/views/application-guides.ts`，
+2026-08-14）。输入列是 OCG 实际能带上的模态。透传 / 转换矩阵见
+[协议转换](#协议转换)。
+
+| 模型 | 上下文 | 输出 | 输入 | 推理 | 工具 | 力度 |
+| --- | ---: | ---: | --- | --- | :---: | --- |
+| `grok-4.5` | 500K | 500K | 文本、图像 | 始终 | ✓ | low / medium / high（默认 high） |
+| `gpt-5.6-luna` | 1.05M | 128K | 文本、图像 | ✓ | ✓ | low / medium / high / max（默认 medium） |
+| `glm-5.3` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
+| `glm-5.2` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
+| `glm-5.1` | 198K | 32K | 文本 | ✓ | ✓ | — |
+| `kimi-k3` | 1M | 128K | 文本、图像、视频 | 始终 | ✓ | max |
+| `kimi-k2.7-code` | 256K | 256K | 文本、图像、视频 | 始终 | ✓ | — |
+| `kimi-k2.6` | 256K | 64K | 文本、图像、视频 | ✓ | ✓ | — |
+| `mimo-v2.5` | 1M | 128K | 文本、图像、音频、视频 | ✓ | ✓ | — |
+| `mimo-v2.5-pro` | 1M | 128K | 文本 | ✓ | ✓ | — |
+| `minimax-m3` | 1M | 128K | 文本、图像 | ✓ | ✓ | — |
+| `minimax-m2.7` | 200K | 128K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.7-highspeed` | 200K | 128K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.5` | 200K | 64K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.5-highspeed` | 200K | 64K | 文本 | 始终 | ✓ | — |
+| `qwen3.8-max` | 1M | 128K | 文本 | ✓ | ✓ | — |
+| `qwen3.7-max` | 1M | 64K | 文本 | ✓ | ✓ | — |
+| `qwen3.7-plus` | 1M | 64K | 文本、图像 | ✓ | ✓ | — |
+| `qwen3.6-plus` | 1M | 64K | 文本、图像 | ✓ | ✓ | — |
+| `deepseek-v4-pro` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
+| `deepseek-v4-flash` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
+| `hy3` | 256K | 64K | 文本 | ✓ | ✓ | low / high（默认 high） |
+
+显示取整：198K = 202,752；200K = 204,800；256K = 262,144；1M = 1,000,000 或
+1,048,576。`glm-5.3` 暂用 GLM-5.2 家族限额，等 models.dev 单独公布后再改。
+
 Claude Desktop 是例外，它的模型映射是持久化的：复制配置前，选中的 `sonnet`、
 `opus`、`haiku` 目标模型会通过受保护的面板 API 保存到 SQLite。留空的角色回退
 到第一个已配置模型，三个角色不能同时为空。它的恢复操作回到当前页面已加载或
@@ -418,6 +454,16 @@ Manager 恢复，只能从备份恢复或重新登录。
 - **Gateway 端口**：Gateway 监听端口（默认 `9042`）。
 - **Key**：与接入中心同一个值。
 - **上游地址**：OpenCode-Go 基础 URL。
+- **出站代理**：这是进程级设置，不区分账号。`自动（系统 / 环境）` 会读取
+  `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，Windows 还会读取系统
+  代理；没有代理时直接连接。`手动 HTTP 代理` 将所有 HTTP/HTTPS 目标严格送往
+  一个 `http://` 或 `https://` 代理（例如 `http://127.0.0.1:7890`），代理失败时
+  不会静默回退直连；`强制直连` 则忽略系统和环境代理。代理 URL 不能包含账号密码。
+  该策略覆盖模型转发、账号 Key 测试、模型列表、OpenCode Console 用量、价格刷新、
+  Release 检查以及已安装桌面版的签名升级下载等核心 HTTP 请求；浏览器 Sidecar 不在
+  此设置范围内。**测试连接**使用
+  尚未保存的表单值访问当前上游，收到任意 HTTP 状态都表示网络链路可用，且不会发起
+  模型推理或产生模型费用。
 - **OpenCode Go 邀请链接**：托管账号注册向导使用的受限 HTTPS 邀请 URL。新安装
   可能带有演示默认值；正式注册前请改为你自己的链接。创建托管草稿时也可直接编辑
   并写回此处。
@@ -434,6 +480,8 @@ Manager 恢复，只能从备份恢复或重新登录。
   并可下载、校验签名、安装对应平台的包。v1.4.1 必须先完成上文的一次直接覆盖
   安装；开发构建、CLI、Docker 仍显示发布页并手动升级。主机必须能访问 GitHub；
   检查或安装失败不影响 Gateway 转发。
+- **Free 模型路由**：三档 OpenCode Zen 策略（`deny` / `explicit` / `prefer`）。
+  见 [Free 模型策略](#free-模型策略)。
 
 配置项写入 SQLite，下次启动时重新加载；检查更新是按需动作，不会持久化。
 
@@ -489,8 +537,46 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 **请求体** 转到推荐上游协议，再把 **响应体**（或 SSE 流）转回客户端协议，覆盖
 文本、system、图像、工具调用与工具结果、推理内容、完成状态、错误、usage 字段。
   例如 `glm-5.2` 对 Chat Completions / Responses / Messages 均透传；
-  `gpt-5.6-luna` 仅 Responses，Chat / Messages / Gemini 入口会转到 Responses；
-  `deepseek-v4-flash` 仅 Chat，其他客户端协议转到 Chat Completions。
+  `grok-4.5` 仅 Responses，Chat / Messages / Gemini 入口会转到 Responses；
+  `gpt-5.6-luna` 推荐 Responses，Chat 也可透传；`glm-5.3` 仅 Chat。
+
+| 推荐上游协议 | 模型 |
+| --- | --- |
+| OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3` |
+| OpenAI Responses | `grok-4.5`、`gpt-5.6-luna` |
+| Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
+
+透传矩阵（测试账号实测，2026-08-14）。✓ = 客户端协议原样转发；空 = 转换到该
+模型推荐协议。权威来源：`crates/ocg-core/src/gateway/protocol.rs` 的
+`MODEL_PROTOCOLS`。
+
+| 模型 | 推荐 | Chat | Responses | Messages |
+| --- | --- | :---: | :---: | :---: |
+| `grok-4.5` | Responses | | ✓ | |
+| `glm-5.3` | Chat | ✓ | | |
+| `glm-5.2` | Chat | ✓ | ✓ | ✓ |
+| `glm-5.1` | Chat | ✓ | ✓ | ✓ |
+| `glm-5` | Chat | ✓ | ✓ | ✓ |
+| `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `kimi-k3` | Chat | ✓ | | ✓ |
+| `kimi-k2.7-code` | Chat | ✓ | | |
+| `kimi-k2.6` | Chat | ✓ | | |
+| `kimi-k2.5` | Chat | ✓ | | |
+| `deepseek-v4-pro` | Chat | ✓ | ✓ | ✓ |
+| `deepseek-v4-flash` | Chat | ✓ | ✓ | ✓ |
+| `mimo-v2.5` | Chat | ✓ | | |
+| `mimo-v2.5-pro` | Chat | ✓ | | |
+| `hy3` | Chat | ✓ | | |
+| `minimax-m3` | Messages | ✓ | | ✓ |
+| `minimax-m2.7` | Messages | ✓ | | ✓ |
+| `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
+| `minimax-m2.5` | Messages | ✓ | | ✓ |
+| `minimax-m2.5-highspeed` | Messages | ✓ | | ✓ |
+| `qwen3.8-max` | Messages | ✓ | | ✓ |
+| `qwen3.7-max` | Messages | ✓ | | ✓ |
+| `qwen3.7-plus` | Messages | ✓ | | ✓ |
+| `qwen3.6-plus` | Messages | ✓ | | ✓ |
+| `qwen3.5-plus` | Messages | ✓ | | ✓ |
 
 Chat Completions 与 Messages 的未知模型保留客户端选择的协议；Responses 与
 Gemini 上的未知模型、未知 Claude Desktop 别名直接 `400` 拒绝——Gateway 不会靠
@@ -609,6 +695,21 @@ Go 快照。
   即使本地估算值更低。账号在 `cooldown_until` 到期后自动恢复，也可以在面板里
   手动解除。
 
+### Free 模型策略
+
+设置页可选择三档 OpenCode Zen free 路由：
+
+| 档位 | 行为 |
+| --- | --- |
+| **禁止 Free 模型** | 拒绝 `*-free` / `big-pickle`，也不把 Go 模型改写到 free |
+| **仅显式使用 Free 模型**（默认） | 只有客户端显式请求 free 才走 `https://opencode.ai/zen`；Go 模型仍走 Go 上游 |
+| **自动优先同名 Free 模型** | 当前映射：`deepseek-v4-flash` → `deepseek-v4-flash-free`，`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽或超长后回落 Go |
+
+Free 与 Go 使用**独立冷却窗口**；多账号会按现有路由方案在对应通道内轮询。
+sticky-global 路由下，Free 与 Go 目前共享同一个全局偏好账号（跨通道不单独记
+粘性）。Free 为限时促销，额度独立，且请求数据可能用于改进模型——不要提交机密
+内容。
+
 ## CLI
 
 下载对应平台的压缩包并解压成目录，目录里有可执行文件、`dist/` 与 `LICENSE`。
@@ -694,6 +795,7 @@ docker compose ps
 | `OCG_PORT` | Compose | 宿主机回环端口；容器内仍监听 `9042`。 |
 | `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | 首次启动 | 可选管理员引导；必须同时设置或都不设置。 |
 | `OCG_CLIENT_ROOT_URL` | 运行时 | 只读覆盖外部客户端根地址。 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | 运行时 | “自动（系统 / 环境）”出站代理模式使用的标准代理变量。 |
 | `OCG_MANAGER_ENCRYPTION_KEY` | 恢复时 | 原部署曾显式使用的混淆密钥。 |
 | `NPM_REGISTRY` + `CARGO_REGISTRY` | 源码构建 | 仅 `--build` 使用的依赖注册表。 |
 
@@ -917,16 +1019,4 @@ ocg.example.com {
 [English user guide](USER.md) · [Maintainer guide](MAINTAINER.md) ·
 [维护者指南](MAINTAINER.zh-CN.md) · [文档索引](README.md) ·
 [回到 README](../README.zh-CN.md)
-
-## Free 模型策略
-
-设置页可选择三档 OpenCode Zen free 路由：
-
-| 档位 | 行为 |
-| --- | --- |
-| **禁止 Free 模型** | 拒绝 `*-free` / `big-pickle`，也不把 Go 模型改写到 free |
-| **仅显式使用 Free 模型**（默认） | 只有客户端显式请求 free 才走 `https://opencode.ai/zen`；Go 模型仍走 Go 上游 |
-| **自动优先同名 Free 模型** | 当前映射：`deepseek-v4-flash` → `deepseek-v4-flash-free`，`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽或超长后回落 Go |
-
-Free 与 Go 使用**独立冷却窗口**；多账号会按现有路由方案在对应通道内轮询。 sticky-global 路由下，Free 与 Go 目前共享同一个全局偏好账号（跨通道不单独记粘性）。Free 为限时促销，额度独立，且请求数据可能用于改进模型——不要提交机密内容。
 

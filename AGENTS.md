@@ -1,7 +1,7 @@
 # AGENTS.md — ocg-manager
 
 本文件给 AI 编码助手使用。以当前代码为准，别按旧 README 或过期需求文档补不存在的东西。
-用户文档见 `docs/`；发版细节以 `docs/MAINTAINER.md` 为准。
+用户文档见 `docs/USER*.md`；产品 README 只做仓库入口（定位、下载、三步上手、推荐协议分组），不要按旧 README 里的长表补文档。发版细节以 `docs/MAINTAINER.md` 为准。
 
 ## 项目事实
 
@@ -16,6 +16,7 @@
 - 桌面端：Tauri v2 跨平台托盘应用，主窗口默认隐藏；托盘/单实例逻辑用系统浏览器打开 `http://127.0.0.1:<port>/dashboard/`，回环监听自动跳过登录。
 - Tauri commands 仍注册在 `src-tauri/src/commands/`，但不是当前 Vue dashboard 的主调用路径。
 - 每个节点都由自己的 dashboard 管理；项目不提供远端同步或 Admin API。
+- 全局出站代理保存在 `AppConfig`，模式为自动（系统/环境）、手动 HTTP、强制直连；模型、账号测试、用量、价格与已安装桌面版的签名升级下载必须遵守同一套策略。reqwest 路径复用 `http_client.rs`，Tauri updater 用其 `proxy` / `no_proxy` 对齐，不得按账号配置或绕过。
 - 非回环监听使用单管理员登录。Docker 可通过 `OCG_ADMIN_USERNAME` 和 `OCG_ADMIN_PASSWORD` 首次初始化（两个必须同时设置，只设一个会启动报错）；未提供时由首个注册者创建管理员。
 - 设置页通过受保护的 `/dashboard/api/settings/check-update` 手动检查 GitHub 最新 Release。内置升级公钥的已安装桌面版可继续下载、校验签名并原位安装；开发构建、CLI、Docker 与尚未进入升级通道的旧版保留发布页/手动覆盖路径。
 - 价格表通过受保护的 `GET /dashboard/api/pricing`、`PUT /dashboard/api/pricing/multipliers`、`POST /dashboard/api/pricing/refresh` 管理；只在用户点击刷新时访问 `https://opencode.ai/docs/go/`，不得自动轮询。
@@ -24,7 +25,7 @@
 - 容器固定以 UID/GID `10001` 运行并内置 `LICENSE`；Compose 透传可选的 `OCG_MANAGER_ENCRYPTION_KEY` 以支持显式密钥恢复，正常部署仍优先保留卷内 `.encryption-key`。
 - 下游访问根地址优先级：非空 `OCG_CLIENT_ROOT_URL` > SQLite 手工值 > 前端按生产 origin / 开发 Gateway 端口自动推导。环境变量覆盖只读且不得写回 SQLite。
 - Gemini 客户端使用 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`（也接受 `/v1/models/...`），可用 `x-goog-api-key` 鉴权；Gemini 只是客户端格式，Gateway 始终转换到已知模型的推荐上游协议。
-- 模型协议能力在 `protocol.rs` 的 `MODEL_PROTOCOLS` 硬编码：`preferred` 对齐官方 Go docs endpoint 表，`supported` 为测试账号探测结论。客户端协议 ∈ supported 时透传，否则转到 preferred；请求路径禁止试探协议（防双计费）。`gpt-5.6-luna` 仅 `supported = Responses`（Chat 入口须转换，勿再透传 Chat）。
+- 模型协议能力在 `protocol.rs` 的 `MODEL_PROTOCOLS` 硬编码：`preferred` 对齐官方 Go docs endpoint 表，`supported` 为测试账号探测结论。客户端协议 ∈ supported 时透传，否则转到 preferred；请求路径禁止试探协议（防双计费）。`grok-4.5` 仅 `supported = Responses`（Chat 入口须转换）。`gpt-5.6-luna` preferred 仍是 Responses，但 Chat 已可透传。
 - Free 模型策略：`AppConfig.free_model_routing` 为 `deny` / `explicit`（默认）/ `prefer`；Zen free 与 Go 使用独立 `cooldown_free_until`；prefer 仅映射 `deepseek-v4-flash`/`mimo-v2.5`，上下文粗估装得下才降级，free 耗尽回落 Go。
 - Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`；`sonnet`、`opus`、`haiku` 映射保存在 `AppConfig.claude_desktop_models`，由受保护的 `GET/PUT /dashboard/api/claude-desktop/models` 管理。
 - 托管账号（Beta）：`setup_step` 为 `google_account`（UI：登录身份，可跳过）→ `opencode_registration` → `payment` → `key_verification` → `ready`。`PATCH .../setup` 允许前进一格或回退更早步骤，禁止跳步与直接 `ready`。创建草稿可编辑邀请链接并写回 `opencode_invite_url`（`DEFAULT_OPENCODE_INVITE_URL` 为演示默认）。浏览器目标含 Google/GitHub 注册与登录、邀请 URL、控制台 `https://opencode.ai/auth`。
@@ -33,6 +34,7 @@
 ## 关键文件
 
 - `crates/ocg-core/src/gateway/`：OpenAI / Anthropic / Gemini 客户端协议路由与转换、Claude Desktop 别名改写、转发、选择器、冷却、费用统计。
+- `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略。
 - `crates/ocg-core/src/dashboard.rs`：当前 Vue 面板使用的 `/dashboard/api`。
 - `crates/ocg-core/src/console_usage.rs`：托管账号从浏览器 Profile 刷新 OpenCode Go 控制台用量。
 - `crates/ocg-core/src/db.rs`：SQLite schema、迁移、查询。
@@ -44,10 +46,10 @@
 - `src-tauri/src/tray.rs`：托盘菜单和 dashboard 打开逻辑。
 - `src/views/`：Dashboard / Accounts / Pricing / Applications / Logs / Settings。
 - `src/components/ManagedAccountWizard.vue`：托管注册向导（步骤回退、Google/GitHub）。
-- `src/views/application-guides.ts`：16 个应用教程注册表（改数量/协议/脱敏时同步测）。
+- `src/views/application-guides.ts`：16 个应用教程注册表和 `APPLICATION_MODEL_METADATA` 能力表（改数量/协议/脱敏/能力时同步测，并同步 USER 能力表；README 只保留推荐协议分组）。
 - `src/theme.ts` + `DESIGN.md`：主题 token 与设计规范；改色/字号时两边一起改。
 - `vite.config.ts`：`build.target`/`esbuild` 须支持 top-level await（`@novnc/novnc`）。
-- `docs/`：USER、MAINTAINER、防滥用声明、CONTRIBUTORS、文档索引。
+- `docs/`：USER（用户可见事实与模型表）、MAINTAINER、防滥用声明、CONTRIBUTORS、文档索引。根目录 README 是落地页，不是能力表/协议表的权威副本。
 
 ## 常用命令
 
@@ -99,13 +101,13 @@ git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json s
 ## 开发约束
 
 - 工作区可能是脏树。先看 `git status --short`，不要回退不是你改的内容。
-- Ponytail 原则优先：能删就删，能复用现有代码就复用，别加“以后可能用”的抽象。
+- 复杂度控制以完整交付为前提：优先复用现有代码和简单架构，但不得因此省略需求明确要求的流程、状态、错误处理或用户体验。
 - 不要新增 Tauri `invoke` 前端路径，除非你明确要恢复桌面 WebView 内调用；当前主路径是 HTTP dashboard。
 - 安全边界别省：Gateway 鉴权、key 存储混淆、HTTP URL 校验、冷却状态写入、SSE 透传都不能为了简化拿掉。
 - 不要重新引入远端同步；远端节点通过自己的 dashboard 管理。
 - `auto_start` 仅在 Windows release/安装版 Tauri 桌面进程中可用；HTTP dashboard 依据运行时能力显示开关，开发构建、CLI、Docker、macOS 和 Linux 不暴露该设置。
 - `show_dock_icon` 仅在 macOS Tauri 桌面进程中可用；关闭后保留菜单栏托盘图标。Windows、Linux、CLI 与 Docker 不暴露该设置。
-- 改文档时保持中英对、路径与 TOC 一致；用户可见事实以代码与 `docs/USER*.md` 为准。
+- 改文档时保持中英对、路径与 TOC 一致；用户可见事实以代码与 `docs/USER*.md` 为准。协议表跟 `protocol.rs`，能力表跟 `application-guides.ts`，由 USER 镜像。不要把透传矩阵、能力表或熔断长文再写回 README。
 - 改 UI 外观时遵循 `DESIGN.md`：六档字号、七主题、接入中心首屏、Key 命名；主题实现以 `src/theme.ts` 为准。
 
 ## 测试策略

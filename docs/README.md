@@ -11,8 +11,8 @@ OCG Manager 文档按读者拆分。先从产品 README 入手，再打开对应
 
 | Audience / 读者 | English | 简体中文 | Scope / 范围 |
 | --- | --- | --- | --- |
-| Product overview / 产品概览 | [../README.md](../README.md) | [../README.zh-CN.md](../README.zh-CN.md) | Highlights, download matrix, quick start, model table |
-| End users / 终端用户 | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | Install, dashboard, gateway behavior, CLI, Docker, limits, troubleshooting |
+| Product overview / 产品概览 | [../README.md](../README.md) | [../README.zh-CN.md](../README.zh-CN.md) | What it is, download matrix, 3-step start, pointers into USER |
+| End users / 终端用户 | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | Install, dashboard, model tables, gateway behavior, CLI, Docker, limits, troubleshooting |
 | Maintainers / 维护者 | [MAINTAINER.md](MAINTAINER.md) | [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) | Layout, dev loop, architecture, release matrix, CI, validation |
 | Anti-abuse / 防滥用 | [OPENCODE_GO_ANTI_ABUSE.md](OPENCODE_GO_ANTI_ABUSE.md) | [OPENCODE_GO_ANTI_ABUSE.zh-CN.md](OPENCODE_GO_ANTI_ABUSE.zh-CN.md) | Allowed use boundary for OpenCode-Go |
 | Contributors / 贡献者 | [CONTRIBUTORS.md](CONTRIBUTORS.md) | bilingual / 中英同页 | Community credits |
@@ -36,7 +36,8 @@ When docs disagree, prefer the source below and fix the other side.
 | Topic / 主题 | Source of truth / 权威来源 |
 | --- | --- |
 | User-visible product behavior / 用户可见行为 | Code + [USER.md](USER.md) / [USER.zh-CN.md](USER.zh-CN.md) |
-| Model preferred/supported protocols / 模型协议表 | `crates/ocg-core/src/gateway/protocol.rs` (`MODEL_PROTOCOLS`); README mirrors the table |
+| Model preferred/supported protocols / 模型协议表 | `crates/ocg-core/src/gateway/protocol.rs` (`MODEL_PROTOCOLS`); USER Protocol Conversion mirrors the table |
+| Model context/input/reasoning capabilities / 模型能力表 | `src/views/application-guides.ts` (`APPLICATION_MODEL_METADATA`); USER Model capabilities mirrors the table |
 | Dashboard HTTP API / 面板 API | `crates/ocg-core/src/dashboard.rs` |
 | Release artifacts, CI, signing / 发版与签名 | [MAINTAINER.md](MAINTAINER.md) / [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) + `docs/MAINTAINER` CI sections |
 | Current package version pins / 版本钉 | `package.json` / workspace `Cargo.toml` / `src-tauri/tauri.conf.json` / `compose.example.yaml` |
@@ -45,11 +46,13 @@ When docs disagree, prefer the source below and fix the other side.
 | Agent coding constraints / 助手约束 | [../AGENTS.md](../AGENTS.md) |
 
 Example version in Docker snippets should match the current release line
-(currently **v1.6.0**). Do not leave older patch pins in README / USER /
-`.env.example` after a version bump.
+(currently **v1.6.0**). Do not leave older patch pins in USER /
+`.env.example` / `compose.example.yaml` after a version bump. The product
+README no longer pins a clone tag.
 
 Docker 示例里的版本钉应与当前发版线一致（现为 **v1.6.0**）。升版后不要把
-README / USER / `.env.example` 留在旧 patch。
+USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
+不再钉 clone tag。
 
 ## Reading order / 阅读顺序
 
@@ -82,13 +85,20 @@ README / USER / `.env.example` 留在旧 patch。
 - Do not invent remote sync, Admin API, embeddings, or unsupported Gemini
   fields; known gaps live in USER Limits and MAINTAINER Known Debt / AGENTS.
 - After release version bumps, update Docker clone tags and image pins in
-  README, USER, `.env.example`, and `compose.example.yaml` together
+  USER, `.env.example`, and `compose.example.yaml` together
   (`pnpm run release:check` covers compose/package version alignment).
+- Keep the product README a landing page: identity, download, three-step
+  start, one curl, a Docker pointer, the preferred-protocol grouping, and
+  links into USER. Do not copy the passthrough matrix, capability table, or
+  circuit-breaker essay back into README.
 
 - 成对指南保持中英标题结构与 TOC 锚点一致。
 - 优先写短而可核验的事实，少写宣传句。
 - 不要编造远端同步、Admin API、embeddings 或未支持的 Gemini 字段；已知缺口见
   用户指南「限制」、维护者指南「已知缺口」与 `AGENTS.md`。
-- 发版升版后，同步更新 README、USER、`.env.example`、`compose.example.yaml`
-  中的 clone tag 与镜像钉（`pnpm run release:check` 会核对 compose/package
+- 发版升版后，同步更新 USER、`.env.example`、`compose.example.yaml` 中的
+  clone tag 与镜像钉（`pnpm run release:check` 会核对 compose/package
   版本一致性）。
+- 产品 README 只做入口：定位、下载、三步上手、一条 curl、Docker 指针、推荐
+  协议分组，以及指向用户指南的链接。不要把透传矩阵、能力表或熔断长文再写回
+  README。

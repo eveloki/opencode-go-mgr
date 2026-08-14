@@ -169,6 +169,7 @@ impl PricingSnapshot {
 pub fn embedded_seed() -> PricingSnapshot {
     let mut models = vec![
         seed_model("grok-4.5", "Grok 4.5", 2.0, 6.0, 0.3, None, 15.0),
+        seed_model("glm-5.3", "GLM-5.3", 1.4, 4.4, 0.26, None, 15.0),
         seed_model("glm-5.2", "GLM-5.2", 1.4, 4.4, 0.26, None, 60.0),
         seed_model("glm-5.1", "GLM-5.1", 1.4, 4.4, 0.26, None, 60.0),
         seed_tier_with_usage(
@@ -232,6 +233,15 @@ pub fn embedded_seed() -> PricingSnapshot {
             0.06,
             Some(0.375),
             60.0,
+        ),
+        seed_model(
+            "qwen3.8-max",
+            "Qwen3.8 Max",
+            2.0,
+            6.0,
+            0.25,
+            Some(2.5),
+            15.0,
         ),
         seed_model(
             "qwen3.7-max",
@@ -305,11 +315,11 @@ pub fn embedded_seed() -> PricingSnapshot {
     apply_official_pricing_policy(&mut models, MONTHLY_LIMIT);
     sort_models(&mut models);
     PricingSnapshot {
-        revision: format!("seed-2026-07-31-{ADJUSTMENT_POLICY_VERSION}"),
+        revision: format!("seed-2026-08-14-{ADJUSTMENT_POLICY_VERSION}"),
         activated_at: Utc::now().to_rfc3339(),
-        document_updated_at: "2026-07-31T00:00:00.000Z".to_string(),
+        document_updated_at: "2026-08-14T00:00:00.000Z".to_string(),
         source_url: SOURCE_URL.to_string(),
-        content_hash: "embedded-opencode-go-2026-07-31".to_string(),
+        content_hash: "embedded-opencode-go-2026-08-14".to_string(),
         limits: PricingLimits {
             window_5h: 12.0,
             window_week: 30.0,
@@ -419,8 +429,8 @@ fn seed_tier_with_usage(
     model
 }
 
-pub async fn fetch_official_snapshot() -> Result<PricingSnapshot> {
-    let client = reqwest::Client::builder()
+pub async fn fetch_official_snapshot(config: &crate::models::AppConfig) -> Result<PricingSnapshot> {
+    let client = crate::http_client::configured_builder(config)?
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .redirect(Policy::custom(same_source_redirect))
@@ -1288,7 +1298,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires live access to opencode.ai"]
     async fn live_official_document_still_matches_the_parser() {
-        let snapshot = fetch_official_snapshot().await.unwrap();
+        let snapshot = fetch_official_snapshot(&crate::models::AppConfig::default())
+            .await
+            .unwrap();
         assert_eq!(snapshot.source_url, super::SOURCE_URL);
         assert!(snapshot.models.len() >= 18);
     }

@@ -550,6 +550,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
   }>([
     ["grok-4.5", { contextWindow: 500_000, maxOutputTokens: 500_000, piInput: ["text", "image"], kimiCapabilities: ["thinking", "always_thinking", "image_in", "tool_use"] }],
     ["gpt-5.6-luna", { contextWindow: 1_050_000, maxOutputTokens: 128_000, piInput: ["text", "image"], kimiCapabilities: ["thinking", "image_in", "tool_use"] }],
+    ["glm-5.3", { contextWindow: 1_000_000, maxOutputTokens: 131_072, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
     ["glm-5.2", { contextWindow: 1_000_000, maxOutputTokens: 131_072, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
     ["glm-5.1", { contextWindow: 202_752, maxOutputTokens: 32_768, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
     ["kimi-k3", { contextWindow: 1_048_576, maxOutputTokens: 131_072, piInput: ["text", "image"], kimiCapabilities: ["thinking", "always_thinking", "image_in", "video_in", "tool_use"] }],
@@ -562,6 +563,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
     ["minimax-m2.7-highspeed", { contextWindow: 204_800, maxOutputTokens: 131_072, piInput: ["text"], kimiCapabilities: ["thinking", "always_thinking", "tool_use"] }],
     ["minimax-m2.5", { contextWindow: 204_800, maxOutputTokens: 65_536, piInput: ["text"], kimiCapabilities: ["thinking", "always_thinking", "tool_use"] }],
     ["minimax-m2.5-highspeed", { contextWindow: 204_800, maxOutputTokens: 65_536, piInput: ["text"], kimiCapabilities: ["thinking", "always_thinking", "tool_use"] }],
+    ["qwen3.8-max", { contextWindow: 1_000_000, maxOutputTokens: 131_072, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
     ["qwen3.7-max", { contextWindow: 1_000_000, maxOutputTokens: 65_536, piInput: ["text"], kimiCapabilities: ["thinking", "tool_use"] }],
     ["qwen3.7-plus", { contextWindow: 1_000_000, maxOutputTokens: 65_536, piInput: ["text", "image"], kimiCapabilities: ["thinking", "image_in", "tool_use"] }],
     ["qwen3.6-plus", { contextWindow: 1_000_000, maxOutputTokens: 65_536, piInput: ["text", "image"], kimiCapabilities: ["thinking", "image_in", "tool_use"] }],
@@ -626,6 +628,15 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
     xhigh: null,
     max: null,
   });
+  assert.deepEqual(piModels.get("glm-5.3")!.thinkingLevelMap, {
+    off: null,
+    minimal: null,
+    low: null,
+    medium: null,
+    high: "high",
+    xhigh: null,
+    max: "max",
+  });
   assert.deepEqual(piModels.get("glm-5.2")!.thinkingLevelMap, {
     off: null,
     minimal: null,
@@ -660,7 +671,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
       max: null,
     }, modelId);
   }
-  for (const modelId of ["minimax-m3", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"]) {
+  for (const modelId of ["minimax-m3", "qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"]) {
     assert.equal(piModels.get(modelId)!.compat, undefined, modelId);
     assert.deepEqual(piModels.get(modelId)!.thinkingLevelMap, { minimal: "low" }, modelId);
   }
@@ -684,6 +695,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
     );
   }
   assert.match(kimiTables.get("grok-4.5")!, /support_efforts = \["low","medium","high"\]\ndefault_effort = "high"/);
+  assert.match(kimiTables.get("glm-5.3")!, /support_efforts = \["high","max"\]\ndefault_effort = "max"/);
   assert.match(kimiTables.get("glm-5.2")!, /support_efforts = \["high","max"\]\ndefault_effort = "max"/);
   assert.match(kimiTables.get("kimi-k3")!, /support_efforts = \["max"\]\ndefault_effort = "max"/);
   for (const modelId of ["deepseek-v4-pro", "deepseek-v4-flash"]) {
@@ -904,7 +916,7 @@ test("dashboard and settings keep partial data safe", async () => {
   const app = await readFile(new URL("../App.vue", import.meta.url), "utf8");
 
   assert.match(dashboard, /Promise\.allSettled/);
-  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error' \|\| editingGatewayKey"/);
+  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| testingProxy \|\| proxyUrlPreview\.status === 'error' \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error' \|\| editingGatewayKey"/);
   assert.match(settings, /if \(!loaded\.value\) return/);
   assert.match(settings, /\{\{ maskedSettingsKey \}\}/);
   assert.doesNotMatch(settings, /v-model:value="config\.gateway_key"/);
@@ -1006,6 +1018,12 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(settings, /\{\{ automaticClientRootFeedback \}\}/);
   assert.match(settings, /config\.client_root_url/);
   assert.match(settings, /client_root_url_from_env: false/);
+  assert.match(settings, /proxy_mode: "auto"/);
+  assert.match(settings, /v-model:value="config\.proxy_mode"/);
+  assert.match(settings, /v-model:value="config\.proxy_url"/);
+  assert.match(settings, /tauriApi\.testProxy/);
+  assert.match(api, /request<ProxyTestResult>\("\/settings\/test-proxy"/);
+  assert.match(settingsMerge, /"proxy_mode"[\s\S]*"proxy_url"/);
   assert.match(settings, /get: \(\) => config\.value\.client_root_url,/);
   assert.match(settings, /:placeholder="config\.client_root_url_from_env \? '' : automaticClientRootUrls\.rootUrl"/);
   assert.doesNotMatch(settings, /config\.value\.client_root_url = resolveConnectionUrls/);
