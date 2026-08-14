@@ -404,6 +404,7 @@ fn extract_marker(text: &str) -> Option<String> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn probe_with_failover(
     client: &reqwest::Client,
     base: &str,
