@@ -16,6 +16,7 @@ the true / false circuit breakers, and protocol conversion actually work.
 - [The Dashboard](#the-dashboard)
   - [Connection Center](#connection-center)
   - [Application Guides](#application-guides)
+  - [Model capabilities](#model-capabilities)
   - [Accounts](#accounts)
   - [Pricing](#pricing)
   - [Logs](#logs)
@@ -358,6 +359,38 @@ dashboard page remains alive; a page reload resets this in-memory state.
 **Restore defaults** resets the active application's model selection and
 snippet drafts.
 
+### Model capabilities
+
+Application snippets use the verified limits below
+(`src/views/application-guides.ts`, 2026-08-14). Input is what OCG can
+actually carry. Protocol conversion is a separate table in the
+[README](../README.md#supported-models-and-protocols).
+
+| Model | Context | Output | Input | Reasoning | Tools | Efforts |
+| --- | ---: | ---: | --- | --- | :---: | --- |
+| `grok-4.5` | 500K | 500K | text, image | always | ✓ | low / medium / high (default high) |
+| `gpt-5.6-luna` | 1.05M | 128K | text, image | ✓ | ✓ | low / medium / high / max (default medium) |
+| `glm-5.3` | 1M | 128K | text | ✓ | ✓ | high / max (default max) |
+| `glm-5.2` | 1M | 128K | text | ✓ | ✓ | high / max (default max) |
+| `glm-5.1` | 198K | 32K | text | ✓ | ✓ | — |
+| `kimi-k3` | 1M | 128K | text, image, video | always | ✓ | max |
+| `kimi-k2.7-code` | 256K | 256K | text, image, video | always | ✓ | — |
+| `kimi-k2.6` | 256K | 64K | text, image, video | ✓ | ✓ | — |
+| `mimo-v2.5` | 1M | 128K | text, image, audio, video | ✓ | ✓ | — |
+| `mimo-v2.5-pro` | 1M | 128K | text | ✓ | ✓ | — |
+| `minimax-m3` | 1M | 128K | text, image | ✓ | ✓ | — |
+| `minimax-m2.7` | 200K | 128K | text | always | ✓ | — |
+| `minimax-m2.7-highspeed` | 200K | 128K | text | always | ✓ | — |
+| `minimax-m2.5` | 200K | 64K | text | always | ✓ | — |
+| `minimax-m2.5-highspeed` | 200K | 64K | text | always | ✓ | — |
+| `qwen3.8-max` | 1M | 128K | text | ✓ | ✓ | — |
+| `qwen3.7-max` | 1M | 64K | text | ✓ | ✓ | — |
+| `qwen3.7-plus` | 1M | 64K | text, image | ✓ | ✓ | — |
+| `qwen3.6-plus` | 1M | 64K | text, image | ✓ | ✓ | — |
+| `deepseek-v4-pro` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
+| `deepseek-v4-flash` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
+| `hy3` | 256K | 64K | text | ✓ | ✓ | low / high (default high) |
+
 Claude Desktop is the exception with durable model mappings: before its
 configuration is copied, the selected `sonnet`, `opus`, and `haiku` targets
 are saved to SQLite through the protected dashboard API. Omitted roles
@@ -606,9 +639,9 @@ preferred upstream protocol and the **response body** (or SSE stream) back to
 the client protocol. Conversion covers text, system instructions, images, tool
 calls and tool results, reasoning content, completion status, errors, and
 usage fields. Example: `glm-5.2` passthroughs Chat Completions, Responses, and
-Messages; `gpt-5.6-luna` is Responses-only and converts Chat / Messages / Gemini
-entries to Responses; `deepseek-v4-flash` is Chat-only and converts other client formats to
-Chat Completions.
+Messages; `grok-4.5` is Responses-only and converts Chat / Messages / Gemini
+entries to Responses; `gpt-5.6-luna` prefers Responses and also passthroughs
+Chat; `glm-5.3` is Chat-only.
 
 Unknown models keep the request's native Chat Completions or Messages
 protocol. Unknown models requested through Responses or Gemini, and unknown

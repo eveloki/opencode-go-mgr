@@ -114,25 +114,26 @@ Linux 服务器需要托管注册/官网登录时，至少预留 2 CPU、2 GiB �
 
 | 推荐上游协议 | 模型 |
 | --- | --- |
-| OpenAI Chat Completions | `grok-4.5`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3` |
-| OpenAI Responses | `gpt-5.6-luna` |
-| Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
+| OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3` |
+| OpenAI Responses | `grok-4.5`、`gpt-5.6-luna` |
+| Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
 
-透传矩阵（测试账号实测，2026-07-31）。✓ = 客户端协议原样转发；空 = 转换到该模型推荐协议。权威来源：`crates/ocg-core/src/gateway/protocol.rs` 的 `MODEL_PROTOCOLS`。
+透传矩阵（测试账号实测，2026-08-14）。✓ = 客户端协议原样转发；空 = 转换到该模型推荐协议。权威来源：`crates/ocg-core/src/gateway/protocol.rs` 的 `MODEL_PROTOCOLS`。
 
 | 模型 | 推荐 | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |
-| `grok-4.5` | Chat | ✓ | ✓ | |
+| `grok-4.5` | Responses | | ✓ | |
+| `glm-5.3` | Chat | ✓ | | |
 | `glm-5.2` | Chat | ✓ | ✓ | ✓ |
 | `glm-5.1` | Chat | ✓ | ✓ | ✓ |
 | `glm-5` | Chat | ✓ | ✓ | ✓ |
-| `gpt-5.6-luna` | Responses | | ✓ | |
-| `kimi-k3` | Chat | ✓ | | |
+| `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `kimi-k3` | Chat | ✓ | | ✓ |
 | `kimi-k2.7-code` | Chat | ✓ | | |
 | `kimi-k2.6` | Chat | ✓ | | |
 | `kimi-k2.5` | Chat | ✓ | | |
-| `deepseek-v4-pro` | Chat | ✓ | | |
-| `deepseek-v4-flash` | Chat | ✓ | | |
+| `deepseek-v4-pro` | Chat | ✓ | ✓ | ✓ |
+| `deepseek-v4-flash` | Chat | ✓ | ✓ | ✓ |
 | `mimo-v2.5` | Chat | ✓ | | |
 | `mimo-v2.5-pro` | Chat | ✓ | | |
 | `hy3` | Chat | ✓ | | |
@@ -141,10 +142,42 @@ Linux 服务器需要托管注册/官网登录时，至少预留 2 CPU、2 GiB �
 | `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
 | `minimax-m2.5` | Messages | ✓ | | ✓ |
 | `minimax-m2.5-highspeed` | Messages | ✓ | | ✓ |
+| `qwen3.8-max` | Messages | ✓ | | ✓ |
 | `qwen3.7-max` | Messages | ✓ | | ✓ |
 | `qwen3.7-plus` | Messages | ✓ | | ✓ |
 | `qwen3.6-plus` | Messages | ✓ | | ✓ |
 | `qwen3.5-plus` | Messages | ✓ | | ✓ |
+
+应用教程使用的有效限额与能力（`src/views/application-guides.ts`，2026-08-14
+核过）。输入列是 OCG 实际能带上的模态；`minimax-m3` 与 Qwen Plus 原生还支持
+视频，转换时会丢掉。
+
+| 模型 | 上下文 | 输出 | 输入 | 推理 | 工具 | 力度 |
+| --- | ---: | ---: | --- | --- | :---: | --- |
+| `grok-4.5` | 500K | 500K | 文本、图像 | 始终 | ✓ | low / medium / high（默认 high） |
+| `gpt-5.6-luna` | 1.05M | 128K | 文本、图像 | ✓ | ✓ | low / medium / high / max（默认 medium） |
+| `glm-5.3` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
+| `glm-5.2` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
+| `glm-5.1` | 198K | 32K | 文本 | ✓ | ✓ | — |
+| `kimi-k3` | 1M | 128K | 文本、图像、视频 | 始终 | ✓ | max |
+| `kimi-k2.7-code` | 256K | 256K | 文本、图像、视频 | 始终 | ✓ | — |
+| `kimi-k2.6` | 256K | 64K | 文本、图像、视频 | ✓ | ✓ | — |
+| `mimo-v2.5` | 1M | 128K | 文本、图像、音频、视频 | ✓ | ✓ | — |
+| `mimo-v2.5-pro` | 1M | 128K | 文本 | ✓ | ✓ | — |
+| `minimax-m3` | 1M | 128K | 文本、图像 | ✓ | ✓ | — |
+| `minimax-m2.7` | 200K | 128K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.7-highspeed` | 200K | 128K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.5` | 200K | 64K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.5-highspeed` | 200K | 64K | 文本 | 始终 | ✓ | — |
+| `qwen3.8-max` | 1M | 128K | 文本 | ✓ | ✓ | — |
+| `qwen3.7-max` | 1M | 64K | 文本 | ✓ | ✓ | — |
+| `qwen3.7-plus` | 1M | 64K | 文本、图像 | ✓ | ✓ | — |
+| `qwen3.6-plus` | 1M | 64K | 文本、图像 | ✓ | ✓ | — |
+| `deepseek-v4-pro` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
+| `deepseek-v4-flash` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
+| `hy3` | 256K | 64K | 文本 | ✓ | ✓ | low / high（默认 high） |
+
+显示取整：198K = 202,752；200K = 204,800；256K = 262,144；1M = 1,000,000 或 1,048,576。`glm-5.3` 暂用 GLM-5.2 家族限额，等 models.dev 单独公布后再改。
 
 - **Gemini 只是客户端格式**：`/v1beta/models/{model}:generateContent` 与
   `:streamGenerateContent`（也接受 `/v1/models/...`）会转换到所选模型的推荐

@@ -129,25 +129,26 @@ completion status, errors, and usage fields.
 
 | Preferred upstream | Models |
 | --- | --- |
-| OpenAI Chat Completions | `grok-4.5`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
-| OpenAI Responses | `gpt-5.6-luna` |
-| Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
+| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
+| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna` |
+| Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
-Passthrough matrix (live test-account probe, 2026-07-31). ✓ = client protocol is forwarded as-is; empty = converted to the model's preferred protocol. Source of truth: `MODEL_PROTOCOLS` in `crates/ocg-core/src/gateway/protocol.rs`.
+Passthrough matrix (live test-account probe, 2026-08-14). ✓ = client protocol is forwarded as-is; empty = converted to the model's preferred protocol. Source of truth: `MODEL_PROTOCOLS` in `crates/ocg-core/src/gateway/protocol.rs`.
 
 | Model | Preferred | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |
-| `grok-4.5` | Chat | ✓ | ✓ | |
+| `grok-4.5` | Responses | | ✓ | |
+| `glm-5.3` | Chat | ✓ | | |
 | `glm-5.2` | Chat | ✓ | ✓ | ✓ |
 | `glm-5.1` | Chat | ✓ | ✓ | ✓ |
 | `glm-5` | Chat | ✓ | ✓ | ✓ |
-| `gpt-5.6-luna` | Responses | | ✓ | |
-| `kimi-k3` | Chat | ✓ | | |
+| `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `kimi-k3` | Chat | ✓ | | ✓ |
 | `kimi-k2.7-code` | Chat | ✓ | | |
 | `kimi-k2.6` | Chat | ✓ | | |
 | `kimi-k2.5` | Chat | ✓ | | |
-| `deepseek-v4-pro` | Chat | ✓ | | |
-| `deepseek-v4-flash` | Chat | ✓ | | |
+| `deepseek-v4-pro` | Chat | ✓ | ✓ | ✓ |
+| `deepseek-v4-flash` | Chat | ✓ | ✓ | ✓ |
 | `mimo-v2.5` | Chat | ✓ | | |
 | `mimo-v2.5-pro` | Chat | ✓ | | |
 | `hy3` | Chat | ✓ | | |
@@ -156,10 +157,43 @@ Passthrough matrix (live test-account probe, 2026-07-31). ✓ = client protocol 
 | `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
 | `minimax-m2.5` | Messages | ✓ | | ✓ |
 | `minimax-m2.5-highspeed` | Messages | ✓ | | ✓ |
+| `qwen3.8-max` | Messages | ✓ | | ✓ |
 | `qwen3.7-max` | Messages | ✓ | | ✓ |
 | `qwen3.7-plus` | Messages | ✓ | | ✓ |
 | `qwen3.6-plus` | Messages | ✓ | | ✓ |
 | `qwen3.5-plus` | Messages | ✓ | | ✓ |
+
+Effective limits and capabilities used by application snippets
+(`src/views/application-guides.ts`, verified 2026-08-14). Input is what OCG
+can actually carry; `minimax-m3` and the Qwen Plus models are image-capable
+on the native side but video is dropped in conversion.
+
+| Model | Context | Output | Input | Reasoning | Tools | Efforts |
+| --- | ---: | ---: | --- | --- | :---: | --- |
+| `grok-4.5` | 500K | 500K | text, image | always | ✓ | low / medium / high (default high) |
+| `gpt-5.6-luna` | 1.05M | 128K | text, image | ✓ | ✓ | low / medium / high / max (default medium) |
+| `glm-5.3` | 1M | 128K | text | ✓ | ✓ | high / max (default max) |
+| `glm-5.2` | 1M | 128K | text | ✓ | ✓ | high / max (default max) |
+| `glm-5.1` | 198K | 32K | text | ✓ | ✓ | — |
+| `kimi-k3` | 1M | 128K | text, image, video | always | ✓ | max |
+| `kimi-k2.7-code` | 256K | 256K | text, image, video | always | ✓ | — |
+| `kimi-k2.6` | 256K | 64K | text, image, video | ✓ | ✓ | — |
+| `mimo-v2.5` | 1M | 128K | text, image, audio, video | ✓ | ✓ | — |
+| `mimo-v2.5-pro` | 1M | 128K | text | ✓ | ✓ | — |
+| `minimax-m3` | 1M | 128K | text, image | ✓ | ✓ | — |
+| `minimax-m2.7` | 200K | 128K | text | always | ✓ | — |
+| `minimax-m2.7-highspeed` | 200K | 128K | text | always | ✓ | — |
+| `minimax-m2.5` | 200K | 64K | text | always | ✓ | — |
+| `minimax-m2.5-highspeed` | 200K | 64K | text | always | ✓ | — |
+| `qwen3.8-max` | 1M | 128K | text | ✓ | ✓ | — |
+| `qwen3.7-max` | 1M | 64K | text | ✓ | ✓ | — |
+| `qwen3.7-plus` | 1M | 64K | text, image | ✓ | ✓ | — |
+| `qwen3.6-plus` | 1M | 64K | text, image | ✓ | ✓ | — |
+| `deepseek-v4-pro` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
+| `deepseek-v4-flash` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
+| `hy3` | 256K | 64K | text | ✓ | ✓ | low / high (default high) |
+
+Rounded display: 198K = 202,752; 200K = 204,800; 256K = 262,144; 1M = 1,000,000 or 1,048,576. `glm-5.3` uses the GLM-5.2 family limits until models.dev publishes a dedicated row.
 
 - **Gemini is a client-only format**: `/v1beta/models/{model}:generateContent`
   and `:streamGenerateContent` (plus `/v1/models/...` aliases) are converted

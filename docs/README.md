@@ -37,6 +37,7 @@ When docs disagree, prefer the source below and fix the other side.
 | --- | --- |
 | User-visible product behavior / 用户可见行为 | Code + [USER.md](USER.md) / [USER.zh-CN.md](USER.zh-CN.md) |
 | Model preferred/supported protocols / 模型协议表 | `crates/ocg-core/src/gateway/protocol.rs` (`MODEL_PROTOCOLS`); README mirrors the table |
+| Model context/input/reasoning capabilities / 模型能力表 | `src/views/application-guides.ts` (`APPLICATION_MODEL_METADATA`); README and USER mirror the table |
 | Dashboard HTTP API / 面板 API | `crates/ocg-core/src/dashboard.rs` |
 | Release artifacts, CI, signing / 发版与签名 | [MAINTAINER.md](MAINTAINER.md) / [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) + `docs/MAINTAINER` CI sections |
 | Current package version pins / 版本钉 | `package.json` / workspace `Cargo.toml` / `src-tauri/tauri.conf.json` / `compose.example.yaml` |

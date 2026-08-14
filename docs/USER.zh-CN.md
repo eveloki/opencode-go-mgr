@@ -15,6 +15,7 @@
 - [管理面板](#管理面板)
   - [接入中心](#接入中心)
   - [应用教程](#应用教程)
+  - [模型能力](#模型能力)
   - [账号](#账号)
   - [价格表](#价格表)
   - [日志](#日志)
@@ -311,6 +312,37 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 过的代码片段按应用分别缓存在当前页面里，刷新页面后重置。
 **恢复默认** 会重置当前应用的模型选择与片段草稿。
 
+### 模型能力
+
+应用教程片段使用下面这张核过的限额表（`src/views/application-guides.ts`，
+2026-08-14）。输入列是 OCG 实际能带上的模态。协议转换表见
+[README](../README.zh-CN.md#模型与协议)。
+
+| 模型 | 上下文 | 输出 | 输入 | 推理 | 工具 | 力度 |
+| --- | ---: | ---: | --- | --- | :---: | --- |
+| `grok-4.5` | 500K | 500K | 文本、图像 | 始终 | ✓ | low / medium / high（默认 high） |
+| `gpt-5.6-luna` | 1.05M | 128K | 文本、图像 | ✓ | ✓ | low / medium / high / max（默认 medium） |
+| `glm-5.3` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
+| `glm-5.2` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
+| `glm-5.1` | 198K | 32K | 文本 | ✓ | ✓ | — |
+| `kimi-k3` | 1M | 128K | 文本、图像、视频 | 始终 | ✓ | max |
+| `kimi-k2.7-code` | 256K | 256K | 文本、图像、视频 | 始终 | ✓ | — |
+| `kimi-k2.6` | 256K | 64K | 文本、图像、视频 | ✓ | ✓ | — |
+| `mimo-v2.5` | 1M | 128K | 文本、图像、音频、视频 | ✓ | ✓ | — |
+| `mimo-v2.5-pro` | 1M | 128K | 文本 | ✓ | ✓ | — |
+| `minimax-m3` | 1M | 128K | 文本、图像 | ✓ | ✓ | — |
+| `minimax-m2.7` | 200K | 128K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.7-highspeed` | 200K | 128K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.5` | 200K | 64K | 文本 | 始终 | ✓ | — |
+| `minimax-m2.5-highspeed` | 200K | 64K | 文本 | 始终 | ✓ | — |
+| `qwen3.8-max` | 1M | 128K | 文本 | ✓ | ✓ | — |
+| `qwen3.7-max` | 1M | 64K | 文本 | ✓ | ✓ | — |
+| `qwen3.7-plus` | 1M | 64K | 文本、图像 | ✓ | ✓ | — |
+| `qwen3.6-plus` | 1M | 64K | 文本、图像 | ✓ | ✓ | — |
+| `deepseek-v4-pro` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
+| `deepseek-v4-flash` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
+| `hy3` | 256K | 64K | 文本 | ✓ | ✓ | low / high（默认 high） |
+
 Claude Desktop 是例外，它的模型映射是持久化的：复制配置前，选中的 `sonnet`、
 `opus`、`haiku` 目标模型会通过受保护的面板 API 保存到 SQLite。留空的角色回退
 到第一个已配置模型，三个角色不能同时为空。它的恢复操作回到当前页面已加载或
@@ -499,8 +531,8 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 **请求体** 转到推荐上游协议，再把 **响应体**（或 SSE 流）转回客户端协议，覆盖
 文本、system、图像、工具调用与工具结果、推理内容、完成状态、错误、usage 字段。
   例如 `glm-5.2` 对 Chat Completions / Responses / Messages 均透传；
-  `gpt-5.6-luna` 仅 Responses，Chat / Messages / Gemini 入口会转到 Responses；
-  `deepseek-v4-flash` 仅 Chat，其他客户端协议转到 Chat Completions。
+  `grok-4.5` 仅 Responses，Chat / Messages / Gemini 入口会转到 Responses；
+  `gpt-5.6-luna` 推荐 Responses，Chat 也可透传；`glm-5.3` 仅 Chat。
 
 Chat Completions 与 Messages 的未知模型保留客户端选择的协议；Responses 与
 Gemini 上的未知模型、未知 Claude Desktop 别名直接 `400` 拒绝——Gateway 不会靠

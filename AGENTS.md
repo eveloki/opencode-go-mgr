@@ -25,7 +25,7 @@
 - 容器固定以 UID/GID `10001` 运行并内置 `LICENSE`；Compose 透传可选的 `OCG_MANAGER_ENCRYPTION_KEY` 以支持显式密钥恢复，正常部署仍优先保留卷内 `.encryption-key`。
 - 下游访问根地址优先级：非空 `OCG_CLIENT_ROOT_URL` > SQLite 手工值 > 前端按生产 origin / 开发 Gateway 端口自动推导。环境变量覆盖只读且不得写回 SQLite。
 - Gemini 客户端使用 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`（也接受 `/v1/models/...`），可用 `x-goog-api-key` 鉴权；Gemini 只是客户端格式，Gateway 始终转换到已知模型的推荐上游协议。
-- 模型协议能力在 `protocol.rs` 的 `MODEL_PROTOCOLS` 硬编码：`preferred` 对齐官方 Go docs endpoint 表，`supported` 为测试账号探测结论。客户端协议 ∈ supported 时透传，否则转到 preferred；请求路径禁止试探协议（防双计费）。`gpt-5.6-luna` 仅 `supported = Responses`（Chat 入口须转换，勿再透传 Chat）。
+- 模型协议能力在 `protocol.rs` 的 `MODEL_PROTOCOLS` 硬编码：`preferred` 对齐官方 Go docs endpoint 表，`supported` 为测试账号探测结论。客户端协议 ∈ supported 时透传，否则转到 preferred；请求路径禁止试探协议（防双计费）。`grok-4.5` 仅 `supported = Responses`（Chat 入口须转换）。`gpt-5.6-luna` preferred 仍是 Responses，但 Chat 已可透传。
 - Free 模型策略：`AppConfig.free_model_routing` 为 `deny` / `explicit`（默认）/ `prefer`；Zen free 与 Go 使用独立 `cooldown_free_until`；prefer 仅映射 `deepseek-v4-flash`/`mimo-v2.5`，上下文粗估装得下才降级，free 耗尽回落 Go。
 - Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`；`sonnet`、`opus`、`haiku` 映射保存在 `AppConfig.claude_desktop_models`，由受保护的 `GET/PUT /dashboard/api/claude-desktop/models` 管理。
 - 托管账号（Beta）：`setup_step` 为 `google_account`（UI：登录身份，可跳过）→ `opencode_registration` → `payment` → `key_verification` → `ready`。`PATCH .../setup` 允许前进一格或回退更早步骤，禁止跳步与直接 `ready`。创建草稿可编辑邀请链接并写回 `opencode_invite_url`（`DEFAULT_OPENCODE_INVITE_URL` 为演示默认）。浏览器目标含 Google/GitHub 注册与登录、邀请 URL、控制台 `https://opencode.ai/auth`。
@@ -46,7 +46,7 @@
 - `src-tauri/src/tray.rs`：托盘菜单和 dashboard 打开逻辑。
 - `src/views/`：Dashboard / Accounts / Pricing / Applications / Logs / Settings。
 - `src/components/ManagedAccountWizard.vue`：托管注册向导（步骤回退、Google/GitHub）。
-- `src/views/application-guides.ts`：16 个应用教程注册表（改数量/协议/脱敏时同步测）。
+- `src/views/application-guides.ts`：16 个应用教程注册表和 `APPLICATION_MODEL_METADATA` 能力表（改数量/协议/脱敏/能力时同步测，并同步 README / USER 能力表）。
 - `src/theme.ts` + `DESIGN.md`：主题 token 与设计规范；改色/字号时两边一起改。
 - `vite.config.ts`：`build.target`/`esbuild` 须支持 top-level await（`@novnc/novnc`）。
 - `docs/`：USER、MAINTAINER、防滥用声明、CONTRIBUTORS、文档索引。

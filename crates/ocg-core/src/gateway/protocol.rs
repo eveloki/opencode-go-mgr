@@ -110,8 +110,10 @@ struct ModelProtocol {
     supported: &'static [ApiFormat],
 }
 
-// Probe matrix (direct OpenCode-Go, 2026-07-31, test account):
-// preferred stays on the official docs endpoint; supported is live 2xx shape.
+// Probe matrix (direct OpenCode-Go, 2026-08-14, test account):
+// preferred stays on the official docs endpoint; supported is live stream +
+// non-stream 2xx with a usable body. 5-turn preferred conversations completed
+// 5/5 HTTP OK on every paid model that accepted its preferred endpoint.
 const CHAT_ONLY: &[ApiFormat] = &[ApiFormat::ChatCompletions];
 const RESPONSES_ONLY: &[ApiFormat] = &[ApiFormat::Responses];
 const CHAT_AND_RESPONSES: &[ApiFormat] = &[ApiFormat::ChatCompletions, ApiFormat::Responses];
@@ -125,8 +127,13 @@ const ALL_THREE: &[ApiFormat] = &[
 const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "grok-4.5",
+        preferred: ApiFormat::Responses,
+        supported: RESPONSES_ONLY,
+    },
+    ModelProtocol {
+        id: "glm-5.3",
         preferred: ApiFormat::ChatCompletions,
-        supported: CHAT_AND_RESPONSES,
+        supported: CHAT_ONLY,
     },
     ModelProtocol {
         id: "glm-5.2",
@@ -146,12 +153,12 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "gpt-5.6-luna",
         preferred: ApiFormat::Responses,
-        supported: RESPONSES_ONLY,
+        supported: CHAT_AND_RESPONSES,
     },
     ModelProtocol {
         id: "kimi-k3",
         preferred: ApiFormat::ChatCompletions,
-        supported: CHAT_ONLY,
+        supported: CHAT_AND_MESSAGES,
     },
     ModelProtocol {
         id: "kimi-k2.7-code",
@@ -171,12 +178,12 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     ModelProtocol {
         id: "deepseek-v4-pro",
         preferred: ApiFormat::ChatCompletions,
-        supported: CHAT_ONLY,
+        supported: ALL_THREE,
     },
     ModelProtocol {
         id: "deepseek-v4-flash",
         preferred: ApiFormat::ChatCompletions,
-        supported: CHAT_ONLY,
+        supported: ALL_THREE,
     },
     ModelProtocol {
         id: "mimo-v2.5",
@@ -215,6 +222,11 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
     },
     ModelProtocol {
         id: "minimax-m2.5-highspeed",
+        preferred: ApiFormat::Messages,
+        supported: CHAT_AND_MESSAGES,
+    },
+    ModelProtocol {
+        id: "qwen3.8-max",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
     },
@@ -3328,6 +3340,7 @@ mod tests {
             supported_model_ids().collect::<Vec<_>>(),
             [
                 "grok-4.5",
+                "glm-5.3",
                 "glm-5.2",
                 "glm-5.1",
                 "glm-5",
@@ -3346,6 +3359,7 @@ mod tests {
                 "minimax-m2.7-highspeed",
                 "minimax-m2.5",
                 "minimax-m2.5-highspeed",
+                "qwen3.8-max",
                 "qwen3.7-max",
                 "qwen3.7-plus",
                 "qwen3.6-plus",
@@ -3364,7 +3378,7 @@ mod tests {
 
     #[test]
     fn multi_protocol_models_passthrough_supported_formats() {
-        // deepseek-v4-flash: live probe is Chat-only; Responses converts to preferred Chat.
+        // deepseek-v4-flash: 2026-08-14 probe accepts Chat, Responses, and Messages.
         let flash_responses = prepare_request(
             ApiFormat::Responses,
             bytes(json!({
@@ -3373,8 +3387,8 @@ mod tests {
                 "store": false
             })),
         )
-        .expect("flash routes Responses via preferred Chat");
-        assert_eq!(flash_responses.upstream, ApiFormat::ChatCompletions);
+        .expect("flash passthroughs Responses");
+        assert_eq!(flash_responses.upstream, ApiFormat::Responses);
 
         let glm_responses = prepare_request(
             ApiFormat::Responses,
@@ -3427,7 +3441,7 @@ mod tests {
             })),
         )
         .unwrap();
-        assert_eq!(luna_chat.upstream, ApiFormat::Responses);
+        assert_eq!(luna_chat.upstream, ApiFormat::ChatCompletions);
 
         let luna_responses = prepare_request(
             ApiFormat::Responses,
@@ -3453,19 +3467,51 @@ mod tests {
     }
 
     #[test]
-    fn grok_and_kimi_k3_route_to_their_official_chat_endpoint() {
-        for model in ["grok-4.5", "kimi-k3"] {
-            let plan = prepare_request(
-                ApiFormat::Messages,
-                bytes(json!({
-                    "model": model,
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "max_tokens": 8
-                })),
-            )
-            .unwrap();
-            assert_eq!(plan.upstream, ApiFormat::ChatCompletions, "{model}");
-        }
+    fn grok_converts_chat_and_messages_to_official_responses() {
+        let chat = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "grok-4.5",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .unwrap();
+        assert_eq!(chat.upstream, ApiFormat::Responses);
+
+        let messages = prepare_request(
+            ApiFormat::Messages,
+            bytes(json!({
+                "model": "grok-4.5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8
+            })),
+        )
+        .unwrap();
+        assert_eq!(messages.upstream, ApiFormat::Responses);
+    }
+
+    #[test]
+    fn kimi_k3_passthroughs_chat_and_messages() {
+        let chat = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "kimi-k3",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .unwrap();
+        assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
+
+        let messages = prepare_request(
+            ApiFormat::Messages,
+            bytes(json!({
+                "model": "kimi-k3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8
+            })),
+        )
+        .unwrap();
+        assert_eq!(messages.upstream, ApiFormat::Messages);
     }
 
     #[test]
@@ -3771,9 +3817,9 @@ mod tests {
     }
 
     #[test]
-    fn messages_request_routes_deepseek_to_chat_with_tools_and_usage() {
+    fn messages_request_routes_chat_only_model_with_tools_and_usage() {
         let request = json!({
-            "model": "deepseek-v4-flash",
+            "model": "hy3",
             "stream": true,
             "system": [{"type":"text","text":"be terse"}],
             "messages": [
@@ -3814,7 +3860,7 @@ mod tests {
         let plan = prepare_request(
             ApiFormat::Responses,
             bytes(json!({
-                "model":"deepseek-v4-pro",
+                "model":"hy3",
                 "input":"hello",
                 "store":false,
                 "reasoning":{"effort":"none"}
@@ -3876,7 +3922,7 @@ mod tests {
             (
                 ApiFormat::Responses,
                 json!({
-                    "model":"deepseek-v4-flash","input":"hi","store":false,
+                    "model":"hy3","input":"hi","store":false,
                     "text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object"}}}
                 }),
                 "text.format",
@@ -3884,7 +3930,7 @@ mod tests {
             (
                 ApiFormat::Messages,
                 json!({
-                    "model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],
+                    "model":"hy3","messages":[{"role":"user","content":"hi"}],
                     "output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}
                 }),
                 "output_config.format",
@@ -3946,7 +3992,7 @@ mod tests {
             (
                 ApiFormat::Messages,
                 json!({
-                    "model":"deepseek-v4-pro",
+                    "model":"hy3",
                     "messages":[
                         {"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"f","input":{}}]},
                         {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"}]}
@@ -3956,7 +4002,7 @@ mod tests {
             (
                 ApiFormat::Responses,
                 json!({
-                    "model":"deepseek-v4-pro",
+                    "model":"hy3",
                     "store":false,
                     "input":[
                         {"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},
@@ -4030,7 +4076,7 @@ mod tests {
     #[test]
     fn responses_request_routes_known_model_and_unknown_is_rejected() {
         let request = json!({
-            "model":"deepseek-v4-pro",
+            "model":"hy3",
             "store":false,
             "instructions":"system",
             "input":[
@@ -4129,7 +4175,7 @@ mod tests {
         let plan = prepare_request(
             ApiFormat::Responses,
             bytes(json!({
-                "model":"deepseek-v4-pro",
+                "model":"hy3",
                 "store":false,
                 "instructions":"instructions",
                 "input":[
@@ -4168,7 +4214,7 @@ mod tests {
         let plan = prepare_request(
             ApiFormat::Messages,
             bytes(json!({
-                "model":"deepseek-v4-pro",
+                "model":"hy3",
                 "messages":[
                     {"role":"developer","content":"dev"},
                     {"role":"user","content":"hello"}
@@ -4729,7 +4775,7 @@ mod tests {
         ]);
         let chat = prepare_request(
             ApiFormat::Responses,
-            bytes(json!({"model":"deepseek-v4-pro","input":input,"store":false})),
+            bytes(json!({"model":"hy3","input":input,"store":false})),
         )
         .expect("Chat-native history converts");
         assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
