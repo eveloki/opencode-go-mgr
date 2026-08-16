@@ -317,11 +317,56 @@ pub enum ProxyMode {
 
 pub const DEFAULT_OPENCODE_INVITE_URL: &str = "https://opencode.ai/go?ref=68XPB6NP8V";
 
+/// Sentinel filter value selecting forward logs without a client key
+/// (written before multi-key support or not yet backfilled).
+pub const UNATTRIBUTED_KEY_FILTER: &str = "__unattributed__";
+
+/// One client-facing gateway key. `key` holds the plaintext value and is
+/// cleared on soft delete so deleted credentials never resurface in
+/// management APIs while the record stays resolvable for log attribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GatewayKeyEntry {
+    pub id: String,
+    pub name: String,
+    pub key: String,
+    pub enabled: bool,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Default for GatewayKeyEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            key: String::new(),
+            enabled: true,
+            deleted_at: None,
+            created_at: Utc::now(),
+        }
+    }
+}
+
+impl GatewayKeyEntry {
+    pub fn is_active(&self) -> bool {
+        self.deleted_at.is_none()
+    }
+
+    pub fn authenticates(&self) -> bool {
+        self.enabled && self.is_active() && !self.key.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub gateway_port: u16,
     pub gateway_key: String,
+    /// All gateway keys; the first non-deleted entry is the primary key and
+    /// `gateway_key` always mirrors its value for legacy readers.
+    #[serde(default)]
+    pub gateway_keys: Vec<GatewayKeyEntry>,
     pub upstream_base_url: String,
     pub proxy_mode: ProxyMode,
     pub proxy_url: String,
@@ -344,6 +389,7 @@ impl Default for AppConfig {
         Self {
             gateway_port: 9042,
             gateway_key: String::new(),
+            gateway_keys: Vec::new(),
             upstream_base_url: "https://opencode.ai/zen/go".to_string(),
             proxy_mode: ProxyMode::Auto,
             proxy_url: String::new(),
@@ -628,6 +674,10 @@ pub struct ForwardLog {
     pub model: String,
     pub account_id: String,
     pub account_name: String,
+    #[serde(default)]
+    pub client_key_id: Option<String>,
+    #[serde(default)]
+    pub client_key_name: Option<String>,
     pub status: String,
     pub http_status: Option<i32>,
     pub prompt_tokens: i64,
@@ -695,6 +745,15 @@ pub struct ForwardLogPage {
     pub summary: ForwardLogSummary,
 }
 
+/// One distinct client key observed in forward logs (see
+/// `Database::list_forward_log_keys`). Covers enabled, disabled, and
+/// soft-deleted keys plus dangling ids left by a downgrade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardLogClientKey {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageWindow {
     pub account_id: String,
@@ -725,7 +784,12 @@ pub enum UsageWindowKind {
 pub struct GatewayStatus {
     pub running: bool,
     pub port: u16,
+    /// Primary key value; kept for legacy consumers.
     pub key: String,
+    #[serde(default)]
+    pub keys: Vec<GatewayKeyEntry>,
+    #[serde(default)]
+    pub primary_key_id: String,
     pub upstream_base_url: String,
     pub last_error: Option<String>,
 }
@@ -755,7 +819,7 @@ mod tests {
     use super::{
         AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
         CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL,
-        FreeModelRouting, ProxyMode, RoutingMode, normalize_opencode_invite_url,
+        FreeModelRouting, GatewayKeyEntry, ProxyMode, RoutingMode, normalize_opencode_invite_url,
         normalize_proxy_url, normalize_purchase_date, purchase_expires_on,
     };
 
@@ -882,6 +946,62 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn legacy_config_json_without_gateway_keys_deserializes_to_empty_list() {
+        let legacy: AppConfig = serde_json::from_value(serde_json::json!({
+            "gateway_key": "ocg-legacy-key",
+            "upstream_base_url": "https://opencode.ai/zen/go"
+        }))
+        .expect("legacy config without gateway_keys should deserialize");
+        assert_eq!(legacy.gateway_key, "ocg-legacy-key");
+        assert!(legacy.gateway_keys.is_empty());
+    }
+
+    #[test]
+    fn gateway_keys_round_trip_and_mirror_field_both_serialize() {
+        let entry = GatewayKeyEntry {
+            id: "key-1".into(),
+            name: "Primary".into(),
+            key: "ocg-abc-def".into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: chrono::Utc::now(),
+        };
+        let config = AppConfig {
+            gateway_key: "ocg-abc-def".into(),
+            gateway_keys: vec![entry],
+            ..AppConfig::default()
+        };
+        let encoded = serde_json::to_value(&config).expect("config should serialize");
+        assert_eq!(encoded["gateway_key"], "ocg-abc-def");
+        assert_eq!(encoded["gateway_keys"][0]["id"], "key-1");
+        let decoded: AppConfig = serde_json::from_value(encoded).expect("config should round-trip");
+        assert_eq!(decoded.gateway_keys, config.gateway_keys);
+        assert_eq!(decoded.gateway_key, decoded.gateway_keys[0].key);
+    }
+
+    #[test]
+    fn gateway_key_entry_defaults_are_enabled_without_deleted_at() {
+        let entry: GatewayKeyEntry = serde_json::from_value(serde_json::json!({
+            "id": "key-1",
+            "name": "Primary",
+            "key": "ocg-abc-def",
+            "created_at": "2026-08-16T00:00:00Z"
+        }))
+        .expect("entry without lifecycle fields should deserialize");
+        assert!(entry.enabled);
+        assert!(entry.deleted_at.is_none());
+        assert!(entry.is_active());
+        assert!(entry.authenticates());
+
+        let deleted = GatewayKeyEntry {
+            deleted_at: Some(chrono::Utc::now()),
+            ..entry
+        };
+        assert!(!deleted.is_active());
+        assert!(!deleted.authenticates());
     }
 
     #[test]

@@ -415,6 +415,9 @@ impl CoreStateInner {
             .map_err(anyhow::Error::msg)?;
         config.proxy_url = normalize_proxy_url(config.proxy_mode, &config.proxy_url)
             .map_err(anyhow::Error::msg)?;
+        // Enforce the key invariants (primary exists, >=1 enabled key,
+        // gateway_key mirrors the primary value) on every write path.
+        crate::gateway_keys::normalize(&mut config);
         config.validate().map_err(anyhow::Error::msg)?;
         let http_client = crate::http_client::build(&config)?;
         {
@@ -424,9 +427,18 @@ impl CoreStateInner {
         let should_reset_routing = {
             let mut current_config = self.config.lock();
             let mut current_client = self.http_client.lock();
+            // Only authenticating key values matter for sticky routing: a
+            // reset is needed exactly when a value that used to authenticate
+            // no longer does (regenerate, disable, delete). Renaming or
+            // purely adding keys must not clear live sessions.
+            let previous_values = crate::gateway_keys::enabled_key_values(&current_config);
+            let next_values = crate::gateway_keys::enabled_key_values(&config);
+            let lost_authenticating_value = previous_values
+                .iter()
+                .any(|value| next_values.binary_search(value).is_err());
             let should_reset = current_config.routing_mode != config.routing_mode
                 || current_config.conversation_sticky != config.conversation_sticky
-                || current_config.gateway_key != config.gateway_key;
+                || lost_authenticating_value;
             *current_config = config;
             *current_client = http_client;
             should_reset
@@ -527,6 +539,10 @@ fn load_config(db: &Database) -> crate::Result<(AppConfig, bool)> {
     }
     if config.gateway_key.is_empty() {
         config.gateway_key = generate_gateway_key();
+    }
+    // Multi-key migration: a legacy single key becomes the primary entry;
+    // an empty list gets one minted so the gateway always has a credential.
+    if crate::gateway_keys::normalize(&mut config) {
         needs_persist = true;
     }
     Ok((config, needs_persist))
@@ -994,6 +1010,138 @@ mod tests {
         let status = state.desktop_update_status();
         assert_eq!(status.phase, DesktopUpdatePhase::Failed);
         assert_eq!(status.error.as_deref(), Some("starter failed"));
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn legacy_single_key_migrates_to_primary_entry_and_persists() {
+        let dir = temp_data_dir("gateway-key-migration");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let legacy = serde_json::json!({
+            "gateway_port": 9042,
+            "gateway_key": "ocg-legacy-key",
+            "upstream_base_url": "https://opencode.ai/zen/go",
+        });
+        db.set_setting("config", &legacy.to_string())
+            .expect("legacy config should persist");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+
+        let config = state.config();
+        assert_eq!(config.gateway_key, "ocg-legacy-key");
+        assert_eq!(config.gateway_keys.len(), 1);
+        assert_eq!(config.gateway_keys[0].key, "ocg-legacy-key");
+        assert_eq!(config.gateway_keys[0].name, "Primary");
+        assert!(config.gateway_keys[0].authenticates());
+        // The migrated entry must survive a restart (persisted, not just
+        // in-memory normalization).
+        let stored = state
+            .db
+            .lock()
+            .get_setting("config")
+            .expect("stored config should be readable")
+            .expect("stored config should exist");
+        assert!(stored.contains("gateway_keys"));
+        assert!(stored.contains("ocg-legacy-key"));
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn empty_config_generates_a_primary_key_entry() {
+        let dir = temp_data_dir("gateway-key-fresh");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+
+        let config = state.config();
+        assert!(!config.gateway_key.is_empty());
+        assert_eq!(config.gateway_keys.len(), 1);
+        assert_eq!(config.gateway_keys[0].key, config.gateway_key);
+        assert!(config.gateway_keys[0].authenticates());
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn routing_resets_only_when_enabled_key_values_change() {
+        use crate::crypto::{KeyCipher, StaticKeyCipher};
+        use crate::gateway_keys;
+        use crate::models::{Account, RoutingMode};
+        use std::sync::Arc;
+
+        fn test_account(cipher: &Arc<dyn KeyCipher + Send + Sync>, id: &str) -> Account {
+            Account {
+                id: id.into(),
+                name: id.into(),
+                username: None,
+                password_cipher: None,
+                key_cipher: cipher.encrypt(id).unwrap(),
+                enabled: true,
+                account_type: crate::models::AccountType::Key,
+                setup_step: crate::models::AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        let dir = temp_data_dir("routing-key-values");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state =
+            CoreStateInner::new(db, dir.clone(), cipher.clone()).expect("state should initialize");
+        let accounts = vec![test_account(&cipher, "a"), test_account(&cipher, "b")];
+        let advance = || {
+            state
+                .routing
+                .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
+                .unwrap()
+                .id
+                .clone()
+        };
+
+        assert_eq!(advance(), "a");
+
+        // Adding and renaming keys keeps sticky routing state intact: with the
+        // cursor after "a", the next pick stays "b"; a reset would restart
+        // at "a".
+        let mut config = state.config();
+        let added = gateway_keys::create_key(&mut config, "Laptop").unwrap();
+        state.set_config(config).expect("new key should save");
+        assert_eq!(advance(), "b", "adding a key must not reset routing");
+
+        assert_eq!(advance(), "a");
+        let mut config = state.config();
+        gateway_keys::rename_key(&mut config, &added.id, "Deck").unwrap();
+        state.set_config(config).expect("rename should save");
+        assert_eq!(advance(), "b", "renaming a key must not reset routing");
+
+        // Regenerating a key changes the authenticating value set and resets.
+        assert_eq!(advance(), "a");
+        let mut config = state.config();
+        let primary_id = gateway_keys::primary_key(&config).unwrap().id.clone();
+        gateway_keys::regenerate_key(&mut config, &primary_id).unwrap();
+        state.set_config(config).expect("regenerate should save");
+        assert_eq!(
+            advance(),
+            "a",
+            "the cursor restarts after the enabled key value set changes"
+        );
 
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");

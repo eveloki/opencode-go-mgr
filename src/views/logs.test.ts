@@ -307,7 +307,7 @@ test("logs view shows top stats, extra filters, sorting, and a useful empty stat
   assert.ok(forwardLoad.indexOf("forwardLogs.value = []") < forwardLoad.indexOf("await tauriApi.getForwardLogs"));
   assert.ok(forwardLoad.indexOf("forwardTotals.value = emptySummary()") < forwardLoad.indexOf("await tauriApi.getForwardLogs"));
   assert.match(forwardLoad, /catch \(e\)[\s\S]*request === forwardRequest[\s\S]*forwardLogs\.value = \[\]/);
-  assert.match(source, /Promise\.all\(\[loadForwardLogs\(\), loadForwardLogModels\(\)\]\)/);
+  assert.match(source, /Promise\.all\(\[loadForwardLogs\(\), loadForwardLogModels\(\), loadForwardLogKeys\(\)\]\)/);
   assert.match(source, /row\.cost_state === "legacy_estimate"/);
   assert.match(source, /success_unpriced: \{ label: t\("无价格"\)/);
   assert.match(source, /outcome_unknown: \{ label: t\("结果未知"\)/);
@@ -400,4 +400,26 @@ test("rolling log presets resolve against the current refresh time", async () =>
   const clearFilters = source.slice(source.indexOf("function clearFilters"), source.indexOf("function toggleSortOrder"));
   assert.match(clearFilters, /activePreset\.value = "all"/);
   assert.match(clearFilters, /timeRange\.value = null/);
+});
+
+test("forward logs can be filtered by client key including the unattributed option", async () => {
+  const source = await readFile(new URL("./Logs.vue", import.meta.url), "utf8");
+  const template = source.slice(source.indexOf("<template>"), source.indexOf("<script setup"));
+
+  // Selector data comes from the log table so deleted/dangling ids stay listed.
+  assert.match(template, /v-model:value="keyFilter"/);
+  assert.match(source, /clientKeys\.value = await tauriApi\.getForwardLogKeys\(\)/);
+  assert.match(source, /label: t\("未归因"\), value: UNATTRIBUTED_KEY_FILTER/);
+  assert.match(source, /key_id: keyFilter\.value/);
+  // Filter changes participate in pagination reset + query state sync.
+  const forwardFilterWatch = source.slice(
+    source.indexOf("[statusFilter, accountFilter"),
+    source.indexOf("watch(requestIdFilter"),
+  );
+  assert.match(forwardFilterWatch, /keyFilter/);
+  assert.match(source, /url\.searchParams\.set\("key", keyFilter\.value\)/);
+  const clearFilters = source.slice(source.indexOf("function clearFilters"), source.indexOf("function toggleSortOrder"));
+  assert.match(clearFilters, /keyFilter\.value = ""/);
+  // Pre-upgrade usage lands on the primary key; the note explains that.
+  assert.match(template, /升级前用量统一计入主 Key/);
 });

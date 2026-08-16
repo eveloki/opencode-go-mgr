@@ -53,10 +53,20 @@ export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 export type FreeModelRouting = "deny" | "explicit" | "prefer";
 export type ProxyMode = "auto" | "manual" | "direct";
 
+export interface GatewayKeyEntry {
+  id: string;
+  name: string;
+  key: string;
+  enabled: boolean;
+  deleted_at: string | null;
+  created_at: string;
+}
+
 export interface AppConfig {
   revision: number;
   gateway_port: number;
   gateway_key: string;
+  gateway_keys?: GatewayKeyEntry[] | null;
   upstream_base_url: string;
   proxy_mode: ProxyMode;
   proxy_url: string;
@@ -186,6 +196,8 @@ export interface ForwardLog {
   model: string;
   account_id: string;
   account_name: string;
+  client_key_id?: string | null;
+  client_key_name?: string | null;
   status: string;
   http_status: number | null;
   prompt_tokens: number;
@@ -227,10 +239,28 @@ export interface ForwardLogQuery {
   account_id?: string | null;
   model?: string | null;
   request_id?: string | null;
+  key_id?: string | null;
   start_time?: string | null;
   end_time?: string | null;
   sort_by?: string | null;
   sort_order?: string | null;
+}
+
+/** Sentinel selecting forward logs without client key attribution. */
+export const UNATTRIBUTED_KEY_FILTER = "__unattributed__";
+
+export interface ForwardLogClientKey {
+  id: string;
+  name: string;
+}
+
+export interface GatewayKeyEntryResponse extends GatewayKeyEntry {
+  revision: number;
+}
+
+export interface GatewayKeyRevisionResponse {
+  revision: number;
+  keys: GatewayKeyEntry[];
 }
 
 export interface UsageWindow {
@@ -504,6 +534,30 @@ export const tauriApi = {
       method: "POST",
     });
   },
+  createGatewayKey: (name: string, expectedRevision?: number) =>
+    request<GatewayKeyEntryResponse>("/settings/keys", {
+      method: "POST",
+      body: jsonBody({ name, expected_revision: expectedRevision }),
+    }),
+  updateGatewayKey: (
+    id: string,
+    update: { name?: string; enabled?: boolean },
+    expectedRevision?: number,
+  ) =>
+    request<GatewayKeyRevisionResponse>(`/settings/keys/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: jsonBody({ ...update, expected_revision: expectedRevision }),
+    }),
+  deleteGatewayKey: (id: string, expectedRevision?: number) =>
+    request<GatewayKeyRevisionResponse>(`/settings/keys/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      body: jsonBody({ expected_revision: expectedRevision }),
+    }),
+  regenerateGatewayKeyEntry: (id: string, expectedRevision?: number) =>
+    request<GatewayKeyEntryResponse>(
+      `/settings/keys/${encodeURIComponent(id)}/regenerate`,
+      { method: "POST", body: jsonBody({ expected_revision: expectedRevision }) },
+    ),
   checkForUpdate: () => request<UpdateCheckResult>("/settings/check-update"),
   getUpdateStatus: () => request<UpdateStatus>("/settings/update-status"),
   installUpdate: (expectedVersion: string) => request<UpdateStatus>("/settings/install-update", {
@@ -524,6 +578,7 @@ export const tauriApi = {
     if (query.account_id) params.set("account_id", query.account_id);
     if (query.model) params.set("model", query.model);
     if (query.request_id) params.set("request_id", query.request_id);
+    if (query.key_id) params.set("key_id", query.key_id);
     if (query.start_time) params.set("start_time", query.start_time);
     if (query.end_time) params.set("end_time", query.end_time);
     if (query.sort_by) params.set("sort_by", query.sort_by);
@@ -531,6 +586,7 @@ export const tauriApi = {
     return request<ForwardLogPage>(`/logs/forward?${params}`);
   },
   getForwardLogModels: () => request<string[]>("/logs/forward/models"),
+  getForwardLogKeys: () => request<ForwardLogClientKey[]>("/logs/forward/keys"),
 
   getDashboardSummary: () => request<DashboardSummary>("/dashboard/summary"),
   getDailyCostByModel: (days?: number) =>

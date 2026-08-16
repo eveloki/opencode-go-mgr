@@ -285,6 +285,8 @@ fn list_forward_logs_binds_limit_parameter() {
         model: "glm-5.2".into(),
         account_id: "acct".into(),
         account_name: "main".into(),
+        client_key_id: None,
+        client_key_name: None,
         status: "success".into(),
         http_status: Some(200),
         prompt_tokens: 1,
@@ -328,6 +330,8 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             model: "glm-5.2".into(),
             account_id: "selected".into(),
             account_name: "selected".into(),
+            client_key_id: None,
+            client_key_name: None,
             status: status.into(),
             http_status: Some(200),
             prompt_tokens: prompt,
@@ -359,6 +363,8 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             model: "other".into(),
             account_id: "busy".into(),
             account_name: format!("busy-{index}"),
+            client_key_id: None,
+            client_key_name: None,
             status: "success".into(),
             http_status: Some(200),
             prompt_tokens: 1_000,
@@ -389,6 +395,7 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             status: Some("success"),
             account_id: Some("selected"),
             model: None,
+            key_id: None,
             request_id: None,
             start_time: None,
             end_time: None,
@@ -411,6 +418,7 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             status: Some("success"),
             account_id: Some("selected"),
             model: None,
+            key_id: None,
             request_id: None,
             start_time: None,
             end_time: None,
@@ -429,6 +437,7 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             status: None,
             account_id: None,
             model: None,
+            key_id: None,
             request_id: None,
             start_time: None,
             end_time: None,
@@ -458,6 +467,8 @@ fn daily_cost_by_model_groups_chargeable_rows_only() {
             model: model.into(),
             account_id: "acct".into(),
             account_name: "main".into(),
+            client_key_id: None,
+            client_key_name: None,
             status: status.into(),
             http_status: Some(200),
             prompt_tokens: 0,
@@ -496,4 +507,157 @@ fn daily_cost_by_model_groups_chargeable_rows_only() {
         rows.iter()
             .any(|row| row.model == "kimi-k2.7-code" && (row.cost - 3.0).abs() < f64::EPSILON)
     );
+}
+
+#[test]
+fn single_key_upgrade_drill_migrates_config_and_backfills_logs() {
+    // Build the pre-multi-key data shape: a config JSON without
+    // gateway_keys plus forward_logs rows without a client key.
+    let dir = temp_data_dir("upgrade-drill");
+    let db = Database::open(dir.clone()).unwrap();
+    db.set_setting(
+        "config",
+        &serde_json::json!({
+            "gateway_port": 9042,
+            "gateway_key": "ocg-legacy-value",
+            "upstream_base_url": "https://opencode.ai/zen/go"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for index in 0..3 {
+        let mut log = ForwardLog {
+            id: 0,
+            timestamp: chrono::Utc::now(),
+            model: "glm-5.2".into(),
+            account_id: "acct".into(),
+            account_name: "acct".into(),
+            client_key_id: None,
+            client_key_name: None,
+            status: "success".into(),
+            http_status: Some(200),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: Some(0.5),
+            pricing_revision_id: None,
+            quota_multiplier: None,
+            local_adjustment_multiplier: None,
+            service_tier: None,
+            cost_state: "legacy_estimate".into(),
+            error_message: None,
+            request_id: None,
+            attempt: None,
+            error_source: None,
+            error_stage: None,
+            duration_ms: None,
+            diagnostic: None,
+        };
+        log.model = format!("m{index}");
+        db.log_forward(&log).unwrap();
+    }
+    drop(db);
+
+    // "Upgrade": the new binary opens the same data directory.
+    let cipher: Arc<StaticKeyCipher> = Arc::new(StaticKeyCipher::new("drill"));
+    let state = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher as Arc<dyn KeyCipher + Send + Sync>,
+    )
+    .unwrap();
+
+    // The legacy key became the primary entry and still authenticates.
+    let config = state.config();
+    assert_eq!(config.gateway_keys.len(), 1);
+    assert_eq!(config.gateway_keys[0].key, "ocg-legacy-value");
+    assert_eq!(config.gateway_key, "ocg-legacy-value");
+
+    // Run the startup backfill to completion: historical rows attribute to
+    // the primary key and remain filterable under it.
+    let primary = ocg_core::gateway_keys::primary_key(&config).unwrap();
+    let mut more = true;
+    while more {
+        more = state
+            .db
+            .lock()
+            .backfill_forward_logs_client_key_step(
+                &primary.id,
+                &primary.name,
+                ocg_core::db::FORWARD_LOG_BACKFILL_CHUNK_ROWS,
+            )
+            .unwrap();
+    }
+    let page = state
+        .db
+        .lock()
+        .query_forward_logs(ForwardLogQueryOptions {
+            limit: 10,
+            offset: 0,
+            status: None,
+            account_id: None,
+            model: None,
+            key_id: Some(primary.id.as_str()),
+            request_id: None,
+            start_time: None,
+            end_time: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .unwrap();
+    assert_eq!(page.summary.total_requests, 3);
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn downgrade_drill_keeps_primary_mirror_and_drops_secondary_keys() {
+    let dir = temp_data_dir("downgrade-drill");
+    let cipher: Arc<StaticKeyCipher> = Arc::new(StaticKeyCipher::new("drill"));
+    let state = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher.clone() as Arc<dyn KeyCipher + Send + Sync>,
+    )
+    .unwrap();
+    let mut config = state.config();
+    let secondary = ocg_core::gateway_keys::create_key(&mut config, "Laptop").unwrap();
+    state.set_config(config).unwrap();
+    let before = state.config();
+    let primary_value = before.gateway_key.clone();
+    assert_ne!(secondary.key, primary_value);
+
+    // "Downgrade": an old binary serializes its config shape, which drops
+    // the unknown gateway_keys field, then rewrites the stored config.
+    let mut legacy_json = serde_json::to_value(&before).unwrap();
+    let object = legacy_json.as_object_mut().unwrap();
+    object.remove("gateway_keys");
+    state
+        .db
+        .lock()
+        .set_setting("config", &legacy_json.to_string())
+        .unwrap();
+
+    // "Re-upgrade": the new binary loads that stored config again.
+    drop(state);
+    let state = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher as Arc<dyn KeyCipher + Send + Sync>,
+    )
+    .unwrap();
+    let config = state.config();
+    // The mirrored primary value survived; the secondary key is gone.
+    assert_eq!(config.gateway_key, primary_value);
+    assert_eq!(config.gateway_keys.len(), 1);
+    assert_eq!(config.gateway_keys[0].key, primary_value);
+    // The promotion minted a fresh primary id, so the old secondary id is
+    // dangling — log attribution falls back to stored snapshots.
+    assert_ne!(config.gateway_keys[0].id, secondary.id);
+    assert!(ocg_core::gateway_keys::key_by_id(&config, &secondary.id).is_none());
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
 }

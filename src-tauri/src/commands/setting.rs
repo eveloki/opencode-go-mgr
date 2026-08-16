@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use ocg_core::models::{AppConfig, GatewayStatus, normalize_client_root_url};
-use ocg_core::state::{CoreState, random_word};
+use ocg_core::state::CoreState;
 use tauri::State;
 
 #[tauri::command]
@@ -98,13 +98,25 @@ pub fn regenerate_gateway_key(state: State<'_, AppState>) -> Result<String, Stri
 pub(crate) fn regenerate_gateway_key_inner(core: &CoreState) -> Result<String, String> {
     let _settings_update = core.settings_update.lock();
     let mut config = core.config();
-    config.gateway_key = format!("ocg-{}-{}", random_word(), random_word());
-    core.set_config(config.clone()).map_err(|e| e.to_string())?;
-    let _ = core
-        .db
-        .lock()
-        .log_gateway("info", "settings", "gateway key regenerated");
-    Ok(config.gateway_key)
+    // Converged on the primary key: the dashboard endpoint and this command
+    // share one implementation so the mirror never drifts.
+    let primary_id = ocg_core::gateway_keys::primary_key(&config)
+        .map(|key| key.id.clone())
+        .ok_or_else(|| "no primary gateway key is configured".to_string())?;
+    let updated = ocg_core::gateway_keys::regenerate_key(&mut config, &primary_id)
+        .map_err(|e| e.to_string())?;
+    core.set_config(config).map_err(|e| e.to_string())?;
+    let display_name = if updated.name.is_empty() {
+        updated.id.clone()
+    } else {
+        updated.name.clone()
+    };
+    let _ = core.db.lock().log_gateway(
+        "info",
+        "keys",
+        &format!("regenerated primary gateway key `{display_name}`"),
+    );
+    Ok(updated.key)
 }
 
 fn validate_upstream_url(url: &str) -> Result<(), String> {

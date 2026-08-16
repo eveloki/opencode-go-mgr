@@ -170,6 +170,22 @@ After the first updater-enabled release is installed, future signed desktop
 releases can be downloaded and installed from **Settings** with one action.
 CLI and Docker upgrades remain manual.
 
+### Multi-Key Upgrade And Downgrade Notes
+
+Upgrading from a single-key version is seamless: the existing key becomes
+the primary entry of the new **Access Keys** list, clients keep
+authenticating with it, and a background task attributes historical forward
+logs to that primary key (an approximation if you had rotated the key in the
+past; usage from before the upgrade is counted toward the primary key).
+
+Downgrading to a single-key build after creating secondary keys has a
+documented limitation: the old build rewrites the config without the key
+list, so secondary keys (including their values) are dropped and only the
+primary key's mirrored value survives. Re-upgrading afterwards creates a new
+primary key id, leaving the old ids dangling in log filters — the Logs view
+still resolves them by their recorded names. Prefer restoring the pre-upgrade
+backup over downgrading in place.
+
 ### Backup
 
 1. Stop every process using the data: choose **Quit** from the desktop tray,
@@ -283,7 +299,10 @@ The first panel above the fold — and the only panel that always stays on
 top — is the **Connection Center**. It contains:
 
 - The **Key**, with regenerate and one-click copy. Regenerating invalidates
-  the previous key immediately.
+  only the selected key's previous value immediately; other keys keep
+  working. When more than one enabled key exists, a selector lists them and
+  switches the displayed (masked) value, the copy target, and the regenerate
+  target.
 - The **API Base URL** (e.g. `http://127.0.0.1:9042/v1`) with one-click copy,
   plus the full Chat Completions, Responses, and Messages endpoints.
 - The **Upstream URL** the gateway forwards to, with a copy action.
@@ -536,13 +555,28 @@ if any, and the streamed usage when the upstream emitted a usage chunk.
 - An `outcome_unknown` row means the upstream may already have completed and
   charged the request, but the gateway lost the response or timed out. Such a
   request is not replayed automatically and its local cost remains unknown.
+- The **Key** filter narrows rows and the summary totals to one client key.
+  Its options come from the log table itself, so disabled, deleted, and
+  otherwise unknown keys stay filterable. **Unattributed** selects rows
+  written before multi-key support; a background task attributes those to
+  the primary key after upgrading, so usage from before the upgrade is
+  counted toward the primary key as an approximation.
 
 ### Settings
 
 The **Settings** view exposes the persistent gateway configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`).
-- **Key** — the same value shown in the Connection Center.
+- **Access Keys** — the client-facing credentials. One key is created
+  automatically (named *Primary*); you can add more, give each a display
+  name, rename, enable/disable, regenerate, or delete it. Deleting is a soft
+  delete: the key stops authenticating immediately and its plaintext is
+  cleared, but forward logs keep resolving to its name. At least one enabled
+  key must always remain, and the first active key is the *primary* whose
+  value is mirrored into the client guides and the legacy `gateway_key`
+  field. Deleting the primary promotes the earliest remaining enabled key.
+  Key values are managed only through this list — values sent in a generic
+  settings save are ignored.
 - **Upstream URL** — the OpenCode-Go base URL.
 - **Outbound proxy** — a process-wide setting shared by every account.
   `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,

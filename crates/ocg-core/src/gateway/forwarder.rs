@@ -58,6 +58,8 @@ struct ForwardAttemptContext {
     model: String,
     stream: bool,
     known_secret: Option<String>,
+    client_key_id: Option<String>,
+    client_key_name: Option<String>,
 }
 
 impl ForwardAttemptContext {
@@ -77,7 +79,17 @@ impl ForwardAttemptContext {
             model: plan.model.clone(),
             stream: plan.stream,
             known_secret: None,
+            client_key_id: None,
+            client_key_name: None,
         }
+    }
+
+    /// Records which gateway key authenticated the request; the name is a
+    /// write-time snapshot resolved from the config so later renames keep
+    /// historical attribution.
+    fn set_client_key(&mut self, id: Option<&str>, config: &AppConfig) {
+        self.client_key_id = id.map(str::to_string);
+        self.client_key_name = id.and_then(|id| crate::gateway_keys::key_name(config, id));
     }
 
     fn set_known_secret(&mut self, known_secret: &str) {
@@ -183,6 +195,7 @@ pub async fn forward_request(
     allow_same_account_retry: bool,
     headers: HeaderMap,
     pricing_snapshot: Arc<PricingSnapshot>,
+    client_key_id: Option<&str>,
 ) -> Result<ForwardResult> {
     forward_request_impl(
         client,
@@ -196,6 +209,7 @@ pub async fn forward_request(
         allow_same_account_retry,
         headers,
         pricing_snapshot,
+        client_key_id,
     )
     .await
 }
@@ -213,8 +227,10 @@ async fn forward_request_impl(
     allow_same_account_retry: bool,
     headers: HeaderMap,
     pricing_snapshot: Arc<PricingSnapshot>,
+    client_key_id: Option<&str>,
 ) -> Result<ForwardResult> {
     let mut attempt_context = ForwardAttemptContext::new(trace, client_body.len(), attempt, plan);
+    attempt_context.set_client_key(client_key_id, config);
     let upstream_base = plan
         .upstream_base_override
         .as_deref()
@@ -2177,6 +2193,8 @@ fn log_forward(
         model: model.to_string(),
         account_id: account.id.clone(),
         account_name: account.name.clone(),
+        client_key_id: context.client_key_id.clone(),
+        client_key_name: context.client_key_name.clone(),
         status: status.to_string(),
         http_status,
         prompt_tokens: metrics.prompt_tokens,
@@ -2418,6 +2436,8 @@ mod stream_usage_tests {
             model: "test-model".into(),
             stream: false,
             known_secret: Some(secret.clone()),
+            client_key_id: None,
+            client_key_name: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", format!("request-{secret}").parse().unwrap());

@@ -480,6 +480,10 @@ async fn loopback_settings_trim_and_require_gateway_key() {
     let url = format!("http://127.0.0.1:{}/dashboard/api/settings", handle.port);
     let client = reqwest::Client::new();
 
+    // Keys are managed exclusively through the key lifecycle API: a settings
+    // payload's gateway_key/gateway_keys values are sanity-checked but never
+    // applied, so a stale client can never wipe or replace the key list.
+    let key_before = state.config().gateway_key;
     let mut config = state.config();
     config.gateway_key = "  trimmed-key  ".into();
     config.client_root_url = "  http://192.168.1.20:9042/proxy/v1/  ".into();
@@ -497,7 +501,12 @@ async fn loopback_settings_trim_and_require_gateway_key() {
         StatusCode::OK
     );
     let saved = state.config();
-    assert_eq!(saved.gateway_key, "trimmed-key");
+    assert_eq!(saved.gateway_key, key_before);
+    assert!(!saved.gateway_keys.is_empty());
+    assert_eq!(
+        saved.gateway_keys[0].key, key_before,
+        "the primary entry must mirror into gateway_key"
+    );
     assert_eq!(saved.client_root_url, "http://192.168.1.20:9042/proxy");
     assert_eq!(saved.connect_timeout_secs, 12);
     assert_eq!(saved.non_stream_timeout_secs, 345);
@@ -519,6 +528,12 @@ async fn loopback_settings_trim_and_require_gateway_key() {
     );
     assert_eq!(roundtrip["auto_start_supported"], false);
     assert_eq!(roundtrip["client_root_url_from_env"], false);
+    assert_eq!(roundtrip["gateway_key"], json!(key_before));
+    assert!(
+        roundtrip["gateway_keys"]
+            .as_array()
+            .is_some_and(|keys| !keys.is_empty())
+    );
 
     config.gateway_key = "   ".into();
     assert_eq!(
@@ -531,7 +546,7 @@ async fn loopback_settings_trim_and_require_gateway_key() {
             .status(),
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(state.config().gateway_key, "trimmed-key");
+    assert_eq!(state.config().gateway_key, key_before);
 
     for client_root_url in [
         "ocg.example.com",
@@ -883,6 +898,8 @@ async fn loopback_forward_logs_apply_filters_before_pagination() {
                 model: "glm-5.2".into(),
                 account_id: account_id.into(),
                 account_name: account_id.into(),
+                client_key_id: None,
+                client_key_name: None,
                 status: "success".into(),
                 http_status: Some(200),
                 prompt_tokens,
@@ -925,6 +942,184 @@ async fn loopback_forward_logs_apply_filters_before_pagination() {
     assert_eq!(body["summary"]["prompt_tokens"], 10);
     assert_eq!(body["summary"]["completion_tokens"], 20);
     assert_eq!(body["summary"]["cost"], 0.1);
+
+    gateway::stop_gateway(handle);
+}
+
+#[tokio::test]
+async fn gateway_key_lifecycle_api_manages_multiple_keys() {
+    let state = state("keys-lifecycle");
+    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
+    let client = reqwest::Client::new();
+
+    let primary_id = ocg_core::gateway_keys::primary_key(&state.config())
+        .unwrap()
+        .id
+        .clone();
+
+    // Create a secondary key; the full value comes back exactly once.
+    let created = client
+        .post(format!("{base}/settings/keys"))
+        .json(&json!({ "name": "Laptop" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: serde_json::Value = created.json().await.unwrap();
+    let secondary_id = created["id"].as_str().unwrap().to_string();
+    let secondary_value = created["key"].as_str().unwrap().to_string();
+    assert_eq!(created["name"], "Laptop");
+    assert!(created["enabled"].as_bool().unwrap());
+    assert!(!secondary_value.is_empty());
+
+    // Rename via PATCH.
+    let renamed = client
+        .patch(format!("{base}/settings/keys/{secondary_id}"))
+        .json(&json!({ "name": "Deck" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(renamed.status(), StatusCode::OK);
+
+    // Regenerate and delete honor the optional settings-revision check: a
+    // stale revision is rejected with 409 before any mutation applies.
+    let stale = state.settings_revision().wrapping_sub(1);
+    let stale_regenerate = client
+        .post(format!("{base}/settings/keys/{secondary_id}/regenerate"))
+        .json(&json!({ "expected_revision": stale }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_regenerate.status(), StatusCode::CONFLICT);
+    let stale_delete = client
+        .delete(format!("{base}/settings/keys/{secondary_id}"))
+        .json(&json!({ "expected_revision": stale }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        ocg_core::gateway_keys::key_by_id(&state.config(), &secondary_id)
+            .unwrap()
+            .key,
+        secondary_value,
+        "conflicting requests must not mutate the key"
+    );
+
+    // Disable, then verify the value no longer authenticates.
+    let disabled = client
+        .patch(format!("{base}/settings/keys/{secondary_id}"))
+        .json(&json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), StatusCode::OK);
+    let unauthorized = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            handle.port
+        ))
+        .header("authorization", format!("Bearer {secondary_value}"))
+        .json(&json!({"model":"m","messages":[],"max_tokens":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    // Regenerate returns the new value; the old one is invalid immediately.
+    let re_enabled = client
+        .patch(format!("{base}/settings/keys/{secondary_id}"))
+        .json(&json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(re_enabled.status(), StatusCode::OK);
+    let regenerated = client
+        .post(format!("{base}/settings/keys/{secondary_id}/regenerate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(regenerated.status(), StatusCode::OK);
+    let regenerated: serde_json::Value = regenerated.json().await.unwrap();
+    let new_value = regenerated["key"].as_str().unwrap();
+    assert_ne!(new_value, secondary_value);
+
+    // The last enabled key cannot be disabled or deleted: leave only the
+    // primary enabled and both protections must reject.
+    let park = client
+        .patch(format!("{base}/settings/keys/{secondary_id}"))
+        .json(&json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(park.status(), StatusCode::OK);
+    let last_disable = client
+        .patch(format!("{base}/settings/keys/{primary_id}"))
+        .json(&json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(last_disable.status(), StatusCode::BAD_REQUEST);
+    let last_delete = client
+        .delete(format!("{base}/settings/keys/{primary_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(last_delete.status(), StatusCode::BAD_REQUEST);
+
+    // Re-enable the secondary, then delete the primary: the earliest enabled
+    // key is promoted and the mirror follows.
+    let unpark = client
+        .patch(format!("{base}/settings/keys/{secondary_id}"))
+        .json(&json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unpark.status(), StatusCode::OK);
+    let deleted = client
+        .delete(format!("{base}/settings/keys/{primary_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let config = state.config();
+    let promoted = ocg_core::gateway_keys::primary_key(&config).unwrap();
+    assert_eq!(promoted.id, secondary_id);
+    assert_eq!(config.gateway_key, promoted.key);
+    // The soft-deleted record keeps its attribution data with no plaintext.
+    let tombstone = ocg_core::gateway_keys::key_by_id(&config, &primary_id).unwrap();
+    assert!(tombstone.deleted_at.is_some());
+    assert!(tombstone.key.is_empty());
+    assert_eq!(tombstone.name, "Primary");
+
+    // The legacy regenerate endpoint rotates the (new) primary.
+    let legacy = client
+        .post(format!("{base}/settings/regenerate-gateway-key"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), StatusCode::OK);
+    let legacy: serde_json::Value = legacy.json().await.unwrap();
+    assert_eq!(legacy["key"], json!(state.config().gateway_key));
+
+    // Unknown keys are reported, not silently ignored.
+    let missing = client
+        .delete(format!("{base}/settings/keys/does-not-exist"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+    // Every mutation wrote an audit entry.
+    let audits = state.db.lock().list_gateway_logs(100).unwrap();
+    assert!(
+        audits
+            .iter()
+            .any(|log| log.category == "keys" && log.message.contains("created gateway key"))
+    );
 
     gateway::stop_gateway(handle);
 }

@@ -44,6 +44,15 @@
 
           <div class="connection-row">
             <n-icon size="18" aria-hidden="true"><KeyOutlined /></n-icon>
+            <n-select
+              v-if="enabledGatewayKeys.length > 1"
+              v-model:value="selectedKeyId"
+              class="connection-key-select"
+              size="small"
+              :options="gatewayKeyOptions"
+              :disabled="refreshingKey || loading"
+              :aria-label="t('选择 Key')"
+            />
             <div class="connection-value">
               <span class="sr-only">{{ t("Key") }}</span>
               <code>{{ maskedKey }}</code>
@@ -63,7 +72,7 @@
                         size="small"
                         :aria-label="t('刷新 Key')"
                         :loading="refreshingKey"
-                        :disabled="refreshingKey || loading || !serviceConfig.gateway_key"
+                        :disabled="refreshingKey || loading || !selectedKey"
                       >
                         <template #icon><n-icon :component="ReloadOutlined" /></template>
                       </n-button>
@@ -71,7 +80,7 @@
                     {{ t("刷新 Key") }}
                   </n-tooltip>
                 </template>
-                {{ t("旧 Key 将立即失效，继续生成新 Key？") }}
+                {{ t("仅当前 Key 的旧值立即失效，其他 Key 不受影响。确定生成新值？") }}
               </n-popconfirm>
               <n-tooltip trigger="hover" :delay="200">
                 <template #trigger>
@@ -80,8 +89,8 @@
                     quaternary
                     size="small"
                     :aria-label="t('复制 Key')"
-                    :disabled="refreshingKey || !serviceConfig.gateway_key"
-                    @click="copyConnection('key', serviceConfig.gateway_key, t('Key'))"
+                    :disabled="refreshingKey || !selectedKey"
+                    @click="copyConnection('key', selectedKey?.key ?? '', t('Key'))"
                   >
                     <template #icon>
                       <n-icon :component="copiedTarget === 'key' ? CheckOutlined : CopyOutlined" />
@@ -240,7 +249,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
+import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NSelect, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
 import {
   ApiOutlined,
   CalendarOutlined,
@@ -254,7 +263,15 @@ import {
 } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
 import { tauriApi } from "../api/tauri";
-import type { Account, DailyModelCost, DashboardSummary, UsageWindow } from "../api/tauri";
+import type {
+  Account,
+  AppConfig,
+  DailyModelCost,
+  DashboardSummary,
+  GatewayKeyEntry,
+  GatewayKeyEntryResponse,
+  UsageWindow,
+} from "../api/tauri";
 import { CHART_PALETTE } from "../theme";
 import { t } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
@@ -280,12 +297,29 @@ const usageFailedAccountIds = ref(new Set<string>());
 const refreshingKey = ref(false);
 const lifecycleNow = ref(Date.now());
 
-const serviceConfig = ref({
+const serviceConfig = ref<AppConfig>({
+  revision: 0,
   gateway_port: 9042,
   gateway_key: "",
+  gateway_keys: [],
   upstream_base_url: "",
+  proxy_mode: "auto",
+  proxy_url: "",
+  opencode_invite_url: "",
   client_root_url: "",
+  client_root_url_from_env: false,
+  auto_start: false,
+  auto_start_supported: false,
+  show_dock_icon: true,
+  dock_visibility_supported: false,
+  connect_timeout_secs: 30,
+  non_stream_timeout_secs: 900,
+  stream_idle_timeout_secs: 300,
+  routing_mode: "strict-priority",
+  conversation_sticky: false,
+  free_model_routing: "explicit",
 });
+const selectedKeyId = ref("");
 const summary = ref<DashboardSummary>({
   total_accounts: 0,
   available_accounts: 0,
@@ -303,7 +337,20 @@ const legendModels = computed(() => {
     .map((model, index) => ({ model, color: CHART_PALETTE[index % CHART_PALETTE.length] }));
 });
 const totalChartCost = computed(() => dailyCosts.value.reduce((sum, row) => sum + row.cost, 0));
-const maskedKey = computed(() => maskConnectionKey(serviceConfig.value.gateway_key));
+const maskedKey = computed(() => maskConnectionKey(selectedKey.value?.key ?? ""));
+const enabledGatewayKeys = computed<GatewayKeyEntry[]>(() =>
+  (serviceConfig.value.gateway_keys ?? []).filter((entry) => entry.enabled && !entry.deleted_at),
+);
+const gatewayKeyOptions = computed(() =>
+  enabledGatewayKeys.value.map((entry) => ({ label: entry.name, value: entry.id })),
+);
+// Default to the primary key (first active entry) and keep the selection
+// valid across settings reloads and key lifecycle changes.
+const selectedKey = computed<GatewayKeyEntry | null>(() => {
+  const keys = enabledGatewayKeys.value;
+  if (keys.length === 0) return null;
+  return keys.find((entry) => entry.id === selectedKeyId.value) ?? keys[0];
+});
 const connectionUrls = computed(() => {
   try {
     return resolveConnectionUrls(
@@ -378,16 +425,16 @@ async function copyConnection(target: ConnectionTarget, value: string, label: st
 }
 
 async function regenerateKey() {
-  if (refreshingKey.value || dashboardRequestActive || !serviceConfig.value.gateway_key) return;
-  const previousKey = serviceConfig.value.gateway_key;
+  const target = selectedKey.value;
+  if (refreshingKey.value || dashboardRequestActive || !target) return;
+  const previousKey = target.key;
   refreshingKey.value = true;
   let mutationFailed = false;
   let mutationError: unknown = null;
-  let result: { key: string; revision: number } | null = null;
+  let result: GatewayKeyEntryResponse | null = null;
   try {
     try {
-      result = await tauriApi.regenerateGatewayKey();
-      serviceConfig.value.gateway_key = result.key;
+      result = await tauriApi.regenerateGatewayKeyEntry(target.id, serviceConfig.value.revision);
     } catch (error) {
       mutationFailed = true;
       mutationError = error;
@@ -396,7 +443,9 @@ async function regenerateKey() {
     try {
       const latest = await tauriApi.getSettings();
       serviceConfig.value = latest;
-      if (!mutationFailed || latest.gateway_key !== previousKey) {
+      const refreshed = (latest.gateway_keys ?? []).find((entry) => entry.id === target.id);
+      if (!mutationFailed || refreshed?.key !== previousKey) {
+        selectedKeyId.value = target.id;
         message.success(t("Key 已刷新"));
       } else {
         message.error(t("刷新 Key 失败: {error}", {
@@ -405,6 +454,16 @@ async function regenerateKey() {
       }
     } catch {
       if (result) {
+        // Settings refresh failed; apply the regenerated value locally so
+        // the panel never shows or copies the now-invalid old key.
+        const regenerated = result.key;
+        serviceConfig.value.gateway_keys = (serviceConfig.value.gateway_keys ?? []).map(
+          (entry) => (entry.id === target.id ? { ...entry, key: regenerated } : entry),
+        );
+        if (serviceConfig.value.gateway_key === previousKey) {
+          serviceConfig.value.gateway_key = regenerated;
+        }
+        selectedKeyId.value = target.id;
         message.success(t("Key 已刷新"));
       } else {
         serviceConfig.value.gateway_key = "";
@@ -603,6 +662,12 @@ onUnmounted(() => {
   border-radius: 10px;
   background: color-mix(in srgb, var(--ocg-canvas) 72%, var(--ocg-surface));
   color: var(--ocg-primary);
+}
+.connection-row:has(.connection-key-select) {
+  grid-template-columns: 28px auto minmax(0, 1fr) auto;
+}
+.connection-key-select {
+  width: 132px;
 }
 .connection-value {
   min-width: 0;

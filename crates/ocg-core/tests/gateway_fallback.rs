@@ -9,7 +9,7 @@ use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
-use ocg_core::models::{Account, AccountUpdate, RoutingMode};
+use ocg_core::models::{Account, AccountUpdate, ForwardLog, RoutingMode};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -340,6 +340,8 @@ fn build_state_with_routing(
     let db = Database::open(dir.clone()).unwrap();
     let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
     let mut config = state.config();
+    // Pin the primary entry's value; gateway_key mirrors it.
+    config.gateway_keys[0].key = "gw-test".into();
     config.gateway_key = "gw-test".into();
     config.upstream_base_url = base_url;
     config.routing_mode = routing_mode;
@@ -581,6 +583,7 @@ async fn model_discovery_does_not_create_inference_logs() {
             status: None,
             account_id: None,
             model: None,
+            key_id: None,
             request_id: None,
             start_time: None,
             end_time: None,
@@ -648,6 +651,7 @@ async fn model_discovery_keeps_rate_limit_cooldown_without_logging() {
             status: None,
             account_id: None,
             model: None,
+            key_id: None,
             request_id: None,
             start_time: None,
             end_time: None,
@@ -890,6 +894,7 @@ async fn application_models_intersects_upstream_models_in_upstream_order() {
                 status: None,
                 account_id: None,
                 model: None,
+                key_id: None,
                 request_id: None,
                 start_time: None,
                 end_time: None,
@@ -3254,5 +3259,264 @@ async fn dashboard_port_change_is_saved_for_next_restart() {
     assert_eq!(status_response.status(), StatusCode::OK);
 
     gateway::stop_gateway(state.gateway.lock().take().unwrap());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn forwarded_requests_are_attributed_to_the_authenticating_key() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([
+            MockReply {
+                status: 200,
+                body: r#"{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+            },
+            MockReply {
+                status: 200,
+                body: r#"{"id":"y","choices":[{"message":{"role":"assistant","content":"yo"}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}"#,
+            },
+        ]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    // A second gateway key shares the same upstream account; usage written
+    // under it must be attributable per key.
+    let mut config = state.config();
+    let secondary = ocg_core::gateway_keys::create_key(&mut config, "Laptop").unwrap();
+    state.set_config(config).unwrap();
+
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 3,
+        "stream": false
+    });
+    let secondary_status = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", secondary.key),
+        )
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(secondary_status, StatusCode::OK);
+
+    let primary_status = chat(port).await.0;
+    assert_eq!(primary_status, StatusCode::OK);
+
+    let unauthorized_status = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .header(reqwest::header::AUTHORIZATION, "Bearer unknown-key")
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        2,
+        "only authenticated requests forward"
+    );
+
+    let primary_id = ocg_core::gateway_keys::primary_key(&state.config())
+        .unwrap()
+        .id
+        .clone();
+    let logs = state.db.lock().list_forward_logs(10).unwrap();
+    assert_eq!(
+        logs.len(),
+        2,
+        "unauthenticated requests write no forward rows"
+    );
+    let secondary_rows = logs
+        .iter()
+        .filter(|log| log.client_key_id.as_deref() == Some(secondary.id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(secondary_rows.len(), 1);
+    assert_eq!(
+        secondary_rows[0].client_key_name.as_deref(),
+        Some("Laptop"),
+        "the write-time name snapshot rides along for later renames"
+    );
+    let primary_rows = logs
+        .iter()
+        .filter(|log| log.client_key_id.as_deref() == Some(primary_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(primary_rows.len(), 1);
+
+    // Key-scoped queries return only that key's rows plus its summary slice.
+    let page = state
+        .db
+        .lock()
+        .query_forward_logs(ForwardLogQueryOptions {
+            limit: 10,
+            offset: 0,
+            status: None,
+            account_id: None,
+            model: None,
+            key_id: Some(secondary.id.as_str()),
+            request_id: None,
+            start_time: None,
+            end_time: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .unwrap();
+    assert_eq!(page.summary.total_requests, 1);
+    assert_eq!(page.summary.prompt_tokens, 1);
+    assert!(
+        page.items
+            .iter()
+            .all(|log| log.client_key_id == Some(secondary.id.clone()))
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn gateway_stays_available_while_large_backfill_runs() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: r#"{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+        }]),
+    )]);
+    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+
+    // Seed more rows than one backfill chunk so the background thread takes
+    // over after the inline first step.
+    {
+        let seed_rows = vec![ForwardLog {
+            id: 0,
+            timestamp: chrono::Utc::now(),
+            model: "legacy".into(),
+            account_id: "acct".into(),
+            account_name: "acct".into(),
+            client_key_id: None,
+            client_key_name: None,
+            status: "success".into(),
+            http_status: Some(200),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: Some(0.0),
+            pricing_revision_id: None,
+            quota_multiplier: None,
+            local_adjustment_multiplier: None,
+            service_tier: None,
+            cost_state: "legacy_estimate".into(),
+            error_message: None,
+            request_id: None,
+            attempt: None,
+            error_source: None,
+            error_stage: None,
+            duration_ms: None,
+            diagnostic: None,
+        };
+        // More rows than one chunk so the background thread takes over after
+        // the inline first step at gateway start.
+        (ocg_core::db::FORWARD_LOG_BACKFILL_CHUNK_ROWS + 5_000) as usize];
+        let db = state.db.lock();
+        db.log_forward_batch(&seed_rows).unwrap();
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap(),
+            None,
+            "seeding must not run the backfill"
+        );
+    }
+
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    // Both request classes complete while the backfill thread is still
+    // chunking: unauthenticated traffic is untouched, and authenticated
+    // logging only ever queues behind one short chunk transaction.
+    let (status, _body) = chat(port).await;
+    assert_eq!(status, StatusCode::OK);
+    let client = reqwest::Client::new();
+    let unauthorized = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .header(reqwest::header::AUTHORIZATION, "Bearer wrong-key")
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "x"}],
+            "max_tokens": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    // The backfill converges to the completion marker.
+    let mut marker = None;
+    for _ in 0..600 {
+        marker = state.db.lock().forward_log_backfill_marker().unwrap();
+        if marker.as_deref() == Some(ocg_core::db::BACKFILL_DONE) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        marker.as_deref(),
+        Some(ocg_core::db::BACKFILL_DONE),
+        "backfill must complete after the seeded rows"
+    );
+
+    // Every row is attributed; the request served mid-backfill carried its
+    // key id from the write path.
+    let unattributed: i64 = state
+        .db
+        .lock()
+        .query_forward_logs(ForwardLogQueryOptions {
+            limit: 1,
+            offset: 0,
+            status: None,
+            account_id: None,
+            model: None,
+            key_id: Some(ocg_core::models::UNATTRIBUTED_KEY_FILTER),
+            request_id: None,
+            start_time: None,
+            end_time: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .unwrap()
+        .summary
+        .total_requests;
+    assert_eq!(unattributed, 0);
+    let attributed_chat: i64 = state
+        .db
+        .lock()
+        .query_forward_logs(ForwardLogQueryOptions {
+            limit: 1,
+            offset: 0,
+            status: None,
+            account_id: None,
+            model: Some("deepseek-v4-flash"),
+            key_id: None,
+            request_id: None,
+            start_time: None,
+            end_time: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .unwrap()
+        .summary
+        .total_requests;
+    assert_eq!(attributed_chat, 1);
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
     let _ = fs::remove_dir_all(dir);
 }

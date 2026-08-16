@@ -40,6 +40,8 @@ fn benchmark_state(base_url: String) -> (Arc<CoreStateInner>, std::path::PathBuf
     let db = Database::open(dir.clone()).unwrap();
     let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
     let mut config = state.config();
+    // Pin the primary entry's value; gateway_key mirrors it.
+    config.gateway_keys[0].key = "bench-gateway-key".to_string();
     config.gateway_key = "bench-gateway-key".to_string();
     config.upstream_base_url = base_url;
     state.set_config(config).unwrap();

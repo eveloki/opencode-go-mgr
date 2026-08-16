@@ -95,6 +95,17 @@
               :placeholder="t('模型')"
             />
           </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("接入 Key") }}</span>
+            <n-select
+              v-model:value="keyFilter"
+              :options="keyOptions"
+              :placeholder="t('接入 Key')"
+            />
+          </div>
+          <p v-if="keyFilter" class="key-filter-note" role="status">
+            {{ t("升级前用量统一计入主 Key") }}
+          </p>
           <div class="filter-field time-range-field">
             <span class="filter-label">{{ t("时间范围") }}</span>
             <n-popover
@@ -230,8 +241,14 @@ import {
   useMessage,
 } from "naive-ui";
 import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
-import { tauriApi } from "../api/tauri";
-import type { Account, ForwardLog, ForwardLogSummary, GatewayLog } from "../api/tauri";
+import { UNATTRIBUTED_KEY_FILTER, tauriApi } from "../api/tauri";
+import type {
+  Account,
+  ForwardLog,
+  ForwardLogClientKey,
+  ForwardLogSummary,
+  GatewayLog,
+} from "../api/tauri";
 import { t } from "../i18n/index.ts";
 import { locale } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
@@ -258,12 +275,14 @@ const gatewayLogs = ref<GatewayLog[]>([]);
 const forwardLogs = ref<ForwardLog[]>([]);
 const accounts = ref<Account[]>([]);
 const models = ref<string[]>([]);
+const clientKeys = ref<ForwardLogClientKey[]>([]);
 const gatewayLoading = ref(false);
 const gatewayError = ref("");
 const forwardLoading = ref(false);
 const statusFilter = ref<string>(query.get("status") ?? "");
 const accountFilter = ref<string>(query.get("account") ?? "");
 const modelFilter = ref<string>(query.get("model") ?? "");
+const keyFilter = ref<string>(query.get("key") ?? "");
 const requestIdFilter = ref<string>(query.get("request_id") ?? "");
 const querySort = query.get("sort");
 const queryOrder = query.get("order");
@@ -358,6 +377,13 @@ const allOption = computed(() => ({ label: t("全部"), value: "" }));
 const statusOptions = computed(() => [allOption.value, ...Object.entries(statusMeta.value).map(([value, meta]) => ({ label: meta.label, value }))]);
 const accountOptions = computed(() => [allOption.value, ...accounts.value.map((account) => ({ label: account.name, value: account.id }))]);
 const modelOptions = computed(() => [allOption.value, ...models.value.map((model) => ({ label: model, value: model }))]);
+// Keys come from the log table itself (not config) so disabled, deleted, and
+// dangling ids stay filterable exactly as they appear on the rows.
+const keyOptions = computed(() => [
+  allOption.value,
+  ...clientKeys.value.map((key) => ({ label: key.name, value: key.id })),
+  { label: t("未归因"), value: UNATTRIBUTED_KEY_FILTER },
+]);
 const sortOptions = computed(() => [
   { label: t("时间"), value: "timestamp" },
   { label: t("尝试次数"), value: "attempt" },
@@ -370,6 +396,7 @@ const hasFilters = computed(() =>
   !!statusFilter.value
   || !!accountFilter.value
   || !!modelFilter.value
+  || !!keyFilter.value
   || !!requestIdFilter.value
   || !!timeRange.value,
 );
@@ -577,6 +604,7 @@ function clearFilters() {
   statusFilter.value = "";
   accountFilter.value = "";
   modelFilter.value = "";
+  keyFilter.value = "";
   requestIdFilter.value = "";
   activePreset.value = "all";
   timeRange.value = null;
@@ -597,6 +625,8 @@ function syncQueryState() {
   else url.searchParams.delete("account");
   if (modelFilter.value) url.searchParams.set("model", modelFilter.value);
   else url.searchParams.delete("model");
+  if (keyFilter.value) url.searchParams.set("key", keyFilter.value);
+  else url.searchParams.delete("key");
   if (requestIdFilter.value) url.searchParams.set("request_id", requestIdFilter.value);
   else url.searchParams.delete("request_id");
   if (activePreset.value === "custom" && timeRange.value) {
@@ -651,6 +681,7 @@ async function loadForwardLogs() {
       status: statusFilter.value,
       account_id: accountFilter.value,
       model: modelFilter.value,
+      key_id: keyFilter.value,
       request_id: requestIdFilter.value,
       start_time: requestRange ? toIsoString(requestRange[0]) : null,
       end_time: requestRange ? toIsoString(requestRange[1]) : null,
@@ -687,8 +718,16 @@ async function loadForwardLogModels() {
   }
 }
 
+async function loadForwardLogKeys() {
+  try {
+    clientKeys.value = await tauriApi.getForwardLogKeys();
+  } catch (e) {
+    message.error(t("加载 Key 筛选失败: {error}", { error: String(e) }));
+  }
+}
+
 async function refreshForwardLogs() {
-  await Promise.all([loadForwardLogs(), loadForwardLogModels()]);
+  await Promise.all([loadForwardLogs(), loadForwardLogModels(), loadForwardLogKeys()]);
 }
 
 function changeForwardPage(page: number) {
@@ -702,7 +741,7 @@ function changeGatewayPage(page: number) {
 
 watch(activeTab, syncQueryState);
 watch(
-  [statusFilter, accountFilter, modelFilter, requestIdFilter, timeRange, activePreset, sortBy, sortOrder],
+  [statusFilter, accountFilter, modelFilter, keyFilter, requestIdFilter, timeRange, activePreset, sortBy, sortOrder],
   () => {
     forwardPage.value = 1;
     syncQueryState();
@@ -720,12 +759,19 @@ onMounted(() => {
   void loadForwardLogs();
   void loadAccounts();
   void loadForwardLogModels();
+  void loadForwardLogKeys();
 });
 
 onUnmounted(cleanup);
 </script>
 
 <style scoped>
+.key-filter-note {
+  grid-column: 1 / -1;
+  margin: -4px 0 0;
+  color: var(--ocg-subtle);
+  font-size: var(--ocg-font-xs);
+}
 .log-limit-note {
   margin: 6px 0 10px;
   color: var(--ocg-subtle);

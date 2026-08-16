@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AppConfig } from "../api/tauri.ts";
-import { mergeUnsavedSettings } from "./settings-merge.ts";
+import { EDITABLE_SETTING_KEYS, mergeUnsavedSettings } from "./settings-merge.ts";
+
+test("gateway key fields stay outside the editable settings list", () => {
+  assert.ok(!EDITABLE_SETTING_KEYS.includes("gateway_key" as never));
+  assert.ok(!EDITABLE_SETTING_KEYS.includes("gateway_keys" as never));
+});
 
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -73,4 +78,27 @@ test("settings conflict merge never restores stale secrets or capability flags",
   assert.equal(merged.auto_start, true);
   assert.equal(merged.auto_start_supported, false);
   assert.equal(merged.client_root_url_from_env, true);
+});
+
+test("gateway key lists always come from the server snapshot", () => {
+  const serverKeys = [
+    {
+      id: "key-1",
+      name: "Primary",
+      key: "ocg-server-key",
+      enabled: true,
+      deleted_at: null,
+      created_at: "2026-08-16T00:00:00Z",
+    },
+  ];
+  const saved = config({ gateway_keys: serverKeys });
+  const current = config({ gateway_keys: [{ ...serverKeys[0], name: "Locally Renamed" }] });
+  const latest = config({ revision: 2, gateway_keys: serverKeys });
+
+  const merged = mergeUnsavedSettings(latest, current, saved);
+
+  // gateway_keys is managed exclusively through the key lifecycle API; a
+  // generic settings save must never carry a stale key list.
+  assert.equal(merged.gateway_keys, serverKeys);
+  assert.equal(merged.gateway_key, "server-key-1");
 });
