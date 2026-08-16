@@ -867,8 +867,16 @@ test("dashboard keeps the connection center first and protects key regeneration"
   assert.doesNotMatch(template, /<span class="sr-only">(?:API Base URL|Key)<\/span>/);
   assert.match(template, /\{\{ maskedKey \}\}/);
   assert.doesNotMatch(template, /<code>\{\{ serviceConfig\.gateway_key \}\}<\/code>/);
-  // Key selector appears only with more than one enabled key.
+  // Key selector appears only with more than one enabled key; it is a
+  // popover switcher (name + badge + masked preview), not a bare dropdown,
+  // and it defaults to the primary key instead of a blank selection.
   assert.match(template, /v-if="enabledGatewayKeys\.length > 1"/);
+  assert.match(template, /class="key-switcher-trigger"/);
+  assert.match(template, /:aria-label="t\('选择 Key'\)"/);
+  assert.doesNotMatch(template, /connection-key-select/);
+  assert.match(source, /watch\(enabledGatewayKeys, \(keys\) =>/);
+  assert.match(source, /selectedKeyId\.value = keys\[0\]\.id/);
+  assert.match(source, /const primaryKeyId = computed\(/);
   assert.match(template, /class="account-usage-row"/);
   assert.match(source, /grid-template-columns: minmax\(3\.5em, auto\) minmax\(0, 1fr\)/);
 });

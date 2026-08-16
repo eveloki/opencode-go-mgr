@@ -1593,7 +1593,9 @@ onUnmounted(() => {
   border: none;
   background: none;
   color: var(--ocg-ink);
-  font: 600 var(--ocg-font-md)/1.4 inherit;
+  font-size: var(--ocg-font-md);
+  font-weight: 600;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: text;

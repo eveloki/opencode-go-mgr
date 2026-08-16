@@ -44,15 +44,51 @@
 
           <div class="connection-row">
             <n-icon size="18" aria-hidden="true"><KeyOutlined /></n-icon>
-            <n-select
+            <n-popover
               v-if="enabledGatewayKeys.length > 1"
-              v-model:value="selectedKeyId"
-              class="connection-key-select"
-              size="small"
-              :options="gatewayKeyOptions"
-              :disabled="refreshingKey || loading"
-              :aria-label="t('选择 Key')"
-            />
+              trigger="click"
+              placement="bottom-start"
+              :show="keyMenuOpen"
+              @update:show="keyMenuOpen = $event"
+            >
+              <template #trigger>
+                <button
+                  type="button"
+                  class="key-switcher-trigger"
+                  :disabled="refreshingKey || loading"
+                  :aria-label="t('选择 Key')"
+                  :aria-expanded="keyMenuOpen"
+                  aria-haspopup="menu"
+                  @keydown.esc="keyMenuOpen = false"
+                >
+                  <span class="key-switcher-name">{{ selectedKey?.name }}</span>
+                  <span v-if="selectedKey?.id === primaryKeyId" class="key-switcher-badge">{{ t("主 Key") }}</span>
+                  <n-icon size="12" aria-hidden="true"><DownOutlined /></n-icon>
+                </button>
+              </template>
+              <div class="key-switcher-menu" @keydown.esc="keyMenuOpen = false">
+                <button
+                  v-for="entry in enabledGatewayKeys"
+                  :key="entry.id"
+                  type="button"
+                  class="key-switcher-option"
+                  :class="{ selected: entry.id === selectedKey?.id }"
+                  @click="selectGatewayKey(entry.id)"
+                >
+                  <span class="key-switcher-option-main">
+                    <span class="key-switcher-option-name">{{ entry.name }}</span>
+                    <span v-if="entry.id === primaryKeyId" class="key-switcher-badge">{{ t("主 Key") }}</span>
+                  </span>
+                  <code class="key-switcher-option-value">{{ maskConnectionKey(entry.key) }}</code>
+                  <n-icon
+                    v-if="entry.id === selectedKey?.id"
+                    class="key-switcher-check"
+                    size="14"
+                    aria-hidden="true"
+                  ><CheckOutlined /></n-icon>
+                </button>
+              </div>
+            </n-popover>
             <div class="connection-value">
               <span class="sr-only">{{ t("Key") }}</span>
               <code>{{ maskedKey }}</code>
@@ -248,8 +284,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NSelect, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NPopover, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
 import {
   ApiOutlined,
   CalendarOutlined,
@@ -257,6 +293,7 @@ import {
   ClockCircleOutlined,
   CloudServerOutlined,
   CopyOutlined,
+  DownOutlined,
   KeyOutlined,
   ReloadOutlined,
   WalletOutlined,
@@ -341,9 +378,11 @@ const maskedKey = computed(() => maskConnectionKey(selectedKey.value?.key ?? "")
 const enabledGatewayKeys = computed<GatewayKeyEntry[]>(() =>
   (serviceConfig.value.gateway_keys ?? []).filter((entry) => entry.enabled && !entry.deleted_at),
 );
-const gatewayKeyOptions = computed(() =>
-  enabledGatewayKeys.value.map((entry) => ({ label: entry.name, value: entry.id })),
+// The backend defines the primary key as the first non-deleted entry.
+const primaryKeyId = computed(
+  () => (serviceConfig.value.gateway_keys ?? []).find((entry) => !entry.deleted_at)?.id ?? "",
 );
+const keyMenuOpen = ref(false);
 // Default to the primary key (first active entry) and keep the selection
 // valid across settings reloads and key lifecycle changes.
 const selectedKey = computed<GatewayKeyEntry | null>(() => {
@@ -351,6 +390,17 @@ const selectedKey = computed<GatewayKeyEntry | null>(() => {
   if (keys.length === 0) return null;
   return keys.find((entry) => entry.id === selectedKeyId.value) ?? keys[0];
 });
+// Keep the switcher explicitly on the primary key until the user picks
+// another one, and re-validate whenever the enabled list changes.
+watch(enabledGatewayKeys, (keys) => {
+  if (keys.length > 0 && !keys.some((entry) => entry.id === selectedKeyId.value)) {
+    selectedKeyId.value = keys[0].id;
+  }
+});
+function selectGatewayKey(id: string): void {
+  selectedKeyId.value = id;
+  keyMenuOpen.value = false;
+}
 const connectionUrls = computed(() => {
   try {
     return resolveConnectionUrls(
@@ -663,11 +713,99 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--ocg-canvas) 72%, var(--ocg-surface));
   color: var(--ocg-primary);
 }
-.connection-row:has(.connection-key-select) {
+.connection-row:has(.key-switcher-trigger) {
   grid-template-columns: 28px auto minmax(0, 1fr) auto;
 }
-.connection-key-select {
-  width: 132px;
+.key-switcher-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  padding: 3px 8px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 6px;
+  background: var(--ocg-surface);
+  color: var(--ocg-ink);
+  font-size: var(--ocg-font-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.key-switcher-trigger:hover:not(:disabled) {
+  border-color: var(--ocg-primary);
+}
+.key-switcher-trigger:focus-visible {
+  outline: 2px solid var(--ocg-primary);
+  outline-offset: 2px;
+}
+.key-switcher-trigger:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.key-switcher-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-switcher-badge {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 999px;
+  color: var(--ocg-subtle);
+  font-size: var(--ocg-font-xs);
+  font-weight: 400;
+}
+.key-switcher-menu {
+  display: grid;
+  gap: 4px;
+  min-width: 260px;
+}
+.key-switcher-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--ocg-ink);
+  cursor: pointer;
+  text-align: left;
+}
+.key-switcher-option:hover,
+.key-switcher-option.selected {
+  background: var(--ocg-primary-soft);
+}
+.key-switcher-option:focus-visible {
+  outline: 2px solid var(--ocg-primary);
+  outline-offset: -2px;
+}
+.key-switcher-option-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  grid-column: 1;
+  min-width: 0;
+}
+.key-switcher-option-name {
+  overflow: hidden;
+  font-size: var(--ocg-font-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-switcher-option-value {
+  grid-column: 1;
+  color: var(--ocg-muted);
+  font: var(--ocg-font-xs)/1.4 "Cascadia Mono", Consolas, monospace;
+}
+.key-switcher-check {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  color: var(--ocg-primary);
 }
 .connection-value {
   min-width: 0;
