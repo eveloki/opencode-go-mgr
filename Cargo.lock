@@ -2815,6 +2815,7 @@ dependencies = [
  "nix",
  "ocg-core",
  "parking_lot",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
