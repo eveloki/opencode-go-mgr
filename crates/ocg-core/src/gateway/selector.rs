@@ -52,15 +52,15 @@ impl AccountSelector {
         Self::first_available_for(accounts, UpstreamChannel::Go, exclude_ids)
     }
 
-    /// Zen free quota is shared per egress IP, so one `cooldown_free_until`
-    /// exhausts the whole free channel. Go 429s stay per-account.
+    /// Account-row compatibility guard for the IP-shared Zen free cooldown.
+    /// The durable global gate is checked by the request handler; do not filter
+    /// disabled or unfinished rows here because changing account lifecycle state
+    /// cannot restore an egress-IP quota.
     pub fn free_channel_exhausted(accounts: &[Account]) -> bool {
         let now = Utc::now();
-        accounts.iter().any(|account| {
-            account.enabled
-                && account.setup_step.is_ready()
-                && account.cooldown_free_until.is_some_and(|until| until > now)
-        })
+        accounts
+            .iter()
+            .any(|account| account.cooldown_free_until.is_some_and(|until| until > now))
     }
 
     pub fn first_available_for(
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn one_free_cooldown_exhausts_the_whole_free_channel() {
-        let mut cooled = account("cooled", true, None);
+        let mut cooled = account("cooled", false, None);
         cooled.cooldown_free_until = Some(Utc::now() + Duration::hours(1));
         let next = account("next", true, None);
         let accounts = vec![cooled, next];
@@ -297,7 +297,7 @@ mod tests {
             AccountSelector::first_available_for(&accounts, UpstreamChannel::Go, &[])
                 .unwrap()
                 .id,
-            "cooled"
+            "next"
         );
     }
 }

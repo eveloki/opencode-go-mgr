@@ -1849,6 +1849,45 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Production reset path: stage(ResetProfile) then purge must clear both the
+    /// current and legacy roots for the target account, without touching siblings.
+    #[test]
+    fn reset_profile_stages_and_purges_new_and_legacy_roots_only() {
+        let data_dir = temp_test_root("reset-new-and-legacy");
+        let account_id = "account-1";
+        let new_profile = data_dir.join("browser-profiles").join(account_id);
+        let legacy_profile = data_dir.join("profiles").join(account_id);
+        let other_profile = data_dir.join("browser-profiles").join("account-2");
+        std::fs::create_dir_all(&new_profile).unwrap();
+        std::fs::create_dir_all(&legacy_profile).unwrap();
+        std::fs::create_dir_all(&other_profile).unwrap();
+        std::fs::write(new_profile.join("Cookies"), b"new").unwrap();
+        std::fs::write(legacy_profile.join("Cookies"), b"legacy").unwrap();
+        std::fs::write(other_profile.join("Cookies"), b"sibling").unwrap();
+
+        let staged = StagedBrowserProfiles::stage(
+            &data_dir,
+            account_id,
+            BrowserProfileOperationKind::ResetProfile,
+        )
+        .expect("production reset stages current and legacy roots");
+        assert!(!new_profile.exists());
+        assert!(!legacy_profile.exists());
+        assert!(other_profile.join("Cookies").is_file());
+        staged
+            .purge()
+            .expect("production reset purges staged profiles");
+
+        assert!(!new_profile.exists());
+        assert!(!legacy_profile.exists());
+        assert!(other_profile.join("Cookies").is_file());
+        assert_eq!(
+            std::fs::read(other_profile.join("Cookies")).unwrap(),
+            b"sibling"
+        );
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
     #[test]
     fn staged_profile_rejects_non_directory_targets() {
         let root = std::env::temp_dir().join(format!(

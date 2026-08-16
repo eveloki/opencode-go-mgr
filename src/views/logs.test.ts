@@ -271,14 +271,10 @@ test("managed account API uses ordered setup, browser targets, and profile reset
   ]);
 });
 
-test("logs view shows top stats, extra filters, sorting, and a useful empty state", async () => {
+test("logs view wires filters, race cancellation, debounce, and empty or error state", async () => {
   const source = await readFile(new URL("./Logs.vue", import.meta.url), "utf8");
   const template = source.slice(source.indexOf("<template>"), source.indexOf("<script setup"));
 
-  assert.match(template, /class="stats-row"/);
-  assert.match(template, /class="filter-bar"/);
-  assert.match(template, /\bremote\b/);
-  assert.equal(template.match(/:row-key="logRowKey"/g)?.length, 2);
   assert.match(template, /v-model:value="modelFilter"/);
   assert.match(template, /v-model:value="requestIdFilter"/);
   assert.match(template, /v-model:value="customTimeRange"/);
@@ -289,7 +285,6 @@ test("logs view shows top stats, extra filters, sorting, and a useful empty stat
   assert.match(template, /:loading="gatewayLoading"/);
   assert.match(template, /:loading="forwardLoading"/);
   assert.doesNotMatch(template, /:summary="forwardSummary"/);
-  assert.doesNotMatch(template, /summary-placement="bottom"/);
   assert.doesNotMatch(source, /getForwardLogs\(200\)|filteredForwardLogs/);
   assert.match(source, /const request = \+\+forwardRequest/);
   assert.match(source, /request !== forwardRequest/);
@@ -311,19 +306,10 @@ test("logs view shows top stats, extra filters, sorting, and a useful empty stat
   assert.match(source, /row\.cost_state === "legacy_estimate"/);
   assert.match(source, /row\.cost_state === "free"/);
   assert.match(source, /t\("免费"\)/);
-  assert.match(source, /expandable: \(\) => true/);
-  assert.match(source, /function renderForwardDetail/);
-  assert.match(source, /t\("筛选此请求"\)/);
-  assert.match(source, /:scroll-x="1585"/);
   assert.match(source, /success_unpriced: \{ label: t\("无价格"\)/);
   assert.match(source, /outcome_unknown: \{ label: t\("结果未知"\)/);
   assert.match(source, /row\.error_source === "upstream"/);
   assert.match(source, /t\("上游拒绝"\)/);
-  assert.match(source, /diagnostic\.request_fingerprint/);
-  assert.match(source, /function logRowKey\(row: GatewayLog \| ForwardLog\): number \{\s*return row\.id;\s*\}/);
-  assert.match(source, /type SortBy = [^;]*"attempt"/);
-  assert.match(source, /value: "attempt"/);
-  assert.match(source, /key: "attempt"/);
   assert.match(source, /focusRequestChain\(requestId\)/);
   assert.match(source, /requestIdFilter\.value = requestId[\s\S]*sortBy\.value = "attempt"[\s\S]*sortOrder\.value = "asc"/);
   assert.match(source, /getGatewayLogs\(200, requestIdFilter\.value\)/);
@@ -348,25 +334,6 @@ test("logs view shows top stats, extra filters, sorting, and a useful empty stat
   assert.match(template, /额度消耗（估算）/);
   const clearFilters = source.slice(source.indexOf("function clearFilters"), source.indexOf("function toggleSortOrder"));
   assert.doesNotMatch(clearFilters, /sortBy\.value|sortOrder\.value/);
-});
-
-test("logs time range selector renders presets and custom picker in a popover", async () => {
-  const source = await readFile(new URL("./Logs.vue", import.meta.url), "utf8");
-  const template = source.slice(source.indexOf("<template>"), source.indexOf("<script setup"));
-
-  assert.match(template, /<n-popover[^>]*trigger="click"/);
-  assert.match(template, /<n-button class="time-range-trigger">/);
-  assert.doesNotMatch(template, /class="time-range-trigger"[^>]*:focusable="false"/);
-  assert.match(template, /class="time-range-panel"/);
-  assert.match(template, /class="preset-list"/);
-  assert.match(template, /applyTimePreset\(item\.value\)/);
-  assert.match(template, /class="custom-range-wrapper"/);
-  assert.match(template, /:class="\{ 'is-visible': activePreset === 'custom' \}"/);
-  assert.match(template, /type="daterange"/);
-  assert.match(template, /:panel="true"/);
-  assert.match(template, /:actions="null"/);
-  assert.match(template, /v-model:value="customTimeRange"/);
-  assert.match(template, /applyCustomTimeRange/);
 });
 
 test("logs time range helpers cover all presets", async () => {

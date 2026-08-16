@@ -506,24 +506,34 @@ function stopLifecycleClock() {
 }
 
 // The view stays cached by App.vue's KeepAlive; pause its clock and
-// visibility-driven refreshes while another tab is active.
-onMounted(() => {
+// visibility-driven refreshes while another tab is active. Bind/unbind on
+// activate/deactivate so leave/return cycles re-register the listener.
+function bindVisibilityRefresh() {
   document.addEventListener("visibilitychange", refreshWhenVisible);
+}
+
+function unbindVisibilityRefresh() {
+  document.removeEventListener("visibilitychange", refreshWhenVisible);
+}
+
+onMounted(() => {
+  bindVisibilityRefresh();
   void loadDashboard();
 });
 onActivated(() => {
+  bindVisibilityRefresh();
   startLifecycleClock();
   if (activatedOnce) void loadDashboard();
   else activatedOnce = true;
 });
 onDeactivated(() => {
   stopLifecycleClock();
-  document.removeEventListener("visibilitychange", refreshWhenVisible);
+  unbindVisibilityRefresh();
 });
 onUnmounted(() => {
   cleanup();
   stopLifecycleClock();
-  document.removeEventListener("visibilitychange", refreshWhenVisible);
+  unbindVisibilityRefresh();
 });
 </script>
 

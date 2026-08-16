@@ -95,6 +95,7 @@ const lazyNaivePairs: Partial<Record<Locale, () => Promise<NaiveLocalePair>>> = 
 };
 
 const inflightLoads = new Map<Locale, Promise<void>>();
+let localeRequest = 0;
 
 async function ensureLocaleLoaded(value: Locale): Promise<void> {
   if (catalogs.has(value)) return;
@@ -205,6 +206,7 @@ function applyLocale(value: Locale): void {
 }
 
 export function setLocale(value: Locale): void {
+  const request = ++localeRequest;
   if (catalogs.has(value)) {
     applyLocale(value);
     return;
@@ -212,7 +214,7 @@ export function setLocale(value: Locale): void {
   // Lazy locales swap in once their chunk arrives; the UI keeps the previous
   // language until then so text never mixes catalogs mid-translation.
   void ensureLocaleLoaded(value).then(() => {
-    if (catalogs.has(value)) applyLocale(value);
+    if (request === localeRequest && catalogs.has(value)) applyLocale(value);
   });
 }
 

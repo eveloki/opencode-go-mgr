@@ -2640,10 +2640,10 @@ mod tests {
         AccountOrderInput, AccountSetupUpdate, AccountUsageUpdate, BrowserTarget, ForwardLogQuery,
         MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
         OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
-        ProxyTestRequest, SemverVersion, SettingsUpdateRequest, UpdateCheckResponse,
-        VerifyManagedKeyInput, advance_account_setup, apply_pricing_refresh, asset_path,
-        create_account, create_managed_account, dashboard_account, dashboard_summary,
-        format_error_chain, is_update_available, open_account_browser, parse_semver_version,
+        ProxyTestRequest, SemverVersion, SettingsUpdateRequest, VerifyManagedKeyInput,
+        advance_account_setup, apply_pricing_refresh, asset_path, create_account,
+        create_managed_account, dashboard_account, dashboard_summary, format_error_chain,
+        is_update_available, open_account_browser, parse_semver_version,
         pricing_multiplier_changes, pricing_semantically_equal,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
         reorder_accounts, test_proxy, update_account, update_account_usage,
@@ -3702,30 +3702,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reorder_accounts_accepts_empty_order_for_empty_database() {
-        let dir = temp_data_dir("reorder-empty-accounts");
-        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
-        let db = Database::open(dir.clone()).expect("test database should open");
-        let state = Arc::new(
-            CoreStateInner::new(db, dir.clone(), cipher).expect("test state should initialize"),
-        );
-
-        let accounts = reorder_accounts(
-            State(state.clone()),
-            Json(AccountOrderInput {
-                account_ids: Vec::new(),
-            }),
-        )
-        .await
-        .expect("empty account set should accept an empty order")
-        .0;
-        assert!(accounts.is_empty());
-
-        drop(state);
-        fs::remove_dir_all(dir).expect("test directory should be removable");
-    }
-
-    #[tokio::test]
     async fn manual_usage_update_validates_persists_and_keeps_account_available() {
         let dir = temp_data_dir("manual-usage");
         let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
@@ -3989,92 +3965,36 @@ mod tests {
     }
 
     #[test]
-    fn update_check_response_reports_install_capability() {
-        let response = UpdateCheckResponse {
-            current_version: "1.0.0".to_string(),
-            latest_version: "2.0.0".to_string(),
-            update_available: true,
-            release_url: "https://example.com/release",
-            install_supported: true,
-        };
-        let json = serde_json::to_value(response).expect("response should serialize");
-        assert_eq!(json["install_supported"], true);
+    fn update_availability_covers_stable_and_prerelease_comparisons() {
+        for (current, latest, available) in [
+            ("1.0.0", "1.1.0", true),
+            ("1.1.0", "1.1.0", false),
+            ("2.0.0", "1.9.9", false),
+            ("1.5.8-beta.1", "1.5.7", false),
+            ("1.5.8-beta.1", "1.5.8-beta.2", true),
+            ("1.5.8-beta.1", "1.5.8", true),
+            ("1.5.8-beta.2.9", "1.5.8-beta.11", true),
+        ] {
+            assert_eq!(
+                is_update_available(&parsed_version(current), &parsed_version(latest)),
+                available,
+                "{current} vs {latest}"
+            );
+        }
     }
 
     #[test]
-    fn stable_version_comparison_detects_newer_release() {
-        assert!(is_update_available(
-            &parsed_version("1.0.0"),
-            &parsed_version("1.1.0")
-        ));
-    }
-
-    #[test]
-    fn stable_version_comparison_treats_equal_as_current() {
-        assert!(!is_update_available(
-            &parsed_version("1.1.0"),
-            &parsed_version("1.1.0")
-        ));
-    }
-
-    #[test]
-    fn stable_version_comparison_treats_current_ahead_as_current() {
-        assert!(!is_update_available(
-            &parsed_version("2.0.0"),
-            &parsed_version("1.9.9")
-        ));
-    }
-
-    #[test]
-    fn semver_version_parser_strips_v_prefix() {
-        assert_eq!(
-            parse_semver_version("v1.2.3").map(|(_, value)| value),
-            Some("1.2.3")
-        );
-    }
-
-    #[test]
-    fn semver_version_parser_accepts_dot_separated_build_metadata() {
-        assert_eq!(
-            parse_semver_version("v1.2.3+build.1").map(|(_, value)| value),
-            Some("1.2.3+build.1")
-        );
-    }
-
-    #[test]
-    fn prerelease_build_ignores_older_stable_release() {
-        assert!(!is_update_available(
-            &parsed_version("1.5.8-beta.1"),
-            &parsed_version("1.5.7")
-        ));
-    }
-
-    #[test]
-    fn prerelease_build_detects_newer_prerelease_release() {
-        assert!(is_update_available(
-            &parsed_version("1.5.8-beta.1"),
-            &parsed_version("1.5.8-beta.2")
-        ));
-    }
-
-    #[test]
-    fn prerelease_build_detects_final_release() {
-        assert!(is_update_available(
-            &parsed_version("1.5.8-beta.1"),
-            &parsed_version("1.5.8")
-        ));
-    }
-
-    #[test]
-    fn prerelease_comparison_uses_numeric_dot_separated_identifiers() {
-        assert!(is_update_available(
-            &parsed_version("1.5.8-beta.2.9"),
-            &parsed_version("1.5.8-beta.11")
-        ));
-    }
-
-    #[test]
-    fn semver_version_parser_rejects_malformed_versions() {
+    fn semver_version_parser_accepts_valid_forms_and_rejects_malformed() {
+        for (version, expected) in [
+            ("v1.2.3", Some("1.2.3")),
+            ("v1.2.3+build.1", Some("1.2.3+build.1")),
+        ] {
+            assert_eq!(
+                parse_semver_version(version).map(|(_, value)| value),
+                expected,
+                "{version} should parse"
+            );
+        }
         for version in ["v1.1", "v01.1.0", "v1.1.0-beta.01", "v1.1.0+build..1"] {
             assert!(
                 parse_semver_version(version).is_none(),

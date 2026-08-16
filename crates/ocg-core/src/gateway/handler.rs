@@ -486,6 +486,86 @@ async fn execute_plan(
     let mut free_fallback_used = false;
 
     loop {
+        if active_plan.channel == UpstreamChannel::Free {
+            let free_cooldown = match state.db.lock().free_channel_cooldown_until() {
+                Ok(cooldown) => cooldown,
+                Err(error) => {
+                    let message = format!("failed to read free-channel cooldown: {error}");
+                    record_plan_failure(
+                        &state,
+                        &trace,
+                        &client_body,
+                        attempt.max(1),
+                        client_format,
+                        &active_plan,
+                        "gateway",
+                        "account_selection",
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &message,
+                    );
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &message,
+                        None,
+                    );
+                }
+            };
+            if let Some(until) = free_cooldown {
+                if let Some(outcome) = begin_go_fallback(
+                    &state,
+                    &trace,
+                    client_format,
+                    &client_body,
+                    &active_plan,
+                    &config,
+                    attempt.max(1),
+                    &mut free_fallback_used,
+                ) {
+                    match outcome {
+                        Ok(go_plan) => {
+                            failed_ids.clear();
+                            active_plan = go_plan;
+                            continue;
+                        }
+                        Err(message) => {
+                            record_plan_failure(
+                                &state,
+                                &trace,
+                                &client_body,
+                                attempt.max(1),
+                                client_format,
+                                &active_plan,
+                                "gateway",
+                                "free_fallback",
+                                StatusCode::BAD_REQUEST,
+                                &message,
+                            );
+                            return protocol_error_response(
+                                client_format,
+                                StatusCode::BAD_REQUEST,
+                                &message,
+                                None,
+                            );
+                        }
+                    }
+                }
+                record_plan_failure(
+                    &state,
+                    &trace,
+                    &client_body,
+                    attempt.max(1),
+                    client_format,
+                    &active_plan,
+                    "gateway",
+                    "account_selection",
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "free channel is rate-limited",
+                );
+                return rate_limited_response(client_format, until);
+            }
+        }
+
         let account = {
             let accounts = match state.db.lock().list_accounts() {
                 Ok(accounts) => accounts,
@@ -724,8 +804,22 @@ fn apply_free_routing_policy(
     state: &CoreState,
     conversation_key: Option<&str>,
 ) -> Result<RequestPlan, (StatusCode, String)> {
-    let accounts = state.db.lock().list_accounts().unwrap_or_default();
-    let free_available = !AccountSelector::free_channel_exhausted(&accounts);
+    let db = state.db.lock();
+    let accounts = db.list_accounts().map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to list accounts for free-channel routing: {error}"),
+        )
+    })?;
+    let global_free_cooldown = db.free_channel_cooldown_until().map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to read free-channel cooldown: {error}"),
+        )
+    })?;
+    drop(db);
+    let free_available =
+        global_free_cooldown.is_none() && !AccountSelector::free_channel_exhausted(&accounts);
 
     // Sticky conversation locks channel + resolved model after the first request.
     // Prefer-mode sticky onto free is dropped once the IP-shared free pool is cooling.

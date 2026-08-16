@@ -4112,111 +4112,48 @@ mod tests {
 
     #[test]
     fn streaming_messages_to_chat_sanitizes_minimax_bogus_all_cache() {
-        let source = concat!(
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"minimax-m3\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":40500}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
-            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-        );
-        let plan = RequestPlan {
-            client: ApiFormat::ChatCompletions,
-            upstream: ApiFormat::Messages,
-            model: "minimax-m3".into(),
-            stream: true,
-            body: Bytes::new(),
-            channel: crate::models::UpstreamChannel::Go,
-            upstream_base_override: None,
-            original_model: None,
-            allow_go_fallback: false,
-            service_tier: None,
-            custom_tools: Vec::new(),
-            namespace_tools: Vec::new(),
-            response_parallel_tool_calls: true,
-            response_tool_choice: json!("auto"),
-            response_tools: Vec::new(),
-        };
-        let mut converter = StreamConverter::new(&plan);
-        let bytes = source.as_bytes();
-        let mut output = converter
-            .process_chunk(Bytes::copy_from_slice(bytes))
-            .unwrap();
-        output.extend(converter.finish().unwrap());
-        let output = String::from_utf8(output.concat()).unwrap();
-        assert!(output.contains("\"prompt_tokens\":40500"));
-        assert!(output.contains("\"cached_tokens\":0"));
-    }
-
-    #[test]
-    fn streaming_messages_to_chat_sanitizes_minimax_without_upstream_model() {
-        // OpenCode Go may omit the model field in message_start. The converter must
-        // fall back to the request plan's model to sanitize the bogus cache read.
-        let source = concat!(
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":40500}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
-            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-        );
-        let plan = RequestPlan {
-            client: ApiFormat::ChatCompletions,
-            upstream: ApiFormat::Messages,
-            model: "minimax-m3".into(),
-            stream: true,
-            body: Bytes::new(),
-            channel: crate::models::UpstreamChannel::Go,
-            upstream_base_override: None,
-            original_model: None,
-            allow_go_fallback: false,
-            service_tier: None,
-            custom_tools: Vec::new(),
-            namespace_tools: Vec::new(),
-            response_parallel_tool_calls: true,
-            response_tool_choice: json!("auto"),
-            response_tools: Vec::new(),
-        };
-        let mut converter = StreamConverter::new(&plan);
-        let bytes = source.as_bytes();
-        let mut output = converter
-            .process_chunk(Bytes::copy_from_slice(bytes))
-            .unwrap();
-        output.extend(converter.finish().unwrap());
-        let output = String::from_utf8(output.concat()).unwrap();
-        assert!(output.contains("\"prompt_tokens\":40500"));
-        assert!(output.contains("\"cached_tokens\":0"));
-    }
-
-    #[test]
-    fn streaming_messages_to_chat_sanitizes_mixed_case_minimax() {
-        // OpenCode Go / Qwen Cloud expose MiniMax IDs as "MiniMax-M3". The stream
-        // converter must still sanitize the bogus all-cache usage.
-        let source = concat!(
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":40500}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
-            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-        );
-        let plan = RequestPlan {
-            client: ApiFormat::ChatCompletions,
-            upstream: ApiFormat::Messages,
-            model: "MiniMax-M3".into(),
-            stream: true,
-            body: Bytes::new(),
-            channel: crate::models::UpstreamChannel::Go,
-            upstream_base_override: None,
-            original_model: None,
-            allow_go_fallback: false,
-            service_tier: None,
-            custom_tools: Vec::new(),
-            namespace_tools: Vec::new(),
-            response_parallel_tool_calls: true,
-            response_tool_choice: json!("auto"),
-            response_tools: Vec::new(),
-        };
-        let mut converter = StreamConverter::new(&plan);
-        let bytes = source.as_bytes();
-        let mut output = converter
-            .process_chunk(Bytes::copy_from_slice(bytes))
-            .unwrap();
-        output.extend(converter.finish().unwrap());
-        let output = String::from_utf8(output.concat()).unwrap();
-        assert!(output.contains("\"prompt_tokens\":40500"));
-        assert!(output.contains("\"cached_tokens\":0"));
+        // OpenCode Go may omit the model field in message_start or report the id in
+        // mixed case ("MiniMax-M3"); the converter must fall back to the request
+        // plan's model to sanitize the bogus all-cache usage in every shape.
+        for model in ["minimax-m3", "MiniMax-M3"] {
+            for start_model in [Some(model), None] {
+                let message = match start_model {
+                    Some(model) => json!({
+                        "id":"msg_1","model":model,
+                        "usage":{"input_tokens":0,"cache_read_input_tokens":40500}
+                    }),
+                    None => json!({
+                        "id":"msg_1",
+                        "usage":{"input_tokens":0,"cache_read_input_tokens":40500}
+                    }),
+                };
+                let source = format!(
+                    "event: message_start\ndata: {}\n\n\
+                     event: message_delta\ndata: {}\n\n\
+                     event: message_stop\ndata: {}\n\n",
+                    json!({"type":"message_start","message":message}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}),
+                    json!({"type":"message_stop"}),
+                );
+                let mut request = plan(ApiFormat::ChatCompletions, ApiFormat::Messages);
+                request.model = model.into();
+                let mut converter = StreamConverter::new(&request);
+                let bytes = source.as_bytes();
+                let mut output = converter
+                    .process_chunk(Bytes::copy_from_slice(bytes))
+                    .unwrap();
+                output.extend(converter.finish().unwrap());
+                let output = String::from_utf8(output.concat()).unwrap();
+                assert!(
+                    output.contains("\"prompt_tokens\":40500"),
+                    "model={model} start_model={start_model:?}"
+                );
+                assert!(
+                    output.contains("\"cached_tokens\":0"),
+                    "model={model} start_model={start_model:?}"
+                );
+            }
+        }
     }
 
     #[test]

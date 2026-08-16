@@ -128,6 +128,14 @@ and true vs false circuit breakers:
 Also: [Contributors](docs/CONTRIBUTORS.md), [DESIGN.md](DESIGN.md),
 [AGENTS.md](AGENTS.md).
 
+## Community
+
+Join the OCG Manager QQ group: **1104321231**.
+
+<p align="center">
+  <img src="assets/qq-group.png" alt="OCG Manager QQ group QR code" width="360" />
+</p>
+
 ## Development
 
 ```bash

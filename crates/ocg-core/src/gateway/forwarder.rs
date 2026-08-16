@@ -607,9 +607,10 @@ async fn forward_request_impl(
         if status.as_u16() == 429 {
             // Go usage windows and Zen free promo limits both arrive as 429; cool the matching channel.
             // Unlike a rejected 429, ambiguous transport failures and 5xx responses are not replayed.
-            let window = parse_usage_limit_window(&text).or_else(|| {
-                (plan.channel == UpstreamChannel::Free).then_some(UsageWindowKind::Free)
-            });
+            // The endpoint/channel is authoritative. Free providers sometimes
+            // reuse Go-window wording (5-hour/weekly/monthly); that text must not
+            // downgrade an IP-shared Free 429 into per-account key rotation.
+            let window = usage_limit_window_for_channel(plan.channel, &text);
             let cooldown = if window == Some(UsageWindowKind::Free) {
                 parse_free_reset_or_default(&text)
             } else {
@@ -2089,6 +2090,14 @@ fn error_response(format: ApiFormat, message: &str, upstream: Option<&Value>) ->
     (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
 }
 
+fn usage_limit_window_for_channel(channel: UpstreamChannel, text: &str) -> Option<UsageWindowKind> {
+    if channel == UpstreamChannel::Free {
+        Some(UsageWindowKind::Free)
+    } else {
+        parse_usage_limit_window(text)
+    }
+}
+
 fn action_for_usage_limit(
     window: Option<UsageWindowKind>,
     allow_go_fallback: bool,
@@ -2440,6 +2449,16 @@ mod stream_usage_tests {
 
     #[test]
     fn free_429_does_not_rotate_keys() {
+        for misleading_body in [
+            "5-hour usage limit reached. Resets in 13min.",
+            "Weekly usage limit reached. Resets in 4 days.",
+            "Monthly usage limit reached. Resets in 13 days.",
+        ] {
+            assert_eq!(
+                usage_limit_window_for_channel(UpstreamChannel::Free, misleading_body),
+                Some(UsageWindowKind::Free),
+            );
+        }
         assert_eq!(
             action_for_usage_limit(Some(UsageWindowKind::Free), true),
             ForwardAction::ExhaustFreeChannel
@@ -2598,50 +2617,34 @@ mod stream_usage_tests {
     }
 
     #[test]
-    fn messages_stream_sanitizes_minimax_with_model_hint() {
-        // Upstream may omit the model field in message_start; the request plan's
-        // model must still be used to sanitize bogus all-cache usage.
-        let mut st = StreamState::default();
-        let start = Bytes::from_static(
-            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}}\n\n",
-        );
-        let delta = Bytes::from_static(
-            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n",
-        );
-        process_chunk_for_usage(&mut st, ApiFormat::Messages, &start, Some("minimax-m3"));
-        process_chunk_for_usage(&mut st, ApiFormat::Messages, &delta, Some("minimax-m3"));
-        assert!(st.has_usage);
-        let (p, c, cached, _) = token_counts(st.usage);
-        assert_eq!(p, 40500, "bogus cache read should be moved back to input");
-        assert_eq!(c, 5);
-        assert_eq!(cached, 0);
-    }
-
-    #[test]
-    fn messages_stream_keeps_minimax_request_hint_when_upstream_rewrites_model() {
-        let mut st = StreamState::default();
-        let start = Bytes::from_static(
-            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"ocg-generic\",\"usage\":{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}}\n\n",
-        );
-        process_chunk_for_usage(&mut st, ApiFormat::Messages, &start, Some("minimax-m3"));
-        assert!(st.has_usage);
-        let (input, output, cached, _) = token_counts(st.usage);
-        assert_eq!((input, output, cached), (40500, 5, 0));
-    }
-
-    #[test]
-    fn messages_stream_sanitizes_minimax_with_mixed_case_model_hint() {
-        // OpenCode Go / Qwen Cloud expose MiniMax IDs as "MiniMax-M3". The stream
-        // sanitizer must recognize the family regardless of capitalization.
-        let mut st = StreamState::default();
-        let start = Bytes::from_static(
-            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}}\n\n",
-        );
-        process_chunk_for_usage(&mut st, ApiFormat::Messages, &start, Some("MiniMax-M3"));
-        assert!(st.has_usage);
-        let (p, _, cached, _) = token_counts(st.usage);
-        assert_eq!(p, 40500, "bogus cache read should be moved back to input");
-        assert_eq!(cached, 0);
+    fn messages_stream_sanitizes_minimax_bogus_cache_from_request_hint() {
+        // Upstream may omit the model field in message_start or rewrite it to an
+        // internal id, and the plan's hint may arrive in mixed case ("MiniMax-M3");
+        // the request hint must still sanitize the bogus all-cache usage in every shape.
+        for (hint, start_model) in [
+            ("minimax-m3", None),
+            ("minimax-m3", Some("ocg-generic")),
+            ("MiniMax-M3", None),
+        ] {
+            let message = match start_model {
+                Some(model) => format!(
+                    "{{\"model\":\"{model}\",\"usage\":{{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}}}"
+                ),
+                None => "{\"usage\":{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}".to_string(),
+            };
+            let start = Bytes::from(format!(
+                "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{message}}}\n\n"
+            ));
+            let mut st = StreamState::default();
+            process_chunk_for_usage(&mut st, ApiFormat::Messages, &start, Some(hint));
+            assert!(st.has_usage, "hint={hint} start_model={start_model:?}");
+            let (input, output, cached, _) = token_counts(st.usage);
+            assert_eq!(
+                (input, output, cached),
+                (40500, 5, 0),
+                "hint={hint} start_model={start_model:?}"
+            );
+        }
     }
 
     #[test]

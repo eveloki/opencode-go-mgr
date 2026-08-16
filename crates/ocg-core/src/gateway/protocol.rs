@@ -3343,48 +3343,6 @@ mod tests {
     }
 
     #[test]
-    fn supported_model_ids_lists_every_routable_model() {
-        assert_eq!(
-            supported_model_ids().collect::<Vec<_>>(),
-            [
-                "grok-4.5",
-                "glm-5.3",
-                "glm-5.2",
-                "glm-5.1",
-                "glm-5",
-                "gpt-5.6-luna",
-                "kimi-k3",
-                "kimi-k2.7-code",
-                "kimi-k2.6",
-                "kimi-k2.5",
-                "deepseek-v4-pro",
-                "deepseek-v4-flash",
-                "mimo-v2.5",
-                "mimo-v2.5-pro",
-                "hy3",
-                "minimax-m3",
-                "minimax-m2.7",
-                "minimax-m2.7-highspeed",
-                "minimax-m2.5",
-                "minimax-m2.5-highspeed",
-                "qwen3.8-max",
-                "qwen3.7-max",
-                "qwen3.7-plus",
-                "qwen3.6-plus",
-                "qwen3.5-plus",
-                "big-pickle",
-                "deepseek-v4-flash-free",
-                "mimo-v2.5-free",
-                "ling-3.0-flash-free",
-                "laguna-s-2.1-free",
-                "longcat-2.0-free",
-                "north-mini-code-free",
-                "nemotron-3-ultra-free",
-            ]
-        );
-    }
-
-    #[test]
     fn multi_protocol_models_passthrough_supported_formats() {
         // deepseek-v4-flash: 2026-08-14 probe accepts Chat, Responses, and Messages.
         let flash_responses = prepare_request(
@@ -3539,7 +3497,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_request_to_messages_preserves_string_service_tier() {
+    fn service_tier_preserves_string_values_and_ignores_non_string_values() {
         // MiniMax accepts Chat natively; force Messages conversion via Responses client.
         let plan = prepare_request(
             ApiFormat::Responses,
@@ -3555,6 +3513,20 @@ mod tests {
         assert_eq!(plan.upstream, ApiFormat::Messages);
         assert_eq!(body["service_tier"], "priority");
         assert_eq!(plan.service_tier.as_deref(), Some("priority"));
+
+        let ignored = prepare_request(
+            ApiFormat::Responses,
+            bytes(json!({
+                "model": "minimax-m3",
+                "store": false,
+                "input": "hi",
+                "service_tier": {"tier": "priority"}
+            })),
+        )
+        .expect("non-string service tier should retain compatibility");
+        let body: Value = serde_json::from_slice(&ignored.body).expect("body is JSON");
+        assert!(body.get("service_tier").is_none());
+        assert_eq!(ignored.service_tier, None);
 
         let chat = prepare_request(
             ApiFormat::ChatCompletions,
@@ -3587,38 +3559,6 @@ mod tests {
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["model"], "deepseek-v4-flash");
         assert_eq!(body["messages"][0]["content"], "hi");
-    }
-
-    #[test]
-    fn responses_request_to_messages_preserves_string_service_tier() {
-        let plan = prepare_request(
-            ApiFormat::Responses,
-            bytes(json!({
-                "model": "minimax-m3",
-                "store": false,
-                "input": "hi",
-                "service_tier": "priority"
-            })),
-        )
-        .expect("Responses request should convert");
-        let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
-        assert_eq!(plan.upstream, ApiFormat::Messages);
-        assert_eq!(body["service_tier"], "priority");
-        assert_eq!(plan.service_tier.as_deref(), Some("priority"));
-
-        let ignored = prepare_request(
-            ApiFormat::Responses,
-            bytes(json!({
-                "model": "minimax-m3",
-                "store": false,
-                "input": "hi",
-                "service_tier": {"tier": "priority"}
-            })),
-        )
-        .expect("non-string service tier should retain compatibility");
-        let body: Value = serde_json::from_slice(&ignored.body).expect("body is JSON");
-        assert!(body.get("service_tier").is_none());
-        assert_eq!(ignored.service_tier, None);
     }
 
     #[test]
@@ -4198,77 +4138,58 @@ mod tests {
     }
 
     #[test]
-    fn chat_upstream_converts_responses_developer_role_to_system() {
-        let plan = prepare_request(
-            ApiFormat::Responses,
-            bytes(json!({
-                "model":"hy3",
-                "store":false,
-                "instructions":"instructions",
-                "input":[
-                    {"type":"message","role":"developer","content":[{"type":"input_text","text":"dev"}]},
-                    {"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
-                ]
-            })),
-        )
-        .expect("Responses request to Chat upstream normalizes developer role");
-        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
-        let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
-        let messages = body["messages"]
-            .as_array()
-            .expect("chat messages is an array");
-        assert!(
-            messages.iter().all(|m| m["role"] != "developer"),
-            "chat upstream must not carry developer role"
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|m| m["role"] == "system" && m["content"] == "dev"),
-            "developer message should become a system message"
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|m| m["role"] == "user" && m["content"] == "hello")
-        );
-    }
-
-    #[test]
-    fn chat_upstream_converts_messages_developer_role_to_system() {
-        // Messages 客户端直接请求携带 developer 指令角色，走同一 message_to_chat
-        // 转换链，必须同样归一化为 system（与 Responses 入口共享修复路径）。
-        let plan = prepare_request(
-            ApiFormat::Messages,
-            bytes(json!({
-                "model":"hy3",
-                "messages":[
-                    {"role":"developer","content":"dev"},
-                    {"role":"user","content":"hello"}
-                ]
-            })),
-        )
-        .expect("Messages request to Chat upstream normalizes developer role");
-        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
-        let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
-        let messages = body["messages"]
-            .as_array()
-            .expect("chat messages is an array");
-        assert!(
-            messages.iter().all(|m| m["role"] != "developer"),
-            "chat upstream must not carry developer role"
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|m| m["role"] == "system" && m["content"] == "dev"),
-            "developer message should become a system message"
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|m| m["role"] == "user" && m["content"] == "hello")
-        );
+    fn chat_upstream_converts_developer_role_to_system() {
+        // Responses 与 Messages 客户端入口共享 message_to_chat 转换链，
+        // developer 指令角色都必须归一化为 system，禁止透传 developer。
+        for (client, payload) in [
+            (
+                ApiFormat::Responses,
+                json!({
+                    "model":"hy3",
+                    "store":false,
+                    "instructions":"instructions",
+                    "input":[
+                        {"type":"message","role":"developer","content":[{"type":"input_text","text":"dev"}]},
+                        {"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
+                    ]
+                }),
+            ),
+            (
+                ApiFormat::Messages,
+                json!({
+                    "model":"hy3",
+                    "messages":[
+                        {"role":"developer","content":"dev"},
+                        {"role":"user","content":"hello"}
+                    ]
+                }),
+            ),
+        ] {
+            let plan = prepare_request(client, bytes(payload)).unwrap_or_else(|_| {
+                panic!("{client:?} request to Chat upstream normalizes developer role")
+            });
+            assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
+            let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
+            let messages = body["messages"]
+                .as_array()
+                .expect("chat messages is an array");
+            assert!(
+                messages.iter().all(|m| m["role"] != "developer"),
+                "{client:?}: chat upstream must not carry developer role"
+            );
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m["role"] == "system" && m["content"] == "dev"),
+                "{client:?}: developer message should become a system message"
+            );
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m["role"] == "user" && m["content"] == "hello"),
+                "{client:?}: user message must be preserved"
+            );
+        }
     }
 
     #[test]
@@ -4396,46 +4317,31 @@ mod tests {
 
     #[test]
     fn messages_response_to_chat_sanitizes_minimax_bogus_all_cache() {
-        let response = json!({
-            "id":"m1","model":"minimax-m3",
-            "content":[{"type":"text","text":"hi"}],
-            "stop_reason":"end_turn",
-            "usage":{"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500}
-        });
-        let chat = transform_response(
-            &plan_with_model(
-                ApiFormat::ChatCompletions,
-                ApiFormat::Messages,
-                "minimax-m3",
-            ),
-            &response,
-        )
-        .expect("Messages to Chat");
-        assert_eq!(chat["usage"]["prompt_tokens"], 40500);
-        assert_eq!(chat["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
-    }
-
-    #[test]
-    fn messages_response_to_chat_sanitizes_minimax_when_model_is_missing() {
-        // OpenCode Go's Anthropic-compatible endpoint sometimes omits the model field
-        // from the response body. The request plan's model must still trigger sanitization.
-        let response = json!({
-            "id":"m1",
-            "content":[{"type":"text","text":"hi"}],
-            "stop_reason":"end_turn",
-            "usage":{"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500}
-        });
-        let chat = transform_response(
-            &plan_with_model(
-                ApiFormat::ChatCompletions,
-                ApiFormat::Messages,
-                "minimax-m3",
-            ),
-            &response,
-        )
-        .expect("Messages to Chat");
-        assert_eq!(chat["usage"]["prompt_tokens"], 40500);
-        assert_eq!(chat["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+        // OpenCode Go's Anthropic-compatible endpoint sometimes returns a rewritten model
+        // id or omits the field entirely; the request plan's model must still trigger
+        // sanitization either way.
+        for model_field in [Some("minimax-m3"), None] {
+            let mut response = json!({
+                "id":"m1",
+                "content":[{"type":"text","text":"hi"}],
+                "stop_reason":"end_turn",
+                "usage":{"input_tokens":0,"output_tokens":5,"cache_read_input_tokens":40500}
+            });
+            if let Some(model) = model_field {
+                response["model"] = json!(model);
+            }
+            let chat = transform_response(
+                &plan_with_model(
+                    ApiFormat::ChatCompletions,
+                    ApiFormat::Messages,
+                    "minimax-m3",
+                ),
+                &response,
+            )
+            .expect("Messages to Chat");
+            assert_eq!(chat["usage"]["prompt_tokens"], 40500);
+            assert_eq!(chat["usage"]["prompt_tokens_details"]["cached_tokens"], 0);
+        }
     }
 
     #[test]

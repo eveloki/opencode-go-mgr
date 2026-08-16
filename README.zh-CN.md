@@ -118,6 +118,14 @@ Responses、Gemini 或未知 Claude Desktop 别名直接 `400`。
 另见：[Contributors](docs/CONTRIBUTORS.md)、[DESIGN.md](DESIGN.md)、
 [AGENTS.md](AGENTS.md)。
 
+## 交流群
+
+加入 OCG Manager QQ 群：**1104321231**。
+
+<p align="center">
+  <img src="assets/qq-group.png" alt="OCG Manager QQ 群二维码" width="360" />
+</p>
+
 ## 开发模式
 
 ```bash

@@ -12,6 +12,12 @@ pub struct Database {
     conn: Connection,
 }
 
+/// Durable, egress-IP-wide Zen free-channel cooldown.
+///
+/// This must not be tied only to an account row: disabling or deleting the key
+/// that observed the 429 does not restore the shared upstream quota.
+pub const FREE_CHANNEL_COOLDOWN_SETTING: &str = "free_channel_cooldown_until";
+
 pub struct ForwardLogQueryOptions<'a> {
     pub limit: i64,
     pub offset: i64,
@@ -783,6 +789,21 @@ impl Database {
             params![diagnostic_cutoff],
         )?;
 
+        // v17 originally stored the IP-shared free cooldown only on the account
+        // that observed it. Backfill an active legacy value into a durable global
+        // setting on every open, without adding another schema migration.
+        let legacy_free_cooldown: Option<String> = tx.query_row(
+            "SELECT MAX(cooldown_free_until)
+             FROM accounts
+             WHERE cooldown_free_until IS NOT NULL
+               AND cooldown_free_until > ?1",
+            params![Utc::now().to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        if let Some(until) = legacy_free_cooldown {
+            Self::upsert_free_channel_cooldown(&tx, &until)?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -1063,6 +1084,25 @@ impl Database {
             })
             .optional()
             .map_err(|e| e.into())
+    }
+
+    /// Return the active egress-IP-wide Zen free cooldown, if any.
+    pub fn free_channel_cooldown_until(&self) -> Result<Option<DateTime<Utc>>> {
+        self.free_channel_cooldown_until_at(Utc::now())
+    }
+
+    fn free_channel_cooldown_until_at(&self, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
+        let Some(value) = self.get_setting(FREE_CHANNEL_COOLDOWN_SETTING)? else {
+            return Ok(None);
+        };
+        let until = DateTime::parse_from_rfc3339(&value)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "invalid {FREE_CHANNEL_COOLDOWN_SETTING} setting {value:?}: {error}"
+                )
+            })?;
+        Ok((until > now).then_some(until))
     }
 
     // Logging
@@ -1494,22 +1534,44 @@ impl Database {
             ),
             params![id, until.to_rfc3339(), err, now_rfc, expected_key_cipher],
         )?;
-        if updated == 0 {
+        if updated == 0 && window != Some(UsageWindowKind::Free) {
             return Ok(false);
         }
 
-        // Legacy callers use cooldown_until as the time when this account is usable.
-        let new_cooldown = Self::compute_cooldown_until(&tx, id, &now_rfc)?;
-        tx.execute(
-            "UPDATE accounts SET cooldown_until = ?2 WHERE id = ?1",
-            params![id, new_cooldown],
-        )?;
+        if updated > 0 {
+            // Legacy callers use cooldown_until as the time when this account is usable.
+            let new_cooldown = Self::compute_cooldown_until(&tx, id, &now_rfc)?;
+            tx.execute(
+                "UPDATE accounts SET cooldown_until = ?2 WHERE id = ?1",
+                params![id, new_cooldown],
+            )?;
+        }
+
+        if window == Some(UsageWindowKind::Free) {
+            // A Free 429 proves the egress-IP quota is exhausted even if the
+            // originating key was concurrently replaced or its account deleted.
+            // Keep the furthest observed deadline and commit it atomically with
+            // the account-local compatibility copy when that row still exists.
+            Self::upsert_free_channel_cooldown(&tx, &until.to_rfc3339())?;
+        }
 
         // ponytail: 不再在 429 时设置 baseline。固定窗口的"重置"由 forward_logs 自然驱动；
         // 冷却到期后账号恢复可用，用量窗口照常计算。429 仅用于阻断选择器重试。
         // 旧 baseline 列保留不读不写，避免迁移风险。
         tx.commit()?;
-        Ok(true)
+        Ok(updated > 0)
+    }
+
+    fn upsert_free_channel_cooldown(tx: &rusqlite::Transaction<'_>, until: &str) -> Result<()> {
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = CASE
+                 WHEN excluded.value > settings.value THEN excluded.value
+                 ELSE settings.value
+             END",
+            params![FREE_CHANNEL_COOLDOWN_SETTING, until],
+        )?;
+        Ok(())
     }
 
     fn compute_cooldown_until(
@@ -3254,6 +3316,47 @@ mod tests {
         assert!(cleared.cooldown_until.is_none());
         assert!(cleared.cooldown_generic_until.is_none());
         assert!(cleared.last_error.is_none());
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn free_channel_cooldown_survives_account_deletion_restart_and_expires() {
+        let dir = temp_data_dir("global-free-cooldown");
+        let until = Utc::now() + Duration::minutes(30);
+        {
+            let mut db = Database::open(dir.clone()).expect("db should open");
+            db.create_account(&account("free-source"))
+                .expect("source account should be created");
+            db.set_account_rate_limit(
+                "free-source",
+                until,
+                "free quota exhausted",
+                Some(UsageWindowKind::Free),
+            )
+            .expect("free rate limit should save");
+            db.delete_account("free-source")
+                .expect("source account should be deleted");
+            db.create_account(&account("replacement"))
+                .expect("replacement account should be created");
+
+            assert!(db.free_channel_cooldown_until().unwrap().is_some());
+        }
+
+        let db = Database::open(dir.clone()).expect("db should reopen");
+        assert!(
+            db.free_channel_cooldown_until()
+                .expect("global cooldown should load")
+                .is_some(),
+            "deleting every source row and reopening must not clear the IP-wide cooldown"
+        );
+        assert!(
+            db.free_channel_cooldown_until_at(until + Duration::seconds(1))
+                .expect("expiry should be evaluated")
+                .is_none(),
+            "the global gate must reopen after its deadline"
+        );
 
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
