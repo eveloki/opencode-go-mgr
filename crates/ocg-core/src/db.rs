@@ -1464,7 +1464,15 @@ impl Database {
     ) -> Result<bool> {
         let chunk_rows = chunk_rows.max(1);
         let Some(watermark) = self.backfill_watermark()? else {
-            return Ok(false);
+            // Completion marker present. A downgrade window (an older binary
+            // writing NULL rows after this marker was recorded) must not
+            // leave those rows permanently unattributed: probe the index
+            // once and restart the scan when any NULL row appears.
+            if !self.forward_logs_have_unattributed_rows()? {
+                return Ok(false);
+            }
+            self.set_setting(BACKFILL_SETTING_KEY, "0")?;
+            return Ok(true);
         };
         let max_rowid: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(rowid), 0) FROM forward_logs",
@@ -1494,17 +1502,23 @@ impl Database {
         // the NULL set can only shrink; record completion once nothing is
         // left, otherwise late NULL rows (an older binary still writing)
         // force a restart from the beginning.
-        let remaining: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM forward_logs WHERE client_key_id IS NULL",
-            [],
-            |row| row.get(0),
-        )?;
-        if remaining == 0 {
+        if !self.forward_logs_have_unattributed_rows()? {
             self.set_setting(BACKFILL_SETTING_KEY, BACKFILL_DONE)?;
             return Ok(false);
         }
         self.set_setting(BACKFILL_SETTING_KEY, "0")?;
         Ok(true)
+    }
+
+    /// Whether any forward log row still lacks a client key id; served by
+    /// `idx_forward_logs_client_key` in one index probe.
+    fn forward_logs_have_unattributed_rows(&self) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM forward_logs WHERE client_key_id IS NULL LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(found == 1)
     }
 
     /// `None` when the backfill already completed; otherwise the max rowid
@@ -4511,14 +4525,29 @@ mod tests {
             }
         }
 
-        // Done marker makes further steps a no-op, even for new NULL rows
-        // written by an older binary (they surface as "unattributed").
+        // New NULL rows written by an older binary (a downgrade window)
+        // restart the scan instead of staying "unattributed" forever.
         db.log_forward(&forward_log("acct", "success", 9.0))
             .unwrap();
         assert!(
-            !db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
+            db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
                 .unwrap()
         );
+        while db
+            .backfill_forward_logs_client_key_step("primary", "Primary", 3)
+            .unwrap()
+        {}
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+        let late_rows: Vec<_> = db
+            .list_forward_logs(100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.client_key_name.as_deref() == Some("Primary"))
+            .collect();
+        assert!(late_rows.iter().any(|row| row.cost == Some(9.0)));
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -4575,6 +4604,63 @@ mod tests {
         assert_eq!(
             rows.iter().map(|row| row.cost.unwrap_or(0.0)).sum::<f64>() as i64,
             10
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backfill_restarts_after_done_when_a_downgrade_writes_null_rows() {
+        let dir = temp_data_dir("backfill-restart-after-done");
+        let db = Database::open(dir.clone()).unwrap();
+        db.log_forward(&forward_log("acct", "success", 1.0))
+            .unwrap();
+        assert!(
+            !db.backfill_forward_logs_client_key_step("primary", "Primary", 50)
+                .unwrap()
+        );
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+
+        // A downgrade window writes fresh rows the way the pre-v18 binary
+        // did: without a client key id.
+        db.log_forward(&forward_log("acct", "success", 2.0))
+            .unwrap();
+        db.log_forward(&forward_log("acct", "success", 4.0))
+            .unwrap();
+
+        // The completion marker no longer short-circuits: one index probe
+        // sees the NULL rows, the scan restarts, and they are attributed.
+        assert!(
+            db.backfill_forward_logs_client_key_step("primary", "Primary", 1)
+                .unwrap()
+        );
+        while db
+            .backfill_forward_logs_client_key_step("primary", "Primary", 50)
+            .unwrap()
+        {}
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+        let rows = db.list_forward_logs(100).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .all(|row| row.client_key_id.as_deref() == Some("primary"))
+        );
+
+        // With no fresh NULL rows the marker keeps short-circuiting.
+        let mut attributed = forward_log("acct", "success", 8.0);
+        attributed.client_key_id = Some("primary".into());
+        attributed.client_key_name = Some("Primary".into());
+        db.log_forward(&attributed).unwrap();
+        assert!(
+            !db.backfill_forward_logs_client_key_step("primary", "Primary", 50)
+                .unwrap()
         );
 
         drop(db);

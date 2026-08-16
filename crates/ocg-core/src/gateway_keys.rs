@@ -12,6 +12,10 @@ use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 
 const MAX_NAME_CHARS: usize = 64;
+/// Ceiling on active (non-deleted) keys. The auth scan, the per-request
+/// config clone, and the settings payload all scale with the list, and a
+/// local node has no realistic need for more devices than this.
+const MAX_ACTIVE_KEYS: usize = 64;
 
 /// The primary key: first non-deleted entry in the list.
 pub fn primary_key(config: &AppConfig) -> Option<&GatewayKeyEntry> {
@@ -103,14 +107,14 @@ pub fn normalize(config: &mut AppConfig) -> bool {
 
 /// Validates the full invariant set. Called by `AppConfig::validate`.
 pub fn validate(config: &AppConfig) -> Result<(), String> {
-    if config
-        .gateway_keys
-        .iter()
-        .filter(|key| key.is_active())
-        .count()
-        == 0
-    {
+    let active_count = active_key_count(config);
+    if active_count == 0 {
         return Err("at least one active gateway key is required".to_string());
+    }
+    if active_count > MAX_ACTIVE_KEYS {
+        return Err(format!(
+            "at most {MAX_ACTIVE_KEYS} active gateway keys are supported"
+        ));
     }
     if !config.gateway_keys.iter().any(|key| key.authenticates()) {
         return Err("at least one enabled gateway key is required".to_string());
@@ -142,6 +146,14 @@ pub fn validate(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn active_key_count(config: &AppConfig) -> usize {
+    config
+        .gateway_keys
+        .iter()
+        .filter(|key| key.is_active())
+        .count()
+}
+
 fn validate_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -155,10 +167,17 @@ fn validate_name(name: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// Creates a new enabled key and appends it to the list.
+/// Creates a new enabled key and appends it to the list. The ceiling is
+/// checked before any mutation so a rejected create leaves the config
+/// untouched.
 pub fn create_key(config: &mut AppConfig, name: &str) -> Result<GatewayKeyEntry, String> {
     validate(config)?;
     let name = validate_name(name)?;
+    if active_key_count(config) >= MAX_ACTIVE_KEYS {
+        return Err(format!(
+            "at most {MAX_ACTIVE_KEYS} active gateway keys are supported"
+        ));
+    }
     let entry = GatewayKeyEntry {
         id: uuid::Uuid::new_v4().to_string(),
         name,
@@ -310,6 +329,35 @@ mod tests {
         assert!(create_key(&mut config, &"x".repeat(65)).is_err());
         assert!(create_key(&mut config, " pad ").is_ok());
         assert_eq!(config.gateway_keys[1].name, "pad");
+    }
+
+    #[test]
+    fn create_enforces_the_active_key_ceiling() {
+        let mut config = primary_only();
+        for index in 0..(MAX_ACTIVE_KEYS - 1) {
+            create_key(&mut config, &format!("key-{index}"))
+                .expect("keys below the ceiling should create");
+        }
+        assert_eq!(
+            config
+                .gateway_keys
+                .iter()
+                .filter(|key| key.is_active())
+                .count(),
+            MAX_ACTIVE_KEYS
+        );
+        let overflow = create_key(&mut config, "overflow");
+        assert!(overflow.is_err());
+        assert_eq!(
+            overflow.unwrap_err(),
+            format!("at most {MAX_ACTIVE_KEYS} active gateway keys are supported")
+        );
+
+        // Soft-deleted tombstones do not count against the ceiling, so
+        // deleting one frees a slot again.
+        let demoted_id = config.gateway_keys[1].id.clone();
+        delete_key(&mut config, &demoted_id, Utc::now()).unwrap();
+        create_key(&mut config, "fresh").expect("deleted key frees a slot");
     }
 
     #[test]
