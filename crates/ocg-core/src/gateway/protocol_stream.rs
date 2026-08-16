@@ -810,13 +810,7 @@ impl StreamConverter {
                 if self.input.terminal {
                     break;
                 }
-                let passthrough = sanitize_passthrough_sse_frame(
-                    self.source,
-                    &frame,
-                    &self.model,
-                    self.secret_redactor.secret.as_deref(),
-                );
-                let (converted, secret_matched) = self.convert_frames(vec![frame])?;
+                let (passthrough, converted, secret_matched) = self.same_protocol_frame(frame)?;
                 self.emit_same_protocol_frame(passthrough, converted, secret_matched, &mut output);
             }
             return Ok(output);
@@ -841,13 +835,7 @@ impl StreamConverter {
                 if self.input.terminal {
                     break;
                 }
-                let passthrough = sanitize_passthrough_sse_frame(
-                    self.source,
-                    &frame,
-                    &self.model,
-                    self.secret_redactor.secret.as_deref(),
-                );
-                let (converted, secret_matched) = self.convert_frames(vec![frame])?;
+                let (passthrough, converted, secret_matched) = self.same_protocol_frame(frame)?;
                 self.emit_same_protocol_frame(passthrough, converted, secret_matched, &mut output);
             }
             if self.input.terminal {
@@ -1033,6 +1021,29 @@ impl StreamConverter {
             .collect()
     }
 
+    /// Same-protocol passthrough for a single SSE frame. The frame is parsed
+    /// exactly once here: the sanitized passthrough copy and the converted
+    /// fallback share the same `Value`, and untouched frames are emitted
+    /// byte-for-byte without copying.
+    fn same_protocol_frame(
+        &mut self,
+        frame: Bytes,
+    ) -> Result<(Bytes, Vec<Bytes>, bool), ProtocolError> {
+        let secret = self.secret_redactor.secret.as_deref();
+        let Some((event_name, payload)) = parse_sse_frame(&frame)? else {
+            // No data lines: nothing to convert or redact as JSON; passthrough.
+            let passthrough =
+                sanitize_passthrough_sse_frame(self.source, frame, &self.model, secret, None);
+            return Ok((passthrough, Vec::new(), false));
+        };
+        let payload = payload.trim();
+        let value = parse_sse_payload(payload)?;
+        let passthrough =
+            sanitize_passthrough_sse_frame(self.source, frame, &self.model, secret, value.as_ref());
+        let (converted, secret_matched) = self.convert_parsed_frame(event_name, payload, value)?;
+        Ok((passthrough, converted, secret_matched))
+    }
+
     fn convert_frames(&mut self, frames: Vec<Bytes>) -> Result<(Vec<Bytes>, bool), ProtocolError> {
         let mut output = Vec::new();
         let mut secret_changed = false;
@@ -1044,27 +1055,41 @@ impl StreamConverter {
                 continue;
             };
             let payload = payload.trim();
-            let events = if payload.is_empty() {
-                Vec::new()
-            } else if payload == "[DONE]" {
-                self.finish_input()
-            } else {
-                let value: Value = serde_json::from_str(payload)
-                    .map_err(|e| ProtocolError::new(format!("invalid SSE JSON: {e}")))?;
-                match self.source {
-                    ApiFormat::Messages => self.decode_messages(value),
-                    ApiFormat::ChatCompletions => self.decode_chat(value),
-                    ApiFormat::Responses => self.decode_responses(event_name.as_deref(), value),
-                    ApiFormat::Gemini => {
-                        return Err(ProtocolError::new("Gemini is a client-only stream format"));
-                    }
-                }
-            };
-            let (chunks, matched) = self.encode_redacted(events)?;
+            let value = parse_sse_payload(payload)?;
+            let (chunks, matched) = self.convert_parsed_frame(event_name, payload, value)?;
             output.extend(chunks);
             secret_changed |= matched;
         }
         Ok((output, secret_changed))
+    }
+
+    fn convert_parsed_frame(
+        &mut self,
+        event_name: Option<String>,
+        payload: &str,
+        value: Option<Value>,
+    ) -> Result<(Vec<Bytes>, bool), ProtocolError> {
+        if self.input.terminal {
+            return Ok((Vec::new(), false));
+        }
+        let events = if payload.is_empty() {
+            Vec::new()
+        } else if payload == "[DONE]" {
+            self.finish_input()
+        } else {
+            let value =
+                value.ok_or_else(|| ProtocolError::new("invalid SSE JSON: missing payload"))?;
+            match self.source {
+                ApiFormat::Messages => self.decode_messages(value),
+                ApiFormat::ChatCompletions => self.decode_chat(value),
+                ApiFormat::Responses => self.decode_responses(event_name.as_deref(), value),
+                ApiFormat::Gemini => {
+                    return Err(ProtocolError::new("Gemini is a client-only stream format"));
+                }
+            }
+        };
+        let (chunks, matched) = self.encode_redacted(events)?;
+        Ok((chunks, matched))
     }
 
     fn encode_redacted(
@@ -1087,7 +1112,7 @@ impl StreamConverter {
         frames
             .into_iter()
             .map(|frame| {
-                sanitize_passthrough_sse_frame(self.target, &frame, &self.model, Some(secret))
+                sanitize_passthrough_sse_frame(self.target, frame, &self.model, Some(secret), None)
             })
             .collect()
     }
@@ -2592,6 +2617,17 @@ fn parse_sse_frame(frame: &[u8]) -> Result<Option<(Option<String>, String)>, Pro
     }
 }
 
+/// Parse a trimmed SSE data payload. Empty payloads and the `[DONE]` sentinel
+/// have no JSON body and map to `None`; anything else must be valid JSON.
+fn parse_sse_payload(payload: &str) -> Result<Option<Value>, ProtocolError> {
+    if payload.is_empty() || payload == "[DONE]" {
+        return Ok(None);
+    }
+    serde_json::from_str::<Value>(payload)
+        .map(Some)
+        .map_err(|e| ProtocolError::new(format!("invalid SSE JSON: {e}")))
+}
+
 fn sse_json(event: Option<&str>, value: &Value) -> Bytes {
     let prefix = event.map_or_else(String::new, |name| format!("event: {name}\n"));
     Bytes::from(format!("{prefix}data: {value}\n\n"))
@@ -2602,21 +2638,32 @@ fn done_frame() -> Bytes {
 }
 
 /// Sanitize model-specific bogus usage without weakening same-protocol SSE passthrough.
-/// Frames that do not need a correction are returned byte-for-byte unchanged. When a
-/// correction is needed, only the data field is replaced; event IDs, retry hints,
-/// comments, and the original line-ending style remain intact.
+/// Frames that do not need a correction are returned byte-for-byte unchanged (the
+/// input `Bytes` handle is reused, no copy). When a correction is needed, only the
+/// data field is replaced; event IDs, retry hints, comments, and the original
+/// line-ending style remain intact. `parsed` may supply the already-parsed data
+/// payload so callers on the hot path parse each frame once; `None` makes this
+/// function parse the frame itself (used for freshly generated frames).
 fn sanitize_passthrough_sse_frame(
     format: ApiFormat,
-    frame: &[u8],
+    frame: Bytes,
     model_hint: &str,
     known_secret: Option<&str>,
+    parsed: Option<&Value>,
 ) -> Bytes {
     let secret = known_secret.filter(|secret| !secret.is_empty());
-    let mut output = Bytes::copy_from_slice(frame);
-    if let Ok(Some((_, data))) = parse_sse_frame(frame)
-        && let Ok(mut value) = serde_json::from_str::<Value>(&data)
-    {
-        let original = value.clone();
+    let mut output = frame;
+    // Obtain the frame's JSON value, parsing lazily only when the caller did
+    // not supply one (freshly generated frames take that path).
+    let parsed = match parsed {
+        Some(value) => Some(value.clone()),
+        None => parse_sse_frame(&output)
+            .ok()
+            .flatten()
+            .and_then(|(_, data)| serde_json::from_str::<Value>(&data).ok()),
+    };
+    if let Some(source_value) = parsed {
+        let mut value = source_value.clone();
         if let Some(secret) = secret {
             redact_known_secret_stream_values(&mut value, secret);
         }
@@ -2648,18 +2695,19 @@ fn sanitize_passthrough_sse_frame(
             }
             ApiFormat::Responses | ApiFormat::Gemini => {}
         }
-        if value != original {
-            output = rewrite_sse_data(frame, &value);
+        if value != source_value {
+            output = rewrite_sse_data(&output, &value);
         }
     }
-    secret.map_or(output.clone(), |secret| {
-        redact_sse_metadata(&output, secret)
-    })
+    match secret {
+        Some(secret) => redact_sse_metadata(output, secret),
+        None => output,
+    }
 }
 
-fn redact_sse_metadata(frame: &[u8], known_secret: &str) -> Bytes {
-    let Ok(text) = std::str::from_utf8(frame) else {
-        return Bytes::copy_from_slice(frame);
+fn redact_sse_metadata(frame: Bytes, known_secret: &str) -> Bytes {
+    let Ok(text) = std::str::from_utf8(&frame) else {
+        return frame;
     };
     let mut output = String::with_capacity(text.len());
     let mut changed = false;
@@ -2687,11 +2735,7 @@ fn redact_sse_metadata(frame: &[u8], known_secret: &str) -> Bytes {
             output.push_str(raw_line);
         }
     }
-    if changed {
-        Bytes::from(output)
-    } else {
-        Bytes::copy_from_slice(frame)
-    }
+    if changed { Bytes::from(output) } else { frame }
 }
 
 fn rewrite_sse_data(frame: &[u8], value: &Value) -> Bytes {

@@ -436,10 +436,17 @@ struct DashboardAccount {
 }
 
 fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
-    let known_secret = if account.key_cipher.is_empty() {
-        Some(String::new())
+    // The decrypted key is only needed to redact secrets inside persisted
+    // error text; skip the (Windows DPAPI-backed) decrypt for accounts
+    // without errors, which is the common case on every list call.
+    let known_secret = if account.last_error.is_some() || account.auth_error.is_some() {
+        if account.key_cipher.is_empty() {
+            Some(String::new())
+        } else {
+            state.decrypt_key(&account.key_cipher).ok()
+        }
     } else {
-        state.decrypt_key(&account.key_cipher).ok()
+        None
     };
     let sanitize_persisted_error = |error: Option<String>| {
         error.and_then(|error| {

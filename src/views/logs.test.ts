@@ -333,10 +333,17 @@ test("logs view shows top stats, extra filters, sorting, and a useful empty stat
     requestIdWatchStart,
   );
   const requestIdWatch = source.slice(requestIdWatchStart, source.indexOf("onMounted", requestIdWatchStart));
-  assert.match(forwardFilterWatch, /requestIdFilter/);
+  // request-id typing is debounced: immediate watches must not reload per keystroke,
+  // and the debounced trigger refreshes both lists exactly once per batch.
+  assert.doesNotMatch(forwardFilterWatch, /requestIdFilter/);
   assert.doesNotMatch(forwardFilterWatch, /loadGatewayLogs/);
-  assert.doesNotMatch(requestIdWatch, /loadForwardLogs\(\)|syncQueryState\(\)/);
+  assert.match(requestIdWatch, /setTimeout/);
+  assert.match(requestIdWatch, /\b300\b/);
+  assert.match(requestIdWatch, /clearTimeout\(requestIdDebounce\)/);
   assert.match(requestIdWatch, /loadGatewayLogs\(\)/);
+  assert.match(requestIdWatch, /loadForwardLogs\(\)/);
+  assert.match(requestIdWatch, /syncQueryState\(\)/);
+  assert.match(source, /onUnmounted\(\(\) => \{[\s\S]*clearTimeout\(requestIdDebounce\)/);
   assert.doesNotMatch(source, /legacy_estimate: \{ label:/);
   assert.match(template, /额度消耗（估算）/);
   const clearFilters = source.slice(source.indexOf("function clearFilters"), source.indexOf("function toggleSortOrder"));

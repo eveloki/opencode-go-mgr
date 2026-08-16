@@ -239,7 +239,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
 import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
 import {
   ApiOutlined,
@@ -426,7 +426,6 @@ function goToAccounts() {
   window.dispatchEvent(new Event("popstate"));
 }
 
-let lifecycleClock: number | undefined;
 let dashboardRequestActive = false;
 
 async function loadDashboard() {
@@ -488,17 +487,42 @@ function refreshWhenVisible() {
   if (document.visibilityState === "visible") void loadDashboard();
 }
 
+let lifecycleClock: number | undefined;
+let activatedOnce = false;
+
+function startLifecycleClock() {
+  if (lifecycleClock === undefined) {
+    lifecycleClock = window.setInterval(() => {
+      lifecycleNow.value = Date.now();
+    }, 60_000);
+  }
+}
+
+function stopLifecycleClock() {
+  if (lifecycleClock !== undefined) {
+    window.clearInterval(lifecycleClock);
+    lifecycleClock = undefined;
+  }
+}
+
+// The view stays cached by App.vue's KeepAlive; pause its clock and
+// visibility-driven refreshes while another tab is active.
 onMounted(() => {
-  lifecycleClock = window.setInterval(() => {
-    lifecycleNow.value = Date.now();
-  }, 60_000);
   document.addEventListener("visibilitychange", refreshWhenVisible);
   void loadDashboard();
 });
-
+onActivated(() => {
+  startLifecycleClock();
+  if (activatedOnce) void loadDashboard();
+  else activatedOnce = true;
+});
+onDeactivated(() => {
+  stopLifecycleClock();
+  document.removeEventListener("visibilitychange", refreshWhenVisible);
+});
 onUnmounted(() => {
   cleanup();
-  window.clearInterval(lifecycleClock);
+  stopLifecycleClock();
   document.removeEventListener("visibilitychange", refreshWhenVisible);
 });
 </script>
@@ -667,7 +691,7 @@ onUnmounted(() => {
   border-radius: 10px;
 }
 .kpi-badge.success { color: var(--ocg-success); background: var(--ocg-success-soft); }
-.kpi-badge.info { color: #2f6fd4; background: color-mix(in srgb, #2f6fd4 12%, transparent); }
+.kpi-badge.info { color: var(--ocg-info); background: color-mix(in srgb, var(--ocg-info) 12%, transparent); }
 .kpi-badge.warning { color: var(--ocg-warning); background: var(--ocg-warning-soft); }
 .kpi-badge.primary { color: var(--ocg-primary); background: var(--ocg-primary-soft); }
 .kpi-card > div {

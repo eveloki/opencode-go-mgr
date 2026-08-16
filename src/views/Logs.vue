@@ -212,7 +212,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, h, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -736,16 +736,41 @@ function changeGatewayPage(page: number) {
 
 watch(activeTab, syncQueryState);
 watch(
-  [statusFilter, accountFilter, modelFilter, requestIdFilter, timeRange, activePreset, sortBy, sortOrder],
+  [statusFilter, accountFilter, modelFilter, timeRange, activePreset, sortBy, sortOrder],
   () => {
     forwardPage.value = 1;
     syncQueryState();
     void loadForwardLogs();
   },
 );
+// Typing a request id fires both list loads; debounce so each keystroke
+// batch turns into at most one round-trip per list.
+let requestIdDebounce: ReturnType<typeof setTimeout> | null = null;
 watch(requestIdFilter, () => {
-  gatewayPage.value = 1;
-  void loadGatewayLogs();
+  if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
+  requestIdDebounce = setTimeout(() => {
+    requestIdDebounce = null;
+    forwardPage.value = 1;
+    gatewayPage.value = 1;
+    syncQueryState();
+    void loadForwardLogs();
+    void loadGatewayLogs();
+  }, 300);
+});
+onUnmounted(() => {
+  if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
+});
+
+let activatedOnce = false;
+// Logs accumulate server-side while another tab is active (this view is kept
+// alive by App.vue); refresh both lists when returning, keeping filters.
+onActivated(() => {
+  if (activatedOnce) {
+    void loadGatewayLogs();
+    void loadForwardLogs();
+  } else {
+    activatedOnce = true;
+  }
 });
 
 onMounted(() => {
@@ -785,17 +810,17 @@ onUnmounted(cleanup);
   padding: 12px 14px;
   border: 1px solid var(--ocg-border);
   border-radius: 10px;
-  background: var(--ocg-bg);
+  background: var(--ocg-surface);
 }
 .stat-label {
   margin-bottom: 6px;
   font-size: var(--ocg-font-xs);
-  color: var(--ocg-text-secondary);
+  color: var(--ocg-muted);
 }
 .stat-value {
   font-size: var(--ocg-font-xl);
   font-weight: 600;
-  color: var(--ocg-text);
+  color: var(--ocg-ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -865,7 +890,7 @@ onUnmounted(cleanup);
 }
 .custom-range-title {
   font-size: var(--ocg-font-sm);
-  color: var(--ocg-text-secondary);
+  color: var(--ocg-muted);
   white-space: nowrap;
 }
 .custom-time-picker {
@@ -918,7 +943,7 @@ onUnmounted(cleanup);
 }
 .diagnostic-detail h4 {
   margin: 0 0 5px;
-  color: var(--ocg-text-secondary);
+  color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
 }
 .diagnostic-meta {
@@ -941,7 +966,7 @@ onUnmounted(cleanup);
   padding: 10px 12px;
   border: 1px solid var(--ocg-border);
   border-radius: 6px;
-  background: var(--ocg-bg);
+  background: var(--ocg-canvas);
   color: var(--ocg-ink);
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: var(--ocg-font-sm);

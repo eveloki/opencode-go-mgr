@@ -9,7 +9,7 @@ SQLite，并在 `http://127.0.0.1:9042` 上同时提供多协议 Gateway 与管�
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
-    <img src="assets/star.png" alt="去 GitHub 给本仓库点个 Star" width="420">
+    <img src="assets/star.webp" alt="去 GitHub 给本仓库点个 Star" width="420">
   </a>
 </p>
 

@@ -953,7 +953,16 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.match(modelRow, /@click="restoreApplicationDefaults"/);
   assert.match(modelRow, /@click="saveClaudeDesktopModels"/);
   assert.equal(applications.match(/@click="restoreApplicationDefaults"/g)?.length, 1);
-  assert.match(app, /<KeepAlive>\s*<Applications v-if="activeKey === 'apps'" \/>\s*<\/KeepAlive>/);
+  // All six views are cached by one KeepAlive so tab switches preserve state.
+  const keepAliveBlock = app
+    .slice(app.indexOf("<KeepAlive>"), app.indexOf("</KeepAlive>"))
+    .replace(/\s+/g, " ");
+  for (const view of ["Dashboard", "Accounts", "Applications", "Pricing", "Logs", "Settings"]) {
+    assert.ok(
+      keepAliveBlock.includes(`<${view} v-if=`),
+      `${view} must render inside the shared KeepAlive`,
+    );
+  }
   assert.doesNotMatch(applications, /modelsInitialized/);
   assert.match(applications, /onActivated\(\(\) => \{[\s\S]*?if \(!settingsLoading\.value\) void loadSettings\(\)/);
   assert.match(applications, /applicationModelIds\.value = modelIds/);

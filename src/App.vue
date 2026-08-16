@@ -170,19 +170,22 @@
             >
               {{ logoutError }}
             </n-alert>
-            <Dashboard v-if="activeKey === 'dashboard'" />
-            <Accounts v-if="activeKey === 'accounts'" />
+            <!-- All views are kept alive so switching tabs preserves state
+                 (scroll, filters, drafts); each view refreshes stale data in
+                 its own onActivated hook. -->
             <KeepAlive>
+              <Dashboard v-if="activeKey === 'dashboard'" />
+              <Accounts v-if="activeKey === 'accounts'" />
               <Applications v-if="activeKey === 'apps'" />
+              <Pricing v-if="activeKey === 'pricing'" />
+              <Logs v-if="activeKey === 'logs'" />
+              <Settings
+                v-if="activeKey === 'settings'"
+                :theme-name="themeName"
+                :resolved-theme="resolvedTheme"
+                @update:theme-name="themeName = $event"
+              />
             </KeepAlive>
-            <Pricing v-if="activeKey === 'pricing'" />
-            <Logs v-if="activeKey === 'logs'" />
-            <Settings
-              v-if="activeKey === 'settings'"
-              :theme-name="themeName"
-              :resolved-theme="resolvedTheme"
-              @update:theme-name="themeName = $event"
-            />
           </main>
         </n-layout>
       </n-layout>

@@ -10,7 +10,7 @@ that model's native OpenCode-Go protocol and converts the response back.
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
-    <img src="assets/star.png" alt="Star this repository on GitHub" width="420">
+    <img src="assets/star.webp" alt="Star this repository on GitHub" width="420">
   </a>
 </p>
 

@@ -285,7 +285,6 @@ async fn proxy_handler_inner(
 ) -> axum::response::Response {
     let (config, client) = state.upstream_context();
     let client_body_bytes = body.len();
-    let client_body = body.clone();
 
     if !check_auth(&headers, &config) {
         return protocol_error_response(
@@ -316,7 +315,11 @@ async fn proxy_handler_inner(
     } else {
         body
     };
-    let plan = match prepare_request(client_format, body.clone()) {
+    // Keep the post-rewrite body so its model always matches the initial plan's
+    // model; that lets route finalization reuse the parsed plan instead of
+    // re-parsing the body on every request.
+    let client_body = body.clone();
+    let plan = match prepare_request(client_format, body) {
         Ok(plan) => plan,
         Err(error) => {
             let stage = if error.message.starts_with("invalid JSON request") {
@@ -448,12 +451,15 @@ async fn execute_plan(
     } else {
         None
     };
+    // The client body's model, already extracted by the initial prepare_request.
+    let body_model = plan.model.clone();
 
     let plan = match apply_free_routing_policy(
         &config,
         client_format,
         plan,
         &client_body,
+        &body_model,
         &state,
         conversation_key.as_deref(),
     ) {
@@ -714,6 +720,7 @@ fn apply_free_routing_policy(
     client_format: ApiFormat,
     plan: RequestPlan,
     client_body: &Bytes,
+    body_model: &str,
     state: &CoreState,
     conversation_key: Option<&str>,
 ) -> Result<RequestPlan, (StatusCode, String)> {
@@ -727,13 +734,16 @@ fn apply_free_routing_policy(
             let drop_exhausted_prefer_sticky =
                 channel == UpstreamChannel::Free && !free_available && !is_free_model(&plan.model);
             if !drop_exhausted_prefer_sticky {
+                let original_model = plan.model.clone();
                 return finalize_route_plan(
                     config,
                     client_format,
+                    plan,
                     client_body,
+                    body_model,
                     &resolved_model,
                     channel,
-                    plan.model.clone(),
+                    original_model,
                     None,
                     false,
                 );
@@ -756,7 +766,9 @@ fn apply_free_routing_policy(
     finalize_route_plan(
         config,
         client_format,
+        plan,
         client_body,
+        body_model,
         &decision.model,
         decision.channel,
         decision.original_model,
@@ -769,7 +781,9 @@ fn apply_free_routing_policy(
 fn finalize_route_plan(
     config: &AppConfig,
     client_format: ApiFormat,
+    initial_plan: RequestPlan,
     client_body: &Bytes,
+    body_model: &str,
     model: &str,
     channel: UpstreamChannel,
     original_model: String,
@@ -779,15 +793,17 @@ fn finalize_route_plan(
     let base = resolve_upstream_base(channel, &config.upstream_base_url)
         .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
 
-    let body_model = extract_model_name(client_body).unwrap_or_default();
-    let body = if body_model != model {
-        rewrite_body_model(client_body, model).map_err(|m| (StatusCode::BAD_REQUEST, m))?
+    // When the routed model equals the body's model, the initial plan already
+    // holds the parsed and converted request for this exact body; reusing it
+    // avoids a full JSON parse + conversion per request. Only remapped routes
+    // (free-tier aliases, sticky rebinds, Claude Desktop aliases) re-encode.
+    let mut plan = if body_model != model {
+        let body =
+            rewrite_body_model(client_body, model).map_err(|m| (StatusCode::BAD_REQUEST, m))?;
+        prepare_request(client_format, body).map_err(|error| (error.status, error.message))?
     } else {
-        client_body.clone()
+        initial_plan
     };
-
-    let mut plan =
-        prepare_request(client_format, body).map_err(|error| (error.status, error.message))?;
     plan.model = model.to_string();
     plan.channel = channel;
     plan.upstream_base_override = match channel {
@@ -799,11 +815,7 @@ fn finalize_route_plan(
     Ok(plan)
 }
 
-fn extract_model_name(body: &Bytes) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    value.get("model")?.as_str().map(str::to_string)
-}
-
+#[allow(clippy::too_many_arguments)]
 fn begin_go_fallback(
     state: &CoreState,
     trace: &RequestTrace,
@@ -822,23 +834,24 @@ fn begin_go_fallback(
     }
     *free_fallback_used = true;
     Some(
-        rebuild_go_fallback_plan(client_format, client_body, active_plan, config).map(|go_plan| {
-            let _ = state.db.lock().log_gateway_diagnostic(
-                "info",
-                "gateway",
-                &format!(
-                    "free channel exhausted; falling back to Go model {} without rotating keys",
-                    go_plan.model
-                ),
-                Some(&trace.request_id),
-                Some(attempt as i64),
-                Some("gateway"),
-                Some("free_fallback"),
-                Some(trace.elapsed_ms() as i64),
-                None,
-            );
-            go_plan
-        }),
+        rebuild_go_fallback_plan(client_format, client_body, active_plan, config).inspect(
+            |go_plan| {
+                let _ = state.db.lock().log_gateway_diagnostic(
+                    "info",
+                    "gateway",
+                    &format!(
+                        "free channel exhausted; falling back to Go model {} without rotating keys",
+                        go_plan.model
+                    ),
+                    Some(&trace.request_id),
+                    Some(attempt as i64),
+                    Some("gateway"),
+                    Some("free_fallback"),
+                    Some(trace.elapsed_ms() as i64),
+                    None,
+                );
+            },
+        ),
     )
 }
 

@@ -210,6 +210,12 @@ impl Database {
         std::fs::create_dir_all(&data_dir)?;
         let db_path = data_dir.join("data.sqlite");
         let conn = Connection::open(db_path)?;
+        // WAL keeps request-path log writes off the rollback-journal FULL fsync;
+        // must be set outside any transaction, hence before migrate().
+        let _journal_mode: String =
+            conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -761,17 +767,20 @@ impl Database {
 
         // Detailed diagnostics are intentionally short-lived. Keep the base log row,
         // stable request id, source, stage, and original compact error indefinitely.
+        // Timestamps are stored as to_rfc3339 strings, so a precomputed cutoff keeps
+        // the comparison index-friendly instead of calling julianday() per row.
+        let diagnostic_cutoff = (Utc::now() - Duration::days(30)).to_rfc3339();
         tx.execute(
             "UPDATE forward_logs SET diagnostic_json = NULL
              WHERE diagnostic_json IS NOT NULL
-               AND julianday(timestamp) < julianday('now', '-30 days')",
-            [],
+               AND timestamp < ?1",
+            params![diagnostic_cutoff],
         )?;
         tx.execute(
             "UPDATE gateway_logs SET diagnostic_json = NULL
              WHERE diagnostic_json IS NOT NULL
-               AND julianday(created_at) < julianday('now', '-30 days')",
-            [],
+               AND created_at < ?1",
+            params![diagnostic_cutoff],
         )?;
 
         tx.commit()?;

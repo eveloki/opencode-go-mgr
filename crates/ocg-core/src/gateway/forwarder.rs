@@ -1422,7 +1422,7 @@ async fn forward_request_impl(
                 });
             }
         };
-        let upstream_json = match serde_json::from_str::<Value>(&text) {
+        let mut upstream_json = match serde_json::from_str::<Value>(&text) {
             Ok(value) => value,
             Err(_) => {
                 let message = "upstream returned invalid JSON";
@@ -1485,11 +1485,12 @@ async fn forward_request_impl(
         // adapters serialize source values into opaque replay fields (for
         // example, Anthropic thinking blocks in Responses encrypted_content),
         // where a post-conversion exact-string pass could no longer see the Key.
-        let mut client_safe_upstream_json = upstream_json.clone();
+        // Metrics extraction above is read-only, so redact in place instead of
+        // cloning the whole response tree.
         if let Some(secret) = attempt_context.known_secret.as_deref() {
-            redact_known_secret_values(&mut client_safe_upstream_json, secret);
+            redact_known_secret_values(&mut upstream_json, secret);
         }
-        let mut response_json = match transform_response(plan, &client_safe_upstream_json) {
+        let mut response_json = match transform_response(plan, &upstream_json) {
             Ok(value) => value,
             Err(error) => {
                 let message = format!("response conversion failed: {}", error.message);
@@ -1517,11 +1518,7 @@ async fn forward_request_impl(
                     Some(failure),
                 )?;
                 return Ok(ForwardResult {
-                    response: error_response(
-                        plan.client,
-                        &message,
-                        Some(&client_safe_upstream_json),
-                    ),
+                    response: error_response(plan.client, &message, Some(&upstream_json)),
                     action: ForwardAction::Return,
                     error_message: Some(message),
                 });

@@ -44,7 +44,8 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("/src/i18n/messages/")) return "translations";
+          // Locale message modules resolve to their own per-locale chunks via
+          // the dynamic imports in src/i18n; do not merge them back into one.
           if (id.includes("/node_modules/@vicons/")) return "icons";
           if (id.includes("/node_modules/vue/") || id.includes("/node_modules/@vue/")) return "vue";
         },

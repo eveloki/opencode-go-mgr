@@ -16,7 +16,13 @@ pub(crate) fn get_dashboard_summary_inner(core: &CoreState) -> Result<DashboardS
     let now = Utc::now();
     let available_accounts = accounts
         .iter()
-        .filter(|a| a.enabled && a.auth_error.is_none() && !a.is_cooling_at(now))
+        .filter(|a| {
+            a.enabled
+                && a.setup_step.is_ready()
+                && !a.key_cipher.is_empty()
+                && a.auth_error.is_none()
+                && !a.is_cooling_at(now)
+        })
         .count();
 
     let gateway_running = core.gateway.lock().is_some();
@@ -58,10 +64,71 @@ mod tests {
     use super::*;
     use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
     use ocg_core::db::Database;
-    use ocg_core::models::{Account, AccountInput};
+    use ocg_core::models::{Account, AccountInput, AccountSetupStep, AccountType};
     use ocg_core::state::CoreStateInner;
     use std::fs;
     use std::sync::Arc;
+
+    #[test]
+    fn dashboard_summary_excludes_draft_and_keyless_accounts() {
+        let dir = std::env::temp_dir().join(format!("ocg-tauri-dash-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let core = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let now = Utc::now();
+        let base =
+            |id: &str, name: &str, setup_step: AccountSetupStep, key_cipher: String| Account {
+                id: id.into(),
+                name: name.into(),
+                username: None,
+                password_cipher: None,
+                key_cipher,
+                enabled: true,
+                account_type: AccountType::Managed,
+                setup_step,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                created_at: now,
+                updated_at: now,
+            };
+
+        {
+            let db = core.db.lock();
+            // Draft managed account: setup unfinished, no key yet.
+            db.create_account(&base(
+                "draft",
+                "draft",
+                AccountSetupStep::GoogleAccount,
+                String::new(),
+            ))
+            .unwrap();
+            // Finished setup but never stored a key: not routable.
+            db.create_account(&base(
+                "keyless",
+                "keyless",
+                AccountSetupStep::Ready,
+                String::new(),
+            ))
+            .unwrap();
+        }
+
+        let summary = get_dashboard_summary_inner(&core).unwrap();
+        assert_eq!(summary.total_accounts, 2);
+        assert_eq!(summary.available_accounts, 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn dashboard_inners_summarize_accounts_and_costs() {
