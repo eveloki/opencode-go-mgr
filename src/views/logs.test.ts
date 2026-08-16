@@ -309,6 +309,12 @@ test("logs view shows top stats, extra filters, sorting, and a useful empty stat
   assert.match(forwardLoad, /catch \(e\)[\s\S]*request === forwardRequest[\s\S]*forwardLogs\.value = \[\]/);
   assert.match(source, /Promise\.all\(\[loadForwardLogs\(\), loadForwardLogModels\(\)\]\)/);
   assert.match(source, /row\.cost_state === "legacy_estimate"/);
+  assert.match(source, /row\.cost_state === "free"/);
+  assert.match(source, /t\("免费"\)/);
+  assert.match(source, /expandable: \(\) => true/);
+  assert.match(source, /function renderForwardDetail/);
+  assert.match(source, /t\("筛选此请求"\)/);
+  assert.match(source, /:scroll-x="1585"/);
   assert.match(source, /success_unpriced: \{ label: t\("无价格"\)/);
   assert.match(source, /outcome_unknown: \{ label: t\("结果未知"\)/);
   assert.match(source, /row\.error_source === "upstream"/);

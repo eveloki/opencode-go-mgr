@@ -2,9 +2,9 @@ use super::diagnostics::{
     redact_known_secret, redact_known_secret_stream_values, redact_known_secret_values,
 };
 use super::protocol::{
-    ApiFormat, NamespaceToolMapping, ProtocolError, RequestPlan, encode_anthropic_thinking_block,
-    encode_chat_reasoning, responses_id, sanitize_minimax_anthropic_usage,
-    sanitize_minimax_chat_usage, unix_seconds,
+    ApiFormat, NamespaceToolMapping, ProtocolError, RequestPlan, UsageCounts,
+    encode_anthropic_thinking_block, encode_chat_reasoning, responses_id,
+    sanitize_minimax_anthropic_usage, sanitize_minimax_chat_usage, unix_seconds,
 };
 use bytes::{Bytes, BytesMut};
 use serde_json::{Map, Value, json};
@@ -968,6 +968,15 @@ impl StreamConverter {
 
     pub(crate) fn is_terminal(&self) -> bool {
         self.input.terminal || self.output.terminal
+    }
+
+    pub(crate) fn captured_usage(&self) -> Option<UsageCounts> {
+        self.input.usage.seen.then_some(UsageCounts {
+            input_tokens: self.input.usage.input,
+            output_tokens: self.input.usage.output,
+            cached_tokens: self.input.usage.cached,
+            cache_creation_tokens: self.input.usage.cache_creation,
+        })
     }
 
     fn emit_same_protocol_frame(
@@ -4033,6 +4042,28 @@ mod tests {
         let anthropic = convert(ApiFormat::Messages, ApiFormat::ChatCompletions, chat_source);
         assert!(anthropic.contains("\"input_tokens\":8"));
         assert!(anthropic.contains("\"cache_read_input_tokens\":4"));
+    }
+
+    #[test]
+    fn chat_converter_captures_trailing_include_usage_chunk() {
+        let mut converter = StreamConverter::new(&plan(
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+        ));
+        let source = concat!(
+            "data: {\"id\":\"c\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"deepseek-v4-flash\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4,\"prompt_tokens_details\":{\"cached_tokens\":2}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        converter
+            .process_chunk(Bytes::from(source))
+            .expect("stream should parse");
+        converter.finish().expect("stream should finish");
+        let usage = converter.captured_usage().expect("trailing usage chunk");
+        assert_eq!(usage.input_tokens, 11);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.cached_tokens, 2);
     }
 
     #[test]

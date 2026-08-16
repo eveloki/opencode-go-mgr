@@ -312,7 +312,7 @@
             </div>
           </n-radio-group>
           <p class="field-caption">
-            {{ t("Free 模型为限时促销，有独立额度，且请求数据可能用于改进模型；请勿提交机密内容。") }}
+            {{ t("Free 模型为限时促销，额度按出口 IP 共享（429 后整通道冷却，不换 Key），且请求数据可能用于改进模型；请勿提交机密内容。") }}
           </p>
         </section>
         <section class="settings-subsection" aria-labelledby="request-timeout-title">
@@ -648,12 +648,12 @@ const freeModelRoutingOptions: Array<{
   {
     value: "explicit",
     label: "仅显式使用 Free 模型",
-    behavior: "只有客户端显式请求 free 模型时才走 Zen free 通道；Go 模型保持 Go 上游。",
+    behavior: "只有客户端显式请求 free 模型时才走 Zen free 通道；Go 模型保持 Go 上游。Free 按 IP 限额，429 后整通道冷却，不换 Key。",
   },
   {
     value: "prefer",
     label: "自动优先同名 Free 模型",
-    behavior: "对已映射的 Go 模型（如 deepseek-v4-flash、mimo-v2.5），在上下文装得下时优先 free；耗尽或超长后回落 Go。",
+    behavior: "对已映射的 Go 模型（如 deepseek-v4-flash、mimo-v2.5），在上下文装得下时优先 free；free 按 IP 限额，429 后整通道冷却并回落 Go，不换 Key。",
   },
 ];
 

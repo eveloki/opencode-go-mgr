@@ -178,9 +178,10 @@ Desktop 三个角色模型的持久化行为。
   Sonnet、Opus、Haiku 别名改写为 `AppConfig.claude_desktop_models` 中的实际模
   型。模型配置由受保护的 `/dashboard/api/claude-desktop/models` 读写；常规
   settings 更新必须保留它。
-- `selector.rs` 选下一个账号并跳过禁用、冷却、本次已失败的账号；`limit.rs`
-  解析上游 429 中的重置时长；`pricing.rs` 从当前 OpenCode Go 价格快照计算
-  token 对应的额度消耗，面板窗口额度也来自同一快照。
+- `selector.rs` 选下一个账号并跳过禁用、冷却、本次已失败的账号。Zen free 额度
+  按出口 IP 共享：任一账号存在有效 `cooldown_free_until` 即视为整条 free 通道
+  耗尽，不换 Key。`limit.rs` 解析上游 429 中的重置时长；`pricing.rs` 从当前
+  OpenCode Go 价格快照计算 token 对应的额度消耗，面板窗口额度也来自同一快照。
   `PricingModel.quota_multiplier` 是唯一实际参与结算的官方倍率；抓取的快照按
   `月额度 / Usage` 推导，受保护的倍率更新端点可以为临时活动保存用户覆盖值，并
   生成新的不可变 revision。
@@ -194,10 +195,11 @@ Desktop 三个角色模型的持久化行为。
   MiniMax 长上下文、priority 和 high-speed 调整是本地策略，运行时不会访问供应商
   价格页。
 - `forwarder.rs` 向 `handler.rs` 返回显式动作：只有能证明请求尚未发出的
-  DNS/TCP/TLS 建连失败可以在同一账号重试一次；`401`/`403`/`429` 可以切换账号。
-  `408`、`5xx`、建连后的失败、响应体超时和流式中断均不得重放，无法确认的结果
-  记为 `outcome_unknown`。共享 reqwest client 只设置 30 秒建连超时；非流式请求
-  使用 900 秒总时限，流式请求按 chunk 执行 300 秒空闲时限。
+  DNS/TCP/TLS 建连失败可以在同一账号重试一次；`401`/`403` 与 Go 通道 `429`
+  可以切换账号。free 通道 `429` 冷却按 IP 共享的 free 池，不换 Key；prefer
+  随后回落 Go。`408`、`5xx`、建连后的失败、响应体超时和流式中断均不得重放，
+  无法确认的结果记为 `outcome_unknown`。共享 reqwest client 只设置 30 秒建连
+  超时；非流式请求使用 900 秒总时限，流式请求按 chunk 执行 300 秒空闲时限。
 
 ### 管理面板
 
@@ -679,7 +681,8 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
   表同步钩子。开发构建、CLI、Docker、macOS、Linux 面板不暴露该开关。
 - 生成的 Tauri schema 文件会让 diff 变吵；除非 Tauri 配置真的改了，否则不要动
   它们。
-- 流式用量仅在上游发出 usage chunk 时精确，否则记为 `success_no_usage`。
+- 流式用量仅在上游发出 usage chunk 时精确；Chat 流式请求会设置
+  `stream_options.include_usage`。上游仍不返回时记为 `success_no_usage`。
 - 旧 `profiles/<account_id>` WebView Profile 不会迁移到外部 Chromium；升级后首次
   需要重新登录。保留旧路径仅用于重置/删除时安全清理，不能尝试跨引擎直接复用。
 - Responses 端点是无状态。`previous_response_id`、`conversation`、

@@ -52,11 +52,25 @@ impl AccountSelector {
         Self::first_available_for(accounts, UpstreamChannel::Go, exclude_ids)
     }
 
+    /// Zen free quota is shared per egress IP, so one `cooldown_free_until`
+    /// exhausts the whole free channel. Go 429s stay per-account.
+    pub fn free_channel_exhausted(accounts: &[Account]) -> bool {
+        let now = Utc::now();
+        accounts.iter().any(|account| {
+            account.enabled
+                && account.setup_step.is_ready()
+                && account.cooldown_free_until.is_some_and(|until| until > now)
+        })
+    }
+
     pub fn first_available_for(
         accounts: &[Account],
         channel: UpstreamChannel,
         exclude_ids: &[&str],
     ) -> Option<Account> {
+        if channel == UpstreamChannel::Free && Self::free_channel_exhausted(accounts) {
+            return None;
+        }
         accounts
             .iter()
             .find(|account| Self::is_available_for(account, channel, exclude_ids))
@@ -77,6 +91,9 @@ impl AccountSelector {
         account_id: &str,
         exclude_ids: &[&str],
     ) -> Option<Account> {
+        if channel == UpstreamChannel::Free && Self::free_channel_exhausted(accounts) {
+            return None;
+        }
         accounts
             .iter()
             .find(|account| {
@@ -263,5 +280,24 @@ mod tests {
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn one_free_cooldown_exhausts_the_whole_free_channel() {
+        let mut cooled = account("cooled", true, None);
+        cooled.cooldown_free_until = Some(Utc::now() + Duration::hours(1));
+        let next = account("next", true, None);
+        let accounts = vec![cooled, next];
+
+        assert!(AccountSelector::free_channel_exhausted(&accounts));
+        assert!(
+            AccountSelector::first_available_for(&accounts, UpstreamChannel::Free, &[]).is_none()
+        );
+        assert_eq!(
+            AccountSelector::first_available_for(&accounts, UpstreamChannel::Go, &[])
+                .unwrap()
+                .id,
+            "cooled"
+        );
     }
 }

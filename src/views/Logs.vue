@@ -197,7 +197,7 @@
           :row-key="logRowKey"
           :loading="forwardLoading"
           :pagination="forwardPagination"
-          :scroll-x="1830"
+          :scroll-x="1585"
           remote
           size="small"
           @update:page="changeForwardPage"
@@ -420,6 +420,9 @@ function applyCustomTimeRange(value: [number, number] | null) {
 }
 
 function formatQuotaCost(row: ForwardLog): string {
+  if (row.cost_state === "free") {
+    return t("免费");
+  }
   if (row.cost === null || row.cost_state === "unpriced" || row.cost_state === "outcome_unknown") {
     return "—";
   }
@@ -466,6 +469,35 @@ function focusRequestChain(requestId: string) {
   requestIdFilter.value = requestId;
   sortBy.value = "attempt";
   sortOrder.value = "asc";
+}
+
+function renderForwardDetail(row: ForwardLog) {
+  const requestId = row.request_id;
+  const requestBlock = requestId
+    ? h("section", [
+      h("h4", t("请求 ID")),
+      h("div", { class: "request-id-cell" }, [
+        h("code", requestId),
+        h(NButton, {
+          text: true,
+          type: "primary",
+          "aria-label": t("复制请求 ID"),
+          onClick: () => copyText(`request-id-${row.id}`, requestId, t("请求 ID")),
+        }, {
+          icon: () => h(NIcon, { component: copiedTarget.value === `request-id-${row.id}` ? CheckOutlined : CopyOutlined }),
+        }),
+        h(NButton, {
+          text: true,
+          type: "primary",
+          onClick: () => focusRequestChain(requestId),
+        }, { default: () => t("筛选此请求") }),
+      ]),
+    ])
+    : null;
+  return h("div", { class: "diagnostic-detail" }, [
+    requestBlock,
+    renderDiagnostic(row),
+  ]);
 }
 
 function renderDiagnostic(row: GatewayLog | ForwardLog) {
@@ -526,11 +558,10 @@ const forwardColumns = computed(() => [
   {
     type: "expand" as const,
     width: 44,
-    expandable: (row: ForwardLog) => !!row.error_message || !!row.diagnostic,
-    renderExpand: renderDiagnostic,
+    expandable: () => true,
+    renderExpand: renderForwardDetail,
   },
   { title: t("时间"), key: "timestamp", width: 150, render: (row: ForwardLog) => formatDate(row.timestamp) },
-  { title: t("请求 ID"), key: "request_id", width: 245, render: renderRequestId },
   {
     title: t("尝试次数"),
     key: "attempt",
@@ -538,7 +569,7 @@ const forwardColumns = computed(() => [
     align: "center" as const,
     render: (row: ForwardLog) => row.attempt ? `#${row.attempt}` : "—",
   },
-  { title: t("模型"), key: "model", width: 160, ellipsis: { tooltip: true } },
+  { title: t("模型"), key: "model", width: 200, ellipsis: { tooltip: true } },
   { title: t("账号"), key: "account_name", width: 120, ellipsis: { tooltip: true } },
   {
     title: t("状态"),
@@ -558,6 +589,9 @@ const forwardColumns = computed(() => [
         ? { label: sourceLabel, type: row.error_source === "downstream" ? "warning" as const : "error" as const }
         : statusMeta.value[row.status] ?? { label: row.status, type: "default" as const };
       const tags = [h(NTag, { type: meta.type, size: "small", bordered: false }, { default: () => meta.label })];
+      if (row.cost_state === "free") {
+        tags.push(h(NTag, { type: "success", size: "small", bordered: false }, { default: () => t("免费") }));
+      }
       if (row.cost_state === "legacy_estimate") {
         tags.push(h(NTag, { type: "default", size: "small", bordered: false }, { default: () => t("旧口径") }));
       }

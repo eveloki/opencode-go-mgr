@@ -80,6 +80,16 @@ impl PricingEstimate {
             cost_state: "unpriced",
         }
     }
+
+    fn free(revision: &str) -> Self {
+        Self {
+            cost: None,
+            pricing_revision_id: Some(revision.to_string()),
+            quota_multiplier: None,
+            local_adjustment_multiplier: None,
+            cost_state: "free",
+        }
+    }
 }
 
 impl PricingSnapshot {
@@ -98,6 +108,9 @@ impl PricingSnapshot {
         let cache_creation = (cache_creation.max(0) as f64).min(prompt - cached);
         let uncached = prompt - cached - cache_creation;
         let normalized = normalize_model_name(model);
+        if crate::gateway::free_models::is_free_model(&normalized) {
+            return PricingEstimate::free(&self.revision);
+        }
         let highspeed = normalized.contains("minimax-m2.7-highspeed")
             || normalized.contains("minimax-m2.5-highspeed");
         let lookup_name = normalized.replace("-highspeed", "");
@@ -1103,6 +1116,19 @@ mod tests {
         assert_eq!(estimate.cost_state, "unpriced");
         let prefixed = embedded_seed().estimate("provider-minimax-m3", 1000, 100, 0, 0, None);
         assert_eq!(prefixed.cost, None);
+    }
+
+    #[test]
+    fn zen_free_models_do_not_enter_go_quota() {
+        for model_id in ["deepseek-v4-flash-free", "mimo-v2.5-free", "big-pickle"] {
+            let estimate = embedded_seed().estimate(model_id, 1000, 100, 0, 0, None);
+            assert_eq!(estimate.cost, None, "{model_id}");
+            assert_eq!(estimate.cost_state, "free", "{model_id}");
+            assert_eq!(estimate.quota_multiplier, None, "{model_id}");
+        }
+        let paid = embedded_seed().estimate("deepseek-v4-flash", 1000, 100, 0, 0, None);
+        assert_eq!(paid.cost_state, "priced");
+        assert!(paid.cost.is_some());
     }
 
     #[test]

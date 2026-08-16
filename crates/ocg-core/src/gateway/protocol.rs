@@ -1220,6 +1220,14 @@ fn convert_request(
     };
 
     let mut converted = converted;
+    if upstream == ApiFormat::ChatCompletions
+        && let Some(out) = converted.as_object_mut()
+    {
+        // Chat passthrough used to leave stream_options untouched. OpenAI-compatible
+        // Zen/Go backends (especially flash-free) omit the trailing usage chunk
+        // unless include_usage is set, which made /v1 logs success_no_usage.
+        inject_chat_usage(out);
+    }
     if let Some(schema) = gemini_schema {
         match upstream {
             ApiFormat::Messages => {
@@ -3560,6 +3568,25 @@ mod tests {
         assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
         let chat_body: Value = serde_json::from_slice(&chat.body).expect("body is JSON");
         assert_eq!(chat_body["service_tier"], "priority");
+        assert!(chat_body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn chat_passthrough_stream_requests_include_usage() {
+        let plan = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "deepseek-v4-flash",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .expect("Chat stream should passthrough");
+        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
+        let body: Value = serde_json::from_slice(&plan.body).expect("body is JSON");
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["model"], "deepseek-v4-flash");
+        assert_eq!(body["messages"][0]["content"], "hi");
     }
 
     #[test]

@@ -196,7 +196,9 @@ difference, and the Claude Desktop three-role persistence behavior.
   written through the protected `/dashboard/api/claude-desktop/models`
   endpoint; an ordinary settings update must preserve it.
 - `selector.rs` picks the next account and skips disabled / cooled-down /
-  already-failed accounts. `limit.rs` parses the upstream 429 reset phrase.
+  already-failed accounts. Zen free quota is shared per egress IP: any active
+  `cooldown_free_until` exhausts the whole free channel (no key rotation).
+  `limit.rs` parses the upstream 429 reset phrase.
   `pricing.rs` loads the active OpenCode Go pricing snapshot and derives
   quota cost from token usage; the dashboard windows use the limits stored in
   that same snapshot. `PricingModel.quota_multiplier` is the single applied
@@ -218,12 +220,13 @@ difference, and the Claude Desktop three-role persistence behavior.
   never trigger a supplier-site request.
 - `forwarder.rs` returns an explicit action to `handler.rs`: only a pre-send
   DNS/TCP/TLS connection failure can retry once on the same account;
-  `401`/`403`/`429` can select another account. `408`, `5xx`, post-connect
-  failures, body timeouts, and stream interruptions are never replayed, and
-  ambiguous results are logged as `outcome_unknown`. The shared reqwest
-  client has only a 30-second connect timeout; non-stream requests use a
-  900-second total deadline and streams enforce the 300-second idle timeout
-  per chunk.
+  `401`/`403` and Go-channel `429` can select another account. A free-channel
+  `429` cools the IP-shared free pool and does not rotate keys; prefer mode
+  then falls back to Go. `408`, `5xx`, post-connect failures, body timeouts,
+  and stream interruptions are never replayed, and ambiguous results are
+  logged as `outcome_unknown`. The shared reqwest client has only a 30-second
+  connect timeout; non-stream requests use a 900-second total deadline and
+  streams enforce the 300-second idle timeout per chunk.
 
 ### Dashboard
 
@@ -837,8 +840,9 @@ most of them; the manual parts need a real desktop.
   Docker, macOS, and Linux dashboards do not expose the switch.
 - Existing generated Tauri schema files are noisy in diffs; avoid touching
   them unless the Tauri config actually changed.
-- Streaming cost is exact only when upstream emits usage chunks. Without one,
-  the row ends as `success_no_usage`.
+- Streaming cost is exact only when upstream emits usage chunks. Chat streams
+  request `stream_options.include_usage`. Without a chunk, the row ends as
+  `success_no_usage`.
 - Legacy `profiles/<account_id>` WebView profiles are not migrated to
   external Chromium, so users sign in again after upgrading. The old path is
   retained only for safe reset/delete cleanup; never attempt cross-engine
