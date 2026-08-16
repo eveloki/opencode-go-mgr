@@ -10,7 +10,7 @@ that model's native OpenCode-Go protocol and converts the response back.
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
-    <img src="assets/star.png" alt="Star this repository on GitHub" width="420">
+    <img src="assets/star.webp" alt="Star this repository on GitHub" width="420">
   </a>
 </p>
 
@@ -127,6 +127,14 @@ and true vs false circuit breakers:
 
 Also: [Contributors](docs/CONTRIBUTORS.md), [DESIGN.md](DESIGN.md),
 [AGENTS.md](AGENTS.md).
+
+## Community
+
+Join the OCG Manager QQ group: **1104321231**.
+
+<p align="center">
+  <img src="assets/qq-group.png" alt="OCG Manager QQ group QR code" width="360" />
+</p>
 
 ## Development
 

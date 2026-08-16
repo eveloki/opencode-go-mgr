@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, renameSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, renameSync, mkdtempSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 export const SECRET_ENV_PATTERNS = [
@@ -114,9 +114,10 @@ export function pruneAppImageWaylandLibs(appImagePath, options = {}) {
     return appImagePath;
   }
 
-  const cwd = process.cwd();
   const appImageName = basename(appImagePath);
-  const extractDir = join(cwd, `.appimage-prune-${process.pid}`);
+  // Colocate the scratch dir with the artifact: same filesystem, so the final
+  // renameSync cannot hit EXDEV, and mkdtemp keeps concurrent runs isolated.
+  const extractDir = mkdtempSync(join(dirname(appImagePath), ".appimage-prune-"));
 
   function defaultRun(cmd, args, opts = {}) {
     console.log(`> ${basename(cmd)} ${args.join(" ")}`);
@@ -126,89 +127,87 @@ export function pruneAppImageWaylandLibs(appImagePath, options = {}) {
   }
   const run = customRun || defaultRun;
 
-  // Fail closed: all errors propagate instead of returning the original path.
-  rmSync(extractDir, { recursive: true, force: true });
-  mkdirSync(extractDir, { recursive: true });
-
-  // Extract AppImage
-  console.log(`Extracting AppImage: ${appImagePath}`);
-  run(appImagePath, ["--appimage-extract"], { cwd: extractDir });
-
-  const squashfsRoot = join(extractDir, "squashfs-root");
-  if (!existsSync(squashfsRoot)) {
-    throw new Error(`AppImage extraction did not produce squashfs-root in ${extractDir}`);
-  }
-
-  // Remove bundled libwayland-* libraries
-  const libDir = join(squashfsRoot, "usr", "lib");
-  let removedCount = 0;
-  const removedLibs = [];
-  if (existsSync(libDir)) {
-    const waylandLibs = readdirSync(libDir).filter((f) => f.startsWith("libwayland-"));
-    for (const lib of waylandLibs) {
-      const libPath = join(libDir, lib);
-      console.log(`Removing bundled library: ${libPath}`);
-      rmSync(libPath, { force: true });
-      removedLibs.push(lib);
-      removedCount++;
-    }
-  }
-
-  if (removedCount === 0) {
-    const msg = "No bundled libwayland-* libraries found; nothing to prune.";
-    if (failClosed) throw new Error(msg);
-    console.log(msg);
-    rmSync(extractDir, { recursive: true, force: true });
-    return appImagePath;
-  }
-
-  console.log(
-    `Removed ${removedCount} bundled Wayland librar${removedCount === 1 ? "y" : "ies"}: ${removedLibs.join(", ")}.`,
-  );
-
-  // Repack using appimagetool with sanitized environment (no secrets)
-  const prunedPath = join(extractDir, appImageName);
-  const subprocessEnv = sanitizedEnv();
-  assertNoSecretsInEnv(subprocessEnv);
-  console.log("Repacking AppImage with appimagetool...");
-  run(toolPath, [squashfsRoot, prunedPath], { env: subprocessEnv });
-
-  // Verify the pruned AppImage contains no libwayland-* libraries
-  console.log("Verifying pruned AppImage has no bundled Wayland libraries...");
-  const verifyDir = join(extractDir, "verify");
-  mkdirSync(verifyDir, { recursive: true });
-  run(prunedPath, ["--appimage-extract"], { cwd: verifyDir, env: subprocessEnv });
-  const verifySquashfs = join(verifyDir, "squashfs-root");
-  if (!existsSync(verifySquashfs)) {
-    throw new Error("Verification extraction did not produce squashfs-root.");
-  }
-  const verifyLibDir = join(verifySquashfs, "usr", "lib");
-  if (existsSync(verifyLibDir)) {
-    const remainingLibs = readdirSync(verifyLibDir).filter((f) => f.startsWith("libwayland-"));
-    if (remainingLibs.length > 0) {
-      throw new Error(
-        `Pruned AppImage still contains bundled Wayland libraries: ${remainingLibs.join(", ")}. ` +
-        "Pruning was ineffective — refusing to publish.",
-      );
-    }
-  }
-  rmSync(verifyDir, { recursive: true, force: true });
-  console.log("Verification passed: no libwayland-* libraries remain in the pruned AppImage.");
-
-  // Backup original and replace with pruned
-  const backupPath = `${appImagePath}.wayland-backup`;
-  rmSync(backupPath, { force: true });
-  console.log("Replacing original AppImage with pruned version");
-  renameSync(appImagePath, backupPath);
   try {
-    renameSync(prunedPath, appImagePath);
-  } catch (err) {
-    // Restore original on replacement failure
-    renameSync(backupPath, appImagePath);
-    throw err;
-  }
-  rmSync(backupPath, { force: true });
+    // Extract AppImage
+    console.log(`Extracting AppImage: ${appImagePath}`);
+    run(appImagePath, ["--appimage-extract"], { cwd: extractDir });
 
-  console.log("AppImage Wayland library pruning complete.");
-  return appImagePath;
+    const squashfsRoot = join(extractDir, "squashfs-root");
+    if (!existsSync(squashfsRoot)) {
+      throw new Error(`AppImage extraction did not produce squashfs-root in ${extractDir}`);
+    }
+
+    // Remove bundled libwayland-* libraries
+    const libDir = join(squashfsRoot, "usr", "lib");
+    let removedCount = 0;
+    const removedLibs = [];
+    if (existsSync(libDir)) {
+      const waylandLibs = readdirSync(libDir).filter((f) => f.startsWith("libwayland-"));
+      for (const lib of waylandLibs) {
+        const libPath = join(libDir, lib);
+        console.log(`Removing bundled library: ${libPath}`);
+        rmSync(libPath, { force: true });
+        removedLibs.push(lib);
+        removedCount++;
+      }
+    }
+
+    if (removedCount === 0) {
+      const msg = "No bundled libwayland-* libraries found; nothing to prune.";
+      if (failClosed) throw new Error(msg);
+      console.log(msg);
+      return appImagePath;
+    }
+
+    console.log(
+      `Removed ${removedCount} bundled Wayland librar${removedCount === 1 ? "y" : "ies"}: ${removedLibs.join(", ")}.`,
+    );
+
+    // Repack using appimagetool with sanitized environment (no secrets)
+    const prunedPath = join(extractDir, appImageName);
+    const subprocessEnv = sanitizedEnv();
+    assertNoSecretsInEnv(subprocessEnv);
+    console.log("Repacking AppImage with appimagetool...");
+    run(toolPath, [squashfsRoot, prunedPath], { env: subprocessEnv });
+
+    // Verify the pruned AppImage contains no libwayland-* libraries
+    console.log("Verifying pruned AppImage has no bundled Wayland libraries...");
+    const verifyDir = join(extractDir, "verify");
+    mkdirSync(verifyDir, { recursive: true });
+    run(prunedPath, ["--appimage-extract"], { cwd: verifyDir, env: subprocessEnv });
+    const verifySquashfs = join(verifyDir, "squashfs-root");
+    if (!existsSync(verifySquashfs)) {
+      throw new Error("Verification extraction did not produce squashfs-root.");
+    }
+    const verifyLibDir = join(verifySquashfs, "usr", "lib");
+    if (existsSync(verifyLibDir)) {
+      const remainingLibs = readdirSync(verifyLibDir).filter((f) => f.startsWith("libwayland-"));
+      if (remainingLibs.length > 0) {
+        throw new Error(
+          `Pruned AppImage still contains bundled Wayland libraries: ${remainingLibs.join(", ")}. ` +
+          "Pruning was ineffective — refusing to publish.",
+        );
+      }
+    }
+    console.log("Verification passed: no libwayland-* libraries remain in the pruned AppImage.");
+
+    // Backup original and replace with pruned
+    const backupPath = `${appImagePath}.wayland-backup`;
+    rmSync(backupPath, { force: true });
+    console.log("Replacing original AppImage with pruned version");
+    renameSync(appImagePath, backupPath);
+    try {
+      renameSync(prunedPath, appImagePath);
+    } catch (err) {
+      // Restore original on replacement failure
+      renameSync(backupPath, appImagePath);
+      throw err;
+    }
+    rmSync(backupPath, { force: true });
+
+    console.log("AppImage Wayland library pruning complete.");
+    return appImagePath;
+  } finally {
+    rmSync(extractDir, { recursive: true, force: true });
+  }
 }

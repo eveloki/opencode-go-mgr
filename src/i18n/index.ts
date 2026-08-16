@@ -1,38 +1,12 @@
-import { computed, ref, watch } from "vue";
-// @ts-expect-error naive-ui ships index.d.ts beside this ESM file, which TypeScript doesn't pair automatically.
-import * as naiveUiLocales from "naive-ui/es/locales/index.mjs";
-
-const {
-  dateDeDE,
-  dateEnUS,
-  dateEsAR,
-  dateFrFR,
-  dateJaJP,
-  dateKoKR,
-  datePtBR,
-  dateRuRU,
-  dateZhCN,
-  dateZhTW,
-  deDE,
-  enUS,
-  esAR,
-  frFR,
-  jaJP,
-  koKR,
-  ptBR,
-  ruRU,
-  zhCN,
-  zhTW,
-} = naiveUiLocales as typeof import("naive-ui");
-import { deDEMessages } from "./messages/de-DE.ts";
+import { computed, ref, shallowRef, watch } from "vue";
+import type { NDateLocale, NLocale } from "naive-ui";
+// Direct module paths (not the locales barrel) keep the eagerly bundled set to
+// the two default locales; every other naive-ui locale loads on demand below.
+import naiveEnUS from "naive-ui/es/locales/common/enUS.mjs";
+import dateEnUS from "naive-ui/es/locales/date/enUS.mjs";
+import naiveZhCN from "naive-ui/es/locales/common/zhCN.mjs";
+import dateZhCN from "naive-ui/es/locales/date/zhCN.mjs";
 import { enUSMessages, type MessageKey, type Messages } from "./messages/en-US.ts";
-import { esESMessages } from "./messages/es-ES.ts";
-import { frFRMessages } from "./messages/fr-FR.ts";
-import { jaJPMessages } from "./messages/ja-JP.ts";
-import { koKRMessages } from "./messages/ko-KR.ts";
-import { ptBRMessages } from "./messages/pt-BR.ts";
-import { ruRUMessages } from "./messages/ru-RU.ts";
-import { zhTWMessages } from "./messages/zh-TW.ts";
 
 export type { MessageKey, Messages } from "./messages/en-US.ts";
 
@@ -59,31 +33,93 @@ const zhCNMessages = Object.fromEntries(
   Object.keys(enUSMessages).map((key) => [key, key]),
 ) as Messages;
 
-export const messages: Record<Locale, Messages> = {
-  "zh-CN": zhCNMessages,
-  "zh-TW": zhTWMessages,
-  "en-US": enUSMessages,
-  "ja-JP": { ...enUSMessages, ...jaJPMessages },
-  "ko-KR": { ...enUSMessages, ...koKRMessages },
-  "es-ES": { ...enUSMessages, ...esESMessages },
-  "fr-FR": { ...enUSMessages, ...frFRMessages },
-  "de-DE": { ...enUSMessages, ...deDEMessages },
-  "pt-BR": { ...enUSMessages, ...ptBRMessages },
-  "ru-RU": { ...enUSMessages, ...ruRUMessages },
+type NaiveLocalePair = { locale: NLocale; dateLocale: NDateLocale };
+
+// zh-CN derives from the en-US key set, so only these two catalogs are eager.
+const catalogs = new Map<Locale, Messages>([
+  ["zh-CN", zhCNMessages],
+  ["en-US", enUSMessages],
+]);
+const naivePairs = shallowRef<Map<Locale, NaiveLocalePair>>(new Map([
+  ["zh-CN", { locale: naiveZhCN, dateLocale: dateZhCN }],
+  ["en-US", { locale: naiveEnUS, dateLocale: dateEnUS }],
+]));
+
+// Lazy catalogs merge over the en-US base so a partial translation still
+// renders every key, matching the previous eager `{ ...enUSMessages, ... }`.
+const lazyLoaders: Partial<Record<Locale, () => Promise<Messages>>> = {
+  "zh-TW": async () => ({ ...enUSMessages, ...(await import("./messages/zh-TW.ts")).zhTWMessages }),
+  "ja-JP": async () => ({ ...enUSMessages, ...(await import("./messages/ja-JP.ts")).jaJPMessages }),
+  "ko-KR": async () => ({ ...enUSMessages, ...(await import("./messages/ko-KR.ts")).koKRMessages }),
+  "es-ES": async () => ({ ...enUSMessages, ...(await import("./messages/es-ES.ts")).esESMessages }),
+  "fr-FR": async () => ({ ...enUSMessages, ...(await import("./messages/fr-FR.ts")).frFRMessages }),
+  "de-DE": async () => ({ ...enUSMessages, ...(await import("./messages/de-DE.ts")).deDEMessages }),
+  "pt-BR": async () => ({ ...enUSMessages, ...(await import("./messages/pt-BR.ts")).ptBRMessages }),
+  "ru-RU": async () => ({ ...enUSMessages, ...(await import("./messages/ru-RU.ts")).ruRUMessages }),
 };
 
-const naiveLocales = {
-  "zh-CN": { locale: zhCN, dateLocale: dateZhCN },
-  "zh-TW": { locale: zhTW, dateLocale: dateZhTW },
-  "en-US": { locale: enUS, dateLocale: dateEnUS },
-  "ja-JP": { locale: jaJP, dateLocale: dateJaJP },
-  "ko-KR": { locale: koKR, dateLocale: dateKoKR },
-  "es-ES": { locale: esAR, dateLocale: dateEsAR },
-  "fr-FR": { locale: frFR, dateLocale: dateFrFR },
-  "de-DE": { locale: deDE, dateLocale: dateDeDE },
-  "pt-BR": { locale: ptBR, dateLocale: datePtBR },
-  "ru-RU": { locale: ruRU, dateLocale: dateRuRU },
-} as const;
+// naive-ui has no es-ES pack; es-AR covers the Spanish variants it ships.
+const lazyNaivePairs: Partial<Record<Locale, () => Promise<NaiveLocalePair>>> = {
+  "zh-TW": async () => ({
+    locale: (await import("naive-ui/es/locales/common/zhTW.mjs")).default,
+    dateLocale: (await import("naive-ui/es/locales/date/zhTW.mjs")).default,
+  }),
+  "ja-JP": async () => ({
+    locale: (await import("naive-ui/es/locales/common/jaJP.mjs")).default,
+    dateLocale: (await import("naive-ui/es/locales/date/jaJP.mjs")).default,
+  }),
+  "ko-KR": async () => ({
+    locale: (await import("naive-ui/es/locales/common/koKR.mjs")).default,
+    dateLocale: (await import("naive-ui/es/locales/date/koKR.mjs")).default,
+  }),
+  "es-ES": async () => ({
+    locale: (await import("naive-ui/es/locales/common/esAR.mjs")).default,
+    dateLocale: (await import("naive-ui/es/locales/date/esAR.mjs")).default,
+  }),
+  "fr-FR": async () => ({
+    locale: (await import("naive-ui/es/locales/common/frFR.mjs")).default,
+    dateLocale: (await import("naive-ui/es/locales/date/frFR.mjs")).default,
+  }),
+  "de-DE": async () => ({
+    locale: (await import("naive-ui/es/locales/common/deDE.mjs")).default,
+    dateLocale: (await import("naive-ui/es/locales/date/deDE.mjs")).default,
+  }),
+  "pt-BR": async () => ({
+    locale: (await import("naive-ui/es/locales/common/ptBR.mjs")).default,
+    dateLocale: (await import("naive-ui/es/locales/date/ptBR.mjs")).default,
+  }),
+  "ru-RU": async () => ({
+    locale: (await import("naive-ui/es/locales/common/ruRU.mjs")).default,
+    dateLocale: (await import("naive-ui/es/locales/date/ruRU.mjs")).default,
+  }),
+};
+
+const inflightLoads = new Map<Locale, Promise<void>>();
+let localeRequest = 0;
+
+async function ensureLocaleLoaded(value: Locale): Promise<void> {
+  if (catalogs.has(value)) return;
+  let load = inflightLoads.get(value);
+  if (!load) {
+    load = Promise.all([
+      (lazyLoaders[value] ?? (async () => enUSMessages))(),
+      lazyNaivePairs[value]?.() ?? Promise.resolve(null),
+    ])
+      .then(([catalog, pair]) => {
+        catalogs.set(value, catalog);
+        if (pair) {
+          const next = new Map(naivePairs.value);
+          next.set(value, pair);
+          naivePairs.value = next;
+        }
+      })
+      .finally(() => {
+        inflightLoads.delete(value);
+      });
+    inflightLoads.set(value, load);
+  }
+  return load;
+}
 
 export function isLocale(value: string | null | undefined): value is Locale {
   return typeof value === "string" && localeValues.has(value);
@@ -148,16 +184,53 @@ export const locale = ref<Locale>(readLocale(localeStorage, browserLocales()));
 export const localeLabel = computed(() => (
   LOCALE_OPTIONS.find(({ value }) => value === locale.value)?.label ?? locale.value
 ));
-export const naiveLocale = computed(() => naiveLocales[locale.value].locale);
-export const naiveDateLocale = computed(() => naiveLocales[locale.value].dateLocale);
+// Fall back to the en-US packs until a lazy locale finishes loading.
+export const naiveLocale = computed(
+  () => naivePairs.value.get(locale.value)?.locale ?? naiveEnUS,
+);
+export const naiveDateLocale = computed(
+  () => naivePairs.value.get(locale.value)?.dateLocale ?? dateEnUS,
+);
 
-export function setLocale(value: Locale): void {
+// Swapped whenever the active catalog changes so every `t()` call site that
+// reads it inside a render or computed re-evaluates.
+const activeCatalog = shallowRef<Messages>(
+  catalogs.get(locale.value) ?? zhCNMessages,
+);
+
+function applyLocale(value: Locale): void {
   locale.value = value;
+  const catalog = catalogs.get(value);
+  if (catalog) activeCatalog.value = catalog;
   writeLocale(localeStorage, value);
 }
 
+export function setLocale(value: Locale): void {
+  const request = ++localeRequest;
+  if (catalogs.has(value)) {
+    applyLocale(value);
+    return;
+  }
+  // Lazy locales swap in once their chunk arrives; the UI keeps the previous
+  // language until then so text never mixes catalogs mid-translation.
+  void ensureLocaleLoaded(value).then(() => {
+    if (request === localeRequest && catalogs.has(value)) applyLocale(value);
+  });
+}
+
+// A stored browser preference may point at a lazy locale; warm it up at startup.
+if (!catalogs.has(locale.value)) {
+  const initial = locale.value;
+  void ensureLocaleLoaded(initial).then(() => {
+    if (locale.value === initial) {
+      const catalog = catalogs.get(initial);
+      if (catalog) activeCatalog.value = catalog;
+    }
+  });
+}
+
 export function t(key: MessageKey, params: TranslationParams = {}): string {
-  return messages[locale.value][key].replace(/\{(\w+)\}/g, (placeholder, name: string) => (
+  return activeCatalog.value[key].replace(/\{(\w+)\}/g, (placeholder, name: string) => (
     Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : placeholder
   ));
 }

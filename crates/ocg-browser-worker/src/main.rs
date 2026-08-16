@@ -1010,17 +1010,15 @@ mod tests {
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn profile_symlinks_are_rejected() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("profiles");
         fs::create_dir(&root).expect("profile root");
-        #[cfg(unix)]
-        {
-            let account_id = "018f2f42-4cb7-7ae8-a9a5-935aa89d499b";
-            std::os::unix::fs::symlink(temp.path(), root.join(account_id)).expect("symlink");
-            assert!(prepare_profile(&root, account_id).is_err());
-        }
+        let account_id = "018f2f42-4cb7-7ae8-a9a5-935aa89d499b";
+        std::os::unix::fs::symlink(temp.path(), root.join(account_id)).expect("symlink");
+        assert!(prepare_profile(&root, account_id).is_err());
     }
 
     #[tokio::test]

@@ -209,7 +209,7 @@
           :row-key="logRowKey"
           :loading="forwardLoading"
           :pagination="forwardPagination"
-          :scroll-x="1830"
+          :scroll-x="1585"
           remote
           size="small"
           @update:page="changeForwardPage"
@@ -224,7 +224,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, h, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -448,6 +448,9 @@ function applyCustomTimeRange(value: [number, number] | null) {
 }
 
 function formatQuotaCost(row: ForwardLog): string {
+  if (row.cost_state === "free") {
+    return t("免费");
+  }
   if (row.cost === null || row.cost_state === "unpriced" || row.cost_state === "outcome_unknown") {
     return "—";
   }
@@ -498,6 +501,35 @@ function focusRequestChain(requestId: string) {
   requestIdFilter.value = requestId;
   sortBy.value = "attempt";
   sortOrder.value = "asc";
+}
+
+function renderForwardDetail(row: ForwardLog) {
+  const requestId = row.request_id;
+  const requestBlock = requestId
+    ? h("section", [
+      h("h4", t("请求 ID")),
+      h("div", { class: "request-id-cell" }, [
+        h("code", requestId),
+        h(NButton, {
+          text: true,
+          type: "primary",
+          "aria-label": t("复制请求 ID"),
+          onClick: () => copyText(`request-id-${row.id}`, requestId, t("请求 ID")),
+        }, {
+          icon: () => h(NIcon, { component: copiedTarget.value === `request-id-${row.id}` ? CheckOutlined : CopyOutlined }),
+        }),
+        h(NButton, {
+          text: true,
+          type: "primary",
+          onClick: () => focusRequestChain(requestId),
+        }, { default: () => t("筛选此请求") }),
+      ]),
+    ])
+    : null;
+  return h("div", { class: "diagnostic-detail" }, [
+    requestBlock,
+    renderDiagnostic(row),
+  ]);
 }
 
 function renderDiagnostic(row: GatewayLog | ForwardLog) {
@@ -558,11 +590,10 @@ const forwardColumns = computed(() => [
   {
     type: "expand" as const,
     width: 44,
-    expandable: (row: ForwardLog) => !!row.error_message || !!row.diagnostic,
-    renderExpand: renderDiagnostic,
+    expandable: () => true,
+    renderExpand: renderForwardDetail,
   },
   { title: t("时间"), key: "timestamp", width: 150, render: (row: ForwardLog) => formatDate(row.timestamp) },
-  { title: t("请求 ID"), key: "request_id", width: 170, render: renderRequestId },
   {
     title: t("尝试次数"),
     key: "attempt",
@@ -570,7 +601,7 @@ const forwardColumns = computed(() => [
     align: "center" as const,
     render: (row: ForwardLog) => row.attempt ? `#${row.attempt}` : "—",
   },
-  { title: t("模型"), key: "model", width: 160, ellipsis: { tooltip: true } },
+  { title: t("模型"), key: "model", width: 200, ellipsis: { tooltip: true } },
   { title: t("账号"), key: "account_name", width: 120, ellipsis: { tooltip: true } },
   {
     title: t("状态"),
@@ -590,6 +621,9 @@ const forwardColumns = computed(() => [
         ? { label: sourceLabel, type: row.error_source === "downstream" ? "warning" as const : "error" as const }
         : statusMeta.value[row.status] ?? { label: row.status, type: "default" as const };
       const tags = [h(NTag, { type: meta.type, size: "small", bordered: false }, { default: () => meta.label })];
+      if (row.cost_state === "free") {
+        tags.push(h(NTag, { type: "success", size: "small", bordered: false }, { default: () => t("免费") }));
+      }
       if (row.cost_state === "legacy_estimate") {
         tags.push(h(NTag, { type: "default", size: "small", bordered: false }, { default: () => t("旧口径") }));
       }
@@ -746,16 +780,41 @@ function changeGatewayPage(page: number) {
 
 watch(activeTab, syncQueryState);
 watch(
-  [statusFilter, accountFilter, modelFilter, keyFilter, requestIdFilter, timeRange, activePreset, sortBy, sortOrder],
+  [statusFilter, accountFilter, modelFilter, keyFilter, timeRange, activePreset, sortBy, sortOrder],
   () => {
     forwardPage.value = 1;
     syncQueryState();
     void loadForwardLogs();
   },
 );
+// Typing a request id fires both list loads; debounce so each keystroke
+// batch turns into at most one round-trip per list.
+let requestIdDebounce: ReturnType<typeof setTimeout> | null = null;
 watch(requestIdFilter, () => {
-  gatewayPage.value = 1;
-  void loadGatewayLogs();
+  if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
+  requestIdDebounce = setTimeout(() => {
+    requestIdDebounce = null;
+    forwardPage.value = 1;
+    gatewayPage.value = 1;
+    syncQueryState();
+    void loadForwardLogs();
+    void loadGatewayLogs();
+  }, 300);
+});
+onUnmounted(() => {
+  if (requestIdDebounce !== null) clearTimeout(requestIdDebounce);
+});
+
+let activatedOnce = false;
+// Logs accumulate server-side while another tab is active (this view is kept
+// alive by App.vue); refresh both lists when returning, keeping filters.
+onActivated(() => {
+  if (activatedOnce) {
+    void loadGatewayLogs();
+    void loadForwardLogs();
+  } else {
+    activatedOnce = true;
+  }
 });
 
 onMounted(() => {
@@ -801,17 +860,17 @@ onUnmounted(cleanup);
   padding: 12px 14px;
   border: 1px solid var(--ocg-border);
   border-radius: 10px;
-  background: var(--ocg-bg);
+  background: var(--ocg-surface);
 }
 .stat-label {
   margin-bottom: 6px;
   font-size: var(--ocg-font-xs);
-  color: var(--ocg-text-secondary);
+  color: var(--ocg-muted);
 }
 .stat-value {
   font-size: var(--ocg-font-xl);
   font-weight: 600;
-  color: var(--ocg-text);
+  color: var(--ocg-ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -882,7 +941,7 @@ onUnmounted(cleanup);
 }
 .custom-range-title {
   font-size: var(--ocg-font-sm);
-  color: var(--ocg-text-secondary);
+  color: var(--ocg-muted);
   white-space: nowrap;
 }
 .custom-time-picker {
@@ -936,7 +995,7 @@ onUnmounted(cleanup);
 }
 .diagnostic-detail h4 {
   margin: 0 0 5px;
-  color: var(--ocg-text-secondary);
+  color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
 }
 .diagnostic-meta {
@@ -959,7 +1018,7 @@ onUnmounted(cleanup);
   padding: 10px 12px;
   border: 1px solid var(--ocg-border);
   border-radius: 6px;
-  background: var(--ocg-bg);
+  background: var(--ocg-canvas);
   color: var(--ocg-ink);
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: var(--ocg-font-sm);

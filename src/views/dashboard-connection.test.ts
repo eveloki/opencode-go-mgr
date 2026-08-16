@@ -796,27 +796,29 @@ test("generated VS Code and Continue configs use their current complete shapes",
     modelValues: {},
     iconUrl: "https://edge.example.com/dashboard/ocg.png",
   };
-  const vscodeWindows = new Map<string, number>([
-    ["glm-5.2", 1_000_000],
-    ["glm-5.1", 202_752],
-    ["kimi-k2.7-code", 262_144],
-    ["kimi-k2.6", 262_144],
-    ["deepseek-v4-pro", 1_000_000],
-    ["deepseek-v4-flash", 1_000_000],
-    ["mimo-v2.5", 1_000_000],
-    ["mimo-v2.5-pro", 1_048_576],
-    ["minimax-m3", 1_000_000],
-    ["minimax-m2.7", 204_800],
-    ["minimax-m2.5", 204_800],
-    ["qwen3.7-max", 1_000_000],
-    ["qwen3.7-plus", 1_000_000],
-    ["qwen3.6-plus", 1_000_000],
-  ]);
+  // Expected token budgets come from APPLICATION_MODEL_METADATA (asserted in the
+  // per-model limits test), so this test only verifies how the guide splits them.
+  const vscodeModelIds = [
+    "glm-5.2",
+    "glm-5.1",
+    "kimi-k2.7-code",
+    "kimi-k2.6",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "mimo-v2.5",
+    "mimo-v2.5-pro",
+    "minimax-m3",
+    "minimax-m2.7",
+    "minimax-m2.5",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-plus",
+  ];
   const vscodeContext = {
     ...context,
     modelId: "glm-5.2",
-    modelIds: [...vscodeWindows.keys()],
-    availableModelIds: [...vscodeWindows.keys()],
+    modelIds: vscodeModelIds,
+    availableModelIds: vscodeModelIds,
   };
   const vscode = APPLICATION_GUIDES.find((guide) => guide.id === "vscode-copilot")!;
   const vscodeConfig = JSON.parse(vscode.snippets(vscodeContext)[0].copy);
@@ -831,7 +833,7 @@ test("generated VS Code and Continue configs use their current complete shapes",
     const metadata = APPLICATION_MODEL_METADATA[model.id];
     assert.equal(
       model.maxInputTokens + model.maxOutputTokens,
-      vscodeWindows.get(model.id),
+      metadata.contextWindow,
       model.id,
     );
     assert.equal(model.maxOutputTokens, model.id === "glm-5.1" ? 32_768 : 65_536, model.id);
@@ -939,6 +941,7 @@ test("dashboard and settings keep partial data safe", async () => {
 test("applications view uses deep-linked subpages and a responsive second navigation", async () => {
   const applications = await readFile(new URL("./Applications.vue", import.meta.url), "utf8");
   const app = await readFile(new URL("../App.vue", import.meta.url), "utf8");
+  const dashboard = await readFile(new URL("./Dashboard.vue", import.meta.url), "utf8");
   const restoreDefaults = applications.slice(
     applications.indexOf("function restoreApplicationDefaults"),
     applications.indexOf("async function copySnippet"),
@@ -966,7 +969,13 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.match(modelRow, /@click="restoreApplicationDefaults"/);
   assert.match(modelRow, /@click="saveClaudeDesktopModels"/);
   assert.equal(applications.match(/@click="restoreApplicationDefaults"/g)?.length, 1);
-  assert.match(app, /<KeepAlive>\s*<Applications v-if="activeKey === 'apps'" \/>\s*<\/KeepAlive>/);
+  // Dashboard KeepAlive visibility lifecycle: App caches Dashboard; bind on
+  // mount/activation and unbind on deactivation/unmount.
+  assert.match(app, /<KeepAlive>[\s\S]*?<Dashboard\b/);
+  assert.match(dashboard, /onMounted\(\(\) => \{[\s\S]*?bindVisibilityRefresh\(\)/);
+  assert.match(dashboard, /onActivated\(\(\) => \{[\s\S]*?bindVisibilityRefresh\(\)/);
+  assert.match(dashboard, /onDeactivated\(\(\) => \{[\s\S]*?unbindVisibilityRefresh\(\)/);
+  assert.match(dashboard, /onUnmounted\(\(\) => \{[\s\S]*?unbindVisibilityRefresh\(\)/);
   assert.doesNotMatch(applications, /modelsInitialized/);
   assert.match(applications, /onActivated\(\(\) => \{[\s\S]*?if \(!settingsLoading\.value\) void loadSettings\(\)/);
   assert.match(applications, /applicationModelIds\.value = modelIds/);
@@ -1015,7 +1024,6 @@ test("applications view uses deep-linked subpages and a responsive second naviga
 
 test("settings expose the downstream display root and bounded request timeouts", async () => {
   const settings = await readFile(new URL("./Settings.vue", import.meta.url), "utf8");
-  const pricing = await readFile(new URL("./Pricing.vue", import.meta.url), "utf8");
   const api = await readFile(new URL("../api/tauri.ts", import.meta.url), "utf8");
   const dashboard = await readFile(new URL("./Dashboard.vue", import.meta.url), "utf8");
   const settingsMerge = await readFile(new URL("./settings-merge.ts", import.meta.url), "utf8");
@@ -1090,7 +1098,6 @@ test("settings expose the downstream display root and bounded request timeouts",
   // list) to drive the key selector.
   assert.match(dashboard, /ref<AppConfig>/);
   assert.doesNotMatch(settings, /PricingCatalog/);
-  assert.match(pricing, /<PricingCatalog \/>/);
   assert.match(api, /getPricing: \(\) => request<PricingSnapshot>\("\/pricing"\)/);
   assert.match(api, /refreshPricing: \(refresh: PricingRefreshRequest = \{\}\) => request<PricingRefreshResult>/);
   assert.match(api, /body: jsonBody\(refresh\)/);
@@ -1120,7 +1127,6 @@ test("accounts confirm deletes through a dialog and keep modal state fresh", asy
 
   assert.match(accounts, /useDialog/);
   assert.doesNotMatch(accounts, /renderAccountMenuOption|NPopconfirm/);
-  assert.match(accounts, /v-if="account\.auth_error \|\| accountIsCooling\(account\)"/);
   assert.match(accounts, /editingAccount\.value = account/);
 });
 

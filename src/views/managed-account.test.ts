@@ -27,15 +27,12 @@ test("managed signup steps advance in order and map to allowed browser targets",
   assert.equal(setupBrowserTarget("key_verification"), "console");
 });
 
-test("default OpenCode invite URL is allowlisted", () => {
+test("OpenCode invite URLs are HTTPS, credential-free, bounded, and host allowlisted", () => {
+  // The demo default must itself pass the allowlist unchanged.
   assert.equal(
     normalizeOpenCodeInviteUrl(DEFAULT_OPENCODE_INVITE_URL),
     DEFAULT_OPENCODE_INVITE_URL,
   );
-  assert.match(DEFAULT_OPENCODE_INVITE_URL, /^https:\/\/opencode\.ai\/go\?ref=68XPB6NP8V$/);
-});
-
-test("OpenCode invite URLs are HTTPS, credential-free, bounded, and host allowlisted", () => {
   assert.equal(normalizeOpenCodeInviteUrl("  "), "");
   assert.equal(
     normalizeOpenCodeInviteUrl("https://opencode.ai/invite/demo"),

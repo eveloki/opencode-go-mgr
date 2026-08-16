@@ -549,9 +549,13 @@ The **Logs** view shows the rolling buffer of requests the gateway has
 forwarded: timestamp, chosen account, model, status code, the upstream error
 if any, and the streamed usage when the upstream emitted a usage chunk.
 
-- Rows with `success_no_usage` mean the stream finished without a usage
-  chunk. A usage chunk makes token counts accurate; quota use is still
-  estimated from the active OpenCode Go pricing snapshot.
+- Chat streaming requests set `stream_options.include_usage` so OpenAI-compatible
+  upstreams emit a usage chunk. Rows with `success_no_usage` mean the stream
+  still finished without one. A usage chunk makes token counts accurate; quota
+  use is still estimated from the active OpenCode Go pricing snapshot. Zen free
+  models (`*-free`, `big-pickle`) record tokens with `cost_state=free` and do
+  not enter Go quota totals. Expand a row to see the request ID and diagnostic
+  detail.
 - An `outcome_unknown` row means the upstream may already have completed and
   charged the request, but the gateway lost the response or timed out. Such a
   request is not replayed automatically and its local cost remains unknown.
@@ -831,9 +835,12 @@ active OpenCode Go USD snapshot.
 
 Edge cases in the log:
 
-- Without a streaming usage chunk, the row ends with `success_no_usage`.
+- Without a streaming usage chunk (after the gateway has requested
+  `include_usage` on Chat streams), the row ends with `success_no_usage`.
 - Models absent from the snapshot are still forwarded, but finish as
   `success_unpriced`, display no quota cost, and do not enter quota totals.
+- Zen free models finish as `success` with `cost_state=free`: tokens are
+  recorded, quota cost stays empty, and they do not enter Go quota totals.
 - Pre-snapshot successful rows retain their old value and are marked as a
   legacy estimate; they are never recalculated.
 - A manually saved percentage becomes the baseline for that window. **Refresh
@@ -878,13 +885,17 @@ Settings expose three OpenCode Zen free-routing modes:
 | --- | --- |
 | **Deny free models** | Reject `*-free` / `big-pickle` and never rewrite Go models onto free |
 | **Explicit free only** (default) | Only client-requested free models use `https://opencode.ai/zen`; Go models stay on Go |
-| **Prefer mapped free models** | Current maps: `deepseek-v4-flash` → `deepseek-v4-flash-free`, `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted fall back to Go |
+| **Prefer mapped free models** | Current maps: `deepseek-v4-flash` → `deepseek-v4-flash-free`, `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted (IP-shared 429, no key rotation) fall back to Go |
 
-Free and Go cooldowns are **independent**; multi-account routing still applies
-within each channel. Under sticky-global routing, Free and Go currently share
-one preferred account id across channels. Free models are promotional, use a
-separate quota, and may use request data to improve models — do not submit
-confidential content.
+Free and Go cooldowns are **independent**. Zen free promo quota is shared per
+egress IP, so a free `429` cools the whole free channel and does **not** rotate
+keys; prefer mode then falls back to Go. Multi-account routing still applies on
+the Go channel (and for free-channel `401`/`403`). Under sticky-global routing,
+Free and Go currently share one preferred account id across channels.
+Successful free-channel rows keep token counts but use `cost_state=free` and do
+not enter Go quota totals; prefer-mode fallbacks that land on Go are priced as
+usual. Free models are promotional, use a separate quota, and may use request
+data to improve models — do not submit confidential content.
 
 ## CLI
 
@@ -1204,8 +1215,8 @@ and browser profiles.
   automatic tool mode; explicitly forcing one returns a `400` error.
   Function, custom, and namespace tools are converted normally.
 - Streaming token counts are accurate only when upstream emits usage chunks;
-  cost uses the active OpenCode Go pricing snapshot. Without usage, logs end
-  as `success_no_usage`.
+  Chat streams request `stream_options.include_usage`. Cost uses the active
+  OpenCode Go pricing snapshot. Without usage, logs end as `success_no_usage`.
 - Browser onboarding provides only manual page interaction; it does not
   register Google accounts, solve verification challenges, pay, scrape
   pages, or extract keys automatically.

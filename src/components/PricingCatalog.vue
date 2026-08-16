@@ -534,13 +534,13 @@ onMounted(() => void loadPricing());
 .pricing-head h2 {
   margin: 0;
   color: var(--ocg-ink);
-  font: 700 18px/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
+  font: 700 var(--ocg-font-xl)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
 }
 .pricing-head p,
 .pricing-note {
   margin: 4px 0 0;
   color: var(--ocg-subtle);
-  font-size: var(--ocg-font-size);
+  font-size: var(--ocg-font-sm);
 }
 .pricing-actions {
   display: flex;
@@ -566,7 +566,7 @@ onMounted(() => void loadPricing());
 .pricing-ledger dt {
   margin-bottom: 4px;
   color: var(--ocg-subtle);
-  font-size: 12px;
+  font-size: var(--ocg-font-xs);
 }
 .pricing-ledger dd {
   overflow: hidden;
@@ -657,7 +657,7 @@ onMounted(() => void loadPricing());
   top: 0;
   background: var(--ocg-canvas);
   color: var(--ocg-subtle);
-  font-size: 12px;
+  font-size: var(--ocg-font-xs);
 }
 :global(.pricing-refresh-comparison td) {
   font-family: "Cascadia Mono", Consolas, monospace;

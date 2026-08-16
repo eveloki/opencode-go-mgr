@@ -5,23 +5,48 @@ import { locale, t } from "../i18n/index.ts";
  * Shared formatting helpers used across Dashboard, Accounts, Logs, and
  * StackedBarChart. Centralising them here avoids duplication and keeps
  * locale-aware formatting consistent.
+ *
+ * Intl.NumberFormat construction is one to two orders of magnitude slower than
+ * format(), and these helpers run per table cell / per list card, so instances
+ * are cached per (locale, fraction digits) combination.
  */
+const currencyFormatters = new Map<string, Intl.NumberFormat>();
+const numberFormatters = new Map<string, Intl.NumberFormat>();
+
+function currencyFormatter(localeTag: string, fractionDigits: number): Intl.NumberFormat {
+  const cacheKey = `${localeTag}:${fractionDigits}`;
+  let formatter = currencyFormatters.get(cacheKey);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(localeTag, {
+      style: "currency",
+      currency: "USD",
+      currencyDisplay: "narrowSymbol",
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    });
+    currencyFormatters.set(cacheKey, formatter);
+  }
+  return formatter;
+}
+
+function plainFormatter(localeTag: string): Intl.NumberFormat {
+  let formatter = numberFormatters.get(localeTag);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(localeTag);
+    numberFormatters.set(localeTag, formatter);
+  }
+  return formatter;
+}
 
 /** Format a number as USD currency with adaptive or caller-specified decimal places. */
 export function formatCost(value: number, digits?: number): string {
   const fractionDigits = digits ?? (value !== 0 && Math.abs(value) < 0.01 ? 4 : 2);
-  return new Intl.NumberFormat(locale.value, {
-    style: "currency",
-    currency: "USD",
-    currencyDisplay: "narrowSymbol",
-    minimumFractionDigits: fractionDigits,
-    maximumFractionDigits: fractionDigits,
-  }).format(value);
+  return currencyFormatter(locale.value, fractionDigits).format(value);
 }
 
 /** Format a number with locale-aware grouping. */
 export function formatNumber(value: number): string {
-  return new Intl.NumberFormat(locale.value).format(value);
+  return plainFormatter(locale.value).format(value);
 }
 
 /**

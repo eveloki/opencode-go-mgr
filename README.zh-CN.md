@@ -9,7 +9,7 @@ SQLite，并在 `http://127.0.0.1:9042` 上同时提供多协议 Gateway 与管�
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
-    <img src="assets/star.png" alt="去 GitHub 给本仓库点个 Star" width="420">
+    <img src="assets/star.webp" alt="去 GitHub 给本仓库点个 Star" width="420">
   </a>
 </p>
 
@@ -117,6 +117,14 @@ Responses、Gemini 或未知 Claude Desktop 别名直接 `400`。
 
 另见：[Contributors](docs/CONTRIBUTORS.md)、[DESIGN.md](DESIGN.md)、
 [AGENTS.md](AGENTS.md)。
+
+## 交流群
+
+加入 OCG Manager QQ 群：**1104321231**。
+
+<p align="center">
+  <img src="assets/qq-group.png" alt="OCG Manager QQ 群二维码" width="360" />
+</p>
 
 ## 开发模式
 

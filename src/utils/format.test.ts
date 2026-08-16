@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_LOCALE, setLocale, t } from "../i18n/index.ts";
+import { DEFAULT_LOCALE, setLocale } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "./format.ts";
 
 test("formatNumber uses the active locale grouping", () => {
@@ -63,7 +63,6 @@ test("useClipboard rejects environments without clipboard support", async () => 
   try {
     const { copy } = useClipboard();
     await assert.rejects(() => copy("k", "value", "Key"), /剪贴板/);
-    assert.equal(t("当前环境不支持剪贴板"), "当前环境不支持剪贴板");
   } finally {
     Object.defineProperty(globalThis, "navigator", {
       configurable: true,

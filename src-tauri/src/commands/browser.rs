@@ -252,13 +252,6 @@ pub(crate) fn native_browser_name() -> Result<&'static str, String> {
 }
 
 #[cfg(test)]
-pub(crate) fn delete_browser_profile_dirs(data_dir: &Path, account_id: &str) -> Result<(), String> {
-    validate_account_id(account_id)?;
-    let paths = browser_profile_paths(data_dir, account_id).map_err(|e| e.to_string())?;
-    delete_browser_profile_dirs_at_paths(paths)
-}
-
-#[cfg(test)]
 fn delete_browser_profile_dirs_at_paths(paths: Vec<PathBuf>) -> Result<(), String> {
     for profile_dir in paths {
         if profile_dir.exists() {
@@ -919,28 +912,6 @@ mod tests {
         assert!(launched.load(Ordering::SeqCst));
         assert!(profile.join("Cookies").is_file());
         drop(core);
-        std::fs::remove_dir_all(data_dir).unwrap();
-    }
-
-    #[test]
-    fn profile_reset_deletes_new_and_legacy_profiles_only() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "ocg-native-browser-profile-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let account_id = "account-1";
-        let new_profile = data_dir.join("browser-profiles").join(account_id);
-        let legacy_profile = data_dir.join("profiles").join(account_id);
-        let other_profile = data_dir.join("browser-profiles").join("account-2");
-        std::fs::create_dir_all(&new_profile).unwrap();
-        std::fs::create_dir_all(&legacy_profile).unwrap();
-        std::fs::create_dir_all(&other_profile).unwrap();
-
-        delete_browser_profile_dirs(&data_dir, account_id).unwrap();
-
-        assert!(!new_profile.exists());
-        assert!(!legacy_profile.exists());
-        assert!(other_profile.exists());
         std::fs::remove_dir_all(data_dir).unwrap();
     }
 

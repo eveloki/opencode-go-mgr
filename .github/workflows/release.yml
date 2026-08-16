@@ -516,15 +516,19 @@ jobs:
             echo "Invalid draft Release id: $RELEASE_ID" >&2
             exit 1
           fi
+          # The assembled-release artifact is what draft-release uploaded; the
+          # server asset set must converge to exactly these names.
+          expected_assets=$(cd release && find . -maxdepth 1 -type f -printf '%f\n' | jq -R . | jq -s .)
           prerelease=$(node scripts/release-policy.mjs is-prerelease --version "$GITHUB_REF_NAME")
           ready=false
           for attempt in 1 2 3 4 5; do
             if gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release-metadata.json; then
               if jq -e --argjson release_id "$RELEASE_ID" --arg tag "$GITHUB_REF_NAME" \
                 --argjson prerelease "$prerelease" \
+                --argjson expected_assets "$expected_assets" \
                 '.id == $release_id and .tag_name == $tag and .draft == true
                   and .prerelease == $prerelease
-                  and (.assets | length == 15)
+                  and ([.assets[].name] | sort) == ($expected_assets | sort)
                   and all(.assets[]; (.name | type == "string") and (.digest | type == "string"))' \
                 release-metadata.json >/dev/null; then
                 jq '[.assets[] | {name, digest}]' release-metadata.json > asset-metadata.json
@@ -535,7 +539,9 @@ jobs:
             sleep 3
           done
           if [ "$ready" != true ]; then
-            echo "GitHub did not expose all 15 immutable asset digests." >&2
+            echo "GitHub did not expose digests for the exact assembled asset set." >&2
+            echo "Expected assets: $expected_assets" >&2
+            jq -r '.assets[]?.name' release-metadata.json 2>/dev/null >&2 || true
             exit 1
           fi
           digest=$(jq -S -c 'sort_by(.name)' asset-metadata.json | sha256sum | cut -d' ' -f1)
@@ -606,7 +612,6 @@ jobs:
             --argjson prerelease "$prerelease" \
             '.id == $release_id and .tag_name == $tag and .draft == true
               and .prerelease == $prerelease
-              and (.assets | length == 15)
               and all(.assets[]; (.name | type == "string") and (.digest | type == "string"))' \
             release-metadata.json >/dev/null; then
             echo "Refusing to publish a Release that is not the exact verified draft." >&2

@@ -52,11 +52,25 @@ impl AccountSelector {
         Self::first_available_for(accounts, UpstreamChannel::Go, exclude_ids)
     }
 
+    /// Account-row compatibility guard for the IP-shared Zen free cooldown.
+    /// The durable global gate is checked by the request handler; do not filter
+    /// disabled or unfinished rows here because changing account lifecycle state
+    /// cannot restore an egress-IP quota.
+    pub fn free_channel_exhausted(accounts: &[Account]) -> bool {
+        let now = Utc::now();
+        accounts
+            .iter()
+            .any(|account| account.cooldown_free_until.is_some_and(|until| until > now))
+    }
+
     pub fn first_available_for(
         accounts: &[Account],
         channel: UpstreamChannel,
         exclude_ids: &[&str],
     ) -> Option<Account> {
+        if channel == UpstreamChannel::Free && Self::free_channel_exhausted(accounts) {
+            return None;
+        }
         accounts
             .iter()
             .find(|account| Self::is_available_for(account, channel, exclude_ids))
@@ -77,6 +91,9 @@ impl AccountSelector {
         account_id: &str,
         exclude_ids: &[&str],
     ) -> Option<Account> {
+        if channel == UpstreamChannel::Free && Self::free_channel_exhausted(accounts) {
+            return None;
+        }
         accounts
             .iter()
             .find(|account| {
@@ -265,5 +282,24 @@ mod tests {
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn one_free_cooldown_exhausts_the_whole_free_channel() {
+        let mut cooled = account("cooled", false, None);
+        cooled.cooldown_free_until = Some(Utc::now() + Duration::hours(1));
+        let next = account("next", true, None);
+        let accounts = vec![cooled, next];
+
+        assert!(AccountSelector::free_channel_exhausted(&accounts));
+        assert!(
+            AccountSelector::first_available_for(&accounts, UpstreamChannel::Free, &[]).is_none()
+        );
+        assert_eq!(
+            AccountSelector::first_available_for(&accounts, UpstreamChannel::Go, &[])
+                .unwrap()
+                .id,
+            "next"
+        );
     }
 }

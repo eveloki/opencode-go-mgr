@@ -36,6 +36,8 @@ pub(crate) enum ForwardAction {
     Return,
     RetrySameAccount,
     TryNextAccount,
+    /// Free 429 is IP-shared; stop probing other keys and fall back to Go if allowed.
+    ExhaustFreeChannel,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -621,9 +623,10 @@ async fn forward_request_impl(
         if status.as_u16() == 429 {
             // Go usage windows and Zen free promo limits both arrive as 429; cool the matching channel.
             // Unlike a rejected 429, ambiguous transport failures and 5xx responses are not replayed.
-            let window = parse_usage_limit_window(&text).or_else(|| {
-                (plan.channel == UpstreamChannel::Free).then_some(UsageWindowKind::Free)
-            });
+            // The endpoint/channel is authoritative. Free providers sometimes
+            // reuse Go-window wording (5-hour/weekly/monthly); that text must not
+            // downgrade an IP-shared Free 429 into per-account key rotation.
+            let window = usage_limit_window_for_channel(plan.channel, &text);
             let cooldown = if window == Some(UsageWindowKind::Free) {
                 parse_free_reset_or_default(&text)
             } else {
@@ -636,13 +639,14 @@ async fn forward_request_impl(
                 sanitized,
                 cooldown.num_seconds()
             );
+            let action = action_for_usage_limit(window, plan.allow_go_fallback);
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "upstream",
                 error_stage: "upstream_http",
                 downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                 upstream_status: Some(status.as_u16()),
                 upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some("try_next_account"),
+                retry_action: Some(retry_action_name(action)),
                 upstream_headers: Some(&error_headers),
                 upstream_error: Some(&text),
                 request_body: Some(client_body),
@@ -674,7 +678,7 @@ async fn forward_request_impl(
             }
             return Ok(ForwardResult {
                 response: error_response(plan.client, &error_message, None),
-                action: ForwardAction::TryNextAccount,
+                action,
                 error_message: Some(error_message),
             });
         }
@@ -1240,12 +1244,14 @@ async fn forward_request_impl(
                             } => (db_h, st_f, converter_f, mdl, initial_id, guard),
                             FinalizerState::Done => return None,
                         };
-                        let (output, finish_error) = if st_f.lock().error {
-                            (bytes::Bytes::new(), None)
+                        let (output, finish_error, converter_usage) = if st_f.lock().error {
+                            (bytes::Bytes::new(), None, None)
                         } else {
                             let mut converter = converter_f.lock();
                             match converter.finish() {
-                                Ok(chunks) => (join_chunks(chunks), None),
+                                Ok(chunks) => {
+                                    (join_chunks(chunks), None, converter.captured_usage())
+                                }
                                 Err(error) => {
                                     let detail = format!(
                                         "upstream stream ended before a complete response: {}",
@@ -1259,7 +1265,11 @@ async fn forward_request_impl(
                                         state.error_message = Some(message.clone());
                                     }
                                     let chunks = converter.outcome_unknown_event(&message);
-                                    (join_chunks(chunks), Some(message))
+                                    (
+                                        join_chunks(chunks),
+                                        Some(message),
+                                        converter.captured_usage(),
+                                    )
                                 }
                             }
                         };
@@ -1285,8 +1295,10 @@ async fn forward_request_impl(
                                         },
                                     ),
                                 )
-                            } else if g.has_usage {
-                                let (p, c, cached, cache_creation) = token_counts(g.usage);
+                            } else if let Some(usage) =
+                                g.has_usage.then_some(g.usage).or(converter_usage)
+                            {
+                                let (p, c, cached, cache_creation) = token_counts(usage);
                                 let metrics = pricing_metrics(
                                     &pricing,
                                     &mdl,
@@ -1296,11 +1308,7 @@ async fn forward_request_impl(
                                     cache_creation,
                                     service_tier.as_deref(),
                                 );
-                                let status = if metrics.cost_state == "priced" {
-                                    "success"
-                                } else {
-                                    "success_unpriced"
-                                };
+                                let status = success_status_for_cost(metrics.cost_state);
                                 (status.to_string(), metrics)
                             } else {
                                 (
@@ -1431,7 +1439,7 @@ async fn forward_request_impl(
                 });
             }
         };
-        let upstream_json = match serde_json::from_str::<Value>(&text) {
+        let mut upstream_json = match serde_json::from_str::<Value>(&text) {
             Ok(value) => value,
             Err(_) => {
                 let message = "upstream returned invalid JSON";
@@ -1494,11 +1502,12 @@ async fn forward_request_impl(
         // adapters serialize source values into opaque replay fields (for
         // example, Anthropic thinking blocks in Responses encrypted_content),
         // where a post-conversion exact-string pass could no longer see the Key.
-        let mut client_safe_upstream_json = upstream_json.clone();
+        // Metrics extraction above is read-only, so redact in place instead of
+        // cloning the whole response tree.
         if let Some(secret) = attempt_context.known_secret.as_deref() {
-            redact_known_secret_values(&mut client_safe_upstream_json, secret);
+            redact_known_secret_values(&mut upstream_json, secret);
         }
-        let mut response_json = match transform_response(plan, &client_safe_upstream_json) {
+        let mut response_json = match transform_response(plan, &upstream_json) {
             Ok(value) => value,
             Err(error) => {
                 let message = format!("response conversion failed: {}", error.message);
@@ -1526,11 +1535,7 @@ async fn forward_request_impl(
                     Some(failure),
                 )?;
                 return Ok(ForwardResult {
-                    response: error_response(
-                        plan.client,
-                        &message,
-                        Some(&client_safe_upstream_json),
-                    ),
+                    response: error_response(plan.client, &message, Some(&upstream_json)),
                     action: ForwardAction::Return,
                     error_message: Some(message),
                 });
@@ -1546,11 +1551,7 @@ async fn forward_request_impl(
                 &db,
                 account,
                 &model,
-                match metrics.cost_state {
-                    "priced" => "success",
-                    "usage_missing" => "success_no_usage",
-                    _ => "success_unpriced",
-                },
+                success_status_for_cost(metrics.cost_state),
                 Some(status.as_u16() as i32),
                 metrics,
                 None,
@@ -1693,12 +1694,12 @@ impl Drop for StreamOutcomeGuard {
                     cache_creation,
                     self.service_tier.as_deref(),
                 );
-                let status = if metrics.cost_state == "priced" {
-                    "success"
-                } else {
-                    "success_unpriced"
-                };
-                (status, metrics, None, None)
+                (
+                    success_status_for_cost(metrics.cost_state),
+                    metrics,
+                    None,
+                    None,
+                )
             } else {
                 (
                     "success_no_usage",
@@ -2105,6 +2106,38 @@ fn error_response(format: ApiFormat, message: &str, upstream: Option<&Value>) ->
     (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
 }
 
+fn usage_limit_window_for_channel(channel: UpstreamChannel, text: &str) -> Option<UsageWindowKind> {
+    if channel == UpstreamChannel::Free {
+        Some(UsageWindowKind::Free)
+    } else {
+        parse_usage_limit_window(text)
+    }
+}
+
+fn action_for_usage_limit(
+    window: Option<UsageWindowKind>,
+    allow_go_fallback: bool,
+) -> ForwardAction {
+    if window == Some(UsageWindowKind::Free) {
+        if allow_go_fallback {
+            ForwardAction::ExhaustFreeChannel
+        } else {
+            ForwardAction::Return
+        }
+    } else {
+        ForwardAction::TryNextAccount
+    }
+}
+
+fn retry_action_name(action: ForwardAction) -> &'static str {
+    match action {
+        ForwardAction::Return => "return",
+        ForwardAction::RetrySameAccount => "retry_same_account",
+        ForwardAction::TryNextAccount => "try_next_account",
+        ForwardAction::ExhaustFreeChannel => "exhaust_free_channel",
+    }
+}
+
 fn account_preflight_failure(plan: &RequestPlan, message: String) -> ForwardResult {
     ForwardResult {
         response: error_response(plan.client, &message, None),
@@ -2217,6 +2250,14 @@ fn log_forward(
     })
 }
 
+fn success_status_for_cost(cost_state: &str) -> &'static str {
+    match cost_state {
+        "priced" | "free" => "success",
+        "usage_missing" => "success_no_usage",
+        _ => "success_unpriced",
+    }
+}
+
 fn pricing_metrics(
     snapshot: &PricingSnapshot,
     model: &str,
@@ -2279,7 +2320,9 @@ struct StreamState {
     diagnostic_recorded: bool,
 }
 
-const MAX_SSE_BUF: usize = 64 * 1024;
+// Match the stream converter's pending-frame cap. The old 64 KiB limit dropped
+// DeepSeek flash reasoning bursts before the trailing usage chunk could be parsed.
+const MAX_SSE_BUF: usize = 8 * 1024 * 1024;
 
 // ponytail: SSE spec allows \n\n OR \r\n\r\n as event boundaries. Match both
 // so Windows-origin / proxy-CRLF upstreams don't accumulate buffer forever.
@@ -2335,10 +2378,6 @@ fn process_chunk_for_usage(
     model_hint: Option<&str>,
 ) {
     if st.terminal {
-        return;
-    }
-    if st.buf.len() + chunk.len() > MAX_SSE_BUF {
-        st.buf.clear();
         return;
     }
     st.buf.extend_from_slice(chunk);
@@ -2402,6 +2441,9 @@ fn process_chunk_for_usage(
             }
         }
     }
+    if st.buf.len() > MAX_SSE_BUF {
+        st.buf.clear();
+    }
 }
 
 fn token_counts(usage: UsageCounts) -> (i64, i64, i64, i64) {
@@ -2421,6 +2463,36 @@ mod stream_usage_tests {
 
     fn usage_event() -> Vec<u8> {
         b"data: {\"id\":\"x\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30,\"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\ndata: [DONE]\n\n".to_vec()
+    }
+
+    #[test]
+    fn free_429_does_not_rotate_keys() {
+        for misleading_body in [
+            "5-hour usage limit reached. Resets in 13min.",
+            "Weekly usage limit reached. Resets in 4 days.",
+            "Monthly usage limit reached. Resets in 13 days.",
+        ] {
+            assert_eq!(
+                usage_limit_window_for_channel(UpstreamChannel::Free, misleading_body),
+                Some(UsageWindowKind::Free),
+            );
+        }
+        assert_eq!(
+            action_for_usage_limit(Some(UsageWindowKind::Free), true),
+            ForwardAction::ExhaustFreeChannel
+        );
+        assert_eq!(
+            action_for_usage_limit(Some(UsageWindowKind::Free), false),
+            ForwardAction::Return
+        );
+        assert_eq!(
+            action_for_usage_limit(Some(UsageWindowKind::FiveHours), true),
+            ForwardAction::TryNextAccount
+        );
+        assert_eq!(
+            action_for_usage_limit(None, false),
+            ForwardAction::TryNextAccount
+        );
     }
 
     #[test]
@@ -2565,50 +2637,34 @@ mod stream_usage_tests {
     }
 
     #[test]
-    fn messages_stream_sanitizes_minimax_with_model_hint() {
-        // Upstream may omit the model field in message_start; the request plan's
-        // model must still be used to sanitize bogus all-cache usage.
-        let mut st = StreamState::default();
-        let start = Bytes::from_static(
-            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}}\n\n",
-        );
-        let delta = Bytes::from_static(
-            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n",
-        );
-        process_chunk_for_usage(&mut st, ApiFormat::Messages, &start, Some("minimax-m3"));
-        process_chunk_for_usage(&mut st, ApiFormat::Messages, &delta, Some("minimax-m3"));
-        assert!(st.has_usage);
-        let (p, c, cached, _) = token_counts(st.usage);
-        assert_eq!(p, 40500, "bogus cache read should be moved back to input");
-        assert_eq!(c, 5);
-        assert_eq!(cached, 0);
-    }
-
-    #[test]
-    fn messages_stream_keeps_minimax_request_hint_when_upstream_rewrites_model() {
-        let mut st = StreamState::default();
-        let start = Bytes::from_static(
-            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"ocg-generic\",\"usage\":{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}}\n\n",
-        );
-        process_chunk_for_usage(&mut st, ApiFormat::Messages, &start, Some("minimax-m3"));
-        assert!(st.has_usage);
-        let (input, output, cached, _) = token_counts(st.usage);
-        assert_eq!((input, output, cached), (40500, 5, 0));
-    }
-
-    #[test]
-    fn messages_stream_sanitizes_minimax_with_mixed_case_model_hint() {
-        // OpenCode Go / Qwen Cloud expose MiniMax IDs as "MiniMax-M3". The stream
-        // sanitizer must recognize the family regardless of capitalization.
-        let mut st = StreamState::default();
-        let start = Bytes::from_static(
-            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}}\n\n",
-        );
-        process_chunk_for_usage(&mut st, ApiFormat::Messages, &start, Some("MiniMax-M3"));
-        assert!(st.has_usage);
-        let (p, _, cached, _) = token_counts(st.usage);
-        assert_eq!(p, 40500, "bogus cache read should be moved back to input");
-        assert_eq!(cached, 0);
+    fn messages_stream_sanitizes_minimax_bogus_cache_from_request_hint() {
+        // Upstream may omit the model field in message_start or rewrite it to an
+        // internal id, and the plan's hint may arrive in mixed case ("MiniMax-M3");
+        // the request hint must still sanitize the bogus all-cache usage in every shape.
+        for (hint, start_model) in [
+            ("minimax-m3", None),
+            ("minimax-m3", Some("ocg-generic")),
+            ("MiniMax-M3", None),
+        ] {
+            let message = match start_model {
+                Some(model) => format!(
+                    "{{\"model\":\"{model}\",\"usage\":{{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}}}"
+                ),
+                None => "{\"usage\":{\"input_tokens\":0,\"output_tokens\":5,\"cache_read_input_tokens\":40500}}".to_string(),
+            };
+            let start = Bytes::from(format!(
+                "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{message}}}\n\n"
+            ));
+            let mut st = StreamState::default();
+            process_chunk_for_usage(&mut st, ApiFormat::Messages, &start, Some(hint));
+            assert!(st.has_usage, "hint={hint} start_model={start_model:?}");
+            let (input, output, cached, _) = token_counts(st.usage);
+            assert_eq!(
+                (input, output, cached),
+                (40500, 5, 0),
+                "hint={hint} start_model={start_model:?}"
+            );
+        }
     }
 
     #[test]
@@ -2670,10 +2726,39 @@ mod stream_usage_tests {
     #[test]
     fn buffer_bound_clears_on_oversize() {
         let mut st = StreamState::default();
-        // Single chunk larger than MAX_SSE_BUF — must be dropped, not allocated.
+        // Incomplete leftover larger than MAX_SSE_BUF is dropped after the drain.
         let big = vec![b'x'; MAX_SSE_BUF + 1];
         process_chunk_for_usage(&mut st, ApiFormat::ChatCompletions, &Bytes::from(big), None);
-        assert!(st.buf.is_empty(), "oversize chunks are dropped");
+        assert!(
+            st.buf.is_empty(),
+            "oversize incomplete leftovers are dropped"
+        );
         assert!(!st.has_usage);
+    }
+
+    #[test]
+    fn large_reasoning_chunk_still_captures_trailing_usage() {
+        // Flash-style burst: one HTTP chunk larger than the old 64 KiB scanner
+        // cap, with usage in a later SSE event of the same chunk.
+        let reasoning = "r".repeat(80_000);
+        let payload = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"reasoning_content\":\"{reasoning}\"}}}}]}}\n\n\
+             data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":9,\"completion_tokens\":3}}}}\n\n\
+             data: [DONE]\n\n"
+        );
+        let mut st = StreamState::default();
+        process_chunk_for_usage(
+            &mut st,
+            ApiFormat::ChatCompletions,
+            &Bytes::from(payload),
+            Some("deepseek-v4-flash"),
+        );
+        assert!(
+            st.has_usage,
+            "usage after a large reasoning event must be kept"
+        );
+        assert_eq!(token_counts(st.usage), (9, 3, 0, 0));
+        assert!(st.terminal);
+        assert!(st.buf.is_empty());
     }
 }

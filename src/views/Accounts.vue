@@ -357,42 +357,13 @@
                 {{ t("重试") }}
               </n-button>
             </div>
-            <div v-else class="usage-strip">
-              <div class="usage-strip-body" role="group" :aria-label="t('用量')">
-                <div v-for="limit in usageLimits" :key="limit.key" class="usage-segment">
-                  <div class="usage-meta">
-                    <span>{{ limit.label }}</span>
-                    <strong v-if="usageEdits[account.id]">
-                      {{ formatCost(usageCost(account.id, limit.key)) }} / {{ formatCost(limit.limit) }}
-                    </strong>
-                  </div>
-                  <n-progress
-                    type="line"
-                    :height="8"
-                    :percentage="usageProgressPercentage(
-                      account,
-                      limit.key,
-                      usagePercent(account.id, limit.key),
-                      now,
-                    )"
-                    :status="usageProgressStatus(
-                      account,
-                      limit.key,
-                      usagePercent(account.id, limit.key),
-                      now,
-                    )"
-                    :processing="!usageEdits[account.id]"
-                    :show-indicator="false"
-                  />
-                  <span
-                    v-if="accountUsageLimitReached(account, limit.key)"
-                    class="usage-reset-countdown"
-                  >
-                    {{ t("{time}后重置", { time: formatWindowRemaining(account, limit.key) }) }}
-                  </span>
-                </div>
-              </div>
-            </div>
+            <UsageStrip
+              v-else
+              :account="account"
+              :usage="getUsage(account.id)"
+              :limits="usageLimits"
+              :editing="!!usageEdits[account.id]"
+            />
           </div>
         </n-card>
       </div>
@@ -496,7 +467,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
 import {
   NAlert,
   NButton,
@@ -511,7 +482,6 @@ import {
   NInputNumber,
   NModal,
   NPopover,
-  NProgress,
   NSpin,
   NSlider,
   NSpace,
@@ -548,11 +518,8 @@ import {
   isWindowCooling,
   mergeUsageEdit,
   normalizeUsagePercent,
-  resetTimeForWindow,
   resetsInMinutesForSave,
   usagePercentFromCost,
-  usageProgressPercentage,
-  usageProgressStatus,
   WINDOW_FULL_MINUTES,
   windowResetsAt,
 } from "./accounts-usage";
@@ -570,6 +537,7 @@ import {
 import AccountAddModal from "../components/AccountAddModal.vue";
 import AccountFormModal from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
+import UsageStrip from "../components/UsageStrip.vue";
 
 type AccountMenuOption = {
   key: string | number;
@@ -711,10 +679,6 @@ function usageLimit(key: UsageKey): number {
   return usageLimits.value.find((limit) => limit.key === key)?.limit ?? 0;
 }
 
-function usagePercent(accountId: string, key: UsageKey): number {
-  return usagePercentFromCost(usageCost(accountId, key), usageLimit(key));
-}
-
 function accountUsageLimitReached(account: Account, key: UsageKey): boolean {
   return isUsageLimitReached(account, key, now.value);
 }
@@ -732,21 +696,6 @@ async function focusUsageEditor(accountId: string) {
     ).find((element) => element.dataset.usageEditorAccountId === accountId);
     editor?.querySelector<HTMLInputElement>(".n-input-number input")?.focus();
   });
-}
-
-function formatWindowRemaining(account: Account, key: UsageKey): string {
-  const until = resetTimeForWindow(account, key);
-  if (!until) return "";
-  const ms = Date.parse(until) - now.value;
-  if (ms <= 0) return "";
-  const seconds = Math.ceil(ms / 1000);
-  if (seconds < 60) return t("{seconds}秒", { seconds });
-  const minutes = Math.floor(ms / 60000);
-  if (minutes < 60) return t("{minutes}分钟", { minutes });
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return t("{hours}小时{minutes}分钟", { hours, minutes: minutes % 60 });
-  const days = Math.floor(hours / 24);
-  return t("{days}天{hours}小时", { days, hours: hours % 24 });
 }
 
 function usageEditsFromWindow(usage: UsageWindow): AccountUsageEdits {
@@ -1629,14 +1578,38 @@ async function resetCooldown(id: string) {
 }
 
 let clock: number | undefined;
+let activatedOnce = false;
+
+function startClock() {
+  if (clock === undefined) {
+    clock = window.setInterval(() => {
+      now.value = Date.now();
+    }, 15_000);
+  }
+}
+
+function stopClock() {
+  if (clock !== undefined) {
+    window.clearInterval(clock);
+    clock = undefined;
+  }
+}
+
 onMounted(() => {
-  clock = window.setInterval(() => {
-    now.value = Date.now();
-  }, 1000);
   void initializeAccounts();
 });
+// This view is kept alive by App.vue; coarse states (cooling tags, editor
+// enablement) recompute on a 15s clock, while UsageStrip keeps its own 1s
+// countdown. Returning to the view refreshes server-side cooldown changes.
+onActivated(() => {
+  startClock();
+  now.value = Date.now();
+  if (activatedOnce) void initializeAccounts();
+  else activatedOnce = true;
+});
+onDeactivated(stopClock);
 onUnmounted(() => {
-  window.clearInterval(clock);
+  stopClock();
   if (accountDrag) {
     accounts.value = accountDrag.previous;
     clearAccountDrag(accountDrag);
@@ -1677,7 +1650,7 @@ onUnmounted(() => {
 }
 
 .account-card--cooling {
-  border-color: rgba(208, 48, 80, 0.45);
+  border-color: color-mix(in srgb, var(--ocg-error) 45%, transparent);
 }
 
 .account-card--pending {
@@ -1766,37 +1739,6 @@ onUnmounted(() => {
   font-size: var(--ocg-font-sm);
 }
 
-.usage-strip {
-  min-width: 0;
-}
-
-.usage-strip-body {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.usage-segment {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.usage-meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: var(--ocg-font-sm);
-  color: var(--ocg-muted);
-}
-
-.usage-meta strong {
-  color: var(--ocg-ink);
-  font-size: var(--ocg-font-md);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-weight: 600;
-}
-
 .usage-editor-popover {
   display: grid;
   width: 100%;
@@ -1849,12 +1791,6 @@ onUnmounted(() => {
   width: 78px;
 }
 
-.usage-reset-countdown {
-  color: var(--ocg-error);
-  font-size: var(--ocg-font-xs);
-  line-height: 1.4;
-}
-
 .usage-resets-row {
   display: flex;
   flex-wrap: wrap;
@@ -1878,10 +1814,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 900px) {
-  .usage-strip-body {
-    grid-template-columns: 1fr;
-  }
-
   .account-card :deep(.n-card-header) {
     align-items: flex-start;
   }

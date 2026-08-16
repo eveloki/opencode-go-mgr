@@ -455,8 +455,11 @@ Manager 恢复，只能从备份恢复或重新登录。
 **日志** 视图展示 Gateway 转发的请求滚动列表：时间戳、所选账号、模型、状态码、
 上游错误（如果有），以及上游发出 usage chunk 时的精确流式用量。
 
-- 没有 usage chunk 的行会标 `success_no_usage`。usage chunk 只会让 token 数量
-  准确；费用仍按当前 OpenCode Go 价格快照估算。
+- Chat 流式请求会设置 `stream_options.include_usage`，让 OpenAI 兼容上游返回
+  usage chunk。仍然没有 usage chunk 的行会标 `success_no_usage`。usage chunk
+  只会让 token 数量准确；Go 费用仍按当前 OpenCode Go 价格快照估算。Zen free
+  模型（`*-free`、`big-pickle`）会记录 token，但 `cost_state=free`，不计入 Go
+  额度。展开行可查看请求 ID 与诊断详情。
 - `outcome_unknown` 表示上游可能已经完成并扣额，但 Gateway 超时或丢失响应；
   这类请求不会自动重试，且本地额度消耗保持未知。
 - **Key** 筛选把行与汇总统计限定到单个客户端 Key。选项来自日志表本身，因此
@@ -689,9 +692,12 @@ Go 快照。
 
 日志中的几种特殊情况：
 
-- 没有流式 usage chunk 时，日志记 `success_no_usage`。
+- Chat 流式请求已要求 `include_usage` 后仍没有 usage chunk 时，日志记
+  `success_no_usage`。
 - 快照中没有的模型仍可转发，但会记为 `success_unpriced`，额度消耗显示为空且
   不进入累计。
+- Zen free 模型成功时记 `success` 且 `cost_state=free`：token 会记录，额度消耗
+  显示为免费，不进入 Go 额度累计。
 - 快照功能上线前的成功记录保留原值、标记为“旧口径”，不会回算。
 - 手动保存的百分比会成为对应窗口的基线；托管账号的 **刷新额度** 会用控制台官
   方百分比覆盖基线。此后有价格的成功请求继续累加，直到再次手动修改、刷新额
@@ -725,12 +731,15 @@ Go 快照。
 | --- | --- |
 | **禁止 Free 模型** | 拒绝 `*-free` / `big-pickle`，也不把 Go 模型改写到 free |
 | **仅显式使用 Free 模型**（默认） | 只有客户端显式请求 free 才走 `https://opencode.ai/zen`；Go 模型仍走 Go 上游 |
-| **自动优先同名 Free 模型** | 当前映射：`deepseek-v4-flash` → `deepseek-v4-flash-free`，`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽或超长后回落 Go |
+| **自动优先同名 Free 模型** | 当前映射：`deepseek-v4-flash` → `deepseek-v4-flash-free`，`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽（按 IP 共享，不换 Key）或超长后回落 Go |
 
-Free 与 Go 使用**独立冷却窗口**；多账号会按现有路由方案在对应通道内轮询。
-sticky-global 路由下，Free 与 Go 目前共享同一个全局偏好账号（跨通道不单独记
-粘性）。Free 为限时促销，额度独立，且请求数据可能用于改进模型——不要提交机密
-内容。
+Free 与 Go 使用**独立冷却窗口**。Zen free 促销额度按出口 IP 共享，因此 free
+`429` 会冷却整条 free 通道，**不会**换 Key 重试；prefer 随后回落 Go。Go 通道
+（以及 free 通道的 `401`/`403`）仍按现有方案做多账号轮询。sticky-global 路由
+下，Free 与 Go 目前共享同一个全局偏好账号（跨通道不单独记粘性）。成功的 free
+通道请求会记录 token，但 `cost_state=free`，不计入 Go 额度；prefer 回落到 Go
+的请求仍按 Go 计价。Free 为限时促销，额度独立，且请求数据可能用于改进模型——
+不要提交机密内容。
 
 ## CLI
 
@@ -999,8 +1008,9 @@ ocg.example.com {
 - Responses 的 `web_search`、`web_search_preview`、`tool_search` 等托管工具在
   OpenCode-Go 上无法运行；自动工具模式下会被丢弃，显式强制使用则返回 `400`。
   function、custom、namespace 工具正常转换。
-- 流式 token 数量仅在上游发出 usage chunk 时准确；额度消耗使用当前 OpenCode Go
-  价格快照。没有 usage 时日志记为 `success_no_usage`。
+- 流式 token 数量仅在上游发出 usage chunk 时准确；Chat 流式请求会设置
+  `stream_options.include_usage`。额度消耗使用当前 OpenCode Go 价格快照。没有
+  usage 时日志记为 `success_no_usage`。
 - 浏览器向导只提供人工页面操作，不自动注册 Google、处理验证码、支付、抓取网页
   或提取 Key。
 - 已安装的 Windows 桌面版可以在用户登录时把 OCG Manager 拉起到托盘；开发构建、

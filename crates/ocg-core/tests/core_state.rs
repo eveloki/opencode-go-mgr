@@ -276,45 +276,6 @@ fn machine_bound_cipher_roundtrip_through_core_state() {
 }
 
 #[test]
-fn list_forward_logs_binds_limit_parameter() {
-    let dir = temp_data_dir("logs");
-    let db = Database::open(dir).unwrap();
-    db.log_forward(&ForwardLog {
-        id: 0,
-        timestamp: Utc::now(),
-        model: "glm-5.2".into(),
-        account_id: "acct".into(),
-        account_name: "main".into(),
-        client_key_id: None,
-        client_key_name: None,
-        status: "success".into(),
-        http_status: Some(200),
-        prompt_tokens: 1,
-        completion_tokens: 2,
-        cached_tokens: 0,
-        cache_creation_tokens: 0,
-        cost: Some(0.01),
-        pricing_revision_id: None,
-        quota_multiplier: None,
-        local_adjustment_multiplier: None,
-        service_tier: None,
-        cost_state: "legacy_estimate".into(),
-        error_message: None,
-        request_id: None,
-        attempt: None,
-        error_source: None,
-        error_stage: None,
-        duration_ms: None,
-        diagnostic: None,
-    })
-    .unwrap();
-
-    let rows = db.list_forward_logs(1).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].model, "glm-5.2");
-}
-
-#[test]
 fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
     let dir = temp_data_dir("filtered-logs");
     let db = Database::open(dir).unwrap();

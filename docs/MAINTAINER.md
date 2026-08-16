@@ -196,7 +196,9 @@ difference, and the Claude Desktop three-role persistence behavior.
   written through the protected `/dashboard/api/claude-desktop/models`
   endpoint; an ordinary settings update must preserve it.
 - `selector.rs` picks the next account and skips disabled / cooled-down /
-  already-failed accounts. `limit.rs` parses the upstream 429 reset phrase.
+  already-failed accounts. Zen free quota is shared per egress IP: any active
+  `cooldown_free_until` exhausts the whole free channel (no key rotation).
+  `limit.rs` parses the upstream 429 reset phrase.
   `pricing.rs` loads the active OpenCode Go pricing snapshot and derives
   quota cost from token usage; the dashboard windows use the limits stored in
   that same snapshot. `PricingModel.quota_multiplier` is the single applied
@@ -218,12 +220,13 @@ difference, and the Claude Desktop three-role persistence behavior.
   never trigger a supplier-site request.
 - `forwarder.rs` returns an explicit action to `handler.rs`: only a pre-send
   DNS/TCP/TLS connection failure can retry once on the same account;
-  `401`/`403`/`429` can select another account. `408`, `5xx`, post-connect
-  failures, body timeouts, and stream interruptions are never replayed, and
-  ambiguous results are logged as `outcome_unknown`. The shared reqwest
-  client has only a 30-second connect timeout; non-stream requests use a
-  900-second total deadline and streams enforce the 300-second idle timeout
-  per chunk.
+  `401`/`403` and Go-channel `429` can select another account. A free-channel
+  `429` cools the IP-shared free pool and does not rotate keys; prefer mode
+  then falls back to Go. `408`, `5xx`, post-connect failures, body timeouts,
+  and stream interruptions are never replayed, and ambiguous results are
+  logged as `outcome_unknown`. The shared reqwest client has only a 30-second
+  connect timeout; non-stream requests use a 900-second total deadline and
+  streams enforce the 300-second idle timeout per chunk.
 
 ### Dashboard
 
@@ -404,7 +407,9 @@ The `linux/amd64` container is published separately as
 `ghcr.io/klarkxy/opencode-go-mgr`; the GitHub Release contains the seven
 ordinary platform payloads, the extra macOS updater archive, four updater
 signatures, the pull-only Compose example, `latest.json`, and `SHA256SUMS`
-(15 attachments total). The runtime image includes `LICENSE` at
+(currently 15 attachments; `verify-release` derives the exact names and count
+from the assembled `release/` set rather than hardcoding 15). The runtime
+image includes `LICENSE` at
 `/usr/share/licenses/ocg-manager/LICENSE`.
 
 ### scripts/release.mjs
@@ -531,16 +536,17 @@ three per-runner Actions artifacts, assembles their payloads/signatures and
 `compose.example.yaml` in `release/`, generates `latest.json` with immutable
 tag URLs and bundle-aware platform keys, regenerates `SHA256SUMS` over the
 manifest, signatures, and every other attachment, and creates or updates a
-**draft** GitHub Release. `verify-release` then requires the exact 15-asset
-set, re-derives `latest.json`, recomputes every checksum, verifies all four
-updater signatures, and compares every downloaded artifact with the digest
-reported by GitHub Release storage. The draft job passes its numeric Release
-ID downstream; verification and publication re-check that exact ID, tag, and
-draft state instead of using the tag lookup endpoint, which does not expose
-draft Releases.
+**draft** GitHub Release. `verify-release` then requires the GitHub asset
+names to match the assembled `release/` set exactly (names and count derived
+from that artifact, not hardcoded), re-derives `latest.json`, recomputes every
+checksum, verifies all four updater signatures, and compares every downloaded
+artifact with the digest reported by GitHub Release storage. The draft job
+passes its numeric Release ID downstream; verification and publication re-check
+that exact ID, tag, and draft state instead of using the tag lookup endpoint,
+which does not expose draft Releases.
 
 SemVer prerelease tags such as `v1.5.8-beta.1` use this same real signed tag
-path and the same exact 15 immutable attachments. Their updater manifest keeps
+path and the same exact assembled immutable attachments. Their updater manifest keeps
 the full prerelease identifier in payload names and download URLs, and the
 Windows packaged smoke accepts that same prerelease `CandidateVersion`.
 Generated notes begin with a prominent Beta warning for managed account
@@ -633,8 +639,8 @@ newer pair; it fails rather than silently retaining a split channel. Each
 image records an SPDX SBOM, BuildKit SLSA provenance, and GitHub signed
 provenance. `X.Y.Z` and `sha-*` are release-specific immutable tags; `X.Y`
 and `latest` are monotonic moving channels. The browser image is a GHCR
-package, not a GitHub Release asset, so the native release remains exactly 15
-attachments.
+package, not a GitHub Release asset, so the native release keeps only the
+assembled GitHub attachments (verifier derives names/count from that set).
 
 Package visibility is managed separately from the linked repository, so the
 workflow cannot rely on its repository token to make a package public. A new
@@ -738,9 +744,9 @@ across restarts, and remote account switching remain manual checks.
    squash-merged.
 5. Wait for `quality`, `preflight`, every native matrix job, `draft-release`,
    `verify-release`, and `publish-release` to pass. Confirm that publication
-   converted the same verified draft, then review the exact 15 attachments,
-   smoke logs, platform warnings, and notes generated from the previous-tag
-   diff.
+   converted the same verified draft, then review the exact assembled
+   attachments, smoke logs, platform warnings, and notes generated from the
+   previous-tag diff.
 6. Wait for `container.yml`, verify both GHCR packages are public, inspect
    each version and digest, and anonymously pull both full-version tags.
 
@@ -760,7 +766,7 @@ most of them; the manual parts need a real desktop.
       intended release scope, and all four code version manifests,
       `compose.example.yaml`, plus the four local Cargo lock entries agree.
 - [ ] Each runner's `release/SHA256SUMS` matches every payload in that
-      directory; `verify-release` accepted the exact 15 attachments, updater
+      directory; `verify-release` accepted the exact assembled asset set, updater
       manifest, four signatures, checksums, and GitHub server digests.
 - [ ] Run `cargo test -p ocg-core gemini` and
       `cargo test -p ocg-core claude_desktop`. Exercise Gemini
@@ -825,7 +831,7 @@ most of them; the manual parts need a real desktop.
 - [ ] After publishing, confirm `container.yml` passed and anonymously pull
       the main image and `ghcr.io/klarkxy/opencode-go-mgr-browser:<version>`
       by their expected digests; verify each signer workflow, SBOM, and SLSA
-      provenance, while the GitHub Release remains exactly 15 attachments.
+      provenance, while the GitHub Release remains the exact assembled asset set.
 
 ## Known Debt
 
@@ -837,8 +843,9 @@ most of them; the manual parts need a real desktop.
   Docker, macOS, and Linux dashboards do not expose the switch.
 - Existing generated Tauri schema files are noisy in diffs; avoid touching
   them unless the Tauri config actually changed.
-- Streaming cost is exact only when upstream emits usage chunks. Without one,
-  the row ends as `success_no_usage`.
+- Streaming cost is exact only when upstream emits usage chunks. Chat streams
+  request `stream_options.include_usage`. Without a chunk, the row ends as
+  `success_no_usage`.
 - Legacy `profiles/<account_id>` WebView profiles are not migrated to
   external Chromium, so users sign in again after upgrading. The old path is
   retained only for safe reset/delete cleanup; never attempt cross-engine

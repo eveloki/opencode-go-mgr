@@ -178,9 +178,10 @@ Desktop 三个角色模型的持久化行为。
   Sonnet、Opus、Haiku 别名改写为 `AppConfig.claude_desktop_models` 中的实际模
   型。模型配置由受保护的 `/dashboard/api/claude-desktop/models` 读写；常规
   settings 更新必须保留它。
-- `selector.rs` 选下一个账号并跳过禁用、冷却、本次已失败的账号；`limit.rs`
-  解析上游 429 中的重置时长；`pricing.rs` 从当前 OpenCode Go 价格快照计算
-  token 对应的额度消耗，面板窗口额度也来自同一快照。
+- `selector.rs` 选下一个账号并跳过禁用、冷却、本次已失败的账号。Zen free 额度
+  按出口 IP 共享：任一账号存在有效 `cooldown_free_until` 即视为整条 free 通道
+  耗尽，不换 Key。`limit.rs` 解析上游 429 中的重置时长；`pricing.rs` 从当前
+  OpenCode Go 价格快照计算 token 对应的额度消耗，面板窗口额度也来自同一快照。
   `PricingModel.quota_multiplier` 是唯一实际参与结算的官方倍率；抓取的快照按
   `月额度 / Usage` 推导，受保护的倍率更新端点可以为临时活动保存用户覆盖值，并
   生成新的不可变 revision。
@@ -194,10 +195,11 @@ Desktop 三个角色模型的持久化行为。
   MiniMax 长上下文、priority 和 high-speed 调整是本地策略，运行时不会访问供应商
   价格页。
 - `forwarder.rs` 向 `handler.rs` 返回显式动作：只有能证明请求尚未发出的
-  DNS/TCP/TLS 建连失败可以在同一账号重试一次；`401`/`403`/`429` 可以切换账号。
-  `408`、`5xx`、建连后的失败、响应体超时和流式中断均不得重放，无法确认的结果
-  记为 `outcome_unknown`。共享 reqwest client 只设置 30 秒建连超时；非流式请求
-  使用 900 秒总时限，流式请求按 chunk 执行 300 秒空闲时限。
+  DNS/TCP/TLS 建连失败可以在同一账号重试一次；`401`/`403` 与 Go 通道 `429`
+  可以切换账号。free 通道 `429` 冷却按 IP 共享的 free 池，不换 Key；prefer
+  随后回落 Go。`408`、`5xx`、建连后的失败、响应体超时和流式中断均不得重放，
+  无法确认的结果记为 `outcome_unknown`。共享 reqwest client 只设置 30 秒建连
+  超时；非流式请求使用 900 秒总时限，流式请求按 chunk 执行 300 秒空闲时限。
 
 ### 管理面板
 
@@ -344,8 +346,9 @@ SHA256SUMS
 
 `linux/amd64` 容器单独发布为 `ghcr.io/klarkxy/opencode-go-mgr`。GitHub Release
 包含七份常规平台 payload、额外的 macOS 升级压缩包、四份升级签名、只拉取镜像
-的 Compose 示例、`latest.json` 与 `SHA256SUMS`（合计 15 个附件）。运行镜像内
-的许可证位于 `/usr/share/licenses/ocg-manager/LICENSE`。
+的 Compose 示例、`latest.json` 与 `SHA256SUMS`（当前共 15 个附件；
+`verify-release` 从组装后的 `release/` 集合推导确切名称与数量，而不是硬编码
+15）。运行镜像内的许可证位于 `/usr/share/licenses/ocg-manager/LICENSE`。
 
 ### scripts/release.mjs
 
@@ -443,14 +446,14 @@ plan 根据事件确认这是真实 `v*` tag push 时才注入签名 secrets，�
 artifact，把平台 payload、签名与 `compose.example.yaml` 组装进 `release/`，
 生成使用不可变 tag URL 和 bundle 感知平台键的 `latest.json`，再重写覆盖
 manifest、签名和其余附件的 `SHA256SUMS`，最后创建或更新 **draft** GitHub
-Release。`verify-release` 随后要求资产集合恰好为 15 个，重新推导
-`latest.json`、重算全部 checksum、验证四份升级签名，并把每个下载文件与
-GitHub Release 存储层报告的 digest 对比。draft job 会把数字 Release ID 传给下
-游；验证和公开 job 都重新校验该 ID、tag 与 draft 状态，不使用无法显示 draft
-Release 的 tag 查询端点。
+Release。`verify-release` 随后要求 GitHub 附件名称与组装后的 `release/` 集合
+逐名一致（名称与数量由该产物推导，不硬编码），重新推导 `latest.json`、重算
+全部 checksum、验证四份升级签名，并把每个下载文件与 GitHub Release 存储层报告
+的 digest 对比。draft job 会把数字 Release ID 传给下游；验证和公开 job 都重新
+校验该 ID、tag 与 draft 状态，不使用无法显示 draft Release 的 tag 查询端点。
 
-`v1.5.8-beta.1` 这类 SemVer 预发布 tag 走同一条真实签名 tag 路径，并保持恰好
-15 个不可变附件。升级 manifest 会在 payload 文件名和下载 URL 中保留完整预发布
+`v1.5.8-beta.1` 这类 SemVer 预发布 tag 走同一条真实签名 tag 路径，并保持与组
+装产物逐名一致的不可变附件集合。升级 manifest 会在 payload 文件名和下载 URL 中保留完整预发布
 后缀，Windows 安装包冒烟也接受同一个预发布 `CandidateVersion`。自动生成的说明
 开头会显著标注“托管账号注册与隔离浏览器 Profile 均为 Beta，尚未充分测试”，并
 列出尚未实测的 Google/OpenCode 真实注册与支付、noVNC 键盘/剪贴板、GHCR 首次
@@ -519,7 +522,7 @@ Release tag，同时构建并冒烟验证两个 `linux/amd64` 镜像：主服务
 流会失败而不是静默保留。两个镜像各自记录 SPDX SBOM、BuildKit SLSA provenance
 与 GitHub 签名 provenance。`X.Y.Z` 和 `sha-*` 是不可变发布标签；`X.Y` 与
 `latest` 是单调移动通道。浏览器镜像是 GHCR 包，不会增加 GitHub Release 附件；
-原生发布仍必须恰好 15 个附件。
+原生发布只保留组装后的 GitHub 附件（校验器从该集合推导名称/数量）。
 
 Package 可见性独立于关联仓库管理，工作流不能依赖 repository token 代为改成
 公开；新的浏览器 package 在首次推送 digest 前也根本不存在。因此第一次创建该
@@ -604,8 +607,8 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
    还会 squash merge 的分支 commit 上提前打 tag。
 5. 等待 `quality`、`preflight`、全部原生矩阵 job、`draft-release`、
    `verify-release` 和 `publish-release` 通过。确认公开的是同一个已验证 draft，
-   再复核恰好 15 个附件、冒烟日志、平台警告，以及基于上一个 tag diff 编写的说
-   明。
+   再复核与组装产物逐名一致的附件集合、冒烟日志、平台警告，以及基于上一个 tag
+   diff 编写的说明。
 6. 等待 `container.yml` 通过，确认两个 GHCR package 已公开，分别核验版本与
    digest，再匿名拉取两个完整版本标签。
 
@@ -622,8 +625,8 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 - [ ] `git diff --check` 干净；相对上一个 tag 的 diff 只含预期范围；四份代码
       版本清单、`compose.example.yaml` 与 Cargo.lock 四个本地包条目一致。
 - [ ] 每个 runner 的 `release/SHA256SUMS` 与目录内全部 payload 一致；
-      `verify-release` 接受恰好 15 个附件、升级 manifest、四份签名、checksum
-      和 GitHub 服务端 digest。
+      `verify-release` 接受与组装产物逐名一致的附件集合、升级 manifest、四份
+      签名、checksum 和 GitHub 服务端 digest。
 - [ ] 跑 `cargo test -p ocg-core gemini` 与
       `cargo test -p ocg-core claude_desktop`；用 Bearer、`x-api-key`、
       `x-goog-api-key` 分别请求 Gemini `generateContent` 与
@@ -669,7 +672,8 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
       开后确认同一份说明和精确的已验证资产集合已经发布。
 - [ ] 发布后确认 `container.yml` 通过，并按预期 digest 匿名拉取主镜像与
       `ghcr.io/klarkxy/opencode-go-mgr-browser:<version>`，再分别验证 signer
-      workflow、SBOM 与 SLSA provenance；GitHub Release 仍恰好 15 个附件。
+      workflow、SBOM 与 SLSA provenance；GitHub Release 仍为与组装产物逐名一致的
+      附件集合。
 
 ## 已知缺口
 
@@ -679,7 +683,8 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
   表同步钩子。开发构建、CLI、Docker、macOS、Linux 面板不暴露该开关。
 - 生成的 Tauri schema 文件会让 diff 变吵；除非 Tauri 配置真的改了，否则不要动
   它们。
-- 流式用量仅在上游发出 usage chunk 时精确，否则记为 `success_no_usage`。
+- 流式用量仅在上游发出 usage chunk 时精确；Chat 流式请求会设置
+  `stream_options.include_usage`。上游仍不返回时记为 `success_no_usage`。
 - 旧 `profiles/<account_id>` WebView Profile 不会迁移到外部 Chromium；升级后首次
   需要重新登录。保留旧路径仅用于重置/删除时安全清理，不能尝试跨引擎直接复用。
 - Responses 端点是无状态。`previous_response_id`、`conversation`、

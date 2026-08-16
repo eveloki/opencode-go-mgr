@@ -5,6 +5,7 @@ import {
   DEFAULT_LOCALE,
   LOCALE_OPTIONS,
   LOCALE_STORAGE_KEY,
+  locale,
   matchLocale,
   readLocale,
   resolveLocale,
@@ -74,6 +75,16 @@ test("translations react to locale changes and preserve interpolation", () => {
   assert.equal(t("已复制 {label}", { label: "API Base URL" }), "Copied API Base URL");
   setLocale("zh-CN");
   assert.equal(t("已复制 {label}", { label: "Key" }), "已复制 Key");
+});
+
+test("a late lazy locale load cannot override a later locale selection", async () => {
+  setLocale("ja-JP");
+  setLocale("en-US");
+
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(locale.value, "en-US");
+  assert.equal(t("已复制 {label}", { label: "Key" }), "Copied Key");
 });
 
 test("USD costs use the narrow dollar symbol and preserve requested precision", () => {

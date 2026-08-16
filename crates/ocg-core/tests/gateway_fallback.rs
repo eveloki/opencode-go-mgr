@@ -141,6 +141,9 @@ async fn start_mock_upstream(
         .route("/v1/responses", post(mock_chat))
         .route("/v1/messages", post(mock_chat))
         .route("/v1/models", get(mock_chat))
+        .route("/zen/v1/chat/completions", post(mock_chat))
+        .route("/zen/v1/responses", post(mock_chat))
+        .route("/zen/v1/messages", post(mock_chat))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -2738,6 +2741,67 @@ async fn all_limited_accounts_return_429_with_soonest_reset() {
             .count(),
         2
     );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn free_429_uses_channel_not_misleading_window_and_survives_account_removal() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 429,
+                // Free endpoints may reuse Go quota wording. The endpoint is
+                // authoritative and must prevent a probe with key-2.
+                body: LIMITED_BODY,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["key-1"],
+        "a Free 429 must never rotate to another key"
+    );
+    {
+        let db = state.db.lock();
+        let source = db.get_account("acct-1").unwrap().unwrap();
+        assert!(source.cooldown_free_until.is_some());
+        assert!(source.cooldown_5h_until.is_none());
+        assert!(source.cooldown_week_until.is_none());
+        assert!(source.cooldown_month_until.is_none());
+        assert!(db.free_channel_cooldown_until().unwrap().is_some());
+    }
+
+    set_account_enabled(&state, "acct-1", false);
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    state.db.lock().delete_account("acct-1").unwrap();
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(calls.lock().unwrap().len(), 1);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());

@@ -167,6 +167,8 @@ impl Account {
     }
 
     /// Go routing ignores free promo cooldown; free routing ignores Go usage windows.
+    /// Free 429s are IP-shared: the selector treats any active `cooldown_free_until`
+    /// as exhausting the whole free channel.
     pub fn cooldown_ends_at_for(
         &self,
         channel: UpstreamChannel,

@@ -206,6 +206,21 @@ pub fn decide_route(
     })
 }
 
+/// Prefer-mode mapping is IP-shared: once any account is in free cooldown,
+/// skip the free probe and keep the original Go model.
+pub fn apply_shared_free_exhaustion(
+    mut decision: RouteDecision,
+    free_available: bool,
+) -> RouteDecision {
+    if decision.channel == UpstreamChannel::Free && decision.allow_go_fallback && !free_available {
+        decision.channel = UpstreamChannel::Go;
+        decision.model = decision.original_model.clone();
+        decision.mapped_from = None;
+        decision.allow_go_fallback = false;
+    }
+    decision
+}
+
 /// Cheap heuristic: sum string lengths in the JSON body / 4.
 pub fn estimate_request_tokens(body: &Bytes) -> u64 {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
@@ -340,5 +355,39 @@ mod tests {
         .unwrap();
         assert_eq!(decision.channel, UpstreamChannel::Go);
         assert!(!decision.allow_go_fallback);
+    }
+
+    #[test]
+    fn shared_free_exhaustion_keeps_prefer_on_go() {
+        let body = Bytes::from_static(br#"{"model":"deepseek-v4-flash","messages":[]}"#);
+        let decision = decide_route(
+            FreeModelRouting::Prefer,
+            "deepseek-v4-flash",
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+            &body,
+        )
+        .unwrap();
+        assert_eq!(decision.channel, UpstreamChannel::Free);
+        let exhausted = apply_shared_free_exhaustion(decision, false);
+        assert_eq!(exhausted.channel, UpstreamChannel::Go);
+        assert_eq!(exhausted.model, "deepseek-v4-flash");
+        assert!(!exhausted.allow_go_fallback);
+    }
+
+    #[test]
+    fn shared_free_exhaustion_does_not_rewrite_explicit_free() {
+        let body = Bytes::from_static(br#"{"model":"deepseek-v4-flash-free","messages":[]}"#);
+        let decision = decide_route(
+            FreeModelRouting::Explicit,
+            "deepseek-v4-flash-free",
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+            &body,
+        )
+        .unwrap();
+        let exhausted = apply_shared_free_exhaustion(decision, false);
+        assert_eq!(exhausted.channel, UpstreamChannel::Free);
+        assert_eq!(exhausted.model, "deepseek-v4-flash-free");
     }
 }

@@ -136,7 +136,16 @@ test("the exact draft Release identity flows through verification and publicatio
   assert.match(verifyJob, /if gh api "repos\/\$GITHUB_REPOSITORY\/releases\/\$RELEASE_ID"/);
   assert.match(verifyJob, /\.id == \$release_id and \.tag_name == \$tag and \.draft == true/);
   assert.match(verifyJob, /\.prerelease == \$prerelease/);
-  assert.match(verifyJob, /\.assets \| length == 15/);
+  assert.match(
+    verifyJob,
+    /expected_assets=\$\(cd release && find \. -maxdepth 1 -type f -printf '%f\\n' \| jq -R \. \| jq -s \.\)/,
+  );
+  assert.match(verifyJob, /--argjson expected_assets "\$expected_assets"/);
+  assert.match(
+    verifyJob,
+    /\(\[\.assets\[\]\.name\] \| sort\) == \(\$expected_assets \| sort\)/,
+  );
+  assert.doesNotMatch(`${verifyJob}${publishJob}`, /length == 15/);
   assert.doesNotMatch(verifyJob, /releases\/tags\//);
   assert.match(publishJob, /RELEASE_ID: \$\{\{ needs\.verify-release\.outputs\.release_id \}\}/);
   assert.match(publishJob, /gh api "repos\/\$GITHUB_REPOSITORY\/releases\/\$RELEASE_ID" > release-metadata\.json/);

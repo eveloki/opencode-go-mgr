@@ -132,13 +132,15 @@ test("shows local estimated saturation as a warning, not a real breaker", () => 
 });
 
 test("shows a live reset countdown below a quota progress bar during cooldown", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
-  const progress = source.indexOf(":percentage=\"usageProgressPercentage(");
+  // The strip lives in UsageStrip.vue with its own 1s clock so a tick only
+  // re-renders the strip instead of the whole account card list.
+  const source = await readFile(new URL("../components/UsageStrip.vue", import.meta.url), "utf8");
+  const progress = source.indexOf(':percentage="usageProgressPercentage(');
   const countdown = source.indexOf('class="usage-reset-countdown"');
 
   assert.ok(progress >= 0);
   assert.ok(countdown > progress);
-  assert.match(source, /v-if="accountUsageLimitReached\(account, limit\.key\)"[\s\S]*class="usage-reset-countdown"[\s\S]*formatWindowRemaining\(account, limit\.key\)/);
+  assert.match(source, /v-if="isUsageLimitReached\(account, limit\.key, now\)"[\s\S]*class="usage-reset-countdown"[\s\S]*formatWindowRemaining\(limit\.key\)/);
   assert.match(source, /\.usage-reset-countdown \{[\s\S]*color: var\(--ocg-error\);/);
   assert.doesNotMatch(source, /\.usage-reset-countdown \{[\s\S]*?min-height:/);
 });
@@ -166,14 +168,14 @@ test("maps each usage window to its cooldown reset deadline", () => {
 
 test("keeps account cards compact with metadata tags and popover calibration", async () => {
   const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const strip = await readFile(new URL("../components/UsageStrip.vue", import.meta.url), "utf8");
   const header = source.slice(
     source.indexOf("<template #header>"),
     source.indexOf('<div v-if="!accountIsReady(account)"'),
   );
-  const usageStart = source.indexOf('class="usage-strip-body" role="group"');
-  const usage = source.slice(
-    usageStart,
-    source.indexOf("</n-card>"),
+  const usage = strip.slice(
+    strip.indexOf('class="usage-strip-body" role="group"'),
+    strip.indexOf("</template>"),
   );
 
   assert.ok(header.indexOf("accountStatusLabel(account)") < header.indexOf('t("购买于 {date}"'));
@@ -192,10 +194,10 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   assert.match(usage, /<n-progress[\s\S]*?:percentage="usageProgressPercentage\(/);
   assert.doesNotMatch(usage, /<n-input-number|<n-slider|class="usage-resets-row"/);
   assert.match(
-    source,
+    strip,
     /\.usage-strip\s*\{\s*min-width:\s*0;\s*\}\s*\.usage-strip-body\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/,
   );
-  assert.match(source, /@media \(max-width: 900px\) \{\s*\.usage-strip-body\s*\{\s*grid-template-columns: 1fr;/);
+  assert.match(strip, /@media \(max-width: 900px\) \{\s*\.usage-strip-body\s*\{\s*grid-template-columns: 1fr;/);
   assert.doesNotMatch(source, /class="account-lifecycle"|\.account-lifecycle\s*\{/);
   assert.match(source, /key: "edit", label: t\("编辑账号"\)/);
   assert.match(source, /v-if="quotaLimitsError"[\s\S]*?@click="retryQuotaLimits"/);

@@ -2,9 +2,9 @@ use super::diagnostics::{
     redact_known_secret, redact_known_secret_stream_values, redact_known_secret_values,
 };
 use super::protocol::{
-    ApiFormat, NamespaceToolMapping, ProtocolError, RequestPlan, encode_anthropic_thinking_block,
-    encode_chat_reasoning, responses_id, sanitize_minimax_anthropic_usage,
-    sanitize_minimax_chat_usage, unix_seconds,
+    ApiFormat, NamespaceToolMapping, ProtocolError, RequestPlan, UsageCounts,
+    encode_anthropic_thinking_block, encode_chat_reasoning, responses_id,
+    sanitize_minimax_anthropic_usage, sanitize_minimax_chat_usage, unix_seconds,
 };
 use bytes::{Bytes, BytesMut};
 use serde_json::{Map, Value, json};
@@ -810,13 +810,7 @@ impl StreamConverter {
                 if self.input.terminal {
                     break;
                 }
-                let passthrough = sanitize_passthrough_sse_frame(
-                    self.source,
-                    &frame,
-                    &self.model,
-                    self.secret_redactor.secret.as_deref(),
-                );
-                let (converted, secret_matched) = self.convert_frames(vec![frame])?;
+                let (passthrough, converted, secret_matched) = self.same_protocol_frame(frame)?;
                 self.emit_same_protocol_frame(passthrough, converted, secret_matched, &mut output);
             }
             return Ok(output);
@@ -841,13 +835,7 @@ impl StreamConverter {
                 if self.input.terminal {
                     break;
                 }
-                let passthrough = sanitize_passthrough_sse_frame(
-                    self.source,
-                    &frame,
-                    &self.model,
-                    self.secret_redactor.secret.as_deref(),
-                );
-                let (converted, secret_matched) = self.convert_frames(vec![frame])?;
+                let (passthrough, converted, secret_matched) = self.same_protocol_frame(frame)?;
                 self.emit_same_protocol_frame(passthrough, converted, secret_matched, &mut output);
             }
             if self.input.terminal {
@@ -970,6 +958,15 @@ impl StreamConverter {
         self.input.terminal || self.output.terminal
     }
 
+    pub(crate) fn captured_usage(&self) -> Option<UsageCounts> {
+        self.input.usage.seen.then_some(UsageCounts {
+            input_tokens: self.input.usage.input,
+            output_tokens: self.input.usage.output,
+            cached_tokens: self.input.usage.cached,
+            cache_creation_tokens: self.input.usage.cache_creation,
+        })
+    }
+
     fn emit_same_protocol_frame(
         &mut self,
         passthrough: Bytes,
@@ -1024,6 +1021,29 @@ impl StreamConverter {
             .collect()
     }
 
+    /// Same-protocol passthrough for a single SSE frame. The frame is parsed
+    /// exactly once here: the sanitized passthrough copy and the converted
+    /// fallback share the same `Value`, and untouched frames are emitted
+    /// byte-for-byte without copying.
+    fn same_protocol_frame(
+        &mut self,
+        frame: Bytes,
+    ) -> Result<(Bytes, Vec<Bytes>, bool), ProtocolError> {
+        let secret = self.secret_redactor.secret.as_deref();
+        let Some((event_name, payload)) = parse_sse_frame(&frame)? else {
+            // No data lines: nothing to convert or redact as JSON; passthrough.
+            let passthrough =
+                sanitize_passthrough_sse_frame(self.source, frame, &self.model, secret, None);
+            return Ok((passthrough, Vec::new(), false));
+        };
+        let payload = payload.trim();
+        let value = parse_sse_payload(payload)?;
+        let passthrough =
+            sanitize_passthrough_sse_frame(self.source, frame, &self.model, secret, value.as_ref());
+        let (converted, secret_matched) = self.convert_parsed_frame(event_name, payload, value)?;
+        Ok((passthrough, converted, secret_matched))
+    }
+
     fn convert_frames(&mut self, frames: Vec<Bytes>) -> Result<(Vec<Bytes>, bool), ProtocolError> {
         let mut output = Vec::new();
         let mut secret_changed = false;
@@ -1035,27 +1055,41 @@ impl StreamConverter {
                 continue;
             };
             let payload = payload.trim();
-            let events = if payload.is_empty() {
-                Vec::new()
-            } else if payload == "[DONE]" {
-                self.finish_input()
-            } else {
-                let value: Value = serde_json::from_str(payload)
-                    .map_err(|e| ProtocolError::new(format!("invalid SSE JSON: {e}")))?;
-                match self.source {
-                    ApiFormat::Messages => self.decode_messages(value),
-                    ApiFormat::ChatCompletions => self.decode_chat(value),
-                    ApiFormat::Responses => self.decode_responses(event_name.as_deref(), value),
-                    ApiFormat::Gemini => {
-                        return Err(ProtocolError::new("Gemini is a client-only stream format"));
-                    }
-                }
-            };
-            let (chunks, matched) = self.encode_redacted(events)?;
+            let value = parse_sse_payload(payload)?;
+            let (chunks, matched) = self.convert_parsed_frame(event_name, payload, value)?;
             output.extend(chunks);
             secret_changed |= matched;
         }
         Ok((output, secret_changed))
+    }
+
+    fn convert_parsed_frame(
+        &mut self,
+        event_name: Option<String>,
+        payload: &str,
+        value: Option<Value>,
+    ) -> Result<(Vec<Bytes>, bool), ProtocolError> {
+        if self.input.terminal {
+            return Ok((Vec::new(), false));
+        }
+        let events = if payload.is_empty() {
+            Vec::new()
+        } else if payload == "[DONE]" {
+            self.finish_input()
+        } else {
+            let value =
+                value.ok_or_else(|| ProtocolError::new("invalid SSE JSON: missing payload"))?;
+            match self.source {
+                ApiFormat::Messages => self.decode_messages(value),
+                ApiFormat::ChatCompletions => self.decode_chat(value),
+                ApiFormat::Responses => self.decode_responses(event_name.as_deref(), value),
+                ApiFormat::Gemini => {
+                    return Err(ProtocolError::new("Gemini is a client-only stream format"));
+                }
+            }
+        };
+        let (chunks, matched) = self.encode_redacted(events)?;
+        Ok((chunks, matched))
     }
 
     fn encode_redacted(
@@ -1078,7 +1112,7 @@ impl StreamConverter {
         frames
             .into_iter()
             .map(|frame| {
-                sanitize_passthrough_sse_frame(self.target, &frame, &self.model, Some(secret))
+                sanitize_passthrough_sse_frame(self.target, frame, &self.model, Some(secret), None)
             })
             .collect()
     }
@@ -2583,6 +2617,17 @@ fn parse_sse_frame(frame: &[u8]) -> Result<Option<(Option<String>, String)>, Pro
     }
 }
 
+/// Parse a trimmed SSE data payload. Empty payloads and the `[DONE]` sentinel
+/// have no JSON body and map to `None`; anything else must be valid JSON.
+fn parse_sse_payload(payload: &str) -> Result<Option<Value>, ProtocolError> {
+    if payload.is_empty() || payload == "[DONE]" {
+        return Ok(None);
+    }
+    serde_json::from_str::<Value>(payload)
+        .map(Some)
+        .map_err(|e| ProtocolError::new(format!("invalid SSE JSON: {e}")))
+}
+
 fn sse_json(event: Option<&str>, value: &Value) -> Bytes {
     let prefix = event.map_or_else(String::new, |name| format!("event: {name}\n"));
     Bytes::from(format!("{prefix}data: {value}\n\n"))
@@ -2593,21 +2638,32 @@ fn done_frame() -> Bytes {
 }
 
 /// Sanitize model-specific bogus usage without weakening same-protocol SSE passthrough.
-/// Frames that do not need a correction are returned byte-for-byte unchanged. When a
-/// correction is needed, only the data field is replaced; event IDs, retry hints,
-/// comments, and the original line-ending style remain intact.
+/// Frames that do not need a correction are returned byte-for-byte unchanged (the
+/// input `Bytes` handle is reused, no copy). When a correction is needed, only the
+/// data field is replaced; event IDs, retry hints, comments, and the original
+/// line-ending style remain intact. `parsed` may supply the already-parsed data
+/// payload so callers on the hot path parse each frame once; `None` makes this
+/// function parse the frame itself (used for freshly generated frames).
 fn sanitize_passthrough_sse_frame(
     format: ApiFormat,
-    frame: &[u8],
+    frame: Bytes,
     model_hint: &str,
     known_secret: Option<&str>,
+    parsed: Option<&Value>,
 ) -> Bytes {
     let secret = known_secret.filter(|secret| !secret.is_empty());
-    let mut output = Bytes::copy_from_slice(frame);
-    if let Ok(Some((_, data))) = parse_sse_frame(frame)
-        && let Ok(mut value) = serde_json::from_str::<Value>(&data)
-    {
-        let original = value.clone();
+    let mut output = frame;
+    // Obtain the frame's JSON value, parsing lazily only when the caller did
+    // not supply one (freshly generated frames take that path).
+    let parsed = match parsed {
+        Some(value) => Some(value.clone()),
+        None => parse_sse_frame(&output)
+            .ok()
+            .flatten()
+            .and_then(|(_, data)| serde_json::from_str::<Value>(&data).ok()),
+    };
+    if let Some(source_value) = parsed {
+        let mut value = source_value.clone();
         if let Some(secret) = secret {
             redact_known_secret_stream_values(&mut value, secret);
         }
@@ -2639,18 +2695,19 @@ fn sanitize_passthrough_sse_frame(
             }
             ApiFormat::Responses | ApiFormat::Gemini => {}
         }
-        if value != original {
-            output = rewrite_sse_data(frame, &value);
+        if value != source_value {
+            output = rewrite_sse_data(&output, &value);
         }
     }
-    secret.map_or(output.clone(), |secret| {
-        redact_sse_metadata(&output, secret)
-    })
+    match secret {
+        Some(secret) => redact_sse_metadata(output, secret),
+        None => output,
+    }
 }
 
-fn redact_sse_metadata(frame: &[u8], known_secret: &str) -> Bytes {
-    let Ok(text) = std::str::from_utf8(frame) else {
-        return Bytes::copy_from_slice(frame);
+fn redact_sse_metadata(frame: Bytes, known_secret: &str) -> Bytes {
+    let Ok(text) = std::str::from_utf8(&frame) else {
+        return frame;
     };
     let mut output = String::with_capacity(text.len());
     let mut changed = false;
@@ -2678,11 +2735,7 @@ fn redact_sse_metadata(frame: &[u8], known_secret: &str) -> Bytes {
             output.push_str(raw_line);
         }
     }
-    if changed {
-        Bytes::from(output)
-    } else {
-        Bytes::copy_from_slice(frame)
-    }
+    if changed { Bytes::from(output) } else { frame }
 }
 
 fn rewrite_sse_data(frame: &[u8], value: &Value) -> Bytes {
@@ -4036,112 +4089,71 @@ mod tests {
     }
 
     #[test]
+    fn chat_converter_captures_trailing_include_usage_chunk() {
+        let mut converter = StreamConverter::new(&plan(
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+        ));
+        let source = concat!(
+            "data: {\"id\":\"c\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"deepseek-v4-flash\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4,\"prompt_tokens_details\":{\"cached_tokens\":2}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        converter
+            .process_chunk(Bytes::from(source))
+            .expect("stream should parse");
+        converter.finish().expect("stream should finish");
+        let usage = converter.captured_usage().expect("trailing usage chunk");
+        assert_eq!(usage.input_tokens, 11);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.cached_tokens, 2);
+    }
+
+    #[test]
     fn streaming_messages_to_chat_sanitizes_minimax_bogus_all_cache() {
-        let source = concat!(
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"minimax-m3\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":40500}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
-            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-        );
-        let plan = RequestPlan {
-            client: ApiFormat::ChatCompletions,
-            upstream: ApiFormat::Messages,
-            model: "minimax-m3".into(),
-            stream: true,
-            body: Bytes::new(),
-            channel: crate::models::UpstreamChannel::Go,
-            upstream_base_override: None,
-            original_model: None,
-            allow_go_fallback: false,
-            service_tier: None,
-            custom_tools: Vec::new(),
-            namespace_tools: Vec::new(),
-            response_parallel_tool_calls: true,
-            response_tool_choice: json!("auto"),
-            response_tools: Vec::new(),
-        };
-        let mut converter = StreamConverter::new(&plan);
-        let bytes = source.as_bytes();
-        let mut output = converter
-            .process_chunk(Bytes::copy_from_slice(bytes))
-            .unwrap();
-        output.extend(converter.finish().unwrap());
-        let output = String::from_utf8(output.concat()).unwrap();
-        assert!(output.contains("\"prompt_tokens\":40500"));
-        assert!(output.contains("\"cached_tokens\":0"));
-    }
-
-    #[test]
-    fn streaming_messages_to_chat_sanitizes_minimax_without_upstream_model() {
-        // OpenCode Go may omit the model field in message_start. The converter must
-        // fall back to the request plan's model to sanitize the bogus cache read.
-        let source = concat!(
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":40500}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
-            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-        );
-        let plan = RequestPlan {
-            client: ApiFormat::ChatCompletions,
-            upstream: ApiFormat::Messages,
-            model: "minimax-m3".into(),
-            stream: true,
-            body: Bytes::new(),
-            channel: crate::models::UpstreamChannel::Go,
-            upstream_base_override: None,
-            original_model: None,
-            allow_go_fallback: false,
-            service_tier: None,
-            custom_tools: Vec::new(),
-            namespace_tools: Vec::new(),
-            response_parallel_tool_calls: true,
-            response_tool_choice: json!("auto"),
-            response_tools: Vec::new(),
-        };
-        let mut converter = StreamConverter::new(&plan);
-        let bytes = source.as_bytes();
-        let mut output = converter
-            .process_chunk(Bytes::copy_from_slice(bytes))
-            .unwrap();
-        output.extend(converter.finish().unwrap());
-        let output = String::from_utf8(output.concat()).unwrap();
-        assert!(output.contains("\"prompt_tokens\":40500"));
-        assert!(output.contains("\"cached_tokens\":0"));
-    }
-
-    #[test]
-    fn streaming_messages_to_chat_sanitizes_mixed_case_minimax() {
-        // OpenCode Go / Qwen Cloud expose MiniMax IDs as "MiniMax-M3". The stream
-        // converter must still sanitize the bogus all-cache usage.
-        let source = concat!(
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":40500}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
-            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-        );
-        let plan = RequestPlan {
-            client: ApiFormat::ChatCompletions,
-            upstream: ApiFormat::Messages,
-            model: "MiniMax-M3".into(),
-            stream: true,
-            body: Bytes::new(),
-            channel: crate::models::UpstreamChannel::Go,
-            upstream_base_override: None,
-            original_model: None,
-            allow_go_fallback: false,
-            service_tier: None,
-            custom_tools: Vec::new(),
-            namespace_tools: Vec::new(),
-            response_parallel_tool_calls: true,
-            response_tool_choice: json!("auto"),
-            response_tools: Vec::new(),
-        };
-        let mut converter = StreamConverter::new(&plan);
-        let bytes = source.as_bytes();
-        let mut output = converter
-            .process_chunk(Bytes::copy_from_slice(bytes))
-            .unwrap();
-        output.extend(converter.finish().unwrap());
-        let output = String::from_utf8(output.concat()).unwrap();
-        assert!(output.contains("\"prompt_tokens\":40500"));
-        assert!(output.contains("\"cached_tokens\":0"));
+        // OpenCode Go may omit the model field in message_start or report the id in
+        // mixed case ("MiniMax-M3"); the converter must fall back to the request
+        // plan's model to sanitize the bogus all-cache usage in every shape.
+        for model in ["minimax-m3", "MiniMax-M3"] {
+            for start_model in [Some(model), None] {
+                let message = match start_model {
+                    Some(model) => json!({
+                        "id":"msg_1","model":model,
+                        "usage":{"input_tokens":0,"cache_read_input_tokens":40500}
+                    }),
+                    None => json!({
+                        "id":"msg_1",
+                        "usage":{"input_tokens":0,"cache_read_input_tokens":40500}
+                    }),
+                };
+                let source = format!(
+                    "event: message_start\ndata: {}\n\n\
+                     event: message_delta\ndata: {}\n\n\
+                     event: message_stop\ndata: {}\n\n",
+                    json!({"type":"message_start","message":message}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}),
+                    json!({"type":"message_stop"}),
+                );
+                let mut request = plan(ApiFormat::ChatCompletions, ApiFormat::Messages);
+                request.model = model.into();
+                let mut converter = StreamConverter::new(&request);
+                let bytes = source.as_bytes();
+                let mut output = converter
+                    .process_chunk(Bytes::copy_from_slice(bytes))
+                    .unwrap();
+                output.extend(converter.finish().unwrap());
+                let output = String::from_utf8(output.concat()).unwrap();
+                assert!(
+                    output.contains("\"prompt_tokens\":40500"),
+                    "model={model} start_model={start_model:?}"
+                );
+                assert!(
+                    output.contains("\"cached_tokens\":0"),
+                    "model={model} start_model={start_model:?}"
+                );
+            }
+        }
     }
 
     #[test]

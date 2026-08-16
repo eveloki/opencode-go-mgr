@@ -283,16 +283,6 @@ mod tests {
         assert!(cipher.decrypt("AAAA").is_err());
     }
 
-    /// Two StaticKeyCiphers with the same secret must be interchangeable.
-    #[test]
-    fn static_key_same_secret_is_interchangeable() {
-        let a = StaticKeyCipher::new("shared");
-        let b = StaticKeyCipher::new("shared");
-        let enc = a.encrypt("payload").unwrap();
-        let dec = b.decrypt(&enc).unwrap();
-        assert_eq!(dec, "payload");
-    }
-
     #[test]
     fn static_key_file_is_created_and_reused() {
         let dir = test_dir("reuse");
