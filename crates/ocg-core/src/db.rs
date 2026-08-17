@@ -784,13 +784,10 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (17);")?;
         }
 
-        // v18 (upstream v1.6.3): optional account notes. ensure_column is
-        // idempotent and runs unconditionally: databases that ran this
-        // fork's earlier draft migration numbering (v18/v19 used for the
-        // client-key columns and the sub key table) skip the version guard
-        // below while still lacking the column, and every account query
-        // references it.
-        ensure_column(&tx, "accounts", "notes", "TEXT")?;
+        // v18 (upstream v1.6.3): optional account notes. The idempotent
+        // ensure_column for this column lives after the versioned gates
+        // below — databases from unreleased draft builds already report
+        // version >= 18 without having the column.
         if version < 18 {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (18);")?;
         }
@@ -799,9 +796,6 @@ impl Database {
         // keep old binaries (which select explicit column names) downgrade-safe;
         // historical NULL rows mean "unattributed" until the startup backfill
         // attributes them to the fixed primary key id (PRIMARY_KEY_ID).
-        // (Numbered after upstream's v18; never released under this number
-        // before, and every statement is idempotent so development databases
-        // that ran the earlier draft numbering still converge.)
         if version < 19 {
             ensure_column(&tx, "forward_logs", "client_key_id", "TEXT")?;
             ensure_column(&tx, "forward_logs", "client_key_name", "TEXT")?;
@@ -833,6 +827,12 @@ impl Database {
                  INSERT OR REPLACE INTO schema_version (version) VALUES (20);",
             )?;
         }
+
+        // Unreleased #43 drafts numbered client-key columns as v18 and the
+        // sub-key table as v19, so those databases already report version
+        // >= 18 and skip the notes gate above. ensure_column is idempotent
+        // on released v1.6.3 libraries and on fresh installs.
+        ensure_column(&tx, "accounts", "notes", "TEXT")?;
 
         // Detailed diagnostics are intentionally short-lived. Keep the base log row,
         // stable request id, source, stage, and original compact error indefinitely.
@@ -5126,6 +5126,51 @@ mod tests {
             drop(db);
             fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn draft_v19_libraries_without_notes_gain_the_column_on_reopen() {
+        let dir = temp_data_dir("draft-v19-notes-repair");
+        let db = Database::open(dir.clone()).unwrap();
+        db.create_account(&account("legacy")).unwrap();
+        // Unreleased #43 drafts already sat at version 19 (client-key
+        // columns + sub-key table) and never received upstream v18 notes.
+        db.conn
+            .execute_batch(
+                "ALTER TABLE accounts DROP COLUMN notes;
+                 DELETE FROM schema_version;
+                 INSERT INTO schema_version (version) VALUES (19);",
+            )
+            .expect("draft numbering should be reproducible");
+        let notes_before: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = 'notes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(notes_before, 0);
+        drop(db);
+
+        let db = Database::open(dir.clone()).expect("draft database should reopen");
+        let (version, notes_after): (i32, i64) = db
+            .conn
+            .query_row(
+                "SELECT
+                    (SELECT MAX(version) FROM schema_version),
+                    (SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = 'notes')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("repaired schema should load");
+        assert_eq!(version, 20);
+        assert_eq!(notes_after, 1);
+        db.list_accounts()
+            .expect("account reads must survive a missing notes column on the draft");
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
