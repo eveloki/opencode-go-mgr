@@ -24,8 +24,8 @@ RUN if [ "$CARGO_REGISTRY" != "sparse+https://index.crates.io/" ]; then \
         "$CARGO_REGISTRY" > /usr/local/cargo/config.toml; \
     fi
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=ocg-cargo-registry-cli,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=ocg-cargo-target-cli,target=/src/target \
     cargo build --locked --release -p ocg-manager-cli \
     && cp /src/target/release/ocg-manager-cli /ocg-manager-cli
 
