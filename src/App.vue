@@ -175,12 +175,12 @@
                  its own onActivated hook. -->
             <KeepAlive>
               <Dashboard v-if="activeKey === 'dashboard'" />
-              <Accounts v-if="activeKey === 'accounts'" />
-              <Applications v-if="activeKey === 'apps'" />
-              <Pricing v-if="activeKey === 'pricing'" />
-              <Logs v-if="activeKey === 'logs'" />
+              <Accounts v-else-if="activeKey === 'accounts'" />
+              <Applications v-else-if="activeKey === 'apps'" />
+              <Pricing v-else-if="activeKey === 'pricing'" />
+              <Logs v-else-if="activeKey === 'logs'" />
               <Settings
-                v-if="activeKey === 'settings'"
+                v-else-if="activeKey === 'settings'"
                 :theme-name="themeName"
                 :resolved-theme="resolvedTheme"
                 @update:theme-name="themeName = $event"

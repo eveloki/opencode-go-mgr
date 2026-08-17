@@ -336,11 +336,14 @@ contents to the network.
 The **Applications** view ships with per-client configuration snippets for 16
 tools: Claude Code, Claude Desktop, Codex, Gemini CLI, Pi, Kimi Code CLI,
 OpenCode, WorkBuddy, OpenClaw, Hermes, Cherry Studio, VS Code Copilot Chat,
-Cline, Roo Code, Continue, and Chatbox. Each guide shows the protocol the tool
-speaks, the official documentation URL, step-by-step instructions, model
-selectors, and one or more editable code blocks with a **Copy** button. The displayed
-block masks the Key; copying restores the real key, so screenshots
-remain shareable without producing an unusable configuration.
+Cline, Roo Code, Continue, and Chatbox. The connection panel shows the current
+client's request URL, a Key selector (the primary Key plus enabled sub keys),
+and model pickers. Node addresses and the upstream URL stay on Dashboard. Each
+guide shows the protocol the tool speaks, the official documentation URL,
+step-by-step instructions, and one or more editable code blocks with a
+**Copy** button. The displayed block masks the Key; copying restores the real
+key, so screenshots remain shareable without producing an unusable
+configuration.
 
 Before overwriting any existing configuration file, back up the original file. The code blocks
 in Applications are editable, but keep a recoverable copy before copying or manually merging
@@ -359,11 +362,14 @@ Base URL conventions per client:
   use the API Base URL ending in `/v1`.
 - VS Code Copilot Chat and WorkBuddy need the full `/v1/chat/completions` URL.
   Codex needs the API Base URL ending in `/v1` plus `wire_api = "responses"`.
-  Copy `~/.codex/ocg-model-catalog.json` for model picker metadata, then either
-  use `~/.codex/ocg.config.toml` with `codex --profile ocg` (CLI) or merge the
+  Use `~/.codex/ocg.config.toml` with `codex --profile ocg` (CLI) or merge the
   same provider block into user-level `~/.codex/config.toml` (Desktop / default
-  provider). The catalog is optional metadata only; Codex still talks Responses
-  to OCG Manager either way.
+  provider). `~/.codex/ocg-model-catalog.json` is optional: skip it to connect.
+  Enable `model_catalog_json` only for the picker plus real context windows and
+  reasoning levels. A catalog replaces Codex's bundled model list and must
+  include the current required fields. Without a catalog, unknown slugs use
+  Codex's 272K fallback metadata. Requests always use OCG Manager's Responses
+  endpoint.
 
 Codex's `~/.codex/ocg-model-catalog.json`, `~/.codex/ocg.config.toml`, and
 `~/.codex/config.toml` are local configuration files. Back up each file before overwriting
@@ -492,9 +498,7 @@ cookies/profile, and the confirmation states this explicitly. That login state
 can then be recovered only from a backup or by signing in again.
 
 Each completed account card shows the account name, cooldown state, and the
-5-hour / weekly / monthly usage bars driven by local accounting. Every account
-card also has an optional freeform **notes** box. It can stay empty, does not
-affect routing or quota, and is saved when the field loses focus.
+5-hour / weekly / monthly usage bars driven by local accounting.
 
 - **Usage baselines (Key accounts).** Type a percentage or drag a bar to set
   its current real-world usage baseline. After the value is saved, successful
@@ -512,8 +516,9 @@ affect routing or quota, and is saved when the field loses focus.
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.
-  A separate large notes box is optional and freeform. The dashboard stores
-  the account key but does not collect or manage third-party login passwords.
+  Optional freeform notes live in **Edit account**. They can stay empty and
+  do not affect routing or quota. The dashboard stores the account key but
+  does not collect or manage third-party login passwords.
 - **Purchase date.** New accounts default to the browser's current date, and
   the value remains editable. The managed wizard also writes the purchase date
   when payment advances to key verification. Expiry is the same day in the

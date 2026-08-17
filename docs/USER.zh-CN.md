@@ -293,9 +293,11 @@ Français、Deutsch、Português (Brasil)、Русский，默认简体中文�
 
 **应用** 视图为 16 个常见客户端预置了配置片段：Claude Code、Claude Desktop、
 Codex、Gemini CLI、Pi、Kimi Code CLI、OpenCode、WorkBuddy、OpenClaw、Hermes、
-Cherry Studio、VS Code Copilot Chat、Cline、Roo Code、Continue、Chatbox。每个教程
-展示协议、官方文档链接、操作步骤、模型选择，以及一个或多个带 **复制** 按钮的代码块。屏幕上的
-代码块中 Key 已脱敏，复制出来的才是真实 Key，方便分享截图。
+Cherry Studio、VS Code Copilot Chat、Cline、Roo Code、Continue、Chatbox。接入区
+只展示当前客户端的请求地址、Key 选择器（主 Key 与已启用子 Key）和模型选择；
+节点地址与上游地址仍在仪表盘。每个教程展示协议、官方文档链接、操作步骤，以及
+一个或多个带 **复制** 按钮的代码块。屏幕上的代码块中 Key 已脱敏，复制出来的才
+是真实 Key，方便分享截图。
 
 覆盖任何现有配置文件前，请先备份原文件。应用页的代码块可以编辑，但复制或手动合并
 之前都应保留一份可恢复的原始配置。
@@ -311,11 +313,12 @@ Cherry Studio、VS Code Copilot Chat、Cline、Roo Code、Continue、Chatbox。�
 - Pi、Kimi Code CLI、OpenCode、OpenClaw、Hermes、Cline、Roo Code、Continue
   使用带 `/v1` 的 API Base URL。
 - VS Code Copilot Chat 与 WorkBuddy 使用完整 `/v1/chat/completions` 端点。Codex
-  使用带 `/v1` 的 API Base URL，且必须 `wire_api = "responses"`。可复制
-  `~/.codex/ocg-model-catalog.json` 作为模型目录；CLI 用
+  使用带 `/v1` 的 API Base URL，且必须 `wire_api = "responses"`。CLI 用
   `~/.codex/ocg.config.toml` + `codex --profile ocg`，Desktop 或常驻默认则合并进
-  用户级 `~/.codex/config.toml`。catalog 只提供元数据，不负责协议转换；请求始终
-  走 OCG Manager 的 Responses 入口。
+  用户级 `~/.codex/config.toml`。`~/.codex/ocg-model-catalog.json` 可选：不写也能
+  请求；只有需要选择器、真实上下文窗口和推理档位时才启用 `model_catalog_json`。
+  启用后会整份替换 Codex 内置目录，且必须包含当前必填字段。不写 catalog 时，未知
+  slug 按 Codex 的 272K 回退元数据。请求始终走 OCG Manager 的 Responses 入口。
 
 Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 `~/.codex/config.toml` 都属于本机配置。覆盖或合并前先分别备份；如果使用 CC Switch
@@ -415,8 +418,7 @@ Key，只退出控制台登录；注册中的托管账号还会回到登录身�
 Manager 恢复，只能从备份恢复或重新登录。
 
 每张已完成账号卡显示账号名、冷却状态，以及由本地估算驱动的 5 小时、本周、本月
-用量条。每张账号卡还有一个可选的大备注框，可留空，不参与路由、不计入额度，失焦
-时保存。
+用量条。
 
 - **用量校准（Key 账号）**：每个窗口都可以输入百分比或拖动进度条，将其保存为
   当前实际用量基线；保存后，OCG Manager 记录的成功请求成本会继续累加到该基线
@@ -428,8 +430,9 @@ Manager 恢复，只能从备份恢复或重新登录。
   Linux Docker Sidecar 使用 Chromium 的 basic 密码存储，因此 Profile 不依赖宿主
   机密钥环；桌面 Profile 仍使用浏览器自身配置的凭据存储。
 - **标识与凭据**：名称是必填的主要展示标识。登录账号可选；新增 Key 账号时如果
-  先填写账号，它会自动同步为名称，手动修改名称后不再跟随。另外有一个可选的大
-  备注框，内容由你自定。面板保存账号 Key，但不收集或维护第三方登录密码。
+  先填写账号，它会自动同步为名称，手动修改名称后不再跟随。可选备注写在**编辑
+  账号**里，可留空，不参与路由、不计入额度。面板保存账号 Key，但不收集或维护
+  第三方登录密码。
 - **购买日期**：新增账号默认使用浏览器当天，也可以在新增或展开编辑表单里修改。
   托管向导在确认支付进入 Key 验证时也会写入购买日期。到期日取下一个自然月同
   日；目标月份没有该日时取月末，例如 `2026-01-31` 的到期日是 `2026-02-28`。

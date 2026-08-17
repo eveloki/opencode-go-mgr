@@ -33,103 +33,52 @@
               {{ t("接入信息") }}
             </h2>
 
-            <div class="connection-zones">
-              <div class="connection-zone">
-                <h3 class="zone-caption">{{ t("节点信息") }}</h3>
-                <div class="connection-track">
-                  <article class="connection-stage">
-                    <span>{{ t("服务地址") }}</span>
-                    <div class="connection-value">
-                      <code>{{ connectionUrls.rootUrl }}</code>
-                      <n-button
-                        circle
-                        quaternary
-                        :aria-label="t('复制 {label}', { label: t('服务地址') })"
-                        :disabled="!settingsLoaded"
-                        @click="copyValue('root', connectionUrls.rootUrl, t('服务地址'))"
-                      >
-                        <template #icon>
-                          <n-icon :component="copiedTarget === 'root' ? CheckOutlined : CopyOutlined" />
-                        </template>
-                      </n-button>
-                    </div>
-                  </article>
-                  <article class="connection-stage">
-                    <span>{{ t("API 地址") }}</span>
-                    <div class="connection-value">
-                      <code>{{ connectionUrls.apiBaseUrl }}</code>
-                      <n-button
-                        circle
-                        quaternary
-                        :aria-label="t('复制 {label}', { label: t('API 地址') })"
-                        :disabled="!settingsLoaded"
-                        @click="copyValue('api', connectionUrls.apiBaseUrl, t('API 地址'))"
-                      >
-                        <template #icon>
-                          <n-icon :component="copiedTarget === 'api' ? CheckOutlined : CopyOutlined" />
-                        </template>
-                      </n-button>
-                    </div>
-                  </article>
-                  <article v-if="serviceConfig.upstream_base_url" class="connection-stage">
-                    <span>{{ t("上游地址") }}</span>
-                    <div class="connection-value">
-                      <code>{{ serviceConfig.upstream_base_url }}</code>
-                      <n-button
-                        circle
-                        quaternary
-                        :aria-label="t('复制 {label}', { label: t('上游地址') })"
-                        :disabled="!settingsLoaded"
-                        @click="copyValue('upstream', serviceConfig.upstream_base_url, t('上游地址'))"
-                      >
-                        <template #icon>
-                          <n-icon :component="copiedTarget === 'upstream' ? CheckOutlined : CopyOutlined" />
-                        </template>
-                      </n-button>
-                    </div>
-                  </article>
+            <div class="access-fields">
+              <label class="access-field">
+                <span>{{ t("请求地址") }}</span>
+                <div class="access-value">
+                  <code>{{ activeEndpoint.url }}</code>
+                  <n-button
+                    circle
+                    quaternary
+                    :aria-label="t('复制 {label}', { label: t('请求地址') })"
+                    :disabled="!settingsLoaded"
+                    @click="copyValue('endpoint', activeEndpoint.url, t('请求地址'))"
+                  >
+                    <template #icon>
+                      <n-icon :component="copiedTarget === 'endpoint' ? CheckOutlined : CopyOutlined" />
+                    </template>
+                  </n-button>
                 </div>
-
-                <div class="key-row">
-                  <span>{{ t("Key") }}</span>
-                  <code>{{ maskedKey }}</code>
+              </label>
+              <label class="access-field">
+                <span>{{ t("Key") }}</span>
+                <div class="access-value">
+                  <n-select
+                    :value="selectedKeyId"
+                    :options="keySelectOptions"
+                    :loading="settingsLoading"
+                    :disabled="!settingsLoaded || enabledGatewayKeys.length === 0"
+                    :placeholder="t('选择 Key')"
+                    :aria-label="t('选择 Key')"
+                    @update:value="selectGatewayKey"
+                  />
                   <n-button
                     circle
                     quaternary
                     :aria-label="t('复制 Key')"
-                    :disabled="!settingsLoaded || !serviceConfig.gateway_key"
-                    @click="copyValue('key', serviceConfig.gateway_key, t('Key'))"
+                    :disabled="!settingsLoaded || !selectedKey?.value"
+                    @click="copyValue('key', selectedKey?.value ?? '', t('Key'))"
                   >
                     <template #icon>
                       <n-icon :component="copiedTarget === 'key' ? CheckOutlined : CopyOutlined" />
                     </template>
                   </n-button>
                 </div>
-              </div>
+              </label>
+            </div>
 
-              <div class="connection-zone connection-zone--app">
-                <h3 class="zone-caption">{{ t("当前应用配置") }}</h3>
-                <div class="connection-track endpoint-track">
-                  <article class="connection-stage">
-                    <span>{{ t("请求地址") }}</span>
-                    <div class="connection-value">
-                      <code>{{ activeEndpoint.url }}</code>
-                      <n-button
-                        circle
-                        quaternary
-                        :aria-label="t('复制 {label}', { label: t('请求地址') })"
-                        :disabled="!settingsLoaded"
-                        @click="copyValue('endpoint', activeEndpoint.url, t('请求地址'))"
-                      >
-                        <template #icon>
-                          <n-icon :component="copiedTarget === 'endpoint' ? CheckOutlined : CopyOutlined" />
-                        </template>
-                      </n-button>
-                    </div>
-                  </article>
-                </div>
-
-                <div class="model-row">
+            <div class="model-row">
                   <div class="model-row-head">
                     <span class="model-label">{{ t("模型") }}</span>
                     <n-button
@@ -202,8 +151,6 @@
                     </template>
                   </div>
                 </div>
-              </div>
-            </div>
 
             <p v-if="copyDisabledHint" class="copy-disabled-hint">
               {{ copyDisabledHint }}
@@ -344,7 +291,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -359,7 +306,7 @@ import {
 import type { MenuOption, SelectGroupOption, SelectOption } from "naive-ui";
 import { CheckOutlined, CopyOutlined, ExportOutlined } from "@vicons/antd";
 import logoUrl from "../../assets/logo/ocg_logo_final_transparent.png";
-import { tauriApi, type ClaudeDesktopModels } from "../api/tauri";
+import { PRIMARY_KEY_ID, tauriApi, type ClaudeDesktopModels, type ConnectionSubKey } from "../api/tauri";
 import { useClipboard } from "../utils/format.ts";
 import {
   isGeminiCliBaseUrlAllowed,
@@ -426,12 +373,50 @@ const claudeDesktopModelsDirty = computed(() => (
   ))
 ));
 
+interface SwitcherKey {
+  id: string;
+  name: string;
+  value: string;
+}
+
 const serviceConfig = ref({
   gateway_port: 9042,
-  gateway_key: "",
   client_root_url: "",
-  upstream_base_url: "",
+  primary_key: "",
+  sub_keys: [] as ConnectionSubKey[],
 });
+const selectedKeyId = ref(PRIMARY_KEY_ID);
+const enabledGatewayKeys = computed<SwitcherKey[]>(() => [
+  { id: PRIMARY_KEY_ID, name: t("主 Key"), value: serviceConfig.value.primary_key },
+  ...serviceConfig.value.sub_keys
+    .filter((entry) => entry.enabled && entry.value)
+    .map((entry) => ({ id: entry.id, name: entry.name, value: entry.value })),
+]);
+const selectedKey = computed<SwitcherKey | null>(() => {
+  const keys = enabledGatewayKeys.value.filter((entry) => entry.value);
+  if (!keys.length) return null;
+  return keys.find((entry) => entry.id === selectedKeyId.value) ?? keys[0];
+});
+const keySelectOptions = computed(() =>
+  enabledGatewayKeys.value
+    .filter((entry) => entry.value)
+    .map((entry) => ({
+      label: `${entry.id === PRIMARY_KEY_ID ? t("主 Key") : entry.name} · ${maskConnectionKey(entry.value)}`,
+      value: entry.id,
+    })),
+);
+watch(enabledGatewayKeys, (keys) => {
+  if (keys.length > 0 && !keys.some((entry) => entry.id === selectedKeyId.value && entry.value)) {
+    selectedKeyId.value = keys.find((entry) => entry.value)?.id ?? PRIMARY_KEY_ID;
+  }
+});
+watch(selectedKeyId, () => {
+  snippetDrafts.value = {};
+});
+function selectGatewayKey(value: string | number | null) {
+  if (typeof value !== "string" || value === selectedKeyId.value) return;
+  selectedKeyId.value = value;
+}
 
 const applicationGuides: readonly ApplicationGuide[] = APPLICATION_GUIDES;
 const activeGuide = computed<ApplicationGuide>(() => (
@@ -502,7 +487,7 @@ const connectionUrls = computed(() => {
     );
   }
 });
-const maskedKey = computed(() => maskConnectionKey(serviceConfig.value.gateway_key));
+const maskedKey = computed(() => maskConnectionKey(selectedKey.value?.value ?? ""));
 const guideContext = computed<GuideContext>(() => ({
   rootUrl: connectionUrls.value.rootUrl,
   apiBaseUrl: connectionUrls.value.apiBaseUrl,
@@ -510,7 +495,7 @@ const guideContext = computed<GuideContext>(() => ({
   responsesUrl: connectionUrls.value.responsesUrl,
   messagesUrl: connectionUrls.value.messagesUrl,
   displayKey: maskedKey.value,
-  actualKey: serviceConfig.value.gateway_key,
+  actualKey: selectedKey.value?.value ?? "",
   modelId: activeGuide.value.modelFields?.length
     ? modelValues.value[activeGuide.value.modelFields[0]] || "<MODEL_ID>"
     : selectedModel.value?.trim() || "<MODEL_ID>",
@@ -523,7 +508,7 @@ const currentSnippets = computed(() => activeGuide.value.snippets(guideContext.v
 const geminiCliBaseUrlAllowed = computed(() => isGeminiCliBaseUrlAllowed(connectionUrls.value.rootUrl));
 const canGenerateConfig = computed(() => (
   settingsLoaded.value
-  && Boolean(serviceConfig.value.gateway_key)
+  && Boolean(selectedKey.value?.value)
   && (activeGuide.value.id !== "gemini-cli" || geminiCliBaseUrlAllowed.value)
   && (activeGuide.value.id !== "claude-desktop" || claudeDesktopModelsLoaded.value)
   && (activeGuide.value.modelFields?.every((field) => Boolean(modelValues.value[field]))
@@ -550,7 +535,7 @@ const activeEndpoint = computed(() => {
 const copyDisabledHint = computed(() => {
   if (settingsLoading.value) return t("设置加载完成后可复制");
   if (settingsError.value) return t("设置加载失败，请先重试");
-  if (!serviceConfig.value.gateway_key) return t("请先在仪表盘设置 Key");
+  if (!selectedKey.value?.value) return t("请先在仪表盘设置 Key");
   if (modelsLoading.value) return t("模型加载完成后可复制");
   if (modelsError.value && activeGuide.value.id === "claude-desktop" && !claudeDesktopModelsLoaded.value) {
     return modelsError.value;
@@ -684,13 +669,28 @@ async function loadSettings(loadApplicationModels = true) {
     const connection = await tauriApi.getConnection();
     const nextServiceConfig = {
       gateway_port: connection.gateway_port,
-      gateway_key: connection.primary_key,
       client_root_url: connection.client_root_url,
-      upstream_base_url: connection.upstream_base_url || "",
+      primary_key: connection.primary_key,
+      sub_keys: connection.sub_keys,
     };
     snippetDrafts.value = reconcileConnectionDrafts(
-      serviceConfig.value,
-      nextServiceConfig,
+      {
+        gateway_port: serviceConfig.value.gateway_port,
+        gateway_key: selectedKey.value?.value ?? "",
+        client_root_url: serviceConfig.value.client_root_url,
+        upstream_base_url: "",
+      },
+      {
+        gateway_port: nextServiceConfig.gateway_port,
+        gateway_key: (
+          nextServiceConfig.primary_key
+          && selectedKeyId.value === PRIMARY_KEY_ID
+            ? nextServiceConfig.primary_key
+            : nextServiceConfig.sub_keys.find((entry) => entry.id === selectedKeyId.value)?.value
+        ) ?? nextServiceConfig.primary_key,
+        client_root_url: nextServiceConfig.client_root_url,
+        upstream_base_url: "",
+      },
       snippetDrafts.value,
     );
     serviceConfig.value = nextServiceConfig;
@@ -916,84 +916,38 @@ onUnmounted(() => {
   font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
 }
 
-.connection-zones {
+.access-fields {
   display: grid;
-  gap: 16px;
-}
-
-.connection-zone {
-  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
   gap: 12px;
+}
+
+.access-field {
+  display: grid;
+  gap: 6px;
   min-width: 0;
 }
 
-.connection-zone--app {
-  padding-top: 16px;
-  border-top: 1px solid var(--ocg-divider);
-}
-
-.zone-caption {
-  margin: 0;
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-xs);
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.connection-track,
-.guide-head,
-.guide-title-row,
-.connection-value,
-.key-row,
-.upstream-row,
-.snippet-card > header,
-.model-row {
-  display: flex;
-  align-items: center;
-}
-
-.connection-track {
-  gap: 28px;
-}
-
-.connection-stage {
-  position: relative;
-  flex: 1 1 0;
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--ocg-border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--ocg-canvas) 72%, var(--ocg-surface));
-}
-
-.connection-stage:not(:last-child)::after {
-  content: "→";
-  position: absolute;
-  top: 50%;
-  right: -17px;
-  color: var(--ocg-subtle);
-  transform: translateY(-50%);
-}
-
-.connection-stage > span,
-.key-row > span,
-.upstream-row > span {
-  display: block;
-  margin-bottom: 5px;
+.access-field > span {
   color: var(--ocg-subtle);
   font: 700 var(--ocg-font-sm)/1.2 "Cascadia Mono", Consolas, monospace;
   letter-spacing: 0.04em;
 }
 
-.connection-value {
-  min-width: 0;
+.access-value {
+  display: flex;
+  align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
-.connection-value code,
-.key-row code,
-.upstream-row code {
+.access-value :deep(.n-select) {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.access-value code {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--ocg-ink);
@@ -1002,24 +956,12 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.connection-value code {
-  flex: 1 1 auto;
-}
-
-.key-row,
-.upstream-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--ocg-primary-soft);
-}
-
-.key-row > span,
-.upstream-row > span {
-  margin: 0;
-  color: var(--ocg-primary);
+.guide-head,
+.guide-title-row,
+.snippet-card > header,
+.model-row {
+  display: flex;
+  align-items: center;
 }
 
 .copy-disabled-hint {
@@ -1232,26 +1174,8 @@ onUnmounted(() => {
 }
 
 @media (max-width: 800px) {
-  .connection-zones {
+  .access-fields {
     grid-template-columns: 1fr;
-  }
-
-  .connection-zone--app {
-    padding-left: 0;
-    border-left: none;
-  }
-
-  .connection-track {
-    flex-direction: column;
-    gap: 18px;
-  }
-
-  .connection-stage:not(:last-child)::after {
-    content: "↓";
-    top: auto;
-    right: 50%;
-    bottom: -17px;
-    transform: translateX(50%);
   }
 
   .model-controls {
@@ -1274,10 +1198,6 @@ onUnmounted(() => {
 
   .connection-panel {
     padding: 12px;
-  }
-
-  .connection-zones {
-    gap: 12px;
   }
 
   .model-row,

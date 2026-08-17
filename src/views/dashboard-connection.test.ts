@@ -193,7 +193,7 @@ test("application catalog has sixteen verified clients and never displays a comp
     ["workbuddy", "https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Model"],
     ["openclaw", "https://docs.openclaw.ai/start/wizard-cli-automation"],
     ["hermes", "https://hermes-agent.nousresearch.com/docs/integrations/providers"],
-    ["cherry-studio", "https://docs.cherry-ai.com/docs/en-us/pre-basic/settings/providers"],
+    ["cherry-studio", "https://docs.cherry-ai.com/en-us/pre-basic/providers/zi-ding-yi-fu-wu-shang"],
     ["vscode-copilot", "https://code.visualstudio.com/docs/agent-customization/language-models"],
     ["cline", "https://docs.cline.bot/provider-config/openai-compatible"],
     ["roo-code", "https://roocodeinc.github.io/Roo-Code/features/settings-management/"],
@@ -310,19 +310,32 @@ test("application catalog has sixteen verified clients and never displays a comp
     supported_in_api: boolean;
     supported_reasoning_levels: unknown[];
     visibility: string;
+    base_instructions: string;
+    shell_type: string;
+    priority: number;
+    support_verbosity: boolean;
+    truncation_policy: { mode: string; limit: number };
+    experimental_supported_tools: unknown[];
   }>;
   assert.deepEqual(
     catalogModels.map((model) => model.slug),
     ["kimi-k3", "glm-5.1"],
   );
-  for (const model of catalogModels) {
+  for (const [index, model] of catalogModels.entries()) {
     assert.equal(model.context_window, APPLICATION_MODEL_METADATA[model.slug].contextWindow);
     assert.equal(model.supported_in_api, true);
     assert.ok(Array.isArray(model.supported_reasoning_levels));
     assert.equal(model.visibility, "list");
+    assert.ok(model.base_instructions.length > 0, model.slug);
+    assert.equal(model.shell_type, "default");
+    assert.equal(model.priority, 10 + index);
+    assert.equal(model.support_verbosity, false);
+    assert.deepEqual(model.truncation_policy, { mode: "bytes", limit: 10_000 });
+    assert.deepEqual(model.experimental_supported_tools, []);
   }
   assert.deepEqual(catalogModels.find((model) => model.slug === "glm-5.1")?.supported_reasoning_levels, []);
   assert.deepEqual(buildCodexModelCatalog(context), codexCatalog);
+  assert.ok(codex.steps.some((step) => step.startsWith("可选：")));
   assert.equal(codexSnippets[1].label, "~/.codex/ocg.config.toml");
   assert.equal(codexSnippets[2].label, "~/.codex/config.toml");
   for (const label of ["~/.codex/ocg.config.toml", "~/.codex/config.toml"]) {
@@ -330,7 +343,8 @@ test("application catalog has sixteen verified clients and never displays a comp
     assert.match(codexConfig, /model = "kimi-k3"/, label);
     assert.match(codexConfig, /review_model = "glm-5.1"/, label);
     assert.match(codexConfig, /model_provider = "ocg"/, label);
-    assert.match(codexConfig, /model_catalog_json = "ocg-model-catalog.json"/, label);
+    assert.match(codexConfig, /^# model_catalog_json = "ocg-model-catalog.json"$/m, label);
+    assert.doesNotMatch(codexConfig, /^model_catalog_json = /m, label);
     assert.match(codexConfig, /wire_api = "responses"/, label);
     assert.match(codexConfig, /requires_openai_auth = false/, label);
     assert.match(codexConfig, new RegExp(`base_url = "${urls.apiBaseUrl}"`), label);
@@ -343,6 +357,8 @@ test("application catalog has sixteen verified clients and never displays a comp
   const claudeDesktop = APPLICATION_GUIDES.find((guide) => guide.id === "claude-desktop");
   assert.ok(claudeDesktop);
   assert.deepEqual(claudeDesktop.modelFields, ["sonnet", "opus", "haiku"]);
+  assert.ok(claudeDesktop.steps.some((step) => step.includes("Enable Developer Mode")));
+  assert.ok(claudeDesktop.steps.some((step) => step.includes("桌面窗口不填模型 ID")));
   const desktopForm = claudeDesktop.snippets(context)[0].copy;
   assert.match(desktopForm, /Inference provider: Gateway/);
   assert.match(desktopForm, new RegExp(`Gateway base URL: ${urls.rootUrl}/claude-desktop`));
@@ -509,6 +525,12 @@ test("application catalog has sixteen verified clients and never displays a comp
 
   const hermes = APPLICATION_GUIDES.find((guide) => guide.id === "hermes")!;
   const hermesConfig = hermes.snippets(context)[0].copy;
+  assert.match(hermesConfig, /^providers:\n  ocg:\n    api: /);
+  assert.match(hermesConfig, /key_env: OCG_API_KEY/);
+  assert.match(hermesConfig, /transport: chat_completions/);
+  assert.match(hermesConfig, /provider: custom:ocg/);
+  assert.doesNotMatch(hermesConfig, /custom_providers:/);
+  assert.doesNotMatch(hermesConfig, /api_mode:/);
   assert.match(hermesConfig, /"kimi-k3":\n\s+context_length: 1048576\n\s+supports_vision: true/);
   assert.match(hermesConfig, /"glm-5\.1":\n\s+context_length: 202752\n\s+supports_vision: false/);
 
@@ -713,10 +735,11 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
   );
 });
 
-test("Claude Code defaults balance model capability and cost with safe fallbacks", () => {
+test("Claude Code defaults prefer Messages-capable models with safe fallbacks", () => {
   const models = [
     "glm-5.2",
     "kimi-k2.7-code",
+    "kimi-k3",
     "deepseek-v4-flash",
     "minimax-m3",
     "qwen3.7-max",
@@ -728,7 +751,15 @@ test("Claude Code defaults balance model capability and cost with safe fallbacks
   assert.equal(recommendClaudeCodeModel("ANTHROPIC_DEFAULT_SONNET_MODEL", models), "qwen3.7-plus");
   assert.equal(recommendClaudeCodeModel("ANTHROPIC_DEFAULT_OPUS_MODEL", models), "glm-5.2");
   assert.equal(recommendClaudeCodeModel("CLAUDE_CODE_SUBAGENT_MODEL", models), "minimax-m3");
-  assert.equal(recommendClaudeCodeModel("ANTHROPIC_CUSTOM_MODEL_OPTION", models), "kimi-k2.7-code");
+  assert.equal(recommendClaudeCodeModel("ANTHROPIC_CUSTOM_MODEL_OPTION", models), "kimi-k3");
+  const claudeGuide = APPLICATION_GUIDES.find((guide) => guide.id === "claude-code")!;
+  for (const field of claudeGuide.modelFields ?? []) {
+    assert.equal(
+      recommendClaudeCodeModel(field, ["kimi-k2.7-code", "mimo-v2.5", "kimi-k3"]),
+      "kimi-k3",
+      field,
+    );
+  }
   assert.equal(recommendClaudeCodeModel("ANTHROPIC_DEFAULT_HAIKU_MODEL", ["mimo-v2.5"]), "mimo-v2.5");
   assert.equal(recommendClaudeCodeModel("unknown", ["fallback-model"]), "fallback-model");
   assert.equal(recommendClaudeCodeModel("ANTHROPIC_MODEL", []), "");
@@ -836,7 +867,7 @@ test("generated VS Code and Continue configs use their current complete shapes",
       metadata.contextWindow,
       model.id,
     );
-    assert.equal(model.maxOutputTokens, model.id === "glm-5.1" ? 32_768 : 65_536, model.id);
+    assert.equal(model.maxOutputTokens, metadata.maxOutputTokens, model.id);
     assert.equal(model.vision, (metadata.ocgInput ?? metadata.input).includes("image"), model.id);
   }
 
@@ -984,6 +1015,13 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   // Connection fields come from the lightweight payload, not full settings.
   assert.match(applications, /tauriApi\.getConnection\(\)/);
   assert.doesNotMatch(applications, /tauriApi\.getSettings\(\)/);
+  assert.doesNotMatch(applications, /t\("节点信息"\)|t\("服务地址"\)|t\("上游地址"\)/);
+  assert.doesNotMatch(applications, /class="connection-track"|class="connection-stage"/);
+  assert.match(applications, /class="access-fields"/);
+  assert.match(applications, /enabledGatewayKeys/);
+  assert.match(applications, /PRIMARY_KEY_ID/);
+  assert.match(applications, /t\(['"]选择 Key['"]\)/);
+  assert.match(applications, /selectedKey\.value\?\.value/);
   assert.match(applications, /Promise\.allSettled/);
   assert.match(applications, /const claudeDesktopModelsLoaded = ref\(false\)/);
   assert.match(applications, /activeGuide\.value\.id !== "claude-desktop" \|\| claudeDesktopModelsLoaded\.value/);
@@ -1039,8 +1077,8 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.doesNotMatch(applications, /<n-tab-pane/);
   assert.doesNotMatch(applications, /class="page-head"/);
   assert.doesNotMatch(applications, /class="guide-card"/);
-  assert.match(applications, /\{\{ maskedKey \}\}/);
-  assert.doesNotMatch(applications, /<code>\{\{ serviceConfig\.gateway_key \}\}<\/code>/);
+  assert.match(applications, /maskConnectionKey\(selectedKey\.value\?\.value/);
+  assert.doesNotMatch(applications, /<code>\{\{ serviceConfig\.(?:gateway_key|primary_key) \}\}<\/code>/);
   assert.match(app, /<main class="app-content">/);
   assert.doesNotMatch(app, /<n-layout-content/);
   assert.match(app, /dashboard.*accounts.*apps.*pricing.*logs.*settings/s);
@@ -1163,15 +1201,20 @@ test("account form rejects whitespace-only required credentials", async () => {
   assert.match(accountForm, /purchaseDate: \[\s*\{\s*required: true,\s*type: "number",/);
 });
 
-test("account cards and forms expose an optional freeform notes box", async () => {
+test("account notes live in the edit-account form, not on cards", async () => {
   const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
   const accountForm = await readFile(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
+  const template = accountForm.slice(accountForm.indexOf("<template>"), accountForm.indexOf("<script setup"));
+  const managedCreate = accounts.slice(
+    accounts.indexOf('<n-modal\n      :show="showManagedCreate"'),
+    accounts.indexOf("<ManagedAccountWizard"),
+  );
 
-  assert.match(accounts, /class="account-notes"/);
-  assert.match(accounts, /@blur="saveNotes\(account\.id\)"/);
-  assert.match(accounts, /updateAccount\(accountId, \{ notes: draft \}\)/);
-  assert.match(accountForm, /path="notes"/);
+  assert.doesNotMatch(accounts, /class="account-notes"|saveNotes\(|notesDrafts/);
+  assert.doesNotMatch(managedCreate, /path="notes"|t\(['"]备注['"]\)/);
+  assert.match(template, /v-if="isEdit" path="notes"/);
   assert.match(accountForm, /type="textarea"/);
+  assert.match(accountForm, /isEdit\.value \? t\("编辑账号"\)/);
 });
 
 test("account form keeps identity first and does not collect managed password or expiry", async () => {

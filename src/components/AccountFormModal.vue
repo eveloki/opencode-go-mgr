@@ -51,7 +51,7 @@
             :placeholder="isEdit ? t('留空不修改') : 'sk-...'"
           />
         </n-form-item>
-        <n-form-item path="notes" :label="t('备注')" class="notes-field">
+        <n-form-item v-if="isEdit" path="notes" :label="t('备注')" class="notes-field">
           <n-input
             v-model:value="form.notes"
             type="textarea"

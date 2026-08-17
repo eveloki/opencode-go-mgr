@@ -145,14 +145,17 @@ export function buildChatboxUrl(context: GuideContext): string {
   return `chatbox://provider/import?config=${encodePayload(buildChatboxConfig(context))}`;
 }
 
+// Prefer models whose supported set includes Messages so Claude Code can
+// passthrough. Chat-only IDs still work via Gateway conversion, but they are
+// not first picks.
 const CLAUDE_CODE_MODEL_PREFERENCES: Readonly<Record<string, readonly string[]>> = {
-  ANTHROPIC_MODEL: ["qwen3.7-plus", "minimax-m3", "kimi-k2.7-code", "glm-5.2"],
-  ANTHROPIC_DEFAULT_FABLE_MODEL: ["qwen3.7-max", "glm-5.2", "kimi-k2.7-code", "deepseek-v4-pro"],
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: ["deepseek-v4-flash", "minimax-m3", "mimo-v2.5"],
-  ANTHROPIC_DEFAULT_SONNET_MODEL: ["qwen3.7-plus", "minimax-m3", "kimi-k2.7-code", "glm-5.2"],
-  ANTHROPIC_DEFAULT_OPUS_MODEL: ["glm-5.2", "qwen3.7-max", "kimi-k2.7-code", "deepseek-v4-pro"],
-  CLAUDE_CODE_SUBAGENT_MODEL: ["minimax-m3", "qwen3.7-plus", "deepseek-v4-flash", "kimi-k2.7-code"],
-  ANTHROPIC_CUSTOM_MODEL_OPTION: ["kimi-k2.7-code", "glm-5.2", "qwen3.7-max", "deepseek-v4-pro"],
+  ANTHROPIC_MODEL: ["qwen3.7-plus", "minimax-m3", "kimi-k3", "glm-5.2"],
+  ANTHROPIC_DEFAULT_FABLE_MODEL: ["qwen3.7-max", "glm-5.2", "kimi-k3", "deepseek-v4-pro"],
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: ["deepseek-v4-flash", "minimax-m3", "glm-5.1", "kimi-k3"],
+  ANTHROPIC_DEFAULT_SONNET_MODEL: ["qwen3.7-plus", "minimax-m3", "kimi-k3", "glm-5.2"],
+  ANTHROPIC_DEFAULT_OPUS_MODEL: ["glm-5.2", "qwen3.7-max", "kimi-k3", "deepseek-v4-pro"],
+  CLAUDE_CODE_SUBAGENT_MODEL: ["minimax-m3", "qwen3.7-plus", "deepseek-v4-flash", "kimi-k3"],
+  ANTHROPIC_CUSTOM_MODEL_OPTION: ["kimi-k3", "glm-5.2", "qwen3.7-max", "deepseek-v4-pro"],
 };
 
 export function recommendClaudeCodeModel(field: string, availableModels: readonly string[]): string {
@@ -469,28 +472,39 @@ function codexCatalogModelIds(context: GuideContext): string[] {
   return [...new Set(source.filter((modelId) => modelId && modelId !== "<MODEL_ID>"))];
 }
 
+// Current Codex rejects a catalog that omits these fields. Keep the text
+// short: enabling the catalog replaces Codex's bundled models and this
+// template, instead of the official 20KB agent prompt used by slug fallback.
+const CODEX_CATALOG_BASE_INSTRUCTIONS =
+  "You are a coding agent. Inspect the workspace, use tools to run commands and apply patches, and prefer making the change over only describing it. Follow repository conventions and keep replies concise.";
+
 export function buildCodexModelCatalog(context: GuideContext) {
   return {
-    models: codexCatalogModelIds(context).map((modelId) => {
+    models: codexCatalogModelIds(context).map((modelId, index) => {
       const metadata = applicationModelMetadata(modelId);
       const effectiveInput = metadata.ocgInput ?? metadata.input;
       const entry: Record<string, unknown> = {
         slug: modelId,
         display_name: modelId,
         description: `${modelId} via OCG Manager`,
+        base_instructions: CODEX_CATALOG_BASE_INSTRUCTIONS,
         context_window: metadata.contextWindow,
         max_context_window: metadata.contextWindow,
         effective_context_window_percent: 95,
         input_modalities: effectiveInput.includes("image") ? ["text", "image"] : ["text"],
         supported_in_api: true,
-        supports_parallel_tool_calls: metadata.toolUse,
-        // Codex Desktop requires this field for every catalog model, including
+        // Codex requires this field for every catalog model, including
         // models that expose no selectable reasoning effort.
         supported_reasoning_levels: (metadata.efforts ?? []).map((effort) => ({
           effort,
           description: effort,
         })),
         visibility: "list",
+        shell_type: "default",
+        priority: 10 + index,
+        support_verbosity: false,
+        truncation_policy: { mode: "bytes", limit: 10_000 },
+        experimental_supported_tools: [],
       };
       if (metadata.defaultEffort) {
         entry.default_reasoning_level = metadata.defaultEffort;
@@ -507,7 +521,9 @@ function buildCodexProviderConfig(context: GuideContext): string {
     `model = ${JSON.stringify(model)}`,
     `review_model = ${JSON.stringify(reviewModel)}`,
     `model_provider = "ocg"`,
-    `model_catalog_json = "ocg-model-catalog.json"`,
+    "# Optional. Uncomment only after saving ocg-model-catalog.json.",
+    "# A catalog replaces Codex's bundled model list for this process.",
+    '# model_catalog_json = "ocg-model-catalog.json"',
     "",
     "[model_providers.ocg]",
     'name = "OCG Manager"',
@@ -634,16 +650,14 @@ function hermesModelEntry(modelId: string): string {
   return `      ${JSON.stringify(modelId)}:\n        context_length: ${metadata.contextWindow}\n        supports_vision: ${effectiveInput.includes("image")}`;
 }
 
-const VSCODE_MODEL_CONTEXT_WINDOWS = Object.fromEntries(
-  Object.entries(APPLICATION_MODEL_METADATA).map(([modelId, metadata]) => [modelId, metadata.contextWindow]),
-) as Readonly<Record<string, number>>;
-
 function vscodeTokenLimits(modelId: string) {
-  const contextWindow = VSCODE_MODEL_CONTEXT_WINDOWS[modelId];
-  // ponytail: unknown future models keep conservative limits until their real window is added above.
-  if (!contextWindow) return { maxInputTokens: 32_768, maxOutputTokens: 8_192 };
-  const maxOutputTokens = modelId === "glm-5.1" ? 32_768 : 65_536;
-  return { maxInputTokens: contextWindow - maxOutputTokens, maxOutputTokens };
+  const metadata = APPLICATION_MODEL_METADATA[modelId];
+  // Unknown future models keep conservative limits until their real window is added above.
+  if (!metadata) return { maxInputTokens: 32_768, maxOutputTokens: 8_192 };
+  return {
+    maxInputTokens: metadata.contextWindow - metadata.maxOutputTokens,
+    maxOutputTokens: metadata.maxOutputTokens,
+  };
 }
 
 export const APPLICATION_GUIDES = [
@@ -662,6 +676,7 @@ export const APPLICATION_GUIDES = [
     ],
     notes: [
       "Claude Code 使用 Anthropic Messages 协议，因此不要给 ANTHROPIC_BASE_URL 追加 /v1。",
+      "Claude Code 走 Messages 协议；默认推荐支持 Messages 透传的模型。Chat-only 模型会由 Gateway 转换。",
       "团队管理员可通过 Managed Settings、设备管理或 apiKeyHelper 下发 Claude Code；个人用户合并下方配置。",
       "模型能力由实际上游决定；Agent 工具调用需要所选模型正确支持 tools。",
     ],
@@ -706,8 +721,9 @@ export const APPLICATION_GUIDES = [
     officialUrl: "https://claude.com/docs/third-party/claude-desktop/gateway",
     summary: "通过 Anthropic 兼容入口连接 OCG Manager，地址使用不带 /v1 的根地址。",
     steps: [
+      "先在 Help → Troubleshooting → Enable Developer Mode 打开开发者模式，然后重启 Claude Desktop。",
       "打开 Claude Desktop 的 Developer → Configure Third-Party Inference，选择 Gateway。",
-      "填写下方 Base URL、Key 和模型 ID。",
+      "填写下方 Gateway base URL 和 Key；三个角色模型在本页选择，桌面窗口不填模型 ID。",
       "发送一条测试任务，再到 OCG Manager 的请求日志确认成功记录。",
     ],
     notes: [
@@ -734,15 +750,15 @@ export const APPLICATION_GUIDES = [
     badge: "Responses",
     summary: "注册 OCG Manager 为 Codex 自定义模型提供商，通过 Responses 接口调用。",
     steps: [
-      "把模型目录保存为 ~/.codex/ocg-model-catalog.json。",
       "CLI 切换：保存 ~/.codex/ocg.config.toml 后运行 codex --profile ocg；Desktop 或默认提供商：把相同配置合并进用户级 ~/.codex/config.toml。",
+      "可选：把模型目录保存为 ~/.codex/ocg-model-catalog.json，并在 toml 里取消注释 model_catalog_json。",
       "在启动 Codex 的同一终端设置 OCG_API_KEY 环境变量。",
       "启动 Codex 并发送一条测试消息，再到 OCG Manager 的请求日志确认成功记录。",
     ],
     notes: [
       "Codex 自定义 provider 必须 wire_api = \"responses\"；当前 Codex 不再支持 chat wire_api。",
       "OCG Manager 原生接收 /v1/responses；若上游更偏好其他协议，Gateway 会转换，无需再叠一层 Chat 转换器。",
-      "model_catalog_json 只提供模型元数据（选择器、上下文窗口、推理档位），不负责协议转换；不写 catalog 时直接设置 model 通常仍可请求。",
+      "model_catalog_json 可选。不写也能请求，未知模型按 272K 回退。写了会整份替换 Codex 内置目录，用来提供选择器、真实上下文窗口和推理档位。",
       "OCG Manager 当前提供无状态 Responses 转发，不要依赖 previous_response_id 延续服务端状态。",
       "项目内 .codex/config.toml 不能配置 model_providers；provider 必须写在用户级配置或 profile 文件。",
       "Desktop 更适合合并用户级 config.toml；CLI 可用 profile 避免改默认配置。合并 config.toml 会切换默认 model_provider。",
@@ -1121,12 +1137,12 @@ export const APPLICATION_GUIDES = [
     summary: "运行 hermes model 的 Custom endpoint 向导完成首次接入；长期或多模型使用 key_env 配置。",
     steps: [
       "运行 hermes model，选择 Custom endpoint，再填写下方地址、Key 和模型。",
-      "api_mode 选择 chat_completions，并按下方元数据填写 context length 与图片能力。",
+      "transport 使用 chat_completions，并按下方元数据填写 context_length 与图片能力。",
       "运行 hermes chat -q 发送测试任务，再到 OCG Manager 请求日志确认真实调用。",
     ],
     notes: [
       "baseURL 必须使用带 /v1 的 API Base URL。",
-      "hermes model 向导可能把 Key 写入 config.yaml；长期使用优先采用下方 key_env 与 .env。",
+      "hermes model 向导可能把单次接入写到 model.base_url；长期或多模型请用下方 providers.ocg 与 key_env，把 Key 放在 ~/.hermes/.env。",
       "下方配置按模型元数据固定 context_length 和 supports_vision，避免自动探测不完整。",
       "模型能力由实际上游决定；Agent 工具调用需要所选模型正确支持 tools。",
     ],
@@ -1134,8 +1150,8 @@ export const APPLICATION_GUIDES = [
       {
         label: "~/.hermes/config.yaml",
         language: "yaml",
-        display: `custom_providers:\n  - name: ocg\n    base_url: ${JSON.stringify(context.apiBaseUrl)}\n    key_env: OCG_API_KEY\n    api_mode: chat_completions\n    models:\n${models(context).map(hermesModelEntry).join("\n")}\n\nmodel:\n  default: ${JSON.stringify(context.modelId)}\n  provider: custom:ocg`,
-        copy: `custom_providers:\n  - name: ocg\n    base_url: ${JSON.stringify(context.apiBaseUrl)}\n    key_env: OCG_API_KEY\n    api_mode: chat_completions\n    models:\n${models(context).map(hermesModelEntry).join("\n")}\n\nmodel:\n  default: ${JSON.stringify(context.modelId)}\n  provider: custom:ocg`,
+        display: `providers:\n  ocg:\n    api: ${JSON.stringify(context.apiBaseUrl)}\n    key_env: OCG_API_KEY\n    transport: chat_completions\n    models:\n${models(context).map(hermesModelEntry).join("\n")}\n\nmodel:\n  default: ${JSON.stringify(context.modelId)}\n  provider: custom:ocg`,
+        copy: `providers:\n  ocg:\n    api: ${JSON.stringify(context.apiBaseUrl)}\n    key_env: OCG_API_KEY\n    transport: chat_completions\n    models:\n${models(context).map(hermesModelEntry).join("\n")}\n\nmodel:\n  default: ${JSON.stringify(context.modelId)}\n  provider: custom:ocg`,
       },
       keyedSnippet(context, "~/.hermes/.env", "dotenv", (key) => `OCG_API_KEY=${JSON.stringify(key)}`),
     ],
@@ -1147,11 +1163,11 @@ export const APPLICATION_GUIDES = [
     category: "OpenAI 兼容",
     protocol: "OpenAI Chat Completions",
     endpointKind: "chat",
-    officialUrl: "https://docs.cherry-ai.com/docs/en-us/pre-basic/settings/providers",
-    summary: "在服务商设置中新增 OpenAI 类型的自定义服务商，并通过 Manage 自动获取模型。",
+    officialUrl: "https://docs.cherry-ai.com/en-us/pre-basic/providers/zi-ding-yi-fu-wu-shang",
+    summary: "在服务商设置中新增 OpenAI 类型的自定义服务商，并获取模型列表。",
     steps: [
       "进入设置 → 模型服务，新增 OpenAI 类型的自定义服务商。",
-      "填写 API 地址和 Key 后，打开 Manage 获取模型列表并勾选需要的模型。",
+      "填写 API 地址和 Key 后，点击获取模型列表并勾选需要的模型。",
       "执行连接检查或发送一条测试消息，再到 OCG Manager 的请求日志确认成功记录。",
     ],
     notes: ["API 地址使用不带 /v1 的根地址，由 Cherry Studio 补全 OpenAI 请求路径。"],
