@@ -442,6 +442,7 @@ struct DashboardAccount {
     cooldown_free_until: Option<String>,
     last_error: Option<String>,
     auth_error: Option<String>,
+    notes: String,
     created_at: String,
     updated_at: String,
 }
@@ -485,6 +486,7 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
         cooldown_free_until: account.cooldown_free_until.map(|t| t.to_rfc3339()),
         last_error: sanitize_persisted_error(account.last_error),
         auth_error: sanitize_persisted_error(account.auth_error),
+        notes: account.notes.unwrap_or_default(),
         created_at: account.created_at.to_rfc3339(),
         updated_at: account.updated_at.to_rfc3339(),
     }
@@ -818,6 +820,11 @@ async fn create_account(
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
         _ => String::new(),
     };
+    let notes = match input.notes.as_deref() {
+        Some(value) => normalize_account_notes(value)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?,
+        None => None,
+    };
     let now = Utc::now();
     let id = uuid::Uuid::new_v4().to_string();
     let account = Account {
@@ -842,6 +849,7 @@ async fn create_account(
         cooldown_free_until: None,
         last_error: None,
         auth_error: None,
+        notes,
         created_at: now,
         updated_at: now,
     };
@@ -866,6 +874,8 @@ struct ManagedAccountInput {
     name: String,
     #[serde(default)]
     username: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
 }
 
 async fn create_managed_account(
@@ -885,6 +895,11 @@ async fn create_managed_account(
     if name.chars().count() > 200 {
         return Err(ApiError::bad_request("name must be at most 200 characters"));
     }
+    let notes = match input.notes.as_deref() {
+        Some(value) => normalize_account_notes(value)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?,
+        None => None,
+    };
 
     let now = Utc::now();
     let id = uuid::Uuid::new_v4().to_string();
@@ -908,6 +923,7 @@ async fn create_managed_account(
         cooldown_free_until: None,
         last_error: None,
         auth_error: None,
+        notes,
         created_at: now,
         updated_at: now,
     };
@@ -1271,6 +1287,13 @@ async fn update_account(
                 .map_err(|error| ApiError::bad_request(error.to_string()))?,
         );
     }
+    if let Some(value) = update.notes.take() {
+        update.notes = Some(
+            normalize_account_notes(&value)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?
+                .unwrap_or_default(),
+        );
+    }
     let key_cipher = match update.key.as_deref().map(str::trim) {
         Some("") | None => None,
         Some(key) => Some(state.encrypt_key(key).map_err(ApiError::internal)?),
@@ -1406,6 +1429,7 @@ async fn toggle_account(
         enabled: Some(next_enabled),
         referral_code: None,
         purchase_date: None,
+        notes: None,
     };
     {
         let db = state.db.lock();
@@ -1744,7 +1768,7 @@ async fn read_managed_key_verification_response(
 
 fn account_ping_payload() -> serde_json::Value {
     serde_json::json!({
-        "model": "deepseek-v4-flash",
+        "model": crate::models::DEFAULT_ACCOUNT_TEST_MODEL,
         "messages": [{ "role": "user", "content": "ping" }],
         "max_tokens": 1,
         "stream": false
@@ -2973,12 +2997,12 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 mod tests {
     use super::{
         AccountOrderInput, AccountSetupUpdate, AccountUsageUpdate, BrowserTarget, ForwardLogQuery,
-        MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
-        OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
-        ProxyTestRequest, SemverVersion, SettingsUpdateRequest, VerifyManagedKeyInput,
-        advance_account_setup, apply_pricing_refresh, asset_path, create_account,
-        create_managed_account, dashboard_account, dashboard_summary, format_error_chain,
-        is_update_available, open_account_browser, parse_semver_version,
+        MAX_ACCOUNT_NOTES_CHARS, MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES,
+        MAX_PRICING_MULTIPLIER, ManagedAccountInput, OpenBrowserInput, PricingMultiplierInput,
+        PricingMultiplierUpdate, PricingRefreshPolicy, ProxyTestRequest, SemverVersion,
+        SettingsUpdateRequest, VerifyManagedKeyInput, advance_account_setup, apply_pricing_refresh,
+        asset_path, create_account, create_managed_account, dashboard_account, dashboard_summary,
+        format_error_chain, is_update_available, open_account_browser, parse_semver_version,
         pricing_multiplier_changes, pricing_semantically_equal,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
         reorder_accounts, test_proxy, update_account, update_account_usage,
@@ -3072,6 +3096,7 @@ mod tests {
             cooldown_free_until: None,
             last_error: None,
             auth_error: None,
+            notes: None,
             created_at: now,
             updated_at: now,
         }
@@ -3618,6 +3643,7 @@ mod tests {
             cooldown_free_until: None,
             last_error: Some(format!("legacy rate limit echoed {OPAQUE_KEY}")),
             auth_error: Some(format!("legacy auth failure echoed {OPAQUE_KEY}")),
+            notes: Some("keep this secret-free".into()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -3673,6 +3699,7 @@ mod tests {
                 key: "sk-test".into(),
                 referral_code: None,
                 purchase_date: None,
+                notes: None,
             }),
         )
         .await
@@ -3703,6 +3730,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_notes_accept_empty_and_reject_overlong() {
+        let dir = temp_data_dir("account-notes");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let state = Arc::new(
+            CoreStateInner::new(db, dir.clone(), cipher).expect("test state should initialize"),
+        );
+
+        let created = create_account(
+            State(state.clone()),
+            Json(AccountInput {
+                name: "noted".into(),
+                username: None,
+                password: None,
+                key: "sk-test".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: Some("  first note  ".into()),
+            }),
+        )
+        .await
+        .expect("account should be created")
+        .0;
+        assert_eq!(created.notes, "first note");
+
+        let cleared = update_account(
+            State(state.clone()),
+            AxumPath(created.id.clone()),
+            Json(AccountUpdate {
+                notes: Some("   ".into()),
+                ..AccountUpdate::default()
+            }),
+        )
+        .await
+        .expect("empty notes should clear")
+        .0;
+        assert!(cleared.notes.is_empty());
+
+        let overlong = "n".repeat(MAX_ACCOUNT_NOTES_CHARS + 1);
+        let error = update_account(
+            State(state.clone()),
+            AxumPath(created.id.clone()),
+            Json(AccountUpdate {
+                notes: Some(overlong),
+                ..AccountUpdate::default()
+            }),
+        )
+        .await
+        .expect_err("overlong notes should fail");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test directory should be removable");
+    }
+
+    #[tokio::test]
     async fn managed_draft_requires_invite_and_resumes_in_strict_order() {
         let dir = temp_data_dir("managed-draft");
         let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
@@ -3720,6 +3803,7 @@ mod tests {
             Json(ManagedAccountInput {
                 name: "pending".into(),
                 username: None,
+                notes: None,
             }),
         )
         .await
@@ -3734,6 +3818,7 @@ mod tests {
             Json(ManagedAccountInput {
                 name: "  pending  ".into(),
                 username: Some("  user@example.test  ".into()),
+                notes: Some("  keep this note  ".into()),
             }),
         )
         .await
@@ -3742,6 +3827,7 @@ mod tests {
         assert_eq!(draft.account_type, AccountType::Managed);
         assert_eq!(draft.setup_step, AccountSetupStep::GoogleAccount);
         assert!(!draft.enabled);
+        assert_eq!(draft.notes, "keep this note");
 
         let skipped = advance_account_setup(
             State(state.clone()),
@@ -3948,6 +4034,7 @@ mod tests {
                 enabled: None,
                 referral_code: None,
                 purchase_date: Some("2026-02-30".into()),
+                notes: None,
             }),
         )
         .await
@@ -4061,6 +4148,7 @@ mod tests {
             cooldown_free_until: None,
             last_error: None,
             auth_error: None,
+            notes: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })

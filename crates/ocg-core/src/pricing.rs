@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::Utc;
+use chrono::{DateTime, Timelike, Utc};
 use futures_util::StreamExt;
 use reqwest::redirect::{Attempt, Policy};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,17 @@ pub struct PricingAdjustment {
     pub applies_to: String,
 }
 
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingTimeWindow {
+    #[default]
+    Always,
+    OffPeak,
+    Peak,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PricingModel {
     pub model_id: String,
@@ -46,6 +57,9 @@ pub struct PricingModel {
     pub min_input_tokens: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_input_tokens: Option<i64>,
+    /// Official Peak / Off-Peak row. Missing in older snapshots means `always`.
+    #[serde(default)]
+    pub time_window: PricingTimeWindow,
     pub adjustments: Vec<PricingAdjustment>,
 }
 
@@ -102,6 +116,28 @@ impl PricingSnapshot {
         cache_creation: i64,
         service_tier: Option<&str>,
     ) -> PricingEstimate {
+        self.estimate_at(
+            model,
+            prompt,
+            completion,
+            cached,
+            cache_creation,
+            service_tier,
+            Utc::now(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_at(
+        &self,
+        model: &str,
+        prompt: i64,
+        completion: i64,
+        cached: i64,
+        cache_creation: i64,
+        service_tier: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> PricingEstimate {
         let prompt = prompt.max(0) as f64;
         let completion = completion.max(0) as f64;
         let cached = (cached.max(0) as f64).min(prompt);
@@ -115,7 +151,7 @@ impl PricingSnapshot {
             || normalized.contains("minimax-m2.5-highspeed");
         let lookup_name = normalized.replace("-highspeed", "");
 
-        let selected = self
+        let candidates = self
             .models
             .iter()
             .filter(|entry| lookup_name == entry.model_id)
@@ -127,7 +163,8 @@ impl PricingSnapshot {
                         .max_input_tokens
                         .is_none_or(|maximum| prompt as i64 <= maximum)
             })
-            .max_by_key(|entry| entry.model_id.len());
+            .collect::<Vec<_>>();
+        let selected = select_priced_model(&candidates, at);
         let Some(price) = selected else {
             return PricingEstimate::unpriced(&self.revision);
         };
@@ -305,34 +342,56 @@ pub fn embedded_seed() -> PricingSnapshot {
             Some(256_001),
             None,
         ),
-        seed_model(
+        seed_scheduled(
             "deepseek-v4-pro",
-            "DeepSeek V4 Pro",
-            0.435,
-            0.87,
-            0.003625,
+            "DeepSeek V4 Pro (Off-Peak)",
+            0.66,
+            1.98,
+            0.022,
             None,
             15.0,
+            PricingTimeWindow::OffPeak,
         ),
-        seed_model(
-            "deepseek-v4-flash",
-            "DeepSeek V4 Flash",
-            0.14,
-            0.28,
-            0.0028,
+        seed_scheduled(
+            "deepseek-v4-pro",
+            "DeepSeek V4 Pro (Peak)",
+            1.32,
+            3.96,
+            0.044,
             None,
-            60.0,
+            15.0,
+            PricingTimeWindow::Peak,
+        ),
+        seed_scheduled(
+            "deepseek-v4-flash",
+            "DeepSeek V4 Flash (Off-Peak)",
+            0.22,
+            0.66,
+            0.007,
+            None,
+            15.0,
+            PricingTimeWindow::OffPeak,
+        ),
+        seed_scheduled(
+            "deepseek-v4-flash",
+            "DeepSeek V4 Flash (Peak)",
+            0.44,
+            1.32,
+            0.014,
+            None,
+            15.0,
+            PricingTimeWindow::Peak,
         ),
         seed_model("hy3", "Hy3", 0.14, 0.58, 0.035, None, 60.0),
     ];
     apply_official_pricing_policy(&mut models, MONTHLY_LIMIT);
     sort_models(&mut models);
     PricingSnapshot {
-        revision: format!("seed-2026-08-14-{ADJUSTMENT_POLICY_VERSION}"),
+        revision: format!("seed-2026-08-16-{ADJUSTMENT_POLICY_VERSION}"),
         activated_at: Utc::now().to_rfc3339(),
-        document_updated_at: "2026-08-14T00:00:00.000Z".to_string(),
+        document_updated_at: "2026-08-16T00:00:00.000Z".to_string(),
         source_url: SOURCE_URL.to_string(),
-        content_hash: "embedded-opencode-go-2026-08-14".to_string(),
+        content_hash: "embedded-opencode-go-2026-08-16".to_string(),
         limits: PricingLimits {
             window_5h: 12.0,
             window_week: 30.0,
@@ -396,8 +455,25 @@ fn seed_model(
         quota_multiplier: MONTHLY_LIMIT / usage,
         min_input_tokens: None,
         max_input_tokens: None,
+        time_window: PricingTimeWindow::Always,
         adjustments: Vec::new(),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_scheduled(
+    id: &str,
+    name: &str,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: Option<f64>,
+    usage: f64,
+    time_window: PricingTimeWindow,
+) -> PricingModel {
+    let mut model = seed_model(id, name, input, output, cache_read, cache_write, usage);
+    model.time_window = time_window;
+    model
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -560,7 +636,8 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
             .cloned()
             .ok_or_else(|| anyhow!("no official model ID found for {display_name}"))?;
         let (minimum, maximum) = parse_token_tier(&display_name)?;
-        if !seen_tiers.insert((id.clone(), minimum, maximum)) {
+        let time_window = parse_time_window(&display_name);
+        if !seen_tiers.insert((id.clone(), minimum, maximum, time_window)) {
             bail!("OpenCode Go pricing table contains duplicate row for {display_name}");
         }
         let input = parse_dollar(&row[1], false)?
@@ -586,6 +663,7 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
             quota_multiplier: limits.window_month / usage,
             min_input_tokens: minimum,
             max_input_tokens: maximum,
+            time_window,
             adjustments: Vec::new(),
         });
     }
@@ -617,6 +695,7 @@ pub fn parse_official_html(html: &str) -> Result<PricingSnapshot> {
     if covered.contains("gpt-5.6-luna") {
         validate_token_tiers(&models, "gpt-5.6-luna", 272_000)?;
     }
+    validate_time_windows(&models)?;
 
     let document_updated_at = parse_document_updated_at(html)?;
     let content_hash = format!("{:x}", Sha256::digest(html.as_bytes()));
@@ -722,7 +801,85 @@ fn sort_models(models: &mut [PricingModel]) {
         left.model_id
             .cmp(&right.model_id)
             .then(left.min_input_tokens.cmp(&right.min_input_tokens))
+            .then(left.time_window.cmp(&right.time_window))
     });
+}
+
+fn select_priced_model<'a>(
+    candidates: &[&'a PricingModel],
+    at: DateTime<Utc>,
+) -> Option<&'a PricingModel> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let scheduled = candidates
+        .iter()
+        .any(|entry| entry.time_window != PricingTimeWindow::Always);
+    if scheduled {
+        let prefer = if is_official_peak_utc(at) {
+            PricingTimeWindow::Peak
+        } else {
+            PricingTimeWindow::OffPeak
+        };
+        return candidates
+            .iter()
+            .copied()
+            .find(|entry| entry.time_window == prefer)
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .copied()
+                    .find(|entry| entry.time_window == PricingTimeWindow::Peak)
+            })
+            .or_else(|| candidates.first().copied());
+    }
+    candidates
+        .iter()
+        .copied()
+        .max_by_key(|entry| entry.model_id.len())
+}
+
+fn is_official_peak_utc(at: DateTime<Utc>) -> bool {
+    // Official Go docs: DeepSeek Peak hours are 01:00-04:00 and 06:00-10:00 UTC.
+    let minutes = at.hour() * 60 + at.minute();
+    (60..240).contains(&minutes) || (360..600).contains(&minutes)
+}
+
+fn parse_time_window(name: &str) -> PricingTimeWindow {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("off-peak") || lower.contains("off peak") || lower.contains("offpeak") {
+        return PricingTimeWindow::OffPeak;
+    }
+    if lower.contains("peak") {
+        return PricingTimeWindow::Peak;
+    }
+    PricingTimeWindow::Always
+}
+
+fn validate_time_windows(models: &[PricingModel]) -> Result<()> {
+    let mut windows_by_id: HashMap<String, HashSet<PricingTimeWindow>> = HashMap::new();
+    for model in models {
+        windows_by_id
+            .entry(model.model_id.clone())
+            .or_default()
+            .insert(model.time_window);
+    }
+    for (id, windows) in windows_by_id {
+        let scheduled = windows.contains(&PricingTimeWindow::Peak)
+            || windows.contains(&PricingTimeWindow::OffPeak);
+        if !scheduled {
+            continue;
+        }
+        if windows.contains(&PricingTimeWindow::Always) {
+            bail!("OpenCode Go {id} mixes scheduled and unscheduled pricing rows");
+        }
+        if !windows.contains(&PricingTimeWindow::Peak)
+            || !windows.contains(&PricingTimeWindow::OffPeak)
+        {
+            bail!("OpenCode Go {id} must contain both Peak and Off-Peak pricing rows");
+        }
+    }
+    Ok(())
 }
 
 pub fn normalize_model_name(name: &str) -> String {
@@ -948,6 +1105,7 @@ mod tests {
         embedded_seed, ensure_current_adjustment_policy, fetch_official_snapshot,
         legacy_policy_needs_multiplier_repair, parse_official_html,
     };
+    use chrono::{DateTime, Utc};
 
     #[test]
     fn seed_uses_go_usage_as_quota_multiplier() {
@@ -970,7 +1128,7 @@ mod tests {
     fn pro_usage_allowance_is_applied_after_the_official_table_rates() {
         let snapshot = embedded_seed();
         for (model_id, prompt, cached, completion, official_monthly_requests) in [
-            ("deepseek-v4-pro", 82_750, 82_000, 290, 17_150.0),
+            ("deepseek-v4-pro", 82_750, 82_000, 290, 5_200.0),
             ("mimo-v2.5-pro", 86_790, 86_000, 305, 16_300.0),
         ] {
             let model = snapshot
@@ -981,7 +1139,17 @@ mod tests {
             assert_eq!(model.usage, 15.0);
             assert_eq!(model.quota_multiplier, 4.0);
 
-            let estimate = snapshot.estimate(model_id, prompt, completion, cached, 0, None);
+            let estimate = snapshot.estimate_at(
+                model_id,
+                prompt,
+                completion,
+                cached,
+                0,
+                None,
+                DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            );
             let estimated_monthly_requests = snapshot.limits.window_month / estimate.cost.unwrap();
             assert!(
                 (estimated_monthly_requests / official_monthly_requests - 1.0).abs() < 0.01,
@@ -1144,14 +1312,19 @@ mod tests {
         assert_eq!(snapshot.limits.window_5h, 12.0);
         assert_eq!(snapshot.limits.window_week, 30.0);
         assert_eq!(snapshot.limits.window_month, 60.0);
-        assert_eq!(snapshot.models.len(), 21);
+        assert_eq!(snapshot.models.len(), 25);
         assert!(
             snapshot
                 .models
                 .iter()
                 .any(|entry| entry.model_id == "kimi-k3" && entry.quota_multiplier == 4.0)
         );
-        for model_id in ["deepseek-v4-pro", "mimo-v2.5-pro", "gpt-5.6-luna"] {
+        for model_id in [
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "mimo-v2.5-pro",
+            "gpt-5.6-luna",
+        ] {
             let model = snapshot
                 .models
                 .iter()
@@ -1159,6 +1332,14 @@ mod tests {
                 .unwrap();
             assert_eq!(model.quota_multiplier, 4.0);
         }
+        assert_eq!(
+            snapshot
+                .models
+                .iter()
+                .filter(|entry| entry.model_id == "deepseek-v4-flash")
+                .count(),
+            2
+        );
         assert!(
             snapshot
                 .models
@@ -1171,6 +1352,41 @@ mod tests {
             .filter(|entry| entry.model_id == "gpt-5.6-luna")
             .count();
         assert_eq!(luna_tiers, 2);
+    }
+
+    #[test]
+    fn deepseek_uses_utc_peak_and_off_peak_rows() {
+        let snapshot = embedded_seed();
+        let off_peak = DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let peak = DateTime::parse_from_rfc3339("2026-08-16T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let off = snapshot
+            .estimate_at("deepseek-v4-flash", 1_000_000, 0, 0, 0, None, off_peak)
+            .cost
+            .unwrap();
+        let on = snapshot
+            .estimate_at("deepseek-v4-flash", 1_000_000, 0, 0, 0, None, peak)
+            .cost
+            .unwrap();
+        assert!((off - 0.88).abs() < 1e-12);
+        assert!((on - 1.76).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rejects_incomplete_peak_off_peak_pair() {
+        let fixture = include_str!("../tests/fixtures/opencode-go.html").replace(
+            "<tr><td>DeepSeek V4 Flash (Peak)</td><td>$0.44</td><td>$1.32</td><td>$0.014</td><td>-</td><td>$15</td></tr>",
+            "",
+        );
+        assert!(
+            parse_official_html(&fixture)
+                .unwrap_err()
+                .to_string()
+                .contains("must contain both Peak and Off-Peak")
+        );
     }
 
     #[test]

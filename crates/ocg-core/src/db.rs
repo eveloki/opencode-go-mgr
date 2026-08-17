@@ -784,27 +784,36 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (17);")?;
         }
 
-        // v18: client gateway key attribution on forward logs. Nullable columns
+        // v18 (upstream v1.6.3): optional account notes.
+        if version < 18 {
+            ensure_column(&tx, "accounts", "notes", "TEXT")?;
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (18);")?;
+        }
+
+        // v19: client gateway key attribution on forward logs. Nullable columns
         // keep old binaries (which select explicit column names) downgrade-safe;
         // historical NULL rows mean "unattributed" until the startup backfill
         // attributes them to the fixed primary key id (PRIMARY_KEY_ID).
-        if version < 18 {
+        // (Numbered after upstream's v18; never released under this number
+        // before, and every statement is idempotent so development databases
+        // that ran the earlier draft numbering still converge.)
+        if version < 19 {
             ensure_column(&tx, "forward_logs", "client_key_id", "TEXT")?;
             ensure_column(&tx, "forward_logs", "client_key_name", "TEXT")?;
             tx.execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_forward_logs_client_key
                     ON forward_logs(client_key_id);
-                 INSERT OR REPLACE INTO schema_version (version) VALUES (18);",
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (19);",
             )?;
         }
 
-        // v19: sub gateway keys live in their own table, owned exclusively by
+        // v20: sub gateway keys live in their own table, owned exclusively by
         // the key lifecycle API. Old single-key binaries never read or rewrite
         // it, so sub keys survive downgrade round trips unchanged. The partial
         // unique index only backstops uniqueness among non-deleted sub keys;
         // the primary key lives in the legacy config scalar and cross-tier
         // collision checks are enforced at the API layer.
-        if version < 19 {
+        if version < 20 {
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS sub_gateway_keys (
                     id TEXT PRIMARY KEY,
@@ -816,7 +825,7 @@ impl Database {
                 );
                  CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_gateway_keys_key
                     ON sub_gateway_keys(key) WHERE deleted_at IS NULL AND key <> '';
-                 INSERT OR REPLACE INTO schema_version (version) VALUES (19);",
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (20);",
             )?;
         }
 
@@ -898,8 +907,8 @@ impl Database {
             normalize_purchase_date(&account.purchase_date)?
         };
         self.conn.execute(
-            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 account.id,
                 account.name,
@@ -919,6 +928,7 @@ impl Database {
                 account.auth_error,
                 account.account_type.as_str(),
                 account.setup_step.as_str(),
+                account.notes,
                 account.created_at.to_rfc3339(),
                 account.updated_at.to_rfc3339(),
             ],
@@ -953,6 +963,11 @@ impl Database {
             None => existing.purchase_date.clone(),
         };
         let purchase_date_changed = purchase_date != existing.purchase_date;
+        let notes = match &update.notes {
+            Some(s) if s.is_empty() => None,
+            Some(s) => Some(s.clone()),
+            None => existing.notes.clone(),
+        };
         let key = key_cipher.unwrap_or(&existing.key_cipher);
         let password = match password_cipher {
             Some("") => None,
@@ -961,10 +976,10 @@ impl Database {
         };
 
         self.conn.execute(
-            "UPDATE accounts SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4, enabled = ?5, referral_code = ?6, recharge_date = ?7,
-             usage_month_window_cost_offset = CASE WHEN ?8 THEN 0 ELSE usage_month_window_cost_offset END,
-             auth_error = CASE WHEN ?9 THEN NULL ELSE auth_error END,
-             updated_at = ?10 WHERE id = ?11",
+            "UPDATE accounts SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4, enabled = ?5, referral_code = ?6, recharge_date = ?7, notes = ?8,
+             usage_month_window_cost_offset = CASE WHEN ?9 THEN 0 ELSE usage_month_window_cost_offset END,
+             auth_error = CASE WHEN ?10 THEN NULL ELSE auth_error END,
+             updated_at = ?11 WHERE id = ?12",
             params![
                 name,
                 username,
@@ -973,6 +988,7 @@ impl Database {
                 enabled as i32,
                 referral_code,
                 purchase_date,
+                notes,
                 purchase_date_changed,
                 key_cipher.is_some(),
                 Utc::now().to_rfc3339(),
@@ -991,7 +1007,7 @@ impl Database {
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step FROM accounts WHERE id = ?1"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes FROM accounts WHERE id = ?1"
         )?;
         let account = stmt.query_row([id], account_from_row).optional()?;
         Ok(account)
@@ -999,7 +1015,7 @@ impl Database {
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
         )?;
         let rows = stmt.query_map([], account_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
@@ -2556,7 +2572,7 @@ fn sub_gateway_key_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubGate
 
 fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     // SELECT order: id,name,username,password,key,enabled,referral,recharge,
-    // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup
+    // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup,notes
     let created_at = row.get::<_, String>(15)?;
     let purchase_date = match row.get::<_, Option<String>>(7)? {
         Some(value) if normalize_purchase_date(&value).is_ok() => value,
@@ -2607,6 +2623,7 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         cooldown_free_until: row.get::<_, Option<String>>(13)?.map(parse_datetime),
         last_error: row.get(14)?,
         auth_error: row.get(17)?,
+        notes: row.get(20)?,
         created_at: parse_datetime(created_at),
         updated_at: parse_datetime(row.get::<_, String>(16)?),
     })
@@ -2671,6 +2688,7 @@ mod tests {
             cooldown_free_until: None,
             last_error: None,
             auth_error: None,
+            notes: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -2757,8 +2775,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 19);
-
+        assert_eq!(version, 20);
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
@@ -2985,7 +3002,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 19, "{label}");
+            assert_eq!(version, 20, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -3063,7 +3080,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -3212,7 +3229,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -3356,7 +3373,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -3405,8 +3422,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 19);
-
+        assert_eq!(version, 20);
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
             .with_timezone(&Utc);
@@ -3833,7 +3849,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -3887,7 +3903,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -3962,7 +3978,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
         assert!(auth_error.is_none());
 
         drop(db);
@@ -4397,6 +4413,7 @@ mod tests {
                 enabled: None,
                 referral_code: None,
                 purchase_date: Some(new_purchase_date),
+                notes: None,
             },
             None,
             None,
@@ -4452,6 +4469,7 @@ mod tests {
             enabled: None,
             referral_code: None,
             purchase_date: None,
+            notes: None,
         };
         db.update_account("auth-failed", &rename, None, None)
             .expect("non-key update should save");
@@ -4471,6 +4489,7 @@ mod tests {
             enabled: None,
             referral_code: None,
             purchase_date: None,
+            notes: None,
         };
         db.update_account("auth-failed", &no_fields, Some("replacement-cipher"), None)
             .expect("key replacement should save");
@@ -4972,8 +4991,8 @@ mod tests {
     }
 
     #[test]
-    fn v18_migration_is_idempotent_and_crash_replay_safe() {
-        let dir = temp_data_dir("v18-idempotent");
+    fn v19_client_key_migration_is_idempotent_and_crash_replay_safe() {
+        let dir = temp_data_dir("v19-idempotent");
         let db = Database::open(dir.clone()).unwrap();
         let probe_columns = |conn: &Connection| {
             let mut stmt = conn.prepare("PRAGMA table_info(forward_logs)").unwrap();
@@ -4990,7 +5009,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 19);
+
         let index_exists: i64 = db
             .conn
             .query_row(
@@ -5012,15 +5031,15 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn v19_creates_the_sub_gateway_keys_table_idempotently() {
-        let dir = temp_data_dir("v19-idempotent");
+    fn v20_creates_the_sub_gateway_keys_table_idempotently() {
+        let dir = temp_data_dir("v20-idempotent");
         let db = Database::open(dir.clone()).unwrap();
 
         let probe = |conn: &Connection| {
@@ -5049,7 +5068,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
 
         // Replaying the migration converges to the same shape.
         db.migrate().unwrap();

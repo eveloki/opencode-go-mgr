@@ -4,6 +4,12 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Default model for dashboard account ping and CLI `ping`.
+pub const DEFAULT_ACCOUNT_TEST_MODEL: &str = "mimo-v2.5";
+
+/// Maximum persisted freeform account note length, counted in Unicode scalars.
+pub const MAX_ACCOUNT_NOTES_CHARS: usize = 4000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
@@ -40,6 +46,9 @@ pub struct Account {
     /// until their key is replaced or a direct ping proves the key works again.
     #[serde(default)]
     pub auth_error: Option<String>,
+    /// Optional freeform note. Empty or omitted is valid.
+    #[serde(default)]
+    pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -205,9 +214,11 @@ pub struct AccountInput {
     pub referral_code: Option<String>,
     #[serde(alias = "recharge_date")]
     pub purchase_date: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AccountUpdate {
     pub name: Option<String>,
     pub username: Option<String>,
@@ -217,6 +228,8 @@ pub struct AccountUpdate {
     pub referral_code: Option<String>,
     #[serde(alias = "recharge_date")]
     pub purchase_date: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +238,33 @@ pub struct PurchaseDateError;
 impl fmt::Display for PurchaseDateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("purchase date must use the YYYY-MM-DD format")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountNotesError;
+
+impl fmt::Display for AccountNotesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "notes must be at most {MAX_ACCOUNT_NOTES_CHARS} characters"
+        )
+    }
+}
+
+impl std::error::Error for AccountNotesError {}
+
+/// Trims a freeform account note. Empty input becomes `None`; overlong input is rejected.
+pub fn normalize_account_notes(value: &str) -> Result<Option<String>, AccountNotesError> {
+    let trimmed = value.trim();
+    if trimmed.chars().count() > MAX_ACCOUNT_NOTES_CHARS {
+        return Err(AccountNotesError);
+    }
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
     }
 }
 
@@ -829,8 +869,9 @@ mod tests {
     use super::{
         AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
         CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL,
-        FreeModelRouting, ProxyMode, RoutingMode, normalize_opencode_invite_url,
-        normalize_proxy_url, normalize_purchase_date, purchase_expires_on,
+        FreeModelRouting, MAX_ACCOUNT_NOTES_CHARS, ProxyMode, RoutingMode, normalize_account_notes,
+        normalize_opencode_invite_url, normalize_proxy_url, normalize_purchase_date,
+        purchase_expires_on,
     };
 
     #[test]
@@ -871,6 +912,23 @@ mod tests {
         };
         assert!(unknown.validate().is_err());
         assert!(ClaudeDesktopModels::default().validate().is_ok());
+    }
+
+    #[test]
+    fn account_notes_trim_empty_and_reject_overlong() {
+        assert_eq!(normalize_account_notes("").unwrap(), None);
+        assert_eq!(normalize_account_notes("   ").unwrap(), None);
+        assert_eq!(
+            normalize_account_notes("  keep this  ").unwrap().as_deref(),
+            Some("keep this")
+        );
+        let overlong = "n".repeat(MAX_ACCOUNT_NOTES_CHARS + 1);
+        assert!(normalize_account_notes(&overlong).is_err());
+        let max = "你".repeat(MAX_ACCOUNT_NOTES_CHARS);
+        assert_eq!(
+            normalize_account_notes(&max).unwrap().as_deref(),
+            Some(max.as_str())
+        );
     }
 
     #[test]

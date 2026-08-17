@@ -874,6 +874,7 @@ mod tests {
             cooldown_free_until: None,
             last_error: None,
             auth_error: None,
+            notes: None,
             created_at: now,
             updated_at: now,
         };

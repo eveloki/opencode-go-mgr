@@ -337,7 +337,7 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 | --- | ---: | ---: | --- | --- | :---: | --- |
 | `grok-4.5` | 500K | 500K | 文本、图像 | 始终 | ✓ | low / medium / high（默认 high） |
 | `gpt-5.6-luna` | 1.05M | 128K | 文本、图像 | ✓ | ✓ | low / medium / high / max（默认 medium） |
-| `glm-5.3` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
+| `glm-5.3` | 1M | 128K | 文本 | ✓ | ✓ | low / high / max（默认 max） |
 | `glm-5.2` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
 | `glm-5.1` | 198K | 32K | 文本 | ✓ | ✓ | — |
 | `kimi-k3` | 1M | 128K | 文本、图像、视频 | 始终 | ✓ | max |
@@ -359,7 +359,8 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 | `hy3` | 256K | 64K | 文本 | ✓ | ✓ | low / high（默认 high） |
 
 显示取整：198K = 202,752；200K = 204,800；256K = 262,144；1M = 1,000,000 或
-1,048,576。`glm-5.3` 暂用 GLM-5.2 家族限额，等 models.dev 单独公布后再改。
+1,048,576。`glm-5.3` 的限额与 token 单价已按 models.dev `opencode-go/glm-5.3`
+独立行对齐（$1.40 / $4.40 / $0.26，与官方 Go 表一致；Usage 仍为 $15）。
 
 Claude Desktop 是例外，它的模型映射是持久化的：复制配置前，选中的 `sonnet`、
 `opus`、`haiku` 目标模型会通过受保护的面板 API 保存到 SQLite。留空的角色回退
@@ -414,7 +415,8 @@ Key，只退出控制台登录；注册中的托管账号还会回到登录身�
 Manager 恢复，只能从备份恢复或重新登录。
 
 每张已完成账号卡显示账号名、冷却状态，以及由本地估算驱动的 5 小时、本周、本月
-用量条。
+用量条。每张账号卡还有一个可选的大备注框，可留空，不参与路由、不计入额度，失焦
+时保存。
 
 - **用量校准（Key 账号）**：每个窗口都可以输入百分比或拖动进度条，将其保存为
   当前实际用量基线；保存后，OCG Manager 记录的成功请求成本会继续累加到该基线
@@ -425,9 +427,9 @@ Manager 恢复，只能从备份恢复或重新登录。
   会话或解析失败，不会静默改写额度。
   Linux Docker Sidecar 使用 Chromium 的 basic 密码存储，因此 Profile 不依赖宿主
   机密钥环；桌面 Profile 仍使用浏览器自身配置的凭据存储。
-- **标识与凭据**：名称是必填的主要展示标识。备注/登录账号可选；新增 Key 账号时
-  如果先填写账号，它会自动同步为名称，手动修改名称后不再跟随。面板保存账号
-  Key，但不收集或维护第三方登录密码。
+- **标识与凭据**：名称是必填的主要展示标识。登录账号可选；新增 Key 账号时如果
+  先填写账号，它会自动同步为名称，手动修改名称后不再跟随。另外有一个可选的大
+  备注框，内容由你自定。面板保存账号 Key，但不收集或维护第三方登录密码。
 - **购买日期**：新增账号默认使用浏览器当天，也可以在新增或展开编辑表单里修改。
   托管向导在确认支付进入 Key 验证时也会写入购买日期。到期日取下一个自然月同
   日；目标月份没有该日时取月末，例如 `2026-01-31` 的到期日是 `2026-02-28`。
@@ -443,7 +445,9 @@ Manager 恢复，只能从备份恢复或重新登录。
 
 **价格表** 视图显示当前 revision、文档更新时间、窗口额度、四类美元 token 单价、
 `Usage` 和用于额度结算的单一官方倍率。可组合价格以标准档作为完整根行；展开根行后，
-可查看 Qwen 的更高上下文档，以及 MiniMax 的长上下文、高速、优先服务和组合升级档。
+可查看 Qwen 的更高上下文档、DeepSeek 的 Peak 时段，以及 MiniMax 的长上下文、高速、
+优先服务和组合升级档。DeepSeek V4 Pro / Flash 在 UTC 01:00–04:00 与 06:00–10:00
+使用 Peak 单价，其余时间为 Off-Peak。
 
 官方倍率默认按“月额度 / Usage”推导，也可以按临时活动手动修改；修改会生成新的
 持久化 revision 并立即用于后续本地额度估算。只有用户点击刷新时才会访问
@@ -686,8 +690,8 @@ Go 快照。
 
 - 官方倍率默认按“月额度 / Usage”推导。用户可以为临时活动修改该倍率，新的请求
   会使用当前持久化值；价格刷新不会在未确认时覆盖它。
-- 当前 `deepseek-v4-pro`（DS V4 Pro）、`mimo-v2.5-pro` 和 Grok 的 `$15` Usage
-  对应 `60 / 15 = 4×` 官方倍率。
+- 当前 `deepseek-v4-pro`（DS V4 Pro）、`deepseek-v4-flash`、`mimo-v2.5-pro` 和
+  Grok 的 `$15` Usage 对应 `60 / 15 = 4×` 官方倍率。
 - 最后再叠加适用的本地 MiniMax 调整。计算不使用供应商 API 实际价格、人民币或
   汇率。
 
@@ -766,7 +770,7 @@ ocg-manager-cli
 ├── key enable <id>      启用账号
 ├── key disable <id>     禁用账号
 ├── key ping [id]
-│   --model       测试模型（默认 deepseek-v4-flash）
+│   --model       测试模型（默认 mimo-v2.5）
 │   --message     用户消息（默认 "ping"）
 │   --max-tokens  ping 的 max_tokens（默认 3）
 └── status        显示数据目录、端口、Key、上游、账号总数
@@ -796,7 +800,7 @@ GHCR 上的公开无头镜像无需登录即可拉取。它是 Linux 容器，�
 与 `.env.example` 的仓库目录中运行（建议检出对应 Release tag）：
 
 ```bash
-git clone --branch v1.6.1 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.6.3 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell：Copy-Item .env.example .env
@@ -812,7 +816,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`；Release 中的 `compose.example.yaml`
   默认固定对应的完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:1.6.1`。
+  `ghcr.io/klarkxy/opencode-go-mgr:1.6.3`。
 - 完整版本与 `sha-<commit>` 标签用于标识单次发布，按发布策略不应移动；`1.5`
   与 `latest` 会继续移动。技术上只有
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` digest 真正不可变。
@@ -933,13 +937,13 @@ curl --fail http://127.0.0.1:9042/dashboard/
 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.6.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.6.3
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.3
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.6.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.6.3 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.3 \
   --repo klarkxy/opencode-go-mgr
 ```
 

@@ -230,19 +230,19 @@ export const APPLICATION_MODEL_METADATA: Readonly<Record<string, ApplicationMode
     defaultEffort: "medium",
   },
   "glm-5.3": {
-    // Official Go list 2026-08-14. Context/output not independently published;
-    // keep GLM-5.2 family limits until a dedicated models.dev row exists.
+    // models.dev opencode-go/glm-5.3 (2026-08-17): context 1_000_000, output 131_072;
+    // cost $1.40 / $4.40 / $0.26 matches the official Go table; efforts low/high/max.
     contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
     input: ["text"],
     reasoning: true,
     toolUse: true,
-    efforts: ["high", "max"],
+    efforts: ["low", "high", "max"],
     defaultEffort: "max",
     piThinkingLevelMap: {
       off: null,
       minimal: null,
-      low: null,
+      low: "low",
       medium: null,
       high: "high",
       xhigh: null,

@@ -365,6 +365,29 @@
               :editing="!!usageEdits[account.id]"
             />
           </div>
+          <div class="account-notes">
+            <n-input
+              :value="notesDraft(account.id)"
+              type="textarea"
+              :autosize="{ minRows: 3, maxRows: 8 }"
+              :maxlength="4000"
+              show-count
+              :placeholder="t('可填写任意备注')"
+              :disabled="!!notesSaving[account.id]"
+              :status="notesErrors[account.id] ? 'error' : undefined"
+              :input-props="{ 'aria-label': t('账号 {name} 的备注', { name: account.name }) }"
+              @update:value="updateNotesDraft(account.id, $event)"
+              @focus="notesFocusedId = account.id"
+              @blur="saveNotes(account.id)"
+            />
+            <span
+              v-if="notesErrors[account.id]"
+              class="notes-save-error"
+              role="alert"
+            >
+              {{ t("备注保存失败: {error}", { error: notesErrors[account.id] || "" }) }}
+            </span>
+          </div>
         </n-card>
       </div>
 
@@ -409,12 +432,24 @@
             :input-props="{ 'aria-label': t('名称') }"
           />
         </n-form-item>
-        <n-form-item :label="t('备注（可选）')">
+        <n-form-item :label="t('邮箱备注（可选）')">
           <n-input
             v-model:value="managedDraft.username"
             :disabled="busy"
             :placeholder="t('仅作备注')"
-            :input-props="{ 'aria-label': t('备注（可选）') }"
+            :input-props="{ 'aria-label': t('邮箱备注（可选）') }"
+          />
+        </n-form-item>
+        <n-form-item :label="t('备注')">
+          <n-input
+            v-model:value="managedDraft.notes"
+            type="textarea"
+            :autosize="{ minRows: 4, maxRows: 10 }"
+            :maxlength="4000"
+            show-count
+            :disabled="busy"
+            :placeholder="t('可填写任意备注')"
+            :input-props="{ 'aria-label': t('备注') }"
           />
         </n-form-item>
         <n-form-item
@@ -589,6 +624,10 @@ const usageLoading = ref<Record<string, boolean>>({});
 const usageLoadErrors = ref<Record<string, string | null>>({});
 const usageRefreshLoading = ref<Record<string, boolean>>({});
 const pinging = ref<Record<string, boolean>>({});
+const notesDrafts = ref<Record<string, string>>({});
+const notesSaving = ref<Record<string, boolean>>({});
+const notesErrors = ref<Record<string, string | null>>({});
+const notesFocusedId = ref<string | null>(null);
 const showModal = ref(false);
 const showAddModal = ref(false);
 const showManagedCreate = ref(false);
@@ -598,6 +637,7 @@ const managedWizardAccountId = ref<string | null>(null);
 const managedDraft = ref({
   name: "",
   username: "",
+  notes: "",
   inviteUrl: "",
 });
 const opencodeInviteUrl = ref("");
@@ -1046,6 +1086,7 @@ function openManagedCreateModal(): void {
   managedDraft.value = {
     name: "",
     username: "",
+    notes: "",
     inviteUrl: opencodeInviteUrl.value || DEFAULT_OPENCODE_INVITE_URL,
   };
   showManagedCreate.value = true;
@@ -1118,9 +1159,11 @@ async function createManagedAccount(): Promise<void> {
   try {
     await ensureInviteUrlSaved(inviteUrl);
     const username = managedDraft.value.username.trim();
+    const notes = managedDraft.value.notes;
     const created = await tauriApi.createManagedAccount({
       name,
       ...(username ? { username } : {}),
+      notes,
     });
     addAccount(created);
     showManagedCreate.value = false;
@@ -1350,15 +1393,54 @@ async function handleOrderKeydown(event: KeyboardEvent, accountId: string): Prom
 
 function applyLoadedAccounts(loaded: Account[]): void {
   accounts.value = loaded;
+  for (const account of loaded) {
+    syncNotesDraft(account);
+  }
 }
 
 function replaceAccount(account: Account): void {
   accounts.value = accounts.value.map((item) => (item.id === account.id ? account : item));
   if (editingAccount.value?.id === account.id) editingAccount.value = account;
+  syncNotesDraft(account);
 }
 
 function addAccount(account: Account): void {
   accounts.value = [...accounts.value, account];
+  syncNotesDraft(account);
+}
+
+function notesDraft(accountId: string): string {
+  return notesDrafts.value[accountId] ?? "";
+}
+
+function syncNotesDraft(account: Account): void {
+  if (notesFocusedId.value === account.id) return;
+  notesDrafts.value[account.id] = account.notes ?? "";
+}
+
+function updateNotesDraft(accountId: string, value: string): void {
+  notesDrafts.value[accountId] = value;
+}
+
+async function saveNotes(accountId: string): Promise<void> {
+  notesFocusedId.value = null;
+  const account = accounts.value.find(({ id }) => id === accountId);
+  if (!account || notesSaving.value[accountId]) return;
+  const draft = notesDrafts.value[accountId] ?? "";
+  if (draft === (account.notes ?? "")) {
+    notesErrors.value[accountId] = null;
+    return;
+  }
+  notesSaving.value[accountId] = true;
+  notesErrors.value[accountId] = null;
+  try {
+    const saved = await tauriApi.updateAccount(accountId, { notes: draft });
+    replaceAccount(saved);
+  } catch (error) {
+    notesErrors.value[accountId] = errorDetail(error);
+  } finally {
+    notesSaving.value[accountId] = false;
+  }
 }
 
 function removeAccountState(id: string): void {
@@ -1368,6 +1450,10 @@ function removeAccountState(id: string): void {
   delete usageLoading.value[id];
   delete usageLoadErrors.value[id];
   delete pinging.value[id];
+  delete notesDrafts.value[id];
+  delete notesSaving.value[id];
+  delete notesErrors.value[id];
+  if (notesFocusedId.value === id) notesFocusedId.value = null;
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -1484,12 +1570,13 @@ async function loadAccountUsage(accountId: string) {
   }
 }
 
-async function onFormSave(payload: { name: string; username: string; key?: string; purchase_date?: string }) {
+async function onFormSave(payload: { name: string; username: string; key?: string; purchase_date?: string; notes: string }) {
   if (editingAccount.value) {
     const update: AccountUpdate = {
       name: payload.name,
       username: payload.username,
       purchase_date: payload.purchase_date,
+      notes: payload.notes,
     };
     if (payload.key !== undefined) update.key = payload.key;
     busy.value = true;
@@ -1513,6 +1600,7 @@ async function onFormSave(payload: { name: string; username: string; key?: strin
       username: payload.username,
       key: payload.key || "",
       purchase_date: payload.purchase_date,
+      notes: payload.notes,
     };
     busy.value = true;
     try {
@@ -1708,6 +1796,17 @@ onUnmounted(() => {
 
 .account-name-row :deep(.n-tag) {
   flex: 0 0 auto;
+}
+
+.account-notes {
+  margin-top: 12px;
+}
+
+.notes-save-error {
+  display: block;
+  margin-top: 6px;
+  color: var(--ocg-error);
+  font-size: var(--ocg-font-sm);
 }
 
 .managed-pending {

@@ -384,6 +384,7 @@ fn build_state_with_routing(
             cooldown_free_until: None,
             last_error: None,
             auth_error: None,
+            notes: None,
             created_at: now + chrono::Duration::seconds(idx as i64),
             updated_at: now + chrono::Duration::seconds(idx as i64),
         };
@@ -444,6 +445,7 @@ fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str, enabled: b
                 enabled: Some(enabled),
                 referral_code: None,
                 purchase_date: None,
+                notes: None,
             },
             None,
             None,
@@ -835,6 +837,7 @@ async fn application_models_skip_accounts_with_unusable_stored_credentials() {
                 enabled: None,
                 referral_code: None,
                 purchase_date: None,
+                notes: None,
             },
             Some("not-a-valid-ciphertext"),
             None,
@@ -1544,6 +1547,7 @@ async fn inference_skips_accounts_with_unusable_stored_credentials() {
                     enabled: None,
                     referral_code: None,
                     purchase_date: None,
+                    notes: None,
                 },
                 Some("!!!not-base64!!!"),
                 None,
@@ -2312,6 +2316,7 @@ async fn manual_order_drives_fallback_while_ineligible_accounts_are_skipped() {
                 enabled: Some(false),
                 referral_code: None,
                 purchase_date: None,
+                notes: None,
             },
             None,
             None,
@@ -2921,7 +2926,10 @@ async fn dashboard_ping_marks_quota_cooldown() {
     let calls = calls.lock().unwrap();
     assert_eq!(calls[0].key, "key-1");
     let payload: serde_json::Value = serde_json::from_str(&calls[0].body).unwrap();
-    assert_eq!(payload["model"], "deepseek-v4-flash");
+    assert_eq!(
+        payload["model"],
+        ocg_core::models::DEFAULT_ACCOUNT_TEST_MODEL
+    );
     assert_eq!(payload["messages"][0]["content"], "ping");
 
     gateway::stop_gateway(gateway_handle);
@@ -2971,6 +2979,7 @@ async fn delayed_dashboard_ping_429_does_not_cool_down_replaced_key() {
                 enabled: None,
                 referral_code: None,
                 purchase_date: None,
+                notes: None,
             },
             Some("replacement-cipher"),
             None,
