@@ -173,6 +173,7 @@ test("container publication checks out the release tag or an explicit source ref
   assert.match(workflow, /git show-ref --verify --quiet "\$expected_ref"/);
   assert.match(workflow, /tag_commit=\$\(git rev-parse "\$expected_ref\^\{commit\}"\)/);
   assert.match(workflow, /node scripts\/release\.mjs --check/);
+  assert.match(workflow, /docker-bake\.hcl/);
   assert.match(workflow, /file: \.\/Dockerfile\.browser/);
   assert.match(workflow, /Smoke-test browser container and real Chromium/);
   assert.match(workflow, /provenance: mode=max[\s\S]*?sbom: true/);

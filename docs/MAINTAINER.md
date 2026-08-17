@@ -44,6 +44,7 @@ ocg-manager/
 ├── AGENTS.md          Facts and constraints for AI coding assistants
 ├── DESIGN.md          Design system source of truth (linted in CI)
 ├── .github/workflows/ quality.yml, release.yml, container.yml
+├── docker-bake.hcl    Parallel container smoke targets used by container.yml
 ├── Dockerfile         Multi-stage headless gateway image
 ├── Dockerfile.browser Chromium/noVNC sidecar image
 ├── compose.yaml       Source-build and image Compose service definition
@@ -117,7 +118,9 @@ pnpm run build
   `scripts/release.mjs`, which builds the current supported native platform
   and atomically replaces `release/` only after every expected file passes
   validation. The previous `release/` is preserved on failure. Cargo's
-  incremental build cache is **not** erased.
+  incremental build cache is **not** erased. Release binaries use thin LTO
+  (`[profile.release]` in the workspace `Cargo.toml`) so native CI linking
+  stays bounded.
 
 ### Rust Checks
 
@@ -467,13 +470,22 @@ expensive native build.
 ### quality.yml — the reusable quality gate
 
 `.github/workflows/quality.yml` runs on pull requests and pushes to `main`,
-and `release.yml` calls it once for a release. The Ubuntu job performs
-formatting, locked Rust and Node tests, TypeScript checking, a Vite
-production bundle, Clippy, `DESIGN.md` lint, and Compose validation. A
-bounded Windows job compiles and runs the Tauri library tests so the
-Windows-only auto-start implementation is covered before release. Node/pnpm
-and Rust build caches are shared across compatible runs; pull requests
-restore but do not write the Rust cache.
+and `release.yml` calls it once for a release. The gate is three parallel
+jobs so frontend failures surface without waiting for Rust, and Windows
+does not rebuild the dashboard:
+
+- **Web** — Node tests, TypeScript checking, a Vite production bundle,
+  `DESIGN.md` lint, and Compose validation.
+- **Rust** — `cargo fmt`, locked workspace tests, and Clippy. WebKit
+  headers are installed only on this job so the Linux Tauri crate still
+  compiles.
+- **Windows Tauri** — `cargo test`/`clippy` for `ocg-manager` against a
+  stub `dist/index.html`, covering Windows-only auto-start without pnpm
+  or Vite.
+
+Node/pnpm and Rust build caches are shared across compatible runs; pull
+requests restore but do not write the Rust cache. Failed non-PR runs still
+write the Rust cache so a follow-up fix can reuse the compile.
 
 ### release.yml — candidates and tag releases
 
@@ -486,9 +498,9 @@ restore but do not write the Rust cache.
   matrix and supplies the repository signing secrets. For this
   single-maintainer repository, pushing that tag is the explicit publication
   authorization.
-- The quality job runs in parallel with a keyless Windows preflight that
-  parses the extracted installer smoke, runs the release-helper tests, and
-  validates all version manifests.
+- The quality job runs in parallel with a keyless Ubuntu preflight that
+  parses the extracted installer smoke under `pwsh`, runs the
+  release-helper tests, and validates all version manifests.
 
 After preflight, each selected native runner restores its platform Rust cache
 and installs dependencies. The workflow injects signing secrets only when its
@@ -620,8 +632,9 @@ clients cannot trust a release signed only by the replacement key.
 ### container.yml — the image pipeline
 
 Publishing the GitHub Release triggers `.github/workflows/container.yml`.
-It checks out the release tag and builds and smokes two `linux/amd64` images:
-the main `ghcr.io/klarkxy/opencode-go-mgr` service and the
+It checks out the release tag and, via `docker-bake.hcl`, builds both
+`linux/amd64` smoke images in parallel: the main
+`ghcr.io/klarkxy/opencode-go-mgr` service and the
 `ghcr.io/klarkxy/opencode-go-mgr-browser` sidecar. The main smoke covers the
 dashboard, authentication, and license. The browser smoke starts Xvfb/noVNC
 under a read-only root, zero capabilities, Chromium-compatible seccomp
@@ -703,11 +716,12 @@ Docker retain the direct/manual path.
 
 ### CI Coverage Boundaries
 
-Pull requests automatically receive the platform-neutral quality gate, plus
-the additional Windows job that covers compilation and unit tests for
-Windows-only Tauri behavior. Native installer/package smokes remain manual
-release candidates or tag runs. The container workflow covers `linux/amd64`
-only and runs after a release is published or manually dispatched.
+Pull requests automatically receive the three-job quality gate: frontend
+checks, Linux workspace Rust tests/Clippy (including the Tauri crate), and
+the Windows job that covers compilation and unit tests for Windows-only
+Tauri behavior. Native installer/package smokes remain manual release
+candidates or tag runs. The container workflow covers `linux/amd64` only
+and runs after a release is published or manually dispatched.
 
 CI does not drive real desktop UI interactions or launch real Claude Desktop
 or Gemini CLI clients, and it does not test container ARM64, backup/restore,
@@ -759,7 +773,7 @@ tag.
 Run these checks **before** publishing a `v*` tag. The CI smoke flow covers
 most of them; the manual parts need a real desktop.
 
-- [ ] Both Ubuntu and Windows jobs in the reusable quality gate are green;
+- [ ] All three jobs in the reusable quality gate are green;
       the tag-only signed `release:check` passed; every selected
       `pnpm run build` and platform smoke is green.
 - [ ] `git diff --check` is clean, the previous-tag diff contains only the

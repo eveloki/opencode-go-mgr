@@ -43,6 +43,7 @@ ocg-manager/
 ├── AGENTS.md          给 AI 编码助手的项目事实与约束
 ├── DESIGN.md          设计系统源（CI 中 lint）
 ├── .github/workflows/ quality.yml、release.yml、container.yml
+├── docker-bake.hcl    container.yml 用来并行构建冒烟镜像的 bake 目标
 ├── Dockerfile         多阶段无头 Gateway 镜像
 ├── Dockerfile.browser Chromium/noVNC Sidecar 镜像
 ├── compose.yaml       支持源码构建与镜像拉取的 Compose 服务定义
@@ -108,7 +109,9 @@ pnpm run build
   与代码保持一致。
 - `pnpm run build` **只用于发版验证**。它会跑 `scripts/release.mjs`，为当前
   支持的原生平台构建 GUI 与 CLI，并在每个产物都通过校验后原子替换
-  `release/`。失败时旧 `release/` 保留。Cargo 增量编译缓存不会被清空。
+  `release/`。失败时旧 `release/` 保留。Cargo 增量编译缓存不会被清空。发版
+  二进制使用 thin LTO（workspace `Cargo.toml` 的 `[profile.release]`），把
+  原生 CI 链接时间控制在可接受范围。
 
 ### Rust 检查
 
@@ -393,11 +396,19 @@ repository signing secret 签一个临时 payload，并用已通过连续性检�
 ### quality.yml —— 可复用质量门
 
 `.github/workflows/quality.yml` 在 PR 和 `main` push 上自动运行，`release.yml`
-发版时只调用一次。Ubuntu job 完成格式检查、锁定依赖的 Rust/Node 测试、
-TypeScript 检查、Vite 生产构建、Clippy、`DESIGN.md` lint 与 Compose 校验；另
-一个有界的 Windows job 会编译并执行 Tauri library 测试，使 Windows 专属自动启
-动实现也在发版前得到覆盖。兼容的运行共享 Node/pnpm 和 Rust 构建缓存；PR 只恢
-复 Rust 缓存，不写回。
+发版时只调用一次。质量门拆成三个并行 job，前端失败不必等 Rust，Windows 也不
+再重做 dashboard 构建：
+
+- **Web** —— Node 测试、TypeScript 检查、Vite 生产构建、`DESIGN.md` lint 与
+  Compose 校验。
+- **Rust** —— `cargo fmt`、锁定依赖的 workspace 测试与 Clippy。只有这个 job
+  安装 WebKit 头文件，以便 Linux 上仍编译 Tauri crate。
+- **Windows Tauri** —— 对 `ocg-manager` 跑 `cargo test`/`clippy`，用占位
+  `dist/index.html` 满足 tauri-build，覆盖 Windows 专属自动启动，不再装 pnpm
+  或跑 Vite。
+
+兼容的运行共享 Node/pnpm 和 Rust 构建缓存；PR 只恢复 Rust 缓存，不写回。非 PR
+失败时仍会写回 Rust 缓存，方便后续修复复用编译结果。
 
 ### release.yml —— 候选与 tag 发布
 
@@ -407,8 +418,8 @@ TypeScript 检查、Vite 生产构建、Clippy、`DESIGN.md` lint 与 Compose �
   未签名冒烟产物；即使手动运行选择 tag 作为 ref，也不会获得生产签名权限。
 - 只有 `v*` tag 的 `push` 事件才会强制走完整三平台矩阵并注入 repository signing
   secrets。对这个单维护者仓库，推送该 tag 就是明确的公开发布授权。
-- 质量门与无密钥 Windows 预检并行：预检会解析抽出的安装器冒烟脚本、运行发布
-  辅助测试并校验所有版本清单。
+- 质量门与无密钥 Ubuntu 预检并行：预检在 `pwsh` 下解析抽出的安装器冒烟脚本、
+  运行发布辅助测试并校验所有版本清单。
 
 预检通过后，每个选中的原生 runner 恢复对应 Rust 缓存并安装依赖。工作流只有在
 plan 根据事件确认这是真实 `v*` tag push 时才注入签名 secrets，随后验证公私钥和
@@ -508,7 +519,7 @@ closed。密钥轮换属于 break-glass 恢复，不是普通 secret 更新。�
 ### container.yml —— 镜像流水线
 
 GitHub Release 发布后会触发 `.github/workflows/container.yml`。该工作流检出
-Release tag，同时构建并冒烟验证两个 `linux/amd64` 镜像：主服务
+Release tag，通过 `docker-bake.hcl` 并行构建两个 `linux/amd64` 冒烟镜像：主服务
 `ghcr.io/klarkxy/opencode-go-mgr` 与 Sidecar
 `ghcr.io/klarkxy/opencode-go-mgr-browser`。主镜像冒烟检查 Dashboard、鉴权和许可
 证；浏览器镜像在只读根文件系统、零 capability、Chromium 可用的 seccomp
@@ -576,9 +587,10 @@ Docker 仍走直接/手动路径。
 
 ### CI 覆盖边界
 
-PR 会自动运行平台无关的质量门，额外的 Windows job 覆盖 Windows 专属 Tauri 行
-为的编译和单测；原生安装包/打包冒烟仍只在手动候选或 tag 流程运行。容器工作流
-只覆盖 `linux/amd64`，并且只在 Release 发布后或手动触发时运行。
+PR 会自动运行三路并行质量门：前端检查、Linux workspace Rust 测试/Clippy（含
+Tauri crate），以及覆盖 Windows 专属 Tauri 行为编译和单测的 Windows job；原生
+安装包/打包冒烟仍只在手动候选或 tag 流程运行。容器工作流只覆盖 `linux/amd64`，
+并且只在 Release 发布后或手动触发时运行。
 
 CI 不会操作真实桌面 UI，也不启动真实 Claude Desktop 或 Gemini CLI，不测试容
 器 ARM64、备份恢复、数据库降级、迁移回滚、真实上游账号或真实 Gateway 请求。
@@ -620,7 +632,7 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 推送 `v*` tag **前** 跑完这些检查。CI 冒烟覆盖大部分；需要真实桌面的部分手
 动验证。
 
-- [ ] 可复用质量门中的 Ubuntu 与 Windows job 全绿；tag-only 签名
+- [ ] 可复用质量门中的三个 job 全绿；tag-only 签名
       `release:check` 通过；选中的每个 `pnpm run build` 与平台冒烟全绿。
 - [ ] `git diff --check` 干净；相对上一个 tag 的 diff 只含预期范围；四份代码
       版本清单、`compose.example.yaml` 与 Cargo.lock 四个本地包条目一致。

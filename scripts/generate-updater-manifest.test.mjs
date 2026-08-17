@@ -231,14 +231,21 @@ test("release workflow keeps reusable quality checks out of the native build mat
   const buildJob = workflow.match(/\n  build:[\s\S]*?\n  draft-release:/)?.[0] ?? "";
   const preflightJob = workflow.match(/\n  preflight:[\s\S]*?\n  build:/)?.[0] ?? "";
   const publishJob = workflow.match(/\n  publish-release:[\s\S]*$/)?.[0] ?? "";
+  const windowsJob = quality.match(/\n  windows-tauri:[\s\S]*$/)?.[0] ?? "";
   const containerWorkflow = readFileSync(
     new URL("../.github/workflows/container.yml", import.meta.url),
     "utf8",
   );
 
   assert.match(quality, /\n  pull_request:/);
-  assert.match(quality, /pnpm run test/);
+  assert.match(quality, /\n  web:/);
+  assert.match(quality, /\n  rust:/);
+  assert.match(quality, /pnpm run test:web/);
+  assert.match(quality, /pnpm run typecheck/);
+  assert.match(quality, /pnpm exec vite build/);
+  assert.match(quality, /cargo test --workspace --locked/);
   assert.match(quality, /cargo clippy --workspace --all-targets --locked -- -D warnings/);
+  assert.doesNotMatch(quality, /pnpm run test(?:\s|$)/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/quality\.yml/);
   assert.match(
     workflow,
@@ -272,7 +279,19 @@ test("release workflow keeps reusable quality checks out of the native build mat
   assert.match(workflow, /release-policy\.mjs should-advance/);
   assert.match(quality, /windows-tauri:/);
   assert.match(quality, /cargo test -p ocg-manager --lib --locked/);
+  assert.match(quality, /cargo clippy -p ocg-manager --all-targets --locked -- -D warnings/);
+  assert.match(quality, /Provide stub dashboard for tauri-build/);
+  assert.doesNotMatch(windowsJob, /pnpm\/action-setup|setup-node|pnpm install|vite build/);
+  assert.match(preflightJob, /runs-on: ubuntu-latest/);
+  assert.match(preflightJob, /shell: pwsh/);
+  assert.doesNotMatch(preflightJob, /runs-on: windows-latest/);
   assert.match(containerWorkflow, /push-by-digest=true/);
+  assert.match(containerWorkflow, /docker\/bake-action@/);
+  assert.match(containerWorkflow, /targets: smoke/);
+  const bake = readFileSync(new URL("../docker-bake.hcl", import.meta.url), "utf8");
+  assert.match(bake, /group "smoke"/);
+  assert.match(bake, /target "manager-smoke"/);
+  assert.match(bake, /target "browser-smoke"/);
   assert.match(containerWorkflow, /release-policy\.mjs immutable-tag/);
   assert.match(containerWorkflow, /group: ghcr-moving-channels\s+queue: max/);
 });
