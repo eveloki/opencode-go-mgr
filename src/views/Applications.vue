@@ -34,7 +34,7 @@
             </h2>
 
             <div class="access-fields">
-              <label class="access-field">
+              <div class="access-field">
                 <span>{{ t("请求地址") }}</span>
                 <div class="access-value">
                   <code>{{ activeEndpoint.url }}</code>
@@ -50,8 +50,8 @@
                     </template>
                   </n-button>
                 </div>
-              </label>
-              <label class="access-field">
+              </div>
+              <div class="access-field">
                 <span>{{ t("Key") }}</span>
                 <div class="access-value">
                   <n-select
@@ -75,7 +75,7 @@
                     </template>
                   </n-button>
                 </div>
-              </label>
+              </div>
             </div>
 
             <div class="model-row">

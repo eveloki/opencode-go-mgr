@@ -36,7 +36,7 @@ ocg-manager/
 │   ├── components/    LocaleSwitcher、PricingCatalog、StackedBarChart、…
 │   ├── i18n/          i18n 注册表 + 各语言文案 + 单元测试
 │   ├── styles/        主题 token、设计系统覆盖
-│   └── views/         Dashboard、Accounts、Pricing、Applications、Logs、Settings（含单测）
+│   └── views/         Dashboard、Keys、Accounts、Pricing、Applications、Logs、Settings（含单测）
 ├── src-tauri/         跨平台托盘应用、单实例、升级桥接、原生打包
 ├── docs/              USER / MAINTAINER / 防滥用（中英）、CONTRIBUTORS、索引
 ├── scripts/           free-dev-port、release、updater manifest、release notes、冒烟脚本、…
@@ -217,7 +217,7 @@ Desktop 三个角色模型的持久化行为。
   不属于遥测。
 - Docker 可用 `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；
   不提供时由首位注册者创建。
-- 侧栏包含仪表盘、账号、价格表、应用、日志、设置。**应用** 视图维护 16 个教程：
+- 侧栏包含仪表盘、接入 Key、账号、价格表、应用、日志、设置。**应用** 视图维护 16 个教程：
   Claude Code、Claude Desktop、Codex、Gemini CLI、Pi、Kimi Code CLI、OpenCode、
   WorkBuddy、OpenClaw、Hermes、Cherry Studio、VS Code Copilot Chat、Cline、Roo
   Code、Continue、Chatbox。Claude Desktop 的复制动作还会保存三个角色模型；其他

@@ -897,6 +897,8 @@ test("dashboard keeps the connection center first and protects key regeneration"
   assert.match(template, /:aria-label="t\('刷新 Key'\)"/);
   assert.match(template, /copyConnection\('api', serviceApiUrl, t\('API 地址'\)\)/);
   assert.match(template, /copyConnection\('key', selectedKey\?\.value \?\? '', t\('Key'\)\)/);
+  assert.match(template, /:aria-label="t\('管理接入 Key'\)"/);
+  assert.match(template, /@click="goToKeys"/);
   assert.doesNotMatch(template, /<span class="sr-only">(?:API Base URL|Key)<\/span>/);
   assert.match(template, /\{\{ maskedKey \}\}/);
   assert.doesNotMatch(template, /<code>\{\{ serviceConfig\.gateway_key \}\}<\/code>/);
@@ -931,6 +933,8 @@ test("dashboard reports gateway health and serializes key regeneration", async (
   assert.match(source, /:loading="refreshingKey"\s+:disabled="refreshingKey \|\| loading \|\| !selectedKey"/);
   assert.match(source, /async function regenerateKey\(\) \{\s*const target = selectedKey\.value;\s*if \(refreshingKey\.value \|\| dashboardRequestActive \|\| !target\) return;/);
   assert.match(source, /async function loadDashboard\(\) \{\s*if \(dashboardRequestActive \|\| refreshingKey\.value\) return;/);
+  assert.match(source, /emit\("navigate", "keys"\)/);
+  assert.match(source, /function goToKeys\(\) \{\s*emit\("navigate", "keys"\);/);
   // Primary rotation goes through the legacy endpoint; sub keys rotate via
   // the key lifecycle API.
   assert.match(source, /const isPrimary = target\.id === PRIMARY_KEY_ID;/);
@@ -979,14 +983,12 @@ test("dashboard and settings keep partial data safe", async () => {
   const app = await readFile(new URL("../App.vue", import.meta.url), "utf8");
 
   assert.match(dashboard, /Promise\.allSettled/);
-  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| testingProxy \|\| proxyUrlPreview\.status === 'error' \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error' \|\| primaryKeyPreview\.status === 'error'"/);
+  assert.match(settings, /:disabled="!loaded \|\| testingProxy \|\| proxyUrlPreview\.status === 'error' \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error'"/);
   assert.match(settings, /if \(!loaded\.value\) return/);
-  // Every key row is masked; raw values never render in the settings page.
-  assert.match(settings, /\{\{ maskConnectionKey\(entry\.value\) \}\}/);
-  assert.match(settings, /\{\{ maskConnectionKey\(config\.gateway_key\) \}\}/);
-  // v1.6.1 semantics: the primary key value is editable through the generic
-  // settings save (the management row above stays read-only + rotate).
-  assert.match(settings, /v-model:value="config\.gateway_key"/);
+  // Key lifecycle moved off Settings; the form must not render or edit keys.
+  assert.doesNotMatch(settings, /class="settings-subsection gateway-keys"/);
+  assert.doesNotMatch(settings, /v-model:value="config\.gateway_key"/);
+  assert.doesNotMatch(settings, /maskConnectionKey/);
   assert.match(app, /mode === "register"[\s\S]*getAuthStatus\(\)[\s\S]*status\?\.initialized/);
 });
 
@@ -1021,6 +1023,8 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.match(applications, /enabledGatewayKeys/);
   assert.match(applications, /PRIMARY_KEY_ID/);
   assert.match(applications, /t\(['"]选择 Key['"]\)/);
+  assert.match(applications, /<div class="access-field">[\s\S]*<n-select/);
+  assert.doesNotMatch(applications, /<label class="access-field">[\s\S]*<n-select/);
   assert.match(applications, /selectedKey\.value\?\.value/);
   assert.match(applications, /Promise\.allSettled/);
   assert.match(applications, /const claudeDesktopModelsLoaded = ref\(false\)/);
@@ -1081,7 +1085,7 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.doesNotMatch(applications, /<code>\{\{ serviceConfig\.(?:gateway_key|primary_key) \}\}<\/code>/);
   assert.match(app, /<main class="app-content">/);
   assert.doesNotMatch(app, /<n-layout-content/);
-  assert.match(app, /dashboard.*accounts.*apps.*pricing.*logs.*settings/s);
+  assert.match(app, /dashboard.*keys.*accounts.*apps.*pricing.*logs.*settings/s);
 });
 
 test("settings expose the downstream display root and bounded request timeouts", async () => {
@@ -1112,9 +1116,9 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.doesNotMatch(settings, /config\.value\.client_root_url = resolveConnectionUrls/);
   assert.match(settings, /非本机 HTTP 会明文传输 Key 与请求内容/);
   assert.match(settings, /请求超时/);
-  assert.match(settings, /config\.connect_timeout_secs"\s+:disabled="!loaded \|\| regenerating"\s+:min="1"\s+:max="300"\s+:precision="0"/);
-  assert.match(settings, /config\.non_stream_timeout_secs"\s+:disabled="!loaded \|\| regenerating"\s+:min="1"\s+:max="3600"\s+:precision="0"/);
-  assert.match(settings, /config\.stream_idle_timeout_secs"\s+:disabled="!loaded \|\| regenerating"\s+:min="1"\s+:max="3600"\s+:precision="0"/);
+  assert.match(settings, /config\.connect_timeout_secs"\s+:disabled="!loaded"\s+:min="1"\s+:max="300"\s+:precision="0"/);
+  assert.match(settings, /config\.non_stream_timeout_secs"\s+:disabled="!loaded"\s+:min="1"\s+:max="3600"\s+:precision="0"/);
+  assert.match(settings, /config\.stream_idle_timeout_secs"\s+:disabled="!loaded"\s+:min="1"\s+:max="3600"\s+:precision="0"/);
   assert.match(settings, /connect_timeout_secs: 30/);
   assert.match(settings, /non_stream_timeout_secs: 900/);
   assert.match(settings, /stream_idle_timeout_secs: 300/);
@@ -1125,7 +1129,7 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(settings, /name="routing-mode"/);
   assert.match(settings, /v-for="option in routingModeOptions"/);
   assert.match(settings, /v-model:value="config\.conversation_sticky"/);
-  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| saving"/);
+  assert.match(settings, /:disabled="!loaded \|\| saving"/);
   assert.match(settings, /严格优先级/);
   assert.match(settings, /全局粘性/);
   assert.match(settings, /轮询/);
@@ -1141,12 +1145,9 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(api, /expected_revision: revision/);
   assert.match(settings, /if \(!validateTimeouts\(\)\) return/);
   assert.match(settings, /\{field\}必须为 \{min\}–\{max\} 秒的整数/);
-  // The primary key value is editable again (v1.6.1 semantics) through the
-  // generic settings save; sub keys stay on the lifecycle API.
+  // Key lifecycle lives on the dedicated Keys view, not the settings form.
   assert.doesNotMatch(settings, /gatewayKeyDraft|startGatewayKeyEdit|saveGatewayKey/);
-  assert.match(settings, /tauriApi\.createGatewayKey\(name, config\.value\.revision\)/);
-  assert.match(settings, /tauriApi\.updateGatewayKey\(entry\.id, \{ enabled \}, config\.value\.revision\)/);
-  assert.match(settings, /tauriApi\.deleteGatewayKey\(entry\.id, config\.value\.revision\)/);
+  assert.doesNotMatch(settings, /createGatewayKey|updateGatewayKey|deleteGatewayKey/);
   assert.match(settings, /v-if="settingsLoadError"[\s\S]*?@click="loadSettings"/);
   assert.match(api, /client_root_url: string/);
   assert.match(api, /client_root_url_from_env: boolean/);
@@ -1252,23 +1253,16 @@ test("settings expose supported Windows auto-start safely", async () => {
   assert.match(settings, /:value="config\.auto_start"/);
   assert.match(settings, /@update:value="handleAutoStartToggle"/);
   assert.match(settings, /:aria-label="t\('随 Windows 登录自动启动 OCG Manager'\)"/);
-  // Key management lives in its own section; copies and regeneration are per
-  // entry and never read the legacy mirror value directly.
-  assert.match(settings, /class="settings-subsection gateway-keys"/);
-  assert.match(settings, /:aria-label="t\('复制 Key'\)"\s+:disabled="regenerating \|\| !entry\.value"/);
-  assert.match(settings, /async function copyEntryKey\(entry: ConnectionSubKey\): Promise<void> \{\s+if \(!entry\.value\) return;/);
-  assert.match(settings, /:disabled="!loaded \|\| saving \|\| regenerating"/);
-  assert.match(settings, /:loading="regenerating && keyMutation === `regenerate:\$\{entry\.id\}`"\s+:disabled="regenerating"/);
+  assert.doesNotMatch(settings, /class="settings-subsection gateway-keys"/);
   assert.match(settings, /async function handleAutoStartToggle\(newValue: boolean\)/);
   assert.match(settings, /savedConfig\.value/);
-  assert.match(settings, /if \(!loaded\.value \|\| regenerating\.value \|\| !savedConfig\.value\) return;/);
-  assert.match(settings, /const \[latest, connection\] = await Promise\.all\(\[\s*tauriApi\.getSettings\(\),\s*tauriApi\.getConnection\(\),\s*\]\);/);
+  assert.match(settings, /if \(!loaded\.value \|\| !savedConfig\.value\) return;/);
+  assert.match(settings, /const nextConfig = await tauriApi\.getSettings\(\);/);
+  assert.doesNotMatch(settings, /tauriApi\.getConnection\(\)/);
   assert.match(settings, /savedConfig\.value = \{ \.\.\.latest \}/);
-  assert.match(settings, /pendingSettingsMerge = \{ current: \{ \.\.\.config\.value \}, saved: \{ \.\.\.savedConfig\.value \} \};/);
+  assert.match(settings, /pendingSettingsMerge = saved \? \{ current, saved \} : null;/);
   assert.match(settings, /mergeUnsavedSettings\(latest, pending\.current, pending\.saved\)/);
   assert.match(settings, /pendingSettingsMerge = null/);
-  assert.match(settings, /mutationError = error[\s\S]*?const \[latest, connection\] = await Promise\.all\(/);
-  assert.match(settings, /savedConfig\.value = null;[\s\S]*?loaded\.value = false/);
   assert.match(settings, /const generation = \+\+settingsLoadGeneration/);
   assert.match(settings, /const payload = \{ \.\.\.config\.value \}/);
   assert.match(settings, /revision: 0/);
@@ -1276,6 +1270,7 @@ test("settings expose supported Windows auto-start safely", async () => {
   assert.match(settings, /error instanceof DashboardRequestError/);
   assert.match(settings, /error\.status !== 409/);
   assert.match(settings, /async function loadSettings\(\): Promise<boolean>/);
+  assert.match(settings, /onActivated\(\(\) => \{/);
   const conflictRecovery = settings.slice(
     settings.indexOf("async function reloadSettingsAfterConflict"),
     settings.indexOf("async function saveSettings"),

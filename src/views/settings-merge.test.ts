@@ -3,8 +3,8 @@ import test from "node:test";
 import type { AppConfig } from "../api/tauri.ts";
 import { EDITABLE_SETTING_KEYS, mergeUnsavedSettings } from "./settings-merge.ts";
 
-test("the primary key value is an editable settings field", () => {
-  assert.ok(EDITABLE_SETTING_KEYS.includes("gateway_key"));
+test("the primary key value is not an editable settings field", () => {
+  assert.ok(!(EDITABLE_SETTING_KEYS as readonly string[]).includes("gateway_key"));
 });
 
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -57,7 +57,7 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
   assert.equal(merged.non_stream_timeout_secs, 1_200);
 });
 
-test("settings conflict merge preserves a locally edited primary key value", () => {
+test("settings conflict merge adopts the server primary key and keeps other local edits", () => {
   const saved = config();
   const current = config({ gateway_key: "unpersisted-key", auto_start: true });
   const latest = config({
@@ -68,9 +68,10 @@ test("settings conflict merge preserves a locally edited primary key value", () 
 
   const merged = mergeUnsavedSettings(latest, current, saved);
 
-  // gateway_key is editable (v1.6.1 semantics): an unsaved local edit
-  // survives the merge; capability flags still come from the server.
-  assert.equal(merged.gateway_key, "unpersisted-key");
+  // gateway_key is no longer a settings-form field: an unsaved local
+  // edit is discarded so a rotation on the Keys page wins. Capability
+  // flags still come from the server; other editable fields stay local.
+  assert.equal(merged.gateway_key, "server-key-1");
   assert.equal(merged.auto_start, true);
   assert.equal(merged.auto_start_supported, false);
   assert.equal(merged.client_root_url_from_env, true);

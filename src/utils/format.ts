@@ -2,7 +2,7 @@ import { ref } from "vue";
 import { locale, t } from "../i18n/index.ts";
 
 /**
- * Shared formatting helpers used across Dashboard, Accounts, Logs, and
+ * Shared formatting helpers used across Dashboard, Keys, Accounts, Logs, and
  * StackedBarChart. Centralising them here avoids duplication and keeps
  * locale-aware formatting consistent.
  *

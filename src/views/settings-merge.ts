@@ -2,7 +2,6 @@ import type { AppConfig } from "../api/tauri";
 
 export const EDITABLE_SETTING_KEYS = [
   "gateway_port",
-  "gateway_key",
   "upstream_base_url",
   "proxy_mode",
   "proxy_url",

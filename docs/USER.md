@@ -15,6 +15,7 @@ the true / false circuit breakers, and protocol conversion actually work.
 - [Upgrade, Backup, Restore, And Uninstall](#upgrade-backup-restore-and-uninstall)
 - [The Dashboard](#the-dashboard)
   - [Connection Center](#connection-center)
+  - [Access Keys](#access-keys)
   - [Application Guides](#application-guides)
   - [Model capabilities](#model-capabilities)
   - [Accounts](#accounts)
@@ -281,10 +282,10 @@ The direct GUI steps are also the fallback when in-app update is unavailable.
 ## The Dashboard
 
 The dashboard is a single-page Vue 3 application served by the gateway. The
-left rail (or the horizontal app menu below 1024px) exposes six views:
-**Dashboard**, **Accounts**, **Pricing**, **Applications**, **Logs**, and
-**Settings**. The top right of the header holds the theme switcher, the
-language switcher, and the sign-out button.
+left rail (or the horizontal app menu below 1024px) exposes seven views:
+**Dashboard**, **Access Keys**, **Accounts**, **Pricing**, **Applications**,
+**Logs**, and **Settings**. The top right of the header holds the theme
+switcher, the language switcher, and the sign-out button.
 
 The dashboard speaks ten languages: 简体中文, 繁體中文, English, 日本語,
 한국어, Español, Français, Deutsch, Português (Brasil), and Русский. The
@@ -297,12 +298,16 @@ private window), the in-memory locale still works for the current session.
 The first panel above the fold — and the only panel that always stays on
 top — is the **Connection Center**. It contains:
 
-- The **Key**, with regenerate and one-click copy. Regenerating invalidates
-  only the selected key's previous value immediately; other keys keep
-  working. When more than one enabled key exists, a selector lists them and
-  switches the displayed (masked) value, the copy target, and the regenerate
-  target. Copying places the full plaintext value on the clipboard — clear
-  your clipboard history after use on shared or public computers.
+- The **Key**, with regenerate, one-click copy, and a **Manage access keys**
+  action that opens the Access Keys view. Regenerating invalidates only the
+  selected key's previous value immediately; other keys keep working. When
+  more than one enabled key exists, a selector lists them and switches the
+  displayed (masked) value, the copy target, and the regenerate target.
+  Copying places the full plaintext value on the clipboard — clear your
+  clipboard history after use on shared or public computers. Create, rename,
+  enable, disable, and delete live on **Access Keys**, not here. The primary
+  key is reset with the same regenerate control as a sub key; there is no
+  custom-value field.
 - The **API Base URL** (e.g. `http://127.0.0.1:9042/v1`) with one-click copy,
   plus the full Chat Completions, Responses, and Messages endpoints.
 - The **Upstream URL** the gateway forwards to, with a copy action.
@@ -330,6 +335,25 @@ trailing `/v1` is accepted and removed automatically. This setting does
 proxy — those must already route to the running gateway. Plain HTTP is
 allowed for LAN deployments, but it exposes the Key and request
 contents to the network.
+
+### Access Keys
+
+The **Access Keys** view is the home for client-facing credentials:
+
+- The **primary key** is always active and cannot be disabled or deleted; you
+  rotate it with the reset control. It is the credential the application
+  guides show by default. There is no field for typing a custom primary
+  value.
+- **Sub keys** are additional credentials you create, give a display name,
+  rename, enable/disable, regenerate, or delete — handy for handing one key
+  to each device. Deleting a sub key is a soft delete: it stops authenticating
+  immediately and its plaintext is cleared, but forward logs keep resolving
+  to its name. A sub key value may never equal the primary key value or
+  another sub key value, and at most 64 non-deleted sub keys are
+  supported.
+
+The Connection Center and the Applications view only consume enabled keys.
+Usage by key is filtered on the Logs view.
 
 ### Application Guides
 
@@ -580,17 +604,6 @@ if any, and the streamed usage when the upstream emitted a usage chunk.
 The **Settings** view exposes the persistent gateway configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`).
-- **Access Keys** — the client-facing credentials in two tiers. The
-  **primary key** is always active and cannot be disabled or deleted; you
-  can rotate it (regenerate) or set a custom value for it, and it is the
-  credential the application guides show by default. **Sub keys** are
-  additional credentials you create, give a display name, rename,
-  enable/disable, regenerate, or delete — handy for handing one key to each
-  device. Deleting a sub key is a soft delete: it stops authenticating
-  immediately and its plaintext is cleared, but forward logs keep resolving
-  to its name. A sub key value may never equal the primary key value or
-  another sub key's value, and at most 64 non-deleted sub keys are
-  supported.
 - **Upstream URL** — the OpenCode-Go base URL.
 - **Outbound proxy** — a process-wide setting shared by every account.
   `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,

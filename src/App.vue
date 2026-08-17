@@ -174,7 +174,8 @@
                  (scroll, filters, drafts); each view refreshes stale data in
                  its own onActivated hook. -->
             <KeepAlive>
-              <Dashboard v-if="activeKey === 'dashboard'" />
+              <Dashboard v-if="activeKey === 'dashboard'" @navigate="selectView" />
+              <Keys v-else-if="activeKey === 'keys'" />
               <Accounts v-else-if="activeKey === 'accounts'" />
               <Applications v-else-if="activeKey === 'apps'" />
               <Pricing v-else-if="activeKey === 'pricing'" />
@@ -228,6 +229,7 @@ import {
   KeyOutlined,
   LogoutOutlined,
   SettingOutlined,
+  TeamOutlined,
 } from "@vicons/antd";
 import LocaleSwitcher from "./components/LocaleSwitcher.vue";
 import { locale, naiveDateLocale, naiveLocale, t } from "./i18n/index.ts";
@@ -246,10 +248,11 @@ import {
 import type { ThemeName } from "./theme";
 import { userFacingError } from "./utils/errors.ts";
 
-type ViewKey = "dashboard" | "accounts" | "apps" | "pricing" | "logs" | "settings" | "browser";
+type ViewKey = "dashboard" | "keys" | "accounts" | "apps" | "pricing" | "logs" | "settings" | "browser";
 
 const viewConfig: Record<ViewKey, MessageKey> = {
   dashboard: "仪表盘",
+  keys: "接入 Key",
   accounts: "账号",
   apps: "应用",
   pricing: "价格表",
@@ -260,6 +263,7 @@ const viewConfig: Record<ViewKey, MessageKey> = {
 const views = new Set<ViewKey>(Object.keys(viewConfig) as ViewKey[]);
 
 const Dashboard = defineAsyncComponent(() => import("./views/Dashboard.vue"));
+const Keys = defineAsyncComponent(() => import("./views/Keys.vue"));
 const Accounts = defineAsyncComponent(() => import("./views/Accounts.vue"));
 const Applications = defineAsyncComponent(() => import("./views/Applications.vue"));
 const Pricing = defineAsyncComponent(() => import("./views/Pricing.vue"));
@@ -307,7 +311,8 @@ function renderIcon(icon: Component) {
 
 const menuOptions = computed(() => [
   { label: t("仪表盘"), key: "dashboard", icon: renderIcon(DashboardOutlined) },
-  { label: t("账号"), key: "accounts", icon: renderIcon(KeyOutlined) },
+  { label: t("接入 Key"), key: "keys", icon: renderIcon(KeyOutlined) },
+  { label: t("账号"), key: "accounts", icon: renderIcon(TeamOutlined) },
   { label: t("价格表"), key: "pricing", icon: renderIcon(DollarCircleOutlined) },
   { label: t("应用"), key: "apps", icon: renderIcon(AppstoreOutlined) },
   { label: t("日志"), key: "logs", icon: renderIcon(FileTextOutlined) },

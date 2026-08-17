@@ -37,7 +37,7 @@ ocg-manager/
 │   ├── components/    LocaleSwitcher, PricingCatalog, StackedBarChart, …
 │   ├── i18n/          i18n setup + per-locale message tables + tests
 │   ├── styles/        Theme tokens, design-system overrides
-│   └── views/         Dashboard, Accounts, Pricing, Applications, Logs, Settings (+ unit tests)
+│   └── views/         Dashboard, Keys, Accounts, Pricing, Applications, Logs, Settings (+ unit tests)
 ├── src-tauri/         Cross-platform tray app, single-instance, updater bridge, native packaging
 ├── docs/              USER / MAINTAINER / anti-abuse (EN+ZH), CONTRIBUTORS, index
 ├── scripts/           free-dev-port, release, updater manifest, release notes, smokes, …
@@ -249,8 +249,9 @@ difference, and the Claude Desktop three-role persistence behavior.
   clicks the button; it is not telemetry.
 - Docker may bootstrap the first administrator with `OCG_ADMIN_USERNAME` and
   `OCG_ADMIN_PASSWORD`; otherwise the first registration wins.
-- The side rail exposes Dashboard, Accounts, Pricing, Applications, Logs, and
-  Settings. The Applications view is generated from 16 guides: Claude Code,
+- The side rail exposes Dashboard, Access Keys, Accounts, Pricing,
+  Applications, Logs, and Settings. The Applications view is generated from 16
+  guides: Claude Code,
   Claude Desktop, Codex, Gemini CLI, Pi, Kimi Code CLI, OpenCode, WorkBuddy,
   OpenClaw, Hermes, Cherry Studio, VS Code Copilot Chat, Cline, Roo Code,
   Continue, and Chatbox. The Claude Desktop copy action also saves its three

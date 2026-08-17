@@ -135,6 +135,20 @@
                 </template>
                 {{ t("复制 Key") }}
               </n-tooltip>
+              <n-tooltip trigger="hover" :delay="200">
+                <template #trigger>
+                  <n-button
+                    circle
+                    quaternary
+                    size="small"
+                    :aria-label="t('管理接入 Key')"
+                    @click="goToKeys"
+                  >
+                    <template #icon><n-icon :component="UnorderedListOutlined" /></template>
+                  </n-button>
+                </template>
+                {{ t("管理接入 Key") }}
+              </n-tooltip>
             </div>
           </div>
 
@@ -296,6 +310,7 @@ import {
   DownOutlined,
   KeyOutlined,
   ReloadOutlined,
+  UnorderedListOutlined,
   WalletOutlined,
 } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
@@ -323,6 +338,10 @@ interface SwitcherKey {
   name: string;
   value: string;
 }
+
+const emit = defineEmits<{
+  navigate: [view: string];
+}>();
 
 const message = useMessage();
 const { copiedTarget, copy, cleanup } = useClipboard();
@@ -533,10 +552,11 @@ async function regenerateKey() {
 }
 
 function goToAccounts() {
-  const url = new URL(window.location.href);
-  url.searchParams.set("view", "accounts");
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new Event("popstate"));
+  emit("navigate", "accounts");
+}
+
+function goToKeys() {
+  emit("navigate", "keys");
 }
 
 let dashboardRequestActive = false;

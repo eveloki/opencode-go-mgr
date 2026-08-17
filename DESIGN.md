@@ -52,9 +52,9 @@ The type scale has six steps, exposed as `--ocg-font-xs` … `--ocg-font-2xl`: 1
 
 ## Layout
 
-Use the spacing scale from `{spacing.xs}` through `{spacing.xxl}`. The side rail (horizontal app menu below 1024px) exposes six views in this order: Dashboard, Accounts, Pricing, Applications, Logs, Settings.
+Use the spacing scale from `{spacing.xs}` through `{spacing.xxl}`. The side rail (horizontal app menu below 1024px) exposes seven views in this order: Dashboard, Access Keys, Accounts, Pricing, Applications, Logs, Settings.
 
-The Dashboard order is connection center, KPIs, full-width chart, then account overview. Core connection information must stay above the fold and must never be moved into a secondary rail.
+The Dashboard order is connection center, KPIs, full-width chart, then account overview. Core connection information must stay above the fold and must never be moved into a secondary rail. The connection center is the consume surface: the current Key, copy, and rotate-current stay there, plus a manage action that opens Access Keys. Create, rename, enable, delete, and reset live only on Access Keys. The primary key has no custom-value field; rotation uses the same reset control as sub keys.
 
 Pricing is a data-dense catalog: revision/ledger metadata first, then a dense table of model rates and multipliers. Prefer monospace for revision IDs, USD rates, and multipliers; keep refresh as an explicit primary action, never automatic on page load.
 

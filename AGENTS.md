@@ -8,7 +8,7 @@
 - 产品：OCG Manager，OpenCode-Go 多账号本地管理器。
 - 前端：Vue 3 + TypeScript + naive-ui，源码在 `src/`。
 - 前端 API：`src/api/tauri.ts` 是历史命名，当前封装 HTTP `/dashboard/api`，不是 Tauri `invoke()`。
-- 面板视图（侧栏顺序）：Dashboard / Accounts / Pricing / Applications / Logs / Settings。
+- 面板视图（侧栏顺序）：Dashboard / Access Keys / Accounts / Pricing / Applications / Logs / Settings。
 - UI 文案：接入凭证在面板上显示为 **Key**（不要写 “Gateway Key”）；设计系统以 `DESIGN.md` + `src/theme.ts` 为准。
 - Rust workspace：`crates/ocg-core`、`crates/ocg-cli`（二进制名 `ocg-manager-cli`）、`src-tauri`。
 - 核心 Gateway：Axum + Tokio + reqwest，默认监听 `127.0.0.1:9042`；同一端口提供 OpenAI Chat Completions / Responses、Anthropic Messages、Gemini `generateContent` 客户端入口与 Claude Desktop 别名入口。
@@ -47,7 +47,7 @@
 - `src-tauri/src/lib.rs`：Tauri 启动、Gateway 启动、托盘、命令注册。
 - `src-tauri/src/updater.rs`：签名桌面升级器桥接；由受保护的 dashboard HTTP API 触发，不向 WebView 暴露 updater command 权限。
 - `src-tauri/src/tray.rs`：托盘菜单和 dashboard 打开逻辑。
-- `src/views/`：Dashboard / Accounts / Pricing / Applications / Logs / Settings。
+- `src/views/`：Dashboard / Keys / Accounts / Pricing / Applications / Logs / Settings。
 - `src/components/ManagedAccountWizard.vue`：托管注册向导（步骤回退、Google/GitHub）。
 - `src/views/application-guides.ts`：16 个应用教程注册表和 `APPLICATION_MODEL_METADATA` 能力表（改数量/协议/脱敏/能力时同步测，并同步 USER 能力表；README 只保留推荐协议分组）。
 - `src/theme.ts` + `DESIGN.md`：主题 token 与设计规范；改色/字号时两边一起改。

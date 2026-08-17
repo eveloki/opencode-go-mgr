@@ -10,7 +10,7 @@
         <n-form-item :label="t('上游地址')">
           <n-input
             v-model:value="config.upstream_base_url"
-            :disabled="!loaded || regenerating || testingProxy"
+            :disabled="!loaded || testingProxy"
             :input-props="{ 'aria-label': t('上游地址') }"
             placeholder="https://opencode.ai/zen/go"
           />
@@ -24,7 +24,7 @@
             v-model:value="config.proxy_mode"
             name="proxy-mode"
             class="proxy-mode-group"
-            :disabled="!loaded || regenerating || saving || testingProxy"
+            :disabled="!loaded || saving || testingProxy"
           >
             <n-radio value="auto">{{ t("自动（系统 / 环境）") }}</n-radio>
             <n-radio value="manual">{{ t("手动 HTTP 代理") }}</n-radio>
@@ -42,7 +42,7 @@
               v-model:value="config.proxy_url"
               class="mono"
               clearable
-              :disabled="!loaded || regenerating || saving || testingProxy"
+              :disabled="!loaded || saving || testingProxy"
               placeholder="http://127.0.0.1:7890"
               :input-props="{ 'aria-label': t('代理地址') }"
               @blur="normalizeProxyInput"
@@ -52,7 +52,7 @@
             <n-button
               secondary
               :loading="testingProxy"
-              :disabled="!loaded || saving || regenerating || proxyUrlPreview.status === 'error'"
+              :disabled="!loaded || saving || proxyUrlPreview.status === 'error'"
               @click="testProxyConnection"
             >{{ t("测试连接") }}</n-button>
             <span class="field-caption">{{ t("测试当前表单值，不会保存设置；收到任意 HTTP 响应即表示链路可用。") }}</span>
@@ -72,7 +72,7 @@
         >
           <n-input
             v-model:value="config.opencode_invite_url"
-            :disabled="!loaded || regenerating"
+            :disabled="!loaded"
             clearable
             class="mono"
             :placeholder="DEFAULT_OPENCODE_INVITE_URL"
@@ -80,193 +80,6 @@
             @blur="normalizeInviteUrlInput"
           />
         </n-form-item>
-        <section class="settings-subsection gateway-keys" aria-labelledby="gateway-keys-title">
-          <h3 id="gateway-keys-title">{{ t("接入 Key") }}</h3>
-          <p class="field-caption">
-            {{ t("主 Key 恒为有效，可轮换或自定义；子 Key 可分给不同设备，用量按 Key 记录，删除为软删除，历史日志保留归因。") }}
-          </p>
-          <ul class="gateway-key-list">
-            <li class="gateway-key-row gateway-key-row--primary">
-              <div class="gateway-key-main">
-                <span class="gateway-key-name">{{ t("主 Key") }}</span>
-                <span class="gateway-key-badge">{{ t("恒为有效") }}</span>
-              </div>
-              <code class="gateway-key-value">{{ maskConnectionKey(config.gateway_key) }}</code>
-              <div class="gateway-key-actions">
-                <n-tooltip trigger="hover">
-                  <template #trigger>
-                    <n-button
-                      circle
-                      quaternary
-                      size="small"
-                      :aria-label="t('复制 Key')"
-                      :disabled="regenerating || !config.gateway_key"
-                      @click="copyPrimaryKey"
-                    >
-                      <template #icon><n-icon :component="keyCopied === `settings-key-primary` ? CheckOutlined : CopyOutlined" /></template>
-                    </n-button>
-                  </template>
-                  {{ t("复制 Key") }}
-                </n-tooltip>
-                <n-popconfirm
-                  :positive-text="t('生成新 Key')"
-                  :negative-text="t('取消')"
-                  @positive-click="rotatePrimaryKey"
-                >
-                  <template #trigger>
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button
-                          circle
-                          quaternary
-                          size="small"
-                          :aria-label="t('刷新 Key')"
-                          :loading="regenerating && keyMutation === 'rotate-primary'"
-                          :disabled="regenerating"
-                        >
-                          <template #icon><n-icon :component="ReloadOutlined" /></template>
-                        </n-button>
-                      </template>
-                      {{ t("刷新 Key") }}
-                    </n-tooltip>
-                  </template>
-                  {{ t("旧 Key 将立即失效，继续生成新 Key？") }}
-                </n-popconfirm>
-              </div>
-            </li>
-            <li v-for="entry in subKeys" :key="entry.id" class="gateway-key-row">
-              <div class="gateway-key-main">
-                <template v-if="renamingKeyId === entry.id">
-                  <n-input
-                    v-model:value="renameDraft"
-                    size="small"
-                    :disabled="regenerating"
-                    :input-props="{ 'aria-label': t('Key 名称') }"
-                    @keydown.enter="commitRename(entry)"
-                  />
-                  <n-button size="tiny" secondary :disabled="regenerating" @click="commitRename(entry)">{{ t("保存") }}</n-button>
-                  <n-button size="tiny" quaternary :disabled="regenerating" @click="cancelRename">{{ t("取消") }}</n-button>
-                </template>
-                <template v-else>
-                  <button
-                    type="button"
-                    class="gateway-key-name"
-                    :title="t('点击重命名')"
-                    :disabled="regenerating"
-                    @click="startRename(entry)"
-                  >{{ entry.name }}</button>
-                  <span v-if="!entry.enabled" class="gateway-key-badge muted">{{ t("已停用") }}</span>
-                </template>
-              </div>
-              <code class="gateway-key-value">{{ maskConnectionKey(entry.value) }}</code>
-              <div class="gateway-key-actions">
-                <n-switch
-                  size="small"
-                  :value="entry.enabled"
-                  :loading="regenerating && keyMutation === `toggle:${entry.id}`"
-                  :disabled="regenerating"
-                  :aria-label="t('启用或停用 Key')"
-                  @update:value="(value: boolean) => toggleKey(entry, value)"
-                />
-                <n-tooltip trigger="hover">
-                  <template #trigger>
-                    <n-button
-                      circle
-                      quaternary
-                      size="small"
-                      :aria-label="t('复制 Key')"
-                      :disabled="regenerating || !entry.value"
-                      @click="copyEntryKey(entry)"
-                    >
-                      <template #icon><n-icon :component="keyCopied === `settings-key-${entry.id}` ? CheckOutlined : CopyOutlined" /></template>
-                    </n-button>
-                  </template>
-                  {{ t("复制 Key") }}
-                </n-tooltip>
-                <n-popconfirm
-                  :positive-text="t('生成新 Key')"
-                  :negative-text="t('取消')"
-                  @positive-click="regenerateEntryKey(entry)"
-                >
-                  <template #trigger>
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button
-                          circle
-                          quaternary
-                          size="small"
-                          :aria-label="t('刷新 Key')"
-                          :loading="regenerating && keyMutation === `regenerate:${entry.id}`"
-                          :disabled="regenerating"
-                        >
-                          <template #icon><n-icon :component="ReloadOutlined" /></template>
-                        </n-button>
-                      </template>
-                      {{ t("刷新 Key") }}
-                    </n-tooltip>
-                  </template>
-                  {{ t("仅当前 Key 的旧值立即失效，其他 Key 不受影响。确定生成新值？") }}
-                </n-popconfirm>
-                <n-popconfirm
-                  :positive-text="t('删除')"
-                  :negative-text="t('取消')"
-                  @positive-click="deleteEntryKey(entry)"
-                >
-                  <template #trigger>
-                    <n-tooltip trigger="hover">
-                      <template #trigger>
-                        <n-button
-                          circle
-                          quaternary
-                          size="small"
-                          type="error"
-                          :aria-label="t('删除 Key')"
-                          :loading="regenerating && keyMutation === `delete:${entry.id}`"
-                          :disabled="regenerating"
-                        >
-                          <template #icon><n-icon :component="DeleteOutlined" /></template>
-                        </n-button>
-                      </template>
-                      {{ t("删除 Key") }}
-                    </n-tooltip>
-                  </template>
-                  {{ t("删除后该 Key 立即失效且不可恢复；历史用量仍按名称归因。确定删除？") }}
-                </n-popconfirm>
-              </div>
-            </li>
-          </ul>
-          <div class="key-create-row">
-            <n-input
-              v-model:value="newKeyName"
-              class="key-create-input"
-              :disabled="!loaded || regenerating"
-              :placeholder="t('新 Key 名称，例如 Laptop')"
-              :input-props="{ 'aria-label': t('新 Key 名称') }"
-              @keydown.enter="createKey"
-            />
-            <n-button
-              secondary
-              type="primary"
-              :loading="regenerating && keyMutation === 'create'"
-              :disabled="!loaded || regenerating || !newKeyName.trim()"
-              @click="createKey"
-            >{{ t("新建 Key") }}</n-button>
-          </div>
-          <n-form-item
-            :label="t('自定义主 Key 值')"
-            :show-feedback="true"
-            :validation-status="primaryKeyPreview.status"
-            :feedback="primaryKeyPreview.feedback"
-          >
-            <n-input
-              v-model:value="config.gateway_key"
-              class="mono"
-              clearable
-              :disabled="!loaded || regenerating"
-              :input-props="{ 'aria-label': t('自定义主 Key 值') }"
-            />
-          </n-form-item>
-        </section>
         <div class="downstream-grid">
           <n-form-item
             :label="t('下游访问根地址（可选）')"
@@ -277,7 +90,7 @@
             <div class="client-root-field">
               <n-input
                 v-model:value="clientRootInputValue"
-                :disabled="!loaded || regenerating"
+                :disabled="!loaded"
                 :readonly="config.client_root_url_from_env"
                 :clearable="!config.client_root_url_from_env && !!config.client_root_url"
                 :placeholder="config.client_root_url_from_env ? '' : automaticClientRootUrls.rootUrl"
@@ -309,7 +122,7 @@
             :value="config.auto_start"
             @update:value="handleAutoStartToggle"
             :aria-label="t('随 Windows 登录自动启动 OCG Manager')"
-            :disabled="!loaded || saving || regenerating"
+            :disabled="!loaded || saving"
             :loading="saving"
           >
             <template #checked>{{ t("开启") }}</template>
@@ -326,7 +139,7 @@
             :value="config.show_dock_icon"
             @update:value="handleDockVisibilityToggle"
             :aria-label="t('在 Dock 中显示 OCG Manager')"
-            :disabled="!loaded || saving || regenerating"
+            :disabled="!loaded || saving"
             :loading="saving"
           >
             <template #checked>{{ t("开启") }}</template>
@@ -342,7 +155,7 @@
             v-model:value="config.routing_mode"
             name="routing-mode"
             class="routing-mode-group"
-            :disabled="!loaded || regenerating || saving"
+            :disabled="!loaded || saving"
           >
             <div
               v-for="option in routingModeOptions"
@@ -370,7 +183,7 @@
               <n-switch
                 v-model:value="config.conversation_sticky"
                 :aria-label="t('对话粘性')"
-                :disabled="!loaded || regenerating || saving"
+                :disabled="!loaded || saving"
               >
                 <template #checked>{{ t("开启") }}</template>
                 <template #unchecked>{{ t("关闭") }}</template>
@@ -390,7 +203,7 @@
             v-model:value="config.free_model_routing"
             name="free-model-routing"
             class="routing-mode-group"
-            :disabled="!loaded || regenerating || saving"
+            :disabled="!loaded || saving"
           >
             <div
               v-for="option in freeModelRoutingOptions"
@@ -420,7 +233,7 @@
             <div class="timeout-field">
               <n-input-number
                 v-model:value="config.connect_timeout_secs"
-                :disabled="!loaded || regenerating"
+                :disabled="!loaded"
                 :min="1"
                 :max="300"
                 :precision="0"
@@ -435,7 +248,7 @@
             <div class="timeout-field">
               <n-input-number
                 v-model:value="config.non_stream_timeout_secs"
-                :disabled="!loaded || regenerating"
+                :disabled="!loaded"
                 :min="1"
                 :max="3600"
                 :precision="0"
@@ -450,7 +263,7 @@
             <div class="timeout-field">
               <n-input-number
                 v-model:value="config.stream_idle_timeout_secs"
-                :disabled="!loaded || regenerating"
+                :disabled="!loaded"
                 :min="1"
                 :max="3600"
                 :precision="0"
@@ -472,7 +285,7 @@
       <n-button
         type="primary"
         :loading="saving"
-        :disabled="!loaded || regenerating || testingProxy || proxyUrlPreview.status === 'error' || clientRootPreview.status === 'error' || inviteUrlPreview.status === 'error' || primaryKeyPreview.status === 'error'"
+        :disabled="!loaded || testingProxy || proxyUrlPreview.status === 'error' || clientRootPreview.status === 'error' || inviteUrlPreview.status === 'error'"
         @click="saveSettings"
       >{{ t("保存设置") }}</n-button>
     </section>
@@ -621,7 +434,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -635,14 +448,10 @@ import {
   NRadio,
   NRadioGroup,
   NSwitch,
-  NTooltip,
   useMessage,
 } from "naive-ui";
 import {
   CheckOutlined,
-  CopyOutlined,
-  DeleteOutlined,
-  ReloadOutlined,
   SwapOutlined,
   BgColorsOutlined,
   CloudSyncOutlined,
@@ -650,7 +459,6 @@ import {
 import { DashboardRequestError, tauriApi } from "../api/tauri";
 import type {
   AppConfig,
-  ConnectionSubKey,
   FreeModelRouting,
   ProxyMode,
   RoutingMode,
@@ -661,9 +469,7 @@ import { THEME_OPTIONS } from "../theme";
 import type { ResolvedTheme, ThemeName } from "../theme";
 import { t } from "../i18n/index.ts";
 import type { MessageKey } from "../i18n/index.ts";
-import { useClipboard } from "../utils/format.ts";
 import {
-  maskConnectionKey,
   normalizeClientRootUrl,
   resolveConnectionUrls,
 } from "./dashboard-connection";
@@ -687,20 +493,14 @@ const emit = defineEmits<{ "update:themeName": [value: ThemeName] }>();
 
 const message = useMessage();
 const saving = ref(false);
-const regenerating = ref(false);
 const testingProxy = ref(false);
 const proxyTestResult = ref<{
   type: "success" | "error";
   title: string;
   message: string;
 } | null>(null);
-const { copiedTarget: keyCopied, copy, cleanup } = useClipboard();
 const loaded = ref(false);
 const settingsLoadError = ref("");
-const newKeyName = ref("");
-const renamingKeyId = ref("");
-const renameDraft = ref("");
-const keyMutation = ref("");
 const checkingUpdate = ref(false);
 const updateResult = ref<UpdateCheckResult | null>(null);
 const updateError = ref("");
@@ -801,22 +601,6 @@ const themeLabel = computed(() => {
   if (themeName !== "default") return selected;
   const resolved = t((THEME_OPTIONS.find((option) => option.value === resolvedTheme)?.label ?? "皓白") as MessageKey);
   return t("默认 · {theme}", { theme: resolved });
-});
-// Non-deleted sub keys (enabled and disabled) from the lightweight
-// connection payload; the primary key lives in the settings form below.
-const subKeys = ref<ConnectionSubKey[]>([]);
-const primaryKeyPreview = computed<{ status?: "error"; feedback: string }>(() => {
-  const value = config.value.gateway_key.trim();
-  if (!value) {
-    return { feedback: t("主 Key 值不能为空；留空保存会被拒绝。") };
-  }
-  if (subKeys.value.some((entry) => entry.value === value)) {
-    return {
-      status: "error",
-      feedback: t("主 Key 值不能与任何子 Key 的值相同。"),
-    };
-  }
-  return { feedback: t("可直接修改主 Key 值，保存设置后生效，旧值立即失效。") };
 });
 const proxyModeHelp = computed(() => {
   const help: Record<ProxyMode, MessageKey> = {
@@ -970,15 +754,10 @@ const updateDownloadPercentage = computed(() => {
 
 async function loadSettings(): Promise<boolean> {
   const generation = ++settingsLoadGeneration;
-  loaded.value = false;
   settingsLoadError.value = "";
   try {
-    const [nextConfig, connection] = await Promise.all([
-      tauriApi.getSettings(),
-      tauriApi.getConnection(),
-    ]);
+    const nextConfig = await tauriApi.getSettings();
     if (generation !== settingsLoadGeneration) return false;
-    subKeys.value = connection.sub_keys;
     acceptSettingsSnapshot(nextConfig);
     return true;
   } catch (e) {
@@ -1011,7 +790,6 @@ async function saveSettings() {
   if (!normalizeInviteUrlInput()) return;
   if (!normalizeProxyInput()) return;
   if (!validateTimeouts()) return;
-  if (!validatePrimaryKey()) return;
   saving.value = true;
   const payload = { ...config.value };
   const saved = savedConfig.value ? { ...savedConfig.value } : null;
@@ -1133,198 +911,6 @@ async function handleDockVisibilityToggle(newValue: boolean) {
   } finally {
     saving.value = false;
   }
-}
-
-/**
- * Shared driver for key lifecycle mutations: run one API call, then adopt a
- * fresh settings + connection snapshot so the key list, primary value, and
- * revision all come back consistent (mirrors the legacy regenerate flow's
- * generation guards against interleaved loads).
- */
-async function runKeyMutation(
-  mutation: string,
-  action: () => Promise<unknown>,
-  successText: () => string,
-): Promise<void> {
-  if (!loaded.value || regenerating.value || !savedConfig.value) return;
-  pendingSettingsMerge = { current: { ...config.value }, saved: { ...savedConfig.value } };
-  const generation = ++settingsLoadGeneration;
-  keyMutation.value = mutation;
-  regenerating.value = true;
-  let mutationError: unknown = null;
-  try {
-    try {
-      await action();
-    } catch (error) {
-      mutationError = error;
-    }
-    try {
-      const [latest, connection] = await Promise.all([
-        tauriApi.getSettings(),
-        tauriApi.getConnection(),
-      ]);
-      if (generation !== settingsLoadGeneration) return;
-      subKeys.value = connection.sub_keys;
-      acceptSettingsSnapshot(latest);
-      if (mutationError === null) {
-        message.success(successText());
-      } else {
-        message.error(t("操作失败: {error}", { error: String(mutationError) }));
-      }
-    } catch (reloadError) {
-      if (generation !== settingsLoadGeneration) return;
-      savedConfig.value = null;
-      loaded.value = false;
-      settingsLoadError.value = reloadError instanceof Error ? reloadError.message : String(reloadError);
-      if (mutationError === null) {
-        message.success(successText());
-      } else {
-        message.error(t("操作失败: {error}", { error: String(mutationError) }));
-      }
-      message.error(t("加载设置失败: {error}", { error: settingsLoadError.value }));
-    }
-  } finally {
-    regenerating.value = false;
-    keyMutation.value = "";
-  }
-}
-
-/** Rotates the primary key through the legacy endpoint. */
-async function rotatePrimaryKey(): Promise<void> {
-  let nextValue = "";
-  await runKeyMutation(
-    "rotate-primary",
-    async () => {
-      const result = await tauriApi.regenerateGatewayKey();
-      nextValue = result.key;
-    },
-    () => t("Key 已刷新"),
-  );
-  if (nextValue) {
-    try {
-      await copy(`settings-key-rotated-${Date.now()}`, nextValue, "Key");
-      message.success(t("新 Key 值已复制到剪贴板"));
-    } catch {
-      message.warning(t("自动复制失败，请在列表中手动复制新 Key"));
-    }
-  }
-}
-
-async function copyPrimaryKey(): Promise<void> {
-  if (!config.value.gateway_key) return;
-  try {
-    await copy("settings-key-primary", config.value.gateway_key, "Key");
-    message.success(t("已复制 Key"));
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : t("复制失败"));
-  }
-}
-
-async function createKey(): Promise<void> {
-  const name = newKeyName.value.trim();
-  if (!name || regenerating.value || !loaded.value) return;
-  let createdValue = "";
-  await runKeyMutation(
-    "create",
-    async () => {
-      const result = await tauriApi.createGatewayKey(name, config.value.revision);
-      createdValue = result.key;
-    },
-    () => t("Key 已创建"),
-  );
-  if (createdValue) {
-    newKeyName.value = "";
-    try {
-      await copy(`settings-key-created-${Date.now()}`, createdValue, "Key");
-      message.success(t("新 Key 值已复制到剪贴板"));
-    } catch {
-      message.warning(t("自动复制失败，请在列表中手动复制新 Key"));
-    }
-  }
-}
-
-function startRename(entry: ConnectionSubKey): void {
-  renamingKeyId.value = entry.id;
-  renameDraft.value = entry.name;
-}
-
-function cancelRename(): void {
-  renamingKeyId.value = "";
-  renameDraft.value = "";
-}
-
-async function commitRename(entry: ConnectionSubKey): Promise<void> {
-  const name = renameDraft.value.trim();
-  if (!name || name === entry.name) {
-    cancelRename();
-    return;
-  }
-  await runKeyMutation(
-    `rename:${entry.id}`,
-    () => tauriApi.updateGatewayKey(entry.id, { name }, config.value.revision),
-    () => t("Key 名称已保存"),
-  );
-  cancelRename();
-}
-
-async function toggleKey(entry: ConnectionSubKey, enabled: boolean): Promise<void> {
-  await runKeyMutation(
-    `toggle:${entry.id}`,
-    () => tauriApi.updateGatewayKey(entry.id, { enabled }, config.value.revision),
-    () => (enabled ? t("Key 已启用") : t("Key 已停用")),
-  );
-}
-
-async function copyEntryKey(entry: ConnectionSubKey): Promise<void> {
-  if (!entry.value) return;
-  try {
-    await copy(`settings-key-${entry.id}`, entry.value, "Key");
-    message.success(t("已复制 Key"));
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : t("复制失败"));
-  }
-}
-
-async function regenerateEntryKey(entry: ConnectionSubKey): Promise<void> {
-  let nextValue = "";
-  await runKeyMutation(
-    `regenerate:${entry.id}`,
-    async () => {
-      const result = await tauriApi.regenerateGatewayKeyEntry(entry.id, config.value.revision);
-      nextValue = result.key;
-    },
-    () => t("Key 已重新生成"),
-  );
-  if (nextValue) {
-    try {
-      await copy(`settings-key-regenerated-${Date.now()}`, nextValue, "Key");
-      message.success(t("新 Key 值已复制到剪贴板"));
-    } catch {
-      message.warning(t("自动复制失败，请在列表中手动复制新 Key"));
-    }
-  }
-}
-
-async function deleteEntryKey(entry: ConnectionSubKey): Promise<void> {
-  await runKeyMutation(
-    `delete:${entry.id}`,
-    () => tauriApi.deleteGatewayKey(entry.id, config.value.revision),
-    () => t("Key 已删除"),
-  );
-}
-
-function validatePrimaryKey(): boolean {
-  const value = config.value.gateway_key.trim();
-  if (!value) {
-    message.error(t("主 Key 值不能为空；留空保存会被拒绝。"));
-    return false;
-  }
-  if (subKeys.value.some((entry) => entry.value === value)) {
-    message.error(t("主 Key 值不能与任何子 Key 的值相同。"));
-    return false;
-  }
-  config.value.gateway_key = value;
-  return true;
 }
 
 function normalizeClientRootInput(): boolean {
@@ -1615,10 +1201,19 @@ onMounted(() => {
   void loadSettings();
   void restoreUpdateState();
 });
+onActivated(() => {
+  if (saving.value || testingProxy.value) return;
+  if (savedConfig.value) {
+    pendingSettingsMerge = {
+      current: { ...config.value },
+      saved: { ...savedConfig.value },
+    };
+  }
+  void loadSettings();
+});
 onUnmounted(() => {
   updateDisposed = true;
   cancelUpdatePolling();
-  cleanup();
 });
 </script>
 
@@ -1670,86 +1265,6 @@ onUnmounted(() => {
 .section-icon {
   margin-right: 6px;
   vertical-align: -0.15em;
-}
-.gateway-keys .key-create-row {
-  display: grid;
-  grid-template-columns: minmax(0, 320px) auto;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-}
-.gateway-key-list {
-  display: grid;
-  gap: 8px;
-  margin: 12px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.gateway-key-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--ocg-border);
-  border-radius: 6px;
-  background: var(--ocg-canvas);
-}
-.gateway-key-main {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-.gateway-key-main .n-input {
-  max-width: 240px;
-}
-.gateway-key-name {
-  overflow: hidden;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--ocg-ink);
-  font-size: var(--ocg-font-md);
-  font-weight: 600;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: text;
-}
-.gateway-key-name:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-.gateway-key-badge {
-  flex: none;
-  padding: 1px 8px;
-  border: 1px solid var(--ocg-border);
-  border-radius: 999px;
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-xs);
-}
-.gateway-key-badge.muted {
-  opacity: 0.8;
-}
-.gateway-key-value {
-  overflow: hidden;
-  color: var(--ocg-subtle);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: var(--ocg-font-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.gateway-key-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.gateway-key-row--primary .gateway-key-name {
-  cursor: default;
-}
-.gateway-key-row--primary .gateway-key-value {
-  color: var(--ocg-muted);
 }
 .client-root-field {
   width: 100%;
