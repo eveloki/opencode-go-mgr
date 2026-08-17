@@ -99,6 +99,7 @@ mod tests {
                 cooldown_free_until: None,
                 last_error: None,
                 auth_error: None,
+                notes: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -151,6 +152,7 @@ mod tests {
                 key: "sk-a".into(),
                 referral_code: None,
                 purchase_date: None,
+                notes: None,
             },
         )
         .unwrap();

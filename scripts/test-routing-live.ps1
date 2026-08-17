@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$BaseUrl = "http://127.0.0.1:9042",
-    [string]$Model = "deepseek-v4-flash",
+    [string]$Model = "mimo-v2.5",
     [string[]]$TargetAccountNames = @("112", "115"),
     [int]$RequestTimeoutSec = 120,
     [switch]$SkipProtocolMatrix,

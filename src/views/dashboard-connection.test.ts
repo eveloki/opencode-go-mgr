@@ -631,7 +631,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
   assert.deepEqual(piModels.get("glm-5.3")!.thinkingLevelMap, {
     off: null,
     minimal: null,
-    low: null,
+    low: "low",
     medium: null,
     high: "high",
     xhigh: null,
@@ -695,7 +695,7 @@ test("Pi and Kimi Code configs use verified per-model limits and capabilities wi
     );
   }
   assert.match(kimiTables.get("grok-4.5")!, /support_efforts = \["low","medium","high"\]\ndefault_effort = "high"/);
-  assert.match(kimiTables.get("glm-5.3")!, /support_efforts = \["high","max"\]\ndefault_effort = "max"/);
+  assert.match(kimiTables.get("glm-5.3")!, /support_efforts = \["low","high","max"\]\ndefault_effort = "max"/);
   assert.match(kimiTables.get("glm-5.2")!, /support_efforts = \["high","max"\]\ndefault_effort = "max"/);
   assert.match(kimiTables.get("kimi-k3")!, /support_efforts = \["max"\]\ndefault_effort = "max"/);
   for (const modelId of ["deepseek-v4-pro", "deepseek-v4-flash"]) {
@@ -1115,6 +1115,17 @@ test("account form rejects whitespace-only required credentials", async () => {
   assert.match(accountForm, /name:\s*\{\s*required: true,\s*whitespace: true,/);
   assert.match(accountForm, /base\.key = \{\s*required: true,\s*whitespace: true,/);
   assert.match(accountForm, /purchaseDate: \[\s*\{\s*required: true,\s*type: "number",/);
+});
+
+test("account cards and forms expose an optional freeform notes box", async () => {
+  const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const accountForm = await readFile(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
+
+  assert.match(accounts, /class="account-notes"/);
+  assert.match(accounts, /@blur="saveNotes\(account\.id\)"/);
+  assert.match(accounts, /updateAccount\(accountId, \{ notes: draft \}\)/);
+  assert.match(accountForm, /path="notes"/);
+  assert.match(accountForm, /type="textarea"/);
 });
 
 test("account form keeps identity first and does not collect managed password or expiry", async () => {

@@ -371,7 +371,7 @@ actually carry. The passthrough / conversion matrix is under
 | --- | ---: | ---: | --- | --- | :---: | --- |
 | `grok-4.5` | 500K | 500K | text, image | always | ✓ | low / medium / high (default high) |
 | `gpt-5.6-luna` | 1.05M | 128K | text, image | ✓ | ✓ | low / medium / high / max (default medium) |
-| `glm-5.3` | 1M | 128K | text | ✓ | ✓ | high / max (default max) |
+| `glm-5.3` | 1M | 128K | text | ✓ | ✓ | low / high / max (default max) |
 | `glm-5.2` | 1M | 128K | text | ✓ | ✓ | high / max (default max) |
 | `glm-5.1` | 198K | 32K | text | ✓ | ✓ | — |
 | `kimi-k3` | 1M | 128K | text, image, video | always | ✓ | max |
@@ -393,8 +393,9 @@ actually carry. The passthrough / conversion matrix is under
 | `hy3` | 256K | 64K | text | ✓ | ✓ | low / high (default high) |
 
 Rounded display: 198K = 202,752; 200K = 204,800; 256K = 262,144; 1M = 1,000,000
-or 1,048,576. `glm-5.3` uses the GLM-5.2 family limits until models.dev
-publishes a dedicated row.
+or 1,048,576. `glm-5.3` limits and token rates follow the dedicated
+models.dev `opencode-go/glm-5.3` row (same $1.40 / $4.40 / $0.26 as the
+official Go table; Usage remains $15).
 
 Claude Desktop is the exception with durable model mappings: before its
 configuration is copied, the selected `sonnet`, `opus`, and `haiku` targets
@@ -472,7 +473,9 @@ cookies/profile, and the confirmation states this explicitly. That login state
 can then be recovered only from a backup or by signing in again.
 
 Each completed account card shows the account name, cooldown state, and the
-5-hour / weekly / monthly usage bars driven by local accounting.
+5-hour / weekly / monthly usage bars driven by local accounting. Every account
+card also has an optional freeform **notes** box. It can stay empty, does not
+affect routing or quota, and is saved when the field loses focus.
 
 - **Usage baselines (Key accounts).** Type a percentage or drag a bar to set
   its current real-world usage baseline. After the value is saved, successful
@@ -488,10 +491,10 @@ Each completed account card shows the account name, cooldown state, and the
   profile remains self-contained; desktop profiles continue to use the
   browser's configured credential store.
 - **Identity and credentials.** The name is the account's required primary
-  display label. The note/login account is optional; on Key-account creation,
+  display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.
-  The dashboard stores the account key but does not collect or manage
-  third-party login passwords.
+  A separate large notes box is optional and freeform. The dashboard stores
+  the account key but does not collect or manage third-party login passwords.
 - **Purchase date.** New accounts default to the browser's current date, and
   the value remains editable. The managed wizard also writes the purchase date
   when payment advances to key verification. Expiry is the same day in the
@@ -512,8 +515,9 @@ Each completed account card shows the account name, cooldown state, and the
 The **Pricing** view shows the active revision, documentation timestamp,
 window limits, four USD token rates, `Usage`, and one official quota multiplier.
 Combinable prices use the standard tier as the complete root row. Expanding it
-shows higher-context Qwen tiers and MiniMax long-context, high-speed, priority,
-or combined upgrade tiers.
+shows higher-context Qwen tiers, DeepSeek Peak hours, and MiniMax long-context,
+high-speed, priority, or combined upgrade tiers. DeepSeek V4 Pro and Flash use
+Off-Peak rates except 01:00–04:00 and 06:00–10:00 UTC, when Peak rates apply.
 
 The official multiplier defaults to `monthly limit / Usage`, but can be edited
 for temporary promotions. Saving creates a persistent revision used by later
@@ -794,8 +798,9 @@ active OpenCode Go USD snapshot.
 - The official multiplier defaults to `monthly limit / Usage`. A user can
   override it for a temporary promotion; subsequent requests use the active
   persisted value, and refresh never overwrites it without confirmation.
-- `deepseek-v4-pro` (DS V4 Pro), `mimo-v2.5-pro`, and Grok currently have a
-  `$15` Usage allowance, which corresponds to a `60 / 15 = 4x` multiplier.
+- `deepseek-v4-pro` (DS V4 Pro), `deepseek-v4-flash`, `mimo-v2.5-pro`, and Grok
+  currently have a `$15` Usage allowance, which corresponds to a
+  `60 / 15 = 4x` multiplier.
 - The applicable local MiniMax adjustment is applied last. No supplier API
   price, CNY value, or exchange rate participates in the calculation.
 
@@ -891,7 +896,7 @@ ocg-manager-cli
 ├── key enable <id>      Enable an account
 ├── key disable <id>     Disable an account
 ├── key ping [id]
-│   --model       Model to send (default deepseek-v4-flash)
+│   --model       Model to send (default mimo-v2.5)
 │   --message     User message (default "ping")
 │   --max-tokens  max_tokens for the ping (default 3)
 └── status        Show data dir, gateway port/key, upstream, account totals
@@ -925,7 +930,7 @@ checkout containing `compose.yaml` and `.env.example` (preferably the
 matching release tag):
 
 ```bash
-git clone --branch v1.6.1 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.6.3 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -941,7 +946,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`; the Release
   `compose.example.yaml` defaults to its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.6.1`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.6.3`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `1.5` and `latest` move forward. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is technically immutable.
@@ -1088,13 +1093,13 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.6.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.6.3
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.3
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.6.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.6.3 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.6.3 \
   --repo klarkxy/opencode-go-mgr
 ```
 

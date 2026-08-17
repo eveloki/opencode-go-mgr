@@ -51,6 +51,17 @@
             :placeholder="isEdit ? t('留空不修改') : 'sk-...'"
           />
         </n-form-item>
+        <n-form-item path="notes" :label="t('备注')" class="notes-field">
+          <n-input
+            v-model:value="form.notes"
+            type="textarea"
+            :autosize="{ minRows: 4, maxRows: 10 }"
+            :maxlength="4000"
+            show-count
+            :placeholder="t('可填写任意备注')"
+            :input-props="{ 'aria-label': t('备注') }"
+          />
+        </n-form-item>
       </div>
     </n-form>
     <template #footer>
@@ -94,6 +105,7 @@ type AccountFormPayload = {
   username: string;
   key?: string;
   purchase_date?: string;
+  notes: string;
 };
 
 type AccountDraft = {
@@ -101,6 +113,7 @@ type AccountDraft = {
   username: string;
   key: string;
   purchaseDate: number | null;
+  notes: string;
 };
 
 const props = withDefaults(defineProps<{
@@ -189,6 +202,7 @@ function blankAccountDraft(): AccountDraft {
     username: "",
     key: "",
     purchaseDate: timestampFromLocalDate(localDateString()) ?? Date.now(),
+    notes: "",
   };
 }
 
@@ -200,6 +214,7 @@ function draftFromAccount(account: Account): AccountDraft {
     purchaseDate: timestampFromLocalDate(account.purchase_date)
       ?? timestampFromLocalDate(localDateString())
       ?? Date.now(),
+    notes: account.notes ?? "",
   };
 }
 
@@ -231,6 +246,7 @@ async function handleSave() {
     name: form.value.name.trim(),
     username: form.value.username.trim(),
     purchase_date: form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate),
+    notes: form.value.notes,
   };
   if (isEdit.value) {
     if (form.value.key.trim()) {
@@ -249,6 +265,10 @@ async function handleSave() {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   align-items: start;
+}
+
+.notes-field {
+  grid-column: 1 / -1;
 }
 
 .modal-grid :deep(.n-date-picker) {

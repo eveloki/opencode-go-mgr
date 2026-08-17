@@ -193,10 +193,26 @@ function buildMinimaxHighspeedRows(model: PricingModel, labels: PricingTableLabe
   )]);
 }
 
+function timeWindowRank(model: PricingModel): number {
+  switch (model.time_window) {
+    case "off_peak":
+      return 0;
+    case "peak":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
 function comparePricingTiers(left: PricingModel, right: PricingModel): number {
   return (left.min_input_tokens ?? 0) - (right.min_input_tokens ?? 0)
     || (left.max_input_tokens ?? Number.MAX_SAFE_INTEGER)
-      - (right.max_input_tokens ?? Number.MAX_SAFE_INTEGER);
+      - (right.max_input_tokens ?? Number.MAX_SAFE_INTEGER)
+    || timeWindowRank(left) - timeWindowRank(right);
+}
+
+function timeWindowKey(model: PricingModel): string {
+  return model.time_window ?? "always";
 }
 
 /**
@@ -232,7 +248,7 @@ export function buildPricingTableRows(
       if (!standard) continue;
       rows.push(groupRow(standard, upgrades.map((entry, index) => modelRow(
         entry,
-        `variant:${modelId}:${entry.min_input_tokens ?? "none"}:${entry.max_input_tokens ?? "none"}:${index}`,
+        `variant:${modelId}:${entry.min_input_tokens ?? "none"}:${entry.max_input_tokens ?? "none"}:${timeWindowKey(entry)}:${index}`,
         "variant",
         variantLabel(entry.display_name || entry.model_id),
       ))));
@@ -240,7 +256,7 @@ export function buildPricingTableRows(
     }
     rows.push(modelRow(
       first,
-      `model:${modelId}:${first.min_input_tokens ?? "none"}:${first.max_input_tokens ?? "none"}`,
+      `model:${modelId}:${first.min_input_tokens ?? "none"}:${first.max_input_tokens ?? "none"}:${timeWindowKey(first)}`,
     ));
   }
   return rows;

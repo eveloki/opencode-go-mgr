@@ -1,7 +1,9 @@
 use crate::state::AppState;
 use chrono::Utc;
 use ocg_core::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
-use ocg_core::models::{Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate};
+use ocg_core::models::{
+    Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate, normalize_account_notes,
+};
 use ocg_core::state::CoreState;
 use tauri::State;
 
@@ -48,6 +50,8 @@ pub(crate) fn create_account_inner(
         cooldown_free_until: None,
         last_error: None,
         auth_error: None,
+        notes: normalize_account_notes(input.notes.as_deref().unwrap_or(""))
+            .map_err(|error| error.to_string())?,
         created_at: now,
         updated_at: now,
     };
@@ -77,8 +81,15 @@ pub fn update_account(
 pub(crate) fn update_account_inner(
     core: &CoreState,
     id: String,
-    update: AccountUpdate,
+    mut update: AccountUpdate,
 ) -> Result<Account, String> {
+    if let Some(value) = update.notes.take() {
+        update.notes = Some(
+            normalize_account_notes(&value)
+                .map_err(|error| error.to_string())?
+                .unwrap_or_default(),
+        );
+    }
     let key_cipher = update
         .key
         .as_ref()
@@ -198,6 +209,7 @@ pub(crate) fn toggle_account_inner(core: &CoreState, id: String) -> Result<Accou
         enabled: Some(next_enabled),
         referral_code: None,
         purchase_date: None,
+        notes: None,
     };
     db.update_account(&id, &update, None, None)
         .map_err(|e| e.to_string())?;
@@ -316,6 +328,7 @@ mod tests {
                 key: "sk-long-enough-key".into(),
                 referral_code: None,
                 purchase_date: None,
+                notes: None,
             },
         )
         .unwrap();
@@ -331,6 +344,7 @@ mod tests {
                 key: "short".into(),
                 referral_code: Some("ref".into()),
                 purchase_date: Some("2026-01-15".into()),
+                notes: None,
             },
         )
         .unwrap();
@@ -350,6 +364,7 @@ mod tests {
                 enabled: None,
                 referral_code: None,
                 purchase_date: None,
+                notes: None,
             },
         )
         .unwrap();
@@ -406,6 +421,7 @@ mod tests {
                     enabled: Some(true),
                     referral_code: None,
                     purchase_date: None,
+                    notes: None,
                 },
             )
             .is_err()
@@ -453,6 +469,7 @@ mod tests {
                     enabled: None,
                     referral_code: None,
                     purchase_date: None,
+                    notes: None,
                 },
             )
             .is_err()

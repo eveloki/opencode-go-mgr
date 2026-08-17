@@ -19,6 +19,7 @@ export interface Account {
   cooldown_free_until: string | null;
   last_error: string | null;
   auth_error: string | null;
+  notes: string;
   created_at: string;
   updated_at: string;
 }
@@ -38,6 +39,7 @@ export interface AccountInput {
   password?: string;
   key: string;
   purchase_date?: string;
+  notes?: string;
 }
 
 export interface AccountUpdate {
@@ -47,6 +49,7 @@ export interface AccountUpdate {
   key?: string;
   enabled?: boolean;
   purchase_date?: string;
+  notes?: string;
 }
 
 export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
@@ -269,6 +272,7 @@ export interface PricingModel {
   quota_multiplier: number;
   min_input_tokens?: number | null;
   max_input_tokens?: number | null;
+  time_window?: "always" | "off_peak" | "peak" | null;
   adjustments: PricingAdjustment[];
 }
 
@@ -419,7 +423,7 @@ export const tauriApi = {
   getAccounts: () => request<Account[]>("/accounts"),
   createAccount: (input: AccountInput) =>
     request<Account>("/accounts", { method: "POST", body: jsonBody(input) }),
-  createManagedAccount: (input: { name: string; username?: string }) =>
+  createManagedAccount: (input: { name: string; username?: string; notes?: string }) =>
     request<Account>("/accounts/managed", { method: "POST", body: jsonBody(input) }),
   updateAccount: (id: string, update: AccountUpdate) =>
     request<Account>(`/accounts/${id}`, { method: "PATCH", body: jsonBody(update) }),

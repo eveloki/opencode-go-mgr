@@ -89,8 +89,8 @@ enum KeyAction {
     Ping {
         /// Account ID; omit to ping every enabled key
         id: Option<String>,
-        /// Model to send (default: deepseek-v4-flash)
-        #[arg(long, default_value = "deepseek-v4-flash")]
+        /// Model to send (default: mimo-v2.5)
+        #[arg(long, default_value = ocg_core::models::DEFAULT_ACCOUNT_TEST_MODEL)]
         model: String,
         /// User message (default: "ping")
         #[arg(long, default_value = "ping")]
@@ -301,6 +301,7 @@ async fn key_command(
                 cooldown_free_until: None,
                 last_error: None,
                 auth_error: None,
+                notes: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -393,6 +394,7 @@ fn toggle_account(state: &Arc<CoreStateInner>, id: &str, enabled: bool) -> Resul
         enabled: Some(enabled),
         referral_code: None,
         purchase_date: None,
+        notes: None,
     };
     db.update_account(id, &update, None, None)?;
     db.log_gateway(

@@ -146,6 +146,7 @@ mod tests {
             cooldown_free_until: None,
             last_error: None,
             auth_error: None,
+            notes: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

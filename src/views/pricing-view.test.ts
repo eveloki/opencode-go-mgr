@@ -56,6 +56,36 @@ test("effective pricing retains nulls and applies the Go quota multiplier", () =
   assert.equal(formatPricingMultiplier(1.5), "×1.5");
 });
 
+test("DeepSeek peak rows nest under the off-peak root", () => {
+  const rows = buildPricingTableRows([
+    pricingModel({
+      model_id: "deepseek-v4-flash",
+      display_name: "DeepSeek V4 Flash (Peak)",
+      time_window: "peak",
+      input: 0.44,
+      output: 1.32,
+    }),
+    pricingModel({
+      model_id: "deepseek-v4-flash",
+      display_name: "DeepSeek V4 Flash (Off-Peak)",
+      time_window: "off_peak",
+      input: 0.22,
+      output: 0.66,
+    }),
+  ], pricingLabels);
+
+  assert.equal(rows.length, 1);
+  const flash = rows[0];
+  assert.equal(flash?.kind, "group");
+  assert.equal(flash?.display_name, "DeepSeek V4 Flash");
+  assert.equal(flash?.input, 0.22);
+  assert.deepEqual(flash?.children?.map(({ display_name, input }) => [display_name, input]), [
+    ["Peak", 0.44],
+  ]);
+  const keys = [flash?.row_key, ...(flash?.children ?? []).map((child) => child.row_key)];
+  assert.equal(new Set(keys).size, keys.length);
+});
+
 test("pricing rows group duplicate tiers under stable unique keys", () => {
   const rows = buildPricingTableRows([
     pricingModel({

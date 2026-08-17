@@ -53,6 +53,7 @@ fn core_state_persists_account_through_static_cipher() {
         cooldown_free_until: None,
         last_error: None,
         auth_error: None,
+        notes: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -97,6 +98,7 @@ fn core_state_with_wrong_cipher_cannot_decrypt_existing_account() {
             cooldown_free_until: None,
             last_error: None,
             auth_error: None,
+            notes: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
