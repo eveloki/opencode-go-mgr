@@ -231,6 +231,7 @@ test("release workflow keeps reusable quality checks out of the native build mat
   const buildJob = workflow.match(/\n  build:[\s\S]*?\n  draft-release:/)?.[0] ?? "";
   const preflightJob = workflow.match(/\n  preflight:[\s\S]*?\n  build:/)?.[0] ?? "";
   const publishJob = workflow.match(/\n  publish-release:[\s\S]*$/)?.[0] ?? "";
+  const rustJob = quality.match(/\n  rust:[\s\S]*?\n  windows-tauri:/)?.[0] ?? "";
   const windowsJob = quality.match(/\n  windows-tauri:[\s\S]*$/)?.[0] ?? "";
   const containerWorkflow = readFileSync(
     new URL("../.github/workflows/container.yml", import.meta.url),
@@ -280,7 +281,8 @@ test("release workflow keeps reusable quality checks out of the native build mat
   assert.match(quality, /windows-tauri:/);
   assert.match(quality, /cargo test -p ocg-manager --lib --locked/);
   assert.match(quality, /cargo clippy -p ocg-manager --all-targets --locked -- -D warnings/);
-  assert.match(quality, /Provide stub dashboard for tauri-build/);
+  assert.match(rustJob, /Provide stub dashboard for tauri-build/);
+  assert.match(windowsJob, /Provide stub dashboard for tauri-build/);
   assert.doesNotMatch(windowsJob, /pnpm\/action-setup|setup-node|pnpm install|vite build/);
   assert.match(preflightJob, /runs-on: ubuntu-latest/);
   assert.match(preflightJob, /shell: pwsh/);

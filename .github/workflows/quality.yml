@@ -73,6 +73,11 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
 
+      - name: Provide stub dashboard for tauri-build
+        run: |
+          mkdir -p dist
+          printf '%s\n' '<!doctype html><div id="app"></div>' > dist/index.html
+
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

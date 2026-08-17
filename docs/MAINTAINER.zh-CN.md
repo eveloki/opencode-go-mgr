@@ -401,8 +401,9 @@ repository signing secret 签一个临时 payload，并用已通过连续性检�
 
 - **Web** —— Node 测试、TypeScript 检查、Vite 生产构建、`DESIGN.md` lint 与
   Compose 校验。
-- **Rust** —— `cargo fmt`、锁定依赖的 workspace 测试与 Clippy。只有这个 job
-  安装 WebKit 头文件，以便 Linux 上仍编译 Tauri crate。
+- **Rust** —— `cargo fmt`、锁定依赖的 workspace 测试与 Clippy，用占位
+  `dist/index.html` 满足 tauri-build，以便 Linux 上仍编译桌面 crate。只有这个
+  job 安装 WebKit 头文件。
 - **Windows Tauri** —— 对 `ocg-manager` 跑 `cargo test`/`clippy`，用占位
   `dist/index.html` 满足 tauri-build，覆盖 Windows 专属自动启动，不再装 pnpm
   或跑 Vite。

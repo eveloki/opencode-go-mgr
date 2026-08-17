@@ -477,9 +477,9 @@ does not rebuild the dashboard:
 
 - **Web** — Node tests, TypeScript checking, a Vite production bundle,
   `DESIGN.md` lint, and Compose validation.
-- **Rust** — `cargo fmt`, locked workspace tests, and Clippy. WebKit
-  headers are installed only on this job so the Linux Tauri crate still
-  compiles.
+- **Rust** — `cargo fmt`, locked workspace tests, and Clippy against a
+  stub `dist/index.html` so tauri-build can compile the Linux desktop
+  crate. WebKit headers are installed only on this job.
 - **Windows Tauri** — `cargo test`/`clippy` for `ocg-manager` against a
   stub `dist/index.html`, covering Windows-only auto-start without pnpm
   or Vite.
