@@ -301,7 +301,8 @@ top — is the **Connection Center**. It contains:
   only the selected key's previous value immediately; other keys keep
   working. When more than one enabled key exists, a selector lists them and
   switches the displayed (masked) value, the copy target, and the regenerate
-  target.
+  target. Copying places the full plaintext value on the clipboard — clear
+  your clipboard history after use on shared or public computers.
 - The **API Base URL** (e.g. `http://127.0.0.1:9042/v1`) with one-click copy,
   plus the full Chat Completions, Responses, and Messages endpoints.
 - The **Upstream URL** the gateway forwards to, with a copy action.

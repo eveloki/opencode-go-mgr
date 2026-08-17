@@ -1,5 +1,7 @@
 use crate::state::AppState;
-use ocg_core::models::{AppConfig, GatewayStatus, normalize_client_root_url};
+use ocg_core::models::{
+    AppConfig, GatewayStatus, PRIMARY_KEY_REQUIRED_MESSAGE, normalize_client_root_url,
+};
 use ocg_core::state::CoreState;
 use tauri::State;
 
@@ -28,7 +30,7 @@ pub(crate) fn update_settings_inner(
     let _settings_update = core.settings_update.lock();
     config.gateway_key = config.gateway_key.trim().to_string();
     if config.gateway_key.is_empty() {
-        return Err("key is required".to_string());
+        return Err(PRIMARY_KEY_REQUIRED_MESSAGE.to_string());
     }
     // Same unified cross-tier gate as the dashboard settings update: the
     // primary value must differ from every non-deleted sub key's value.

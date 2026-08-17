@@ -461,6 +461,14 @@ impl CoreStateInner {
         // gates) guarantees no other snapshot entry holds the new value; the
         // warn-only check below is defense in depth for future unchecked
         // writers.
+        //
+        // Ordering note: persistence precedes the snapshot swap on purpose.
+        // A failed save returns before any mutation (consistent state); the
+        // only gap is a panic between two adjacent lock/assignment blocks,
+        // which heals on restart or at the next key API entry point (both
+        // rebuild the snapshot from the database). Swapping the snapshot
+        // first would instead leave an unpersisted credential authenticating
+        // after a failed save — a divergence that outlives the process.
         {
             let mut snapshot = self.credential_snapshot.write();
             if let Some(existing) = snapshot.get(&config.gateway_key) {

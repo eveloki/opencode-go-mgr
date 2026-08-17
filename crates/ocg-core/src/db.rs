@@ -1512,11 +1512,16 @@ impl Database {
             })
         })?;
         let mut keys = rows.collect::<Result<Vec<_>, _>>()?;
-        // Empty snapshot names (logs written before the key existed in config)
-        // still deserve a stable display label.
+        // Empty snapshot names (logs written before the key existed in
+        // config) still deserve a stable display label; the primary key's
+        // fixed display name always wins over the raw id.
         for key in &mut keys {
             if key.name.is_empty() {
-                key.name = key.id.clone();
+                key.name = if key.id == crate::gateway_keys::PRIMARY_KEY_ID {
+                    crate::gateway_keys::PRIMARY_KEY_NAME.to_string()
+                } else {
+                    key.id.clone()
+                };
             }
         }
         Ok(keys)
@@ -5198,6 +5203,19 @@ mod tests {
                 .iter()
                 .any(|key| key.id == "00000000-0000-0000-0000-000000000001")
         );
+
+        // A primary-attributed row with a NULL name resolves to the fixed
+        // display name, never the raw id constant.
+        let mut unnamed_primary = base.clone();
+        unnamed_primary.client_key_id = Some("00000000-0000-0000-0000-000000000001".into());
+        unnamed_primary.client_key_name = None;
+        db.log_forward(&unnamed_primary).unwrap();
+        let keys = db.list_forward_log_keys().unwrap();
+        let primary = keys
+            .iter()
+            .find(|key| key.id == "00000000-0000-0000-0000-000000000001")
+            .unwrap();
+        assert_eq!(primary.name, "Primary");
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();

@@ -319,6 +319,10 @@ pub enum ProxyMode {
 
 pub const DEFAULT_OPENCODE_INVITE_URL: &str = "https://opencode.ai/go?ref=68XPB6NP8V";
 
+/// Shared rejection message for a blank primary gateway key; used by
+/// `AppConfig::validate` and both settings-update entry points.
+pub const PRIMARY_KEY_REQUIRED_MESSAGE: &str = "key is required";
+
 /// Sentinel filter value selecting forward logs without a client key
 /// (written before multi-key support or not yet backfilled).
 pub const UNATTRIBUTED_KEY_FILTER: &str = "__unattributed__";
@@ -514,7 +518,7 @@ pub fn normalize_client_root_url(value: &str) -> Result<String, String> {
 impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.gateway_key.trim().is_empty() {
-            return Err("key is required".to_string());
+            return Err(PRIMARY_KEY_REQUIRED_MESSAGE.to_string());
         }
         self.validate_timeouts()?;
         normalize_proxy_url(self.proxy_mode, &self.proxy_url)?;

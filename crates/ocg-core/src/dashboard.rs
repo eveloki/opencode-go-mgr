@@ -2257,7 +2257,7 @@ async fn update_settings(
         // Minimal payload sanity guard: an empty/blank gateway_key means a
         // truncated or hand-written settings body, which must not silently
         // reset every other field to its default.
-        return Err(ApiError::bad_request("key is required"));
+        return Err(ApiError::bad_request(PRIMARY_KEY_REQUIRED_MESSAGE));
     }
     // Unified cross-tier gate (shared with the Tauri update path and the sub
     // key enable path): the primary value must differ from every non-deleted
