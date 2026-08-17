@@ -784,9 +784,14 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (17);")?;
         }
 
-        // v18 (upstream v1.6.3): optional account notes.
+        // v18 (upstream v1.6.3): optional account notes. ensure_column is
+        // idempotent and runs unconditionally: databases that ran this
+        // fork's earlier draft migration numbering (v18/v19 used for the
+        // client-key columns and the sub key table) skip the version guard
+        // below while still lacking the column, and every account query
+        // references it.
+        ensure_column(&tx, "accounts", "notes", "TEXT")?;
         if version < 18 {
-            ensure_column(&tx, "accounts", "notes", "TEXT")?;
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (18);")?;
         }
 
@@ -1544,7 +1549,7 @@ impl Database {
         Ok(keys)
     }
 
-    // ----- sub gateway keys (schema v19) -----
+    // ----- sub gateway keys (schema v20) -----
 
     /// All sub keys including soft-delete tombstones, in creation order.
     pub fn list_sub_gateway_keys(&self) -> Result<Vec<SubGatewayKey>> {
@@ -5076,6 +5081,51 @@ mod tests {
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn draft_numbered_databases_regain_the_notes_column() {
+        // Databases from this fork's draft builds (schema v18/v19 used for
+        // the client-key columns and the sub key table, never released)
+        // never received upstream v1.6.3's accounts.notes. They sit at
+        // version >= 18 without the column, so the version-guarded block
+        // skips; reopening must repair them before any account query runs.
+        for draft_version in [18, 19] {
+            let dir = temp_data_dir(&format!("draft-v{draft_version}"));
+            let db = Database::open(dir.clone()).unwrap();
+            db.conn
+                .execute_batch(&format!(
+                    "ALTER TABLE accounts DROP COLUMN notes;
+                     INSERT OR REPLACE INTO schema_version (version) VALUES ({draft_version});"
+                ))
+                .unwrap();
+            drop(db);
+
+            let db = Database::open(dir.clone()).unwrap();
+            db.create_account(&account("acct")).unwrap();
+            assert_eq!(db.list_accounts().unwrap().len(), 1);
+            assert!(db.get_account("acct").unwrap().is_some());
+            let notes_present: i64 = db
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('accounts')
+                     WHERE name = 'notes'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(notes_present, 1, "draft v{draft_version} regains notes");
+            let version: i32 = db
+                .conn
+                .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(version, 20);
+
+            drop(db);
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

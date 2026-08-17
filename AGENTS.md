@@ -122,7 +122,7 @@ git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json s
 
 ## 当前已知缺口
 
-- 曾运行多 Key 开发构建（PR #43 config 内嵌形态，从未发布）的数据库：历史 forward_logs 已按当时主 Key 的随机 UUID 回填（非 NULL，不触发重回填），新二进制下 `/logs/forward/keys` 会出现旧 UUID 与 `PRIMARY_KEY_ID` 两个同名 "Primary" 条目。属可接受开发期残留；洁癖修复可删除 data.sqlite 重建，不提供自动迁移。首次启动照常把 NULL 历史行回填到 `PRIMARY_KEY_ID`。
+- 曾运行多 Key 开发构建（PR #43 config 内嵌形态，从未发布）的数据库：历史 forward_logs 已按当时主 Key 的随机 UUID 回填（非 NULL，不触发重回填），新二进制下 `/logs/forward/keys` 会出现旧 UUID 与 `PRIMARY_KEY_ID` 两个同名 "Primary" 条目。属可接受开发期残留；洁癖修复可删除 data.sqlite 重建，不提供自动迁移。首次启动照常把 NULL 历史行回填到 `PRIMARY_KEY_ID`；草稿编号库缺 `accounts.notes` 的问题由迁移无条件 `ensure_column` 自动修复，无需手动处理。
 - `/embeddings` 与 Gemini `embedContent` 未实现；Gemini `countTokens` 返回 `501`，供 Gemini CLI 回退本地估算。
 - Gemini `generateContent` / `streamGenerateContent` 已实现，但非空 `safetySettings`、`cachedContent`、`fileData`、Google Search、`urlContext` 及未明确支持的非空 `generationConfig` 字段会返回 `400`。`topK` 与 `thinkingConfig` 只能视为跨协议兼容提示，不能承诺与 Gemini 原生后端语义等价。
 - 流式 usage 依赖上游 usage chunk；Chat 流式请求会设置 `stream_options.include_usage`。没有 chunk 时会记为 `success_no_usage`。
