@@ -3,9 +3,8 @@ import test from "node:test";
 import type { AppConfig } from "../api/tauri.ts";
 import { EDITABLE_SETTING_KEYS, mergeUnsavedSettings } from "./settings-merge.ts";
 
-test("gateway key fields stay outside the editable settings list", () => {
-  assert.ok(!EDITABLE_SETTING_KEYS.includes("gateway_key" as never));
-  assert.ok(!EDITABLE_SETTING_KEYS.includes("gateway_keys" as never));
+test("the primary key value is an editable settings field", () => {
+  assert.ok(EDITABLE_SETTING_KEYS.includes("gateway_key"));
 });
 
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -58,47 +57,31 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
   assert.equal(merged.non_stream_timeout_secs, 1_200);
 });
 
-test("settings conflict merge never restores stale secrets or capability flags", () => {
+test("settings conflict merge preserves a locally edited primary key value", () => {
   const saved = config();
-  const current = config({
-    gateway_key: "unpersisted-key",
-    auto_start: true,
-    auto_start_supported: true,
-  });
+  const current = config({ gateway_key: "unpersisted-key", auto_start: true });
   const latest = config({
     revision: 3,
-    gateway_key: "server-key-3",
     auto_start_supported: false,
     client_root_url_from_env: true,
   });
 
   const merged = mergeUnsavedSettings(latest, current, saved);
 
-  assert.equal(merged.gateway_key, "server-key-3");
+  // gateway_key is editable (v1.6.1 semantics): an unsaved local edit
+  // survives the merge; capability flags still come from the server.
+  assert.equal(merged.gateway_key, "unpersisted-key");
   assert.equal(merged.auto_start, true);
   assert.equal(merged.auto_start_supported, false);
   assert.equal(merged.client_root_url_from_env, true);
 });
 
-test("gateway key lists always come from the server snapshot", () => {
-  const serverKeys = [
-    {
-      id: "key-1",
-      name: "Primary",
-      key: "ocg-server-key",
-      enabled: true,
-      deleted_at: null,
-      created_at: "2026-08-16T00:00:00Z",
-    },
-  ];
-  const saved = config({ gateway_keys: serverKeys });
-  const current = config({ gateway_keys: [{ ...serverKeys[0], name: "Locally Renamed" }] });
-  const latest = config({ revision: 2, gateway_keys: serverKeys });
+test("an untouched primary key value follows the server snapshot", () => {
+  const saved = config();
+  const current = config();
+  const latest = config({ revision: 2, gateway_key: "server-key-2" });
 
   const merged = mergeUnsavedSettings(latest, current, saved);
 
-  // gateway_keys is managed exclusively through the key lifecycle API; a
-  // generic settings save must never carry a stale key list.
-  assert.equal(merged.gateway_keys, serverKeys);
-  assert.equal(merged.gateway_key, "server-key-1");
+  assert.equal(merged.gateway_key, "server-key-2");
 });

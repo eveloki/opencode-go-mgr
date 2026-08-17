@@ -87,11 +87,12 @@ impl ForwardAttemptContext {
     }
 
     /// Records which gateway key authenticated the request; the name is a
-    /// write-time snapshot resolved from the config so later renames keep
-    /// historical attribution.
-    fn set_client_key(&mut self, id: Option<&str>, config: &AppConfig) {
+    /// write-time snapshot resolved from the credential snapshot (the primary
+    /// key resolves to the fixed "Primary") so later renames keep historical
+    /// attribution without a config or db lookup.
+    fn set_client_key(&mut self, id: Option<&str>, state: &CoreState) {
         self.client_key_id = id.map(str::to_string);
-        self.client_key_name = id.and_then(|id| crate::gateway_keys::key_name(config, id));
+        self.client_key_name = id.and_then(|id| state.client_key_name(id));
     }
 
     fn set_known_secret(&mut self, known_secret: &str) {
@@ -232,7 +233,7 @@ async fn forward_request_impl(
     client_key_id: Option<&str>,
 ) -> Result<ForwardResult> {
     let mut attempt_context = ForwardAttemptContext::new(trace, client_body.len(), attempt, plan);
-    attempt_context.set_client_key(client_key_id, config);
+    attempt_context.set_client_key(client_key_id, state);
     let upstream_base = plan
         .upstream_base_override
         .as_deref()

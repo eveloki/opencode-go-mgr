@@ -97,6 +97,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/settings/keys/{id}/regenerate",
             post(regenerate_gateway_key_entry),
         )
+        .route("/connection", get(connection_info))
         .route("/gateway/status", get(gateway_status))
         .route("/application-models", get(application_models))
         .route("/logs/gateway", get(gateway_logs))
@@ -2256,15 +2257,18 @@ async fn update_settings(
         // Minimal payload sanity guard: an empty/blank gateway_key means a
         // truncated or hand-written settings body, which must not silently
         // reset every other field to its default.
-        return Err(ApiError::bad_request("gateway key is required"));
+        return Err(ApiError::bad_request("key is required"));
+    }
+    // Unified cross-tier gate (shared with the Tauri update path and the sub
+    // key enable path): the primary value must differ from every non-deleted
+    // sub key's value, enabled or disabled.
+    {
+        let db = state.db.lock();
+        crate::gateway_keys::ensure_primary_value_allowed(&db, &config.gateway_key)
+            .map_err(key_api_error)?;
     }
     let previous_config = state.config();
     config.claude_desktop_models = previous_config.claude_desktop_models.clone();
-    // Keys are managed exclusively through the key lifecycle API; values
-    // submitted with a generic settings update are ignored so a stale or
-    // partial payload can never wipe the key list (and 401 every client).
-    config.gateway_key = previous_config.gateway_key.clone();
-    config.gateway_keys = previous_config.gateway_keys.clone();
     config.validate().map_err(ApiError::bad_request)?;
     validate_upstream_url(&config.upstream_base_url)?;
     config.client_root_url =
@@ -2330,8 +2334,8 @@ async fn update_settings_route(
     update_settings(State(state), input).await
 }
 
-/// Legacy entry point kept for older dashboards; converges on regenerating
-/// the primary key so there is exactly one implementation.
+/// Legacy entry point kept for older dashboards; converges on rotating the
+/// primary key so there is exactly one implementation.
 async fn regenerate_gateway_key(
     State(state): State<CoreState>,
     expectation: Option<Json<GatewayKeyRevisionExpectation>>,
@@ -2341,18 +2345,19 @@ async fn regenerate_gateway_key(
         &state,
         expectation.and_then(|Json(body)| body.expected_revision),
     )?;
+    let new_value = {
+        let db = state.db.lock();
+        crate::gateway_keys::generate_primary_value(&db, &state.config().gateway_key)
+            .map_err(key_api_error)?
+    };
     let mut config = state.config();
-    let primary_id = crate::gateway_keys::primary_key(&config)
-        .map(|key| key.id.clone())
-        .ok_or_else(|| ApiError::internal("no primary gateway key is configured"))?;
-    let updated = crate::gateway_keys::regenerate_key(&mut config, &primary_id)
-        .map_err(ApiError::bad_request)?;
+    config.gateway_key = new_value;
     state.set_config(config).map_err(ApiError::internal)?;
     audit_key_event(
         &state,
         &format!(
-            "regenerated primary gateway key `{}`",
-            key_display_name(&updated)
+            "regenerated primary key `{}`",
+            crate::gateway_keys::PRIMARY_KEY_NAME
         ),
     );
     Ok(Json(serde_json::json!({
@@ -2379,7 +2384,7 @@ struct GatewayKeyRevisionExpectation {
 #[derive(Serialize)]
 struct GatewayKeyEntryResponse {
     #[serde(flatten)]
-    key: crate::models::GatewayKeyEntry,
+    key: SubGatewayKey,
     revision: u64,
 }
 
@@ -2396,7 +2401,18 @@ struct GatewayKeyUpdateRequest {
 #[derive(Serialize)]
 struct GatewayKeyRevisionResponse {
     revision: u64,
-    keys: Vec<crate::models::GatewayKeyEntry>,
+    keys: Vec<SubKeySummary>,
+}
+
+/// Sub key summary for list-shaped lifecycle responses. Plaintext never
+/// rides along here: create/regenerate responses return the full value
+/// exactly once, and `/connection` is the persistent session-guarded
+/// exposure that feeds copy actions and masked previews.
+#[derive(Serialize)]
+struct SubKeySummary {
+    id: String,
+    name: String,
+    enabled: bool,
 }
 
 fn check_key_revision(state: &CoreState, expected_revision: Option<u64>) -> Result<(), ApiError> {
@@ -2413,16 +2429,37 @@ fn audit_key_event(state: &CoreState, message: &str) {
     // The key mutation has already committed; a failed audit row must not
     // report the whole operation as failed. Surface it locally instead.
     if let Err(error) = state.db.lock().log_gateway("info", "keys", message) {
-        eprintln!("warning: failed to audit gateway key event: {error}");
+        eprintln!("warning: failed to audit key event: {error}");
     }
 }
 
-fn key_display_name(key: &crate::models::GatewayKeyEntry) -> &str {
-    if key.name.is_empty() {
-        &key.id
-    } else {
-        &key.name
+/// Maps the lifecycle facade's error tier: user-correctable rejections stay
+/// 400, internal failures (including snapshot rollbacks that could not be
+/// restored) surface 500 so clients do not retry blindly.
+fn key_api_error(error: crate::gateway_keys::KeyError) -> ApiError {
+    match error {
+        crate::gateway_keys::KeyError::BadRequest(message) => ApiError::bad_request(message),
+        crate::gateway_keys::KeyError::Internal(message) => {
+            ApiError::status(StatusCode::INTERNAL_SERVER_ERROR, message)
+        }
     }
+}
+
+/// Non-deleted sub key summaries for lifecycle responses; see
+/// [`SubKeySummary`] for why plaintext is omitted.
+fn sub_key_list(state: &CoreState) -> Result<Vec<SubKeySummary>, ApiError> {
+    Ok(state
+        .db
+        .lock()
+        .list_active_sub_gateway_keys()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|key| SubKeySummary {
+            id: key.id,
+            name: key.name,
+            enabled: key.enabled,
+        })
+        .collect())
 }
 
 async fn create_gateway_key(
@@ -2431,18 +2468,10 @@ async fn create_gateway_key(
 ) -> Result<Json<GatewayKeyEntryResponse>, ApiError> {
     let _settings_update = state.settings_update.lock();
     check_key_revision(&state, input.expected_revision)?;
-    let mut config = state.config();
-    let key =
-        crate::gateway_keys::create_key(&mut config, &input.name).map_err(ApiError::bad_request)?;
-    state.set_config(config).map_err(ApiError::internal)?;
-    audit_key_event(
-        &state,
-        &format!("created gateway key `{}`", key_display_name(&key)),
-    );
-    Ok(Json(GatewayKeyEntryResponse {
-        key,
-        revision: state.settings_revision(),
-    }))
+    let key = crate::gateway_keys::create_sub_key(&state, &input.name).map_err(key_api_error)?;
+    audit_key_event(&state, &format!("created key `{}`", key.name));
+    let revision = state.bump_settings_revision();
+    Ok(Json(GatewayKeyEntryResponse { key, revision }))
 }
 
 async fn update_gateway_key(
@@ -2452,36 +2481,88 @@ async fn update_gateway_key(
 ) -> Result<Json<GatewayKeyRevisionResponse>, ApiError> {
     let _settings_update = state.settings_update.lock();
     check_key_revision(&state, input.expected_revision)?;
-    let mut config = state.config();
-    let mut audits: Vec<String> = Vec::new();
+    // Unknown (or soft-deleted, or primary) ids are rejected up front, even
+    // for empty-body patches.
+    if !state
+        .db
+        .lock()
+        .get_sub_gateway_key(&id)
+        .map_err(ApiError::internal)?
+        .is_some_and(|key| key.is_active())
+    {
+        return Err(ApiError::bad_request("key not found"));
+    }
+    let mut reset_routing = false;
+    let mut mutated = false;
     if let Some(name) = input.name.as_deref() {
-        let old_name = crate::gateway_keys::key_by_id(&config, &id)
-            .map(|key| key.name.clone())
+        // No-op renames (same trimmed name) neither audit nor bump, matching
+        // the no-op-toggle handling below.
+        let current_name = state
+            .db
+            .lock()
+            .get_sub_gateway_key(&id)
+            .map_err(ApiError::internal)?
+            .map(|key| key.name)
             .unwrap_or_else(|| id.clone());
-        crate::gateway_keys::rename_key(&mut config, &id, name).map_err(ApiError::bad_request)?;
-        audits.push(format!(
-            "renamed gateway key `{old_name}` to `{}`",
-            name.trim()
-        ));
+        if current_name != name.trim() {
+            crate::gateway_keys::rename_sub_key(&state, &id, name).map_err(key_api_error)?;
+            audit_key_event(
+                &state,
+                &format!("renamed key `{current_name}` to `{}`", name.trim()),
+            );
+            mutated = true;
+        }
     }
     if let Some(enabled) = input.enabled {
-        crate::gateway_keys::set_key_enabled(&mut config, &id, enabled)
-            .map_err(ApiError::bad_request)?;
-        audits.push(format!(
-            "{} gateway key `{}`",
-            if enabled { "enabled" } else { "disabled" },
-            crate::gateway_keys::key_by_id(&config, &id)
-                .map(|key| key.name.clone())
-                .unwrap_or_else(|| id.clone()),
-        ));
+        let current = state
+            .db
+            .lock()
+            .get_sub_gateway_key(&id)
+            .map_err(ApiError::internal)?
+            .filter(|key| key.is_active())
+            .ok_or_else(|| ApiError::bad_request("key not found"))?;
+        // No-op toggles (already in the target state) neither audit nor
+        // reset routing: nothing about the authenticating credential set
+        // changed.
+        if current.enabled != enabled {
+            // The endpoint drives the explicit routing reset for revocations:
+            // disabling a sub key invalidates credentials its sticky
+            // sessions were pinned to. Renames, creates, and enables never
+            // reset.
+            if let Err(error) = crate::gateway_keys::set_sub_key_enabled(&state, &id, enabled) {
+                // A committed rename in the same request already changed
+                // state: bump before failing so the revision never lags a
+                // committed mutation.
+                if mutated {
+                    state.bump_settings_revision();
+                }
+                return Err(key_api_error(error));
+            }
+            let display_name = state
+                .db
+                .lock()
+                .get_sub_gateway_key(&id)
+                .map_err(ApiError::internal)?
+                .map(|key| key.name)
+                .unwrap_or_else(|| id.clone());
+            audit_key_event(
+                &state,
+                &format!(
+                    "{} key `{display_name}`",
+                    if enabled { "enabled" } else { "disabled" }
+                ),
+            );
+            reset_routing = !enabled;
+            mutated = true;
+        }
     }
-    state.set_config(config).map_err(ApiError::internal)?;
-    for message in &audits {
-        audit_key_event(&state, message);
+    if reset_routing {
+        state.routing.reset();
     }
+    let revision = mutated.then(|| state.bump_settings_revision());
     Ok(Json(GatewayKeyRevisionResponse {
-        revision: state.settings_revision(),
-        keys: state.config().gateway_keys,
+        revision: revision.unwrap_or_else(|| state.settings_revision()),
+        keys: sub_key_list(&state)?,
     }))
 }
 
@@ -2495,16 +2576,24 @@ async fn delete_gateway_key(
         &state,
         expectation.and_then(|Json(body)| body.expected_revision),
     )?;
-    let mut config = state.config();
-    let name = crate::gateway_keys::key_by_id(&config, &id)
-        .map(|key| key.name.clone())
-        .unwrap_or_else(|| id.clone());
-    crate::gateway_keys::delete_key(&mut config, &id, Utc::now()).map_err(ApiError::bad_request)?;
-    state.set_config(config).map_err(ApiError::internal)?;
-    audit_key_event(&state, &format!("deleted gateway key `{name}`"));
+    let existing = state
+        .db
+        .lock()
+        .get_sub_gateway_key(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::bad_request("key not found"))?;
+    let (name, was_authenticating) = (existing.name.clone(), existing.authenticates());
+    crate::gateway_keys::delete_sub_key(&state, &id, Utc::now()).map_err(key_api_error)?;
+    audit_key_event(&state, &format!("deleted key `{name}`"));
+    // A disabled key's value never authenticated; its removal changes no
+    // live sticky sessions.
+    if was_authenticating {
+        state.routing.reset();
+    }
+    let revision = state.bump_settings_revision();
     Ok(Json(GatewayKeyRevisionResponse {
-        revision: state.settings_revision(),
-        keys: state.config().gateway_keys,
+        revision,
+        keys: sub_key_list(&state)?,
     }))
 }
 
@@ -2518,16 +2607,45 @@ async fn regenerate_gateway_key_entry(
         &state,
         expectation.and_then(|Json(body)| body.expected_revision),
     )?;
-    let mut config = state.config();
-    let updated =
-        crate::gateway_keys::regenerate_key(&mut config, &id).map_err(ApiError::bad_request)?;
-    state.set_config(config).map_err(ApiError::internal)?;
-    audit_key_event(
-        &state,
-        &format!("regenerated gateway key `{}`", key_display_name(&updated)),
-    );
+    let updated = crate::gateway_keys::regenerate_sub_key(&state, &id).map_err(key_api_error)?;
+    audit_key_event(&state, &format!("regenerated key `{}`", updated.name));
+    // Only an authenticating key's rotation invalidates live sessions; a
+    // disabled key's fresh value never entered the snapshot.
+    if updated.authenticates() {
+        state.routing.reset();
+    }
+    let revision = state.bump_settings_revision();
     Ok(Json(GatewayKeyEntryResponse {
         key: updated,
+        revision,
+    }))
+}
+
+/// Lightweight connection view for the dashboard connection center: the
+/// primary key value, non-deleted sub keys with values, the settings
+/// revision, and the fields the client needs to derive URLs. Served behind
+/// the same dashboard session layer as `/settings`.
+async fn connection_info(State(state): State<CoreState>) -> Result<Json<ConnectionInfo>, ApiError> {
+    let settings = state.settings_config();
+    let sub_keys = state
+        .db
+        .lock()
+        .list_active_sub_gateway_keys()
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .map(|key| ConnectionSubKey {
+            id: key.id,
+            name: key.name,
+            enabled: key.enabled,
+            value: key.key,
+        })
+        .collect();
+    Ok(Json(ConnectionInfo {
+        gateway_port: settings.gateway_port,
+        client_root_url: settings.client_root_url,
+        upstream_base_url: settings.upstream_base_url,
+        primary_key: settings.gateway_key,
+        sub_keys,
         revision: state.settings_revision(),
     }))
 }
@@ -2822,10 +2940,6 @@ fn status_from_state(state: &CoreState) -> GatewayStatus {
         running,
         port: state.active_gateway_port(),
         key: config.gateway_key.clone(),
-        primary_key_id: crate::gateway_keys::primary_key(&config)
-            .map(|key| key.id.clone())
-            .unwrap_or_default(),
-        keys: config.gateway_keys,
         upstream_base_url: config.upstream_base_url,
         last_error,
     }

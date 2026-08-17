@@ -94,16 +94,25 @@ impl std::error::Error for DesktopUpdateStartError {
 }
 
 // Note: Mutex lock ordering is (1) settings_update, (2) db, (3) config,
-// (4) http_client, (5) gateway, (6) pricing, (7) routing. desktop_update_status
-// and the async pricing_refresh guard are never held while acquiring another
-// sync lock. Never acquire in reverse order; always drop one before acquiring
-// another where possible. Do not hold the routing lock across DB or network I/O.
+// (4) http_client, (5) gateway, (6) pricing, (7) routing, (8)
+// credential_snapshot. desktop_update_status and the async pricing_refresh
+// guard are never held while acquiring another sync lock. The credential
+// snapshot write lock is always taken last (after db/config reads) and never
+// held while acquiring another lock; auth-path readers take only the
+// snapshot read lock. Never acquire in reverse order; always drop one before
+// acquiring another where possible. Do not hold the routing lock across DB
+// or network I/O.
 pub struct CoreStateInner {
     pub db: Mutex<Database>,
     pub config: Mutex<AppConfig>,
     client_root_url_override: Option<String>,
     pub settings_update: Mutex<()>,
     settings_revision: AtomicU64,
+    /// Authenticating credentials (value -> id/name) covering the primary
+    /// key and enabled sub keys; see `gateway_keys` for the invalidation
+    /// model. Written only under `settings_update` (key API) or from
+    /// `set_config` (primary refresh).
+    pub credential_snapshot: RwLock<crate::gateway_keys::CredentialSnapshot>,
     pub gateway: Mutex<Option<GatewayHandle>>,
     pub dashboard_session_token: Mutex<String>,
     dashboard_local_mode: AtomicBool,
@@ -160,6 +169,8 @@ impl CoreStateInner {
             // Persist generated defaults and drop fields removed from AppConfig.
             save_config(&db, &config)?;
         }
+        let credential_snapshot =
+            crate::gateway_keys::build_credential_snapshot(&db, &config.gateway_key)?;
         let pricing = match db.latest_pricing_snapshot()? {
             Some(snapshot) => {
                 let previous_revision = snapshot.revision.clone();
@@ -187,6 +198,7 @@ impl CoreStateInner {
             settings_revision: AtomicU64::new(
                 (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF,
             ),
+            credential_snapshot: RwLock::new(credential_snapshot),
             gateway: Mutex::new(None),
             dashboard_session_token: Mutex::new(uuid::Uuid::new_v4().simple().to_string()),
             dashboard_local_mode: AtomicBool::new(false),
@@ -219,6 +231,13 @@ impl CoreStateInner {
 
     pub fn settings_revision(&self) -> u64 {
         self.settings_revision.load(Ordering::Acquire)
+    }
+
+    /// Advances the settings revision for mutations that bypass
+    /// `set_config` (the sub key lifecycle API), keeping the shared
+    /// optimistic-lock scheme meaningful across every writer.
+    pub fn bump_settings_revision(&self) -> u64 {
+        self.settings_revision.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     pub fn client_root_url_from_env(&self) -> bool {
@@ -415,9 +434,7 @@ impl CoreStateInner {
             .map_err(anyhow::Error::msg)?;
         config.proxy_url = normalize_proxy_url(config.proxy_mode, &config.proxy_url)
             .map_err(anyhow::Error::msg)?;
-        // Enforce the key invariants (primary exists, >=1 enabled key,
-        // gateway_key mirrors the primary value) on every write path.
-        crate::gateway_keys::normalize(&mut config);
+        // validate() enforces the non-blank primary key on every write path.
         config.validate().map_err(anyhow::Error::msg)?;
         let http_client = crate::http_client::build(&config)?;
         {
@@ -427,27 +444,73 @@ impl CoreStateInner {
         let should_reset_routing = {
             let mut current_config = self.config.lock();
             let mut current_client = self.http_client.lock();
-            // Only authenticating key values matter for sticky routing: a
-            // reset is needed exactly when a value that used to authenticate
-            // no longer does (regenerate, disable, delete). Renaming or
-            // purely adding keys must not clear live sessions.
-            let previous_values = crate::gateway_keys::enabled_key_values(&current_config);
-            let next_values = crate::gateway_keys::enabled_key_values(&config);
-            let lost_authenticating_value = previous_values
-                .iter()
-                .any(|value| next_values.binary_search(value).is_err());
+            // Sticky routing resets when the routing fields change or the
+            // primary key value rotates (its previous value stops
+            // authenticating). Sub key revocations reset explicitly from
+            // their endpoints; renaming or adding keys never clears live
+            // sessions.
             let should_reset = current_config.routing_mode != config.routing_mode
                 || current_config.conversation_sticky != config.conversation_sticky
-                || lost_authenticating_value;
-            *current_config = config;
+                || current_config.gateway_key != config.gateway_key;
+            *current_config = config.clone();
             *current_client = http_client;
             should_reset
         };
+        // Refresh the primary entry in the credential snapshot so auth stops
+        // accepting the old value immediately. Cross-tier uniqueness (API
+        // gates) guarantees no other snapshot entry holds the new value; the
+        // warn-only check below is defense in depth for future unchecked
+        // writers.
+        {
+            let mut snapshot = self.credential_snapshot.write();
+            if let Some(existing) = snapshot.get(&config.gateway_key) {
+                if existing.id != crate::gateway_keys::PRIMARY_KEY_ID {
+                    eprintln!(
+                        "warning: primary key value collides with sub key `{}`; \
+                         the API-layer gate should have rejected this write",
+                        existing.name
+                    );
+                }
+            }
+            let stale_value = snapshot
+                .iter()
+                .find(|(_, entry)| entry.id == crate::gateway_keys::PRIMARY_KEY_ID)
+                .map(|(value, _)| value.clone());
+            if let Some(value) = stale_value {
+                snapshot.remove(&value);
+            }
+            snapshot.insert(
+                config.gateway_key.clone(),
+                crate::gateway_keys::CredentialEntry {
+                    id: crate::gateway_keys::PRIMARY_KEY_ID.to_string(),
+                    name: crate::gateway_keys::PRIMARY_KEY_NAME.to_string(),
+                },
+            );
+        }
         self.settings_revision.fetch_add(1, Ordering::AcqRel);
         if should_reset_routing {
             self.routing.reset();
         }
         Ok(())
+    }
+
+    /// Resolves an authenticating credential by presented value; used by the
+    /// auth hot path without touching the config or db locks.
+    pub fn credential_entry_for_value(
+        &self,
+        value: &str,
+    ) -> Option<crate::gateway_keys::CredentialEntry> {
+        self.credential_snapshot.read().get(value).cloned()
+    }
+
+    /// Write-time name snapshot for a credential id (primary resolves to the
+    /// fixed "Primary"); serves forward log attribution without a db lookup.
+    pub fn client_key_name(&self, id: &str) -> Option<String> {
+        self.credential_snapshot
+            .read()
+            .values()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.name.clone())
     }
 
     pub fn data_dir(&self) -> PathBuf {
@@ -537,12 +600,11 @@ fn load_config(db: &Database) -> crate::Result<(AppConfig, bool)> {
         config.non_stream_timeout_secs = 900;
         needs_persist = true;
     }
-    if config.gateway_key.is_empty() {
+    if config.gateway_key.trim().is_empty() {
+        // Mint before validate: a fresh, pre-multi-key, or whitespace-corrupt
+        // config always ends up with a usable primary key (validate rejects
+        // blank-after-trim values, so the guard here must be trim-aware).
         config.gateway_key = generate_gateway_key();
-    }
-    // Multi-key migration: a legacy single key becomes the primary entry;
-    // an empty list gets one minted so the gateway always has a credential.
-    if crate::gateway_keys::normalize(&mut config) {
         needs_persist = true;
     }
     Ok((config, needs_persist))
@@ -1016,12 +1078,30 @@ mod tests {
     }
 
     #[test]
-    fn legacy_single_key_migrates_to_primary_entry_and_persists() {
-        let dir = temp_data_dir("gateway-key-migration");
+    fn legacy_config_with_embedded_key_list_drops_it_and_keeps_the_scalar() {
+        let dir = temp_data_dir("gateway-key-legacy-list");
         let db = Database::open(dir.clone()).expect("test database should open");
+        // The never-released PR #43 form stored a key list inside the config
+        // JSON; loading it must keep the scalar and ignore the list.
         let legacy = serde_json::json!({
             "gateway_port": 9042,
             "gateway_key": "ocg-legacy-key",
+            "gateway_keys": [
+                {
+                    "id": "old-primary",
+                    "name": "Primary",
+                    "key": "ocg-legacy-key",
+                    "enabled": true,
+                    "created_at": "2026-08-16T00:00:00Z"
+                },
+                {
+                    "id": "old-laptop",
+                    "name": "Laptop",
+                    "key": "ocg-old-laptop",
+                    "enabled": true,
+                    "created_at": "2026-08-16T00:00:00Z"
+                }
+            ],
             "upstream_base_url": "https://opencode.ai/zen/go",
         });
         db.set_setting("config", &legacy.to_string())
@@ -1031,27 +1111,21 @@ mod tests {
 
         let config = state.config();
         assert_eq!(config.gateway_key, "ocg-legacy-key");
-        assert_eq!(config.gateway_keys.len(), 1);
-        assert_eq!(config.gateway_keys[0].key, "ocg-legacy-key");
-        assert_eq!(config.gateway_keys[0].name, "Primary");
-        assert!(config.gateway_keys[0].authenticates());
-        // The migrated entry must survive a restart (persisted, not just
-        // in-memory normalization).
-        let stored = state
-            .db
-            .lock()
-            .get_setting("config")
-            .expect("stored config should be readable")
-            .expect("stored config should exist");
-        assert!(stored.contains("gateway_keys"));
-        assert!(stored.contains("ocg-legacy-key"));
+        assert!(
+            state.credential_entry_for_value("ocg-legacy-key").is_some(),
+            "the legacy scalar authenticates as the primary key"
+        );
+        assert!(
+            state.credential_entry_for_value("ocg-old-laptop").is_none(),
+            "the embedded sub key list is ignored"
+        );
 
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");
     }
 
     #[test]
-    fn empty_config_generates_a_primary_key_entry() {
+    fn empty_config_generates_a_primary_key_value() {
         let dir = temp_data_dir("gateway-key-fresh");
         let db = Database::open(dir.clone()).expect("test database should open");
         let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
@@ -1059,18 +1133,25 @@ mod tests {
 
         let config = state.config();
         assert!(!config.gateway_key.is_empty());
-        assert_eq!(config.gateway_keys.len(), 1);
-        assert_eq!(config.gateway_keys[0].key, config.gateway_key);
-        assert!(config.gateway_keys[0].authenticates());
+        assert!(
+            state
+                .credential_entry_for_value(&config.gateway_key)
+                .is_some()
+        );
+        assert_eq!(
+            state
+                .client_key_name(crate::gateway_keys::PRIMARY_KEY_ID)
+                .as_deref(),
+            Some(crate::gateway_keys::PRIMARY_KEY_NAME),
+        );
 
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");
     }
 
     #[test]
-    fn routing_resets_only_when_enabled_key_values_change() {
+    fn routing_resets_only_when_routing_fields_or_primary_key_change() {
         use crate::crypto::{KeyCipher, StaticKeyCipher};
-        use crate::gateway_keys;
         use crate::models::{Account, RoutingMode};
         use std::sync::Arc;
 
@@ -1117,30 +1198,35 @@ mod tests {
 
         assert_eq!(advance(), "a");
 
-        // Adding and renaming keys keeps sticky routing state intact: with the
-        // cursor after "a", the next pick stays "b"; a reset would restart
-        // at "a".
+        // An unrelated settings save keeps sticky routing state intact: with
+        // the cursor after "a", the next pick stays "b"; a reset would
+        // restart at "a". (Sub key lifecycle changes never go through
+        // set_config; their revocation resets are endpoint-driven.)
+        assert_eq!(advance(), "b");
         let mut config = state.config();
-        let added = gateway_keys::create_key(&mut config, "Laptop").unwrap();
-        state.set_config(config).expect("new key should save");
-        assert_eq!(advance(), "b", "adding a key must not reset routing");
-
-        assert_eq!(advance(), "a");
-        let mut config = state.config();
-        gateway_keys::rename_key(&mut config, &added.id, "Deck").unwrap();
-        state.set_config(config).expect("rename should save");
-        assert_eq!(advance(), "b", "renaming a key must not reset routing");
-
-        // Regenerating a key changes the authenticating value set and resets.
-        assert_eq!(advance(), "a");
-        let mut config = state.config();
-        let primary_id = gateway_keys::primary_key(&config).unwrap().id.clone();
-        gateway_keys::regenerate_key(&mut config, &primary_id).unwrap();
-        state.set_config(config).expect("regenerate should save");
+        config.connect_timeout_secs += 1;
+        state.set_config(config).expect("unrelated save");
         assert_eq!(
             advance(),
             "a",
-            "the cursor restarts after the enabled key value set changes"
+            "an unrelated settings save must not reset routing"
+        );
+
+        assert_eq!(advance(), "b");
+        // Rotating the primary key value resets: the old value stops
+        // authenticating.
+        let mut config = state.config();
+        config.gateway_key = "ocg-rotated-primary".to_string();
+        state.set_config(config).expect("rotation should save");
+        assert_eq!(
+            advance(),
+            "a",
+            "the cursor restarts after the primary key value changes"
+        );
+        assert!(
+            state
+                .credential_entry_for_value("ocg-rotated-primary")
+                .is_some()
         );
 
         drop(state);

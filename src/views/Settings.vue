@@ -83,27 +83,58 @@
         <section class="settings-subsection gateway-keys" aria-labelledby="gateway-keys-title">
           <h3 id="gateway-keys-title">{{ t("接入 Key") }}</h3>
           <p class="field-caption">
-            {{ t("面向客户端的接入凭证。可创建多把 Key 分给不同设备，用量按 Key 记录；删除为软删除，历史日志保留归因。") }}
+            {{ t("主 Key 恒为有效，可轮换或自定义；子 Key 可分给不同设备，用量按 Key 记录，删除为软删除，历史日志保留归因。") }}
           </p>
-          <div class="key-create-row">
-            <n-input
-              v-model:value="newKeyName"
-              class="key-create-input"
-              :disabled="!loaded || regenerating"
-              :placeholder="t('新 Key 名称，例如 Laptop')"
-              :input-props="{ 'aria-label': t('新 Key 名称') }"
-              @keydown.enter="createKey"
-            />
-            <n-button
-              secondary
-              type="primary"
-              :loading="regenerating && keyMutation === 'create'"
-              :disabled="!loaded || regenerating || !newKeyName.trim()"
-              @click="createKey"
-            >{{ t("新建 Key") }}</n-button>
-          </div>
           <ul class="gateway-key-list">
-            <li v-for="entry in gatewayKeys" :key="entry.id" class="gateway-key-row">
+            <li class="gateway-key-row gateway-key-row--primary">
+              <div class="gateway-key-main">
+                <span class="gateway-key-name">{{ t("主 Key") }}</span>
+                <span class="gateway-key-badge">{{ t("恒为有效") }}</span>
+              </div>
+              <code class="gateway-key-value">{{ maskConnectionKey(config.gateway_key) }}</code>
+              <div class="gateway-key-actions">
+                <n-tooltip trigger="hover">
+                  <template #trigger>
+                    <n-button
+                      circle
+                      quaternary
+                      size="small"
+                      :aria-label="t('复制 Key')"
+                      :disabled="regenerating || !config.gateway_key"
+                      @click="copyPrimaryKey"
+                    >
+                      <template #icon><n-icon :component="keyCopied === `settings-key-primary` ? CheckOutlined : CopyOutlined" /></template>
+                    </n-button>
+                  </template>
+                  {{ t("复制 Key") }}
+                </n-tooltip>
+                <n-popconfirm
+                  :positive-text="t('生成新 Key')"
+                  :negative-text="t('取消')"
+                  @positive-click="rotatePrimaryKey"
+                >
+                  <template #trigger>
+                    <n-tooltip trigger="hover">
+                      <template #trigger>
+                        <n-button
+                          circle
+                          quaternary
+                          size="small"
+                          :aria-label="t('刷新 Key')"
+                          :loading="regenerating && keyMutation === 'rotate-primary'"
+                          :disabled="regenerating"
+                        >
+                          <template #icon><n-icon :component="ReloadOutlined" /></template>
+                        </n-button>
+                      </template>
+                      {{ t("刷新 Key") }}
+                    </n-tooltip>
+                  </template>
+                  {{ t("旧 Key 将立即失效，继续生成新 Key？") }}
+                </n-popconfirm>
+              </div>
+            </li>
+            <li v-for="entry in subKeys" :key="entry.id" class="gateway-key-row">
               <div class="gateway-key-main">
                 <template v-if="renamingKeyId === entry.id">
                   <n-input
@@ -124,17 +155,16 @@
                     :disabled="regenerating"
                     @click="startRename(entry)"
                   >{{ entry.name }}</button>
-                  <span v-if="entry.id === primaryKeyId" class="gateway-key-badge">{{ t("主 Key") }}</span>
-                  <span v-else-if="!entry.enabled" class="gateway-key-badge muted">{{ t("已停用") }}</span>
+                  <span v-if="!entry.enabled" class="gateway-key-badge muted">{{ t("已停用") }}</span>
                 </template>
               </div>
-              <code class="gateway-key-value">{{ maskConnectionKey(entry.key) }}</code>
+              <code class="gateway-key-value">{{ maskConnectionKey(entry.value) }}</code>
               <div class="gateway-key-actions">
                 <n-switch
                   size="small"
                   :value="entry.enabled"
                   :loading="regenerating && keyMutation === `toggle:${entry.id}`"
-                  :disabled="regenerating || (entry.enabled && activeKeyCount <= 1)"
+                  :disabled="regenerating"
                   :aria-label="t('启用或停用 Key')"
                   @update:value="(value: boolean) => toggleKey(entry, value)"
                 />
@@ -145,7 +175,7 @@
                       quaternary
                       size="small"
                       :aria-label="t('复制 Key')"
-                      :disabled="regenerating || !entry.key"
+                      :disabled="regenerating || !entry.value"
                       @click="copyEntryKey(entry)"
                     >
                       <template #icon><n-icon :component="keyCopied === `settings-key-${entry.id}` ? CheckOutlined : CopyOutlined" /></template>
@@ -192,7 +222,7 @@
                           type="error"
                           :aria-label="t('删除 Key')"
                           :loading="regenerating && keyMutation === `delete:${entry.id}`"
-                          :disabled="regenerating || (entry.enabled && activeKeyCount <= 1)"
+                          :disabled="regenerating"
                         >
                           <template #icon><n-icon :component="DeleteOutlined" /></template>
                         </n-button>
@@ -205,6 +235,37 @@
               </div>
             </li>
           </ul>
+          <div class="key-create-row">
+            <n-input
+              v-model:value="newKeyName"
+              class="key-create-input"
+              :disabled="!loaded || regenerating"
+              :placeholder="t('新 Key 名称，例如 Laptop')"
+              :input-props="{ 'aria-label': t('新 Key 名称') }"
+              @keydown.enter="createKey"
+            />
+            <n-button
+              secondary
+              type="primary"
+              :loading="regenerating && keyMutation === 'create'"
+              :disabled="!loaded || regenerating || !newKeyName.trim()"
+              @click="createKey"
+            >{{ t("新建 Key") }}</n-button>
+          </div>
+          <n-form-item
+            :label="t('自定义主 Key 值')"
+            :show-feedback="true"
+            :validation-status="primaryKeyPreview.status"
+            :feedback="primaryKeyPreview.feedback"
+          >
+            <n-input
+              v-model:value="config.gateway_key"
+              class="mono"
+              clearable
+              :disabled="!loaded || regenerating"
+              :input-props="{ 'aria-label': t('自定义主 Key 值') }"
+            />
+          </n-form-item>
         </section>
         <div class="downstream-grid">
           <n-form-item
@@ -411,7 +472,7 @@
       <n-button
         type="primary"
         :loading="saving"
-        :disabled="!loaded || regenerating || testingProxy || proxyUrlPreview.status === 'error' || clientRootPreview.status === 'error' || inviteUrlPreview.status === 'error'"
+        :disabled="!loaded || regenerating || testingProxy || proxyUrlPreview.status === 'error' || clientRootPreview.status === 'error' || inviteUrlPreview.status === 'error' || primaryKeyPreview.status === 'error'"
         @click="saveSettings"
       >{{ t("保存设置") }}</n-button>
     </section>
@@ -589,8 +650,8 @@ import {
 import { DashboardRequestError, tauriApi } from "../api/tauri";
 import type {
   AppConfig,
+  ConnectionSubKey,
   FreeModelRouting,
-  GatewayKeyEntry,
   ProxyMode,
   RoutingMode,
   UpdateCheckResult,
@@ -741,13 +802,22 @@ const themeLabel = computed(() => {
   const resolved = t((THEME_OPTIONS.find((option) => option.value === resolvedTheme)?.label ?? "皓白") as MessageKey);
   return t("默认 · {theme}", { theme: resolved });
 });
-const gatewayKeys = computed<GatewayKeyEntry[]>(() =>
-  (config.value.gateway_keys ?? []).filter((entry) => !entry.deleted_at),
-);
-const primaryKeyId = computed(() => gatewayKeys.value[0]?.id ?? "");
-const activeKeyCount = computed(
-  () => gatewayKeys.value.filter((entry) => entry.enabled).length,
-);
+// Non-deleted sub keys (enabled and disabled) from the lightweight
+// connection payload; the primary key lives in the settings form below.
+const subKeys = ref<ConnectionSubKey[]>([]);
+const primaryKeyPreview = computed<{ status?: "error"; feedback: string }>(() => {
+  const value = config.value.gateway_key.trim();
+  if (!value) {
+    return { feedback: t("主 Key 值不能为空；留空保存会被拒绝。") };
+  }
+  if (subKeys.value.some((entry) => entry.value === value)) {
+    return {
+      status: "error",
+      feedback: t("主 Key 值不能与任何子 Key 的值相同。"),
+    };
+  }
+  return { feedback: t("可直接修改主 Key 值，保存设置后生效，旧值立即失效。") };
+});
 const proxyModeHelp = computed(() => {
   const help: Record<ProxyMode, MessageKey> = {
     auto: "自动读取 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY、NO_PROXY；Windows 也会读取系统代理，未配置时直连。",
@@ -903,8 +973,12 @@ async function loadSettings(): Promise<boolean> {
   loaded.value = false;
   settingsLoadError.value = "";
   try {
-    const nextConfig = await tauriApi.getSettings();
+    const [nextConfig, connection] = await Promise.all([
+      tauriApi.getSettings(),
+      tauriApi.getConnection(),
+    ]);
     if (generation !== settingsLoadGeneration) return false;
+    subKeys.value = connection.sub_keys;
     acceptSettingsSnapshot(nextConfig);
     return true;
   } catch (e) {
@@ -937,6 +1011,7 @@ async function saveSettings() {
   if (!normalizeInviteUrlInput()) return;
   if (!normalizeProxyInput()) return;
   if (!validateTimeouts()) return;
+  if (!validatePrimaryKey()) return;
   saving.value = true;
   const payload = { ...config.value };
   const saved = savedConfig.value ? { ...savedConfig.value } : null;
@@ -1062,9 +1137,9 @@ async function handleDockVisibilityToggle(newValue: boolean) {
 
 /**
  * Shared driver for key lifecycle mutations: run one API call, then adopt a
- * fresh settings snapshot so the key list, mirror value, and revision all
- * come back consistent (mirrors the legacy regenerate flow's generation
- * guards against interleaved loads).
+ * fresh settings + connection snapshot so the key list, primary value, and
+ * revision all come back consistent (mirrors the legacy regenerate flow's
+ * generation guards against interleaved loads).
  */
 async function runKeyMutation(
   mutation: string,
@@ -1084,8 +1159,12 @@ async function runKeyMutation(
       mutationError = error;
     }
     try {
-      const latest = await tauriApi.getSettings();
+      const [latest, connection] = await Promise.all([
+        tauriApi.getSettings(),
+        tauriApi.getConnection(),
+      ]);
       if (generation !== settingsLoadGeneration) return;
+      subKeys.value = connection.sub_keys;
       acceptSettingsSnapshot(latest);
       if (mutationError === null) {
         message.success(successText());
@@ -1107,6 +1186,37 @@ async function runKeyMutation(
   } finally {
     regenerating.value = false;
     keyMutation.value = "";
+  }
+}
+
+/** Rotates the primary key through the legacy endpoint. */
+async function rotatePrimaryKey(): Promise<void> {
+  let nextValue = "";
+  await runKeyMutation(
+    "rotate-primary",
+    async () => {
+      const result = await tauriApi.regenerateGatewayKey();
+      nextValue = result.key;
+    },
+    () => t("Key 已刷新"),
+  );
+  if (nextValue) {
+    try {
+      await copy(`settings-key-rotated-${Date.now()}`, nextValue, "Key");
+      message.success(t("新 Key 值已复制到剪贴板"));
+    } catch {
+      message.warning(t("自动复制失败，请在列表中手动复制新 Key"));
+    }
+  }
+}
+
+async function copyPrimaryKey(): Promise<void> {
+  if (!config.value.gateway_key) return;
+  try {
+    await copy("settings-key-primary", config.value.gateway_key, "Key");
+    message.success(t("已复制 Key"));
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : t("复制失败"));
   }
 }
 
@@ -1133,7 +1243,7 @@ async function createKey(): Promise<void> {
   }
 }
 
-function startRename(entry: GatewayKeyEntry): void {
+function startRename(entry: ConnectionSubKey): void {
   renamingKeyId.value = entry.id;
   renameDraft.value = entry.name;
 }
@@ -1143,7 +1253,7 @@ function cancelRename(): void {
   renameDraft.value = "";
 }
 
-async function commitRename(entry: GatewayKeyEntry): Promise<void> {
+async function commitRename(entry: ConnectionSubKey): Promise<void> {
   const name = renameDraft.value.trim();
   if (!name || name === entry.name) {
     cancelRename();
@@ -1157,7 +1267,7 @@ async function commitRename(entry: GatewayKeyEntry): Promise<void> {
   cancelRename();
 }
 
-async function toggleKey(entry: GatewayKeyEntry, enabled: boolean): Promise<void> {
+async function toggleKey(entry: ConnectionSubKey, enabled: boolean): Promise<void> {
   await runKeyMutation(
     `toggle:${entry.id}`,
     () => tauriApi.updateGatewayKey(entry.id, { enabled }, config.value.revision),
@@ -1165,17 +1275,17 @@ async function toggleKey(entry: GatewayKeyEntry, enabled: boolean): Promise<void
   );
 }
 
-async function copyEntryKey(entry: GatewayKeyEntry): Promise<void> {
-  if (!entry.key) return;
+async function copyEntryKey(entry: ConnectionSubKey): Promise<void> {
+  if (!entry.value) return;
   try {
-    await copy(`settings-key-${entry.id}`, entry.key, "Key");
+    await copy(`settings-key-${entry.id}`, entry.value, "Key");
     message.success(t("已复制 Key"));
   } catch (e) {
     message.error(e instanceof Error ? e.message : t("复制失败"));
   }
 }
 
-async function regenerateEntryKey(entry: GatewayKeyEntry): Promise<void> {
+async function regenerateEntryKey(entry: ConnectionSubKey): Promise<void> {
   let nextValue = "";
   await runKeyMutation(
     `regenerate:${entry.id}`,
@@ -1195,12 +1305,26 @@ async function regenerateEntryKey(entry: GatewayKeyEntry): Promise<void> {
   }
 }
 
-async function deleteEntryKey(entry: GatewayKeyEntry): Promise<void> {
+async function deleteEntryKey(entry: ConnectionSubKey): Promise<void> {
   await runKeyMutation(
     `delete:${entry.id}`,
     () => tauriApi.deleteGatewayKey(entry.id, config.value.revision),
     () => t("Key 已删除"),
   );
+}
+
+function validatePrimaryKey(): boolean {
+  const value = config.value.gateway_key.trim();
+  if (!value) {
+    message.error(t("主 Key 值不能为空；留空保存会被拒绝。"));
+    return false;
+  }
+  if (subKeys.value.some((entry) => entry.value === value)) {
+    message.error(t("主 Key 值不能与任何子 Key 的值相同。"));
+    return false;
+  }
+  config.value.gateway_key = value;
+  return true;
 }
 
 function normalizeClientRootInput(): boolean {
@@ -1547,13 +1671,6 @@ onUnmounted(() => {
   margin-right: 6px;
   vertical-align: -0.15em;
 }
-.key-field {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-}
 .gateway-keys .key-create-row {
   display: grid;
   grid-template-columns: minmax(0, 320px) auto;
@@ -1575,7 +1692,7 @@ onUnmounted(() => {
   gap: 12px;
   padding: 8px 10px;
   border: 1px solid var(--ocg-border);
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--ocg-canvas);
 }
 .gateway-key-main {
@@ -1628,35 +1745,11 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
 }
-.key-stack {
-  display: grid;
-  gap: 6px;
-  width: 100%;
+.gateway-key-row--primary .gateway-key-name {
+  cursor: default;
 }
-.key-display {
-  display: flex;
-  min-width: 0;
-  min-height: 34px;
-  align-items: center;
-  padding: 0 10px;
-  border: 1px solid var(--ocg-border);
-  border-radius: 3px;
-  background: var(--ocg-canvas);
-}
-.key-display code {
-  overflow: hidden;
-  color: var(--ocg-ink);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: var(--ocg-font-md);
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.key-editor {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 6px;
+.gateway-key-row--primary .gateway-key-value {
+  color: var(--ocg-muted);
 }
 .client-root-field {
   width: 100%;

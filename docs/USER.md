@@ -172,19 +172,18 @@ CLI and Docker upgrades remain manual.
 
 ### Multi-Key Upgrade And Downgrade Notes
 
-Upgrading from a single-key version is seamless: the existing key becomes
-the primary entry of the new **Access Keys** list, clients keep
-authenticating with it, and a background task attributes historical forward
-logs to that primary key (an approximation if you had rotated the key in the
-past; usage from before the upgrade is counted toward the primary key).
+Upgrading from a single-key version is seamless: your existing key remains
+the **primary key** with its value unchanged, clients keep authenticating
+with it, and a background task attributes historical forward logs to the
+primary key (usage from before the upgrade is counted toward the primary key
+as an approximation).
 
-Downgrading to a single-key build after creating secondary keys has a
-documented limitation: the old build rewrites the config without the key
-list, so secondary keys (including their values) are dropped and only the
-primary key's mirrored value survives. Re-upgrading afterwards creates a new
-primary key id, leaving the old ids dangling in log filters — the Logs view
-still resolves them by their recorded names. Prefer restoring the pre-upgrade
-backup over downgrading in place.
+Sub keys you create after upgrading live in their own database table that
+single-key builds never read or rewrite. Downgrading to such a build is
+safe: the primary key value survives untouched, every sub key and its
+enabled/disabled/deleted state is intact when you upgrade again, and no
+revoked credential can ever come back to life by downgrading. Sub keys
+simply do not authenticate while the older build runs.
 
 ### Backup
 
@@ -571,16 +570,17 @@ if any, and the streamed usage when the upstream emitted a usage chunk.
 The **Settings** view exposes the persistent gateway configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`).
-- **Access Keys** — the client-facing credentials. One key is created
-  automatically (named *Primary*); you can add more, give each a display
-  name, rename, enable/disable, regenerate, or delete it. Deleting is a soft
-  delete: the key stops authenticating immediately and its plaintext is
-  cleared, but forward logs keep resolving to its name. At least one enabled
-  key must always remain, and the first active key is the *primary* whose
-  value is mirrored into the client guides and the legacy `gateway_key`
-  field. Deleting the primary promotes the earliest remaining enabled key.
-  Key values are managed only through this list — values sent in a generic
-  settings save are ignored.
+- **Access Keys** — the client-facing credentials in two tiers. The
+  **primary key** is always active and cannot be disabled or deleted; you
+  can rotate it (regenerate) or set a custom value for it, and it is the
+  credential the application guides show by default. **Sub keys** are
+  additional credentials you create, give a display name, rename,
+  enable/disable, regenerate, or delete — handy for handing one key to each
+  device. Deleting a sub key is a soft delete: it stops authenticating
+  immediately and its plaintext is cleared, but forward logs keep resolving
+  to its name. A sub key value may never equal the primary key value or
+  another sub key's value, and at most 64 non-deleted sub keys are
+  supported.
 - **Upstream URL** — the OpenCode-Go base URL.
 - **Outbound proxy** — a process-wide setting shared by every account.
   `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,

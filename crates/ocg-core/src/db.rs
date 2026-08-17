@@ -787,7 +787,7 @@ impl Database {
         // v18: client gateway key attribution on forward logs. Nullable columns
         // keep old binaries (which select explicit column names) downgrade-safe;
         // historical NULL rows mean "unattributed" until the startup backfill
-        // attributes them to the migration-time primary key.
+        // attributes them to the fixed primary key id (PRIMARY_KEY_ID).
         if version < 18 {
             ensure_column(&tx, "forward_logs", "client_key_id", "TEXT")?;
             ensure_column(&tx, "forward_logs", "client_key_name", "TEXT")?;
@@ -795,6 +795,28 @@ impl Database {
                 "CREATE INDEX IF NOT EXISTS idx_forward_logs_client_key
                     ON forward_logs(client_key_id);
                  INSERT OR REPLACE INTO schema_version (version) VALUES (18);",
+            )?;
+        }
+
+        // v19: sub gateway keys live in their own table, owned exclusively by
+        // the key lifecycle API. Old single-key binaries never read or rewrite
+        // it, so sub keys survive downgrade round trips unchanged. The partial
+        // unique index only backstops uniqueness among non-deleted sub keys;
+        // the primary key lives in the legacy config scalar and cross-tier
+        // collision checks are enforced at the API layer.
+        if version < 19 {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS sub_gateway_keys (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    deleted_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_gateway_keys_key
+                    ON sub_gateway_keys(key) WHERE deleted_at IS NULL AND key <> '';
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (19);",
             )?;
         }
 
@@ -1467,14 +1489,21 @@ impl Database {
 
     /// Distinct client keys that appear in forward logs, mirroring
     /// [`Database::list_forward_log_models`]. Includes disabled, soft-deleted,
-    /// and dangling ids so historical logs stay filterable.
+    /// and dangling ids so historical logs stay filterable. Each id resolves
+    /// its most recent non-null name snapshot, so renamed keys appear under
+    /// their current name.
     pub fn list_forward_log_keys(&self) -> Result<Vec<ForwardLogClientKey>> {
         let mut stmt = self.conn.prepare(
-            "SELECT client_key_id, COALESCE(MAX(client_key_name), '')
-             FROM forward_logs
+            "SELECT client_key_id, COALESCE((
+                    SELECT f2.client_key_name FROM forward_logs f2
+                    WHERE f2.client_key_id = f.client_key_id
+                      AND f2.client_key_name IS NOT NULL
+                    ORDER BY f2.rowid DESC LIMIT 1
+                ), '')
+             FROM forward_logs f
              WHERE client_key_id IS NOT NULL
              GROUP BY client_key_id
-             ORDER BY MAX(client_key_name) ASC, client_key_id ASC",
+             ORDER BY 2 ASC, client_key_id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ForwardLogClientKey {
@@ -1491,6 +1520,139 @@ impl Database {
             }
         }
         Ok(keys)
+    }
+
+    // ----- sub gateway keys (schema v19) -----
+
+    /// All sub keys including soft-delete tombstones, in creation order.
+    pub fn list_sub_gateway_keys(&self) -> Result<Vec<SubGatewayKey>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, key, enabled, deleted_at, created_at
+             FROM sub_gateway_keys
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map([], sub_gateway_key_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Non-deleted sub keys (enabled and disabled alike); disabled rows keep
+    /// their plaintext so re-enabling can revalidate it.
+    pub fn list_active_sub_gateway_keys(&self) -> Result<Vec<SubGatewayKey>> {
+        let mut keys = self.list_sub_gateway_keys()?;
+        keys.retain(|key| key.is_active());
+        Ok(keys)
+    }
+
+    /// Count of non-deleted sub keys; tombstones never count against the
+    /// active ceiling.
+    pub fn count_active_sub_gateway_keys(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sub_gateway_keys WHERE deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn get_sub_gateway_key(&self, id: &str) -> Result<Option<SubGatewayKey>> {
+        let key = self
+            .conn
+            .query_row(
+                "SELECT id, name, key, enabled, deleted_at, created_at
+                 FROM sub_gateway_keys WHERE id = ?1",
+                params![id],
+                sub_gateway_key_from_row,
+            )
+            .optional()?;
+        Ok(key)
+    }
+
+    /// Inserts a new sub key. The partial unique index backstops value
+    /// uniqueness among non-deleted sub keys; a collision surfaces as a
+    /// constraint error the caller maps to a clear rejection.
+    pub fn insert_sub_gateway_key(&self, key: &SubGatewayKey) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sub_gateway_keys (id, name, key, enabled, deleted_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                key.id,
+                key.name,
+                key.key,
+                key.enabled as i32,
+                key.deleted_at.map(|t| t.to_rfc3339()),
+                key.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Renames a non-deleted sub key. Returns `false` when the id matches no
+    /// active row.
+    pub fn rename_sub_gateway_key(&self, id: &str, name: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sub_gateway_keys SET name = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, name],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Flips the enabled flag of a non-deleted sub key. Returns `false` when
+    /// the id matches no active row.
+    pub fn set_sub_gateway_key_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sub_gateway_keys SET enabled = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, enabled as i32],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Assigns a fresh value to a non-deleted sub key. Returns `false` when
+    /// the id matches no active row.
+    pub fn update_sub_gateway_key_value(&self, id: &str, new_value: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sub_gateway_keys SET key = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, new_value],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Soft-deletes a sub key: clears the plaintext, disables it, and keeps
+    /// id/name/deleted_at for log attribution. Returns `false` when the id
+    /// matches no active row.
+    pub fn soft_delete_sub_gateway_key(&self, id: &str, now: DateTime<Utc>) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sub_gateway_keys
+             SET key = '', enabled = 0, deleted_at = ?2
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, now.to_rfc3339()],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Plaintext values of all non-deleted sub keys (enabled and disabled);
+    /// used to keep generated values unique across tiers.
+    pub fn active_sub_gateway_key_values(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key FROM sub_gateway_keys
+             WHERE deleted_at IS NULL AND key <> ''",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Whether any non-deleted sub key (enabled or disabled) already holds
+    /// this value; the cross-tier uniqueness gate for candidate primary key
+    /// values.
+    pub fn sub_gateway_key_value_exists(&self, value: &str) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sub_gateway_keys
+                WHERE deleted_at IS NULL AND key = ?1 LIMIT 1
+            )",
+            params![value],
+            |row| row.get(0),
+        )?;
+        Ok(found == 1)
     }
 
     // ----- forward log client-key backfill -----
@@ -2374,6 +2536,18 @@ fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog>
     })
 }
 
+fn sub_gateway_key_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubGatewayKey> {
+    // SELECT order: id,name,key,enabled,deleted_at,created_at
+    Ok(SubGatewayKey {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        key: row.get(2)?,
+        enabled: row.get::<_, i64>(3)? != 0,
+        deleted_at: row.get::<_, Option<String>>(4)?.map(parse_datetime),
+        created_at: parse_datetime(row.get::<_, String>(5)?),
+    })
+}
+
 fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     // SELECT order: id,name,username,password,key,enabled,referral,recharge,
     // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup
@@ -2577,7 +2751,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
 
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -2805,7 +2979,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 18, "{label}");
+            assert_eq!(version, 19, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -2883,7 +3057,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -3032,7 +3206,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -3176,7 +3350,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -3225,7 +3399,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
 
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
@@ -3653,7 +3827,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -3707,7 +3881,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -3782,7 +3956,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         assert!(auth_error.is_none());
 
         drop(db);
@@ -4810,7 +4984,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         let index_exists: i64 = db
             .conn
             .query_row(
@@ -4832,7 +5006,198 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v19_creates_the_sub_gateway_keys_table_idempotently() {
+        let dir = temp_data_dir("v19-idempotent");
+        let db = Database::open(dir.clone()).unwrap();
+
+        let probe = |conn: &Connection| {
+            let table: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'sub_gateway_keys'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let index: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_sub_gateway_keys_key'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (table, index)
+        };
+        assert_eq!(probe(&db.conn), (1, 1));
+        let version: i32 = db
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 19);
+
+        // Replaying the migration converges to the same shape.
+        db.migrate().unwrap();
+        assert_eq!(probe(&db.conn), (1, 1));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sub_gateway_key_crud_and_unique_index_backstop() {
+        let dir = temp_data_dir("sub-keys-crud");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let key = SubGatewayKey {
+            id: "sub-1".into(),
+            name: "Laptop".into(),
+            key: "ocg-laptop".into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: now,
+        };
+        db.insert_sub_gateway_key(&key).unwrap();
+        assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 1);
+        assert_eq!(
+            db.list_active_sub_gateway_keys().unwrap(),
+            vec![key.clone()]
+        );
+        assert_eq!(db.list_sub_gateway_keys().unwrap().len(), 1);
+
+        // Duplicate active values are rejected by the partial unique index.
+        let duplicate = SubGatewayKey {
+            id: "sub-2".into(),
+            name: "Twin".into(),
+            key: "ocg-laptop".into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: now,
+        };
+        assert!(db.insert_sub_gateway_key(&duplicate).is_err());
+
+        // Disabled keys keep their plaintext, so they still block duplicates.
+        assert!(db.set_sub_gateway_key_enabled("sub-1", false).unwrap());
+        assert!(db.insert_sub_gateway_key(&duplicate).is_err());
+        assert!(db.sub_gateway_key_value_exists("ocg-laptop").unwrap());
+        assert_eq!(
+            db.active_sub_gateway_key_values().unwrap(),
+            vec!["ocg-laptop".to_string()]
+        );
+
+        // Renaming and regenerating address only non-deleted rows.
+        assert!(db.rename_sub_gateway_key("sub-1", "Deck").unwrap());
+        assert!(
+            db.update_sub_gateway_key_value("sub-1", "ocg-deck")
+                .unwrap()
+        );
+        assert!(db.sub_gateway_key_value_exists("ocg-deck").unwrap());
+
+        // Soft delete clears the plaintext; tombstones free the value and do
+        // not count as active.
+        assert!(db.soft_delete_sub_gateway_key("sub-1", now).unwrap());
+        let tombstone = db.get_sub_gateway_key("sub-1").unwrap().unwrap();
+        assert!(tombstone.deleted_at.is_some());
+        assert!(tombstone.key.is_empty());
+        assert!(!tombstone.enabled);
+        assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 0);
+        assert!(!db.sub_gateway_key_value_exists("ocg-deck").unwrap());
+        assert!(!db.rename_sub_gateway_key("sub-1", "Gone").unwrap());
+        assert!(!db.set_sub_gateway_key_enabled("sub-1", true).unwrap());
+        assert!(!db.soft_delete_sub_gateway_key("sub-1", now).unwrap());
+
+        // The freed value is insertable again, and missing ids report false.
+        let recycled = SubGatewayKey {
+            id: "sub-3".into(),
+            name: "Recycled".into(),
+            key: "ocg-deck".into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: now,
+        };
+        db.insert_sub_gateway_key(&recycled).unwrap();
+        assert!(!db.rename_sub_gateway_key("missing", "X").unwrap());
+        assert!(db.get_sub_gateway_key("missing").unwrap().is_none());
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn forward_log_keys_resolve_the_latest_name_per_id() {
+        let dir = temp_data_dir("log-keys-latest-name");
+        let db = Database::open(dir.clone()).unwrap();
+        let base = ForwardLog {
+            id: 0,
+            timestamp: Utc::now(),
+            model: "m".into(),
+            account_id: "a".into(),
+            account_name: "a".into(),
+            client_key_id: Some("sub-1".into()),
+            client_key_name: Some("Laptop".into()),
+            status: "success".into(),
+            http_status: Some(200),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: None,
+            pricing_revision_id: None,
+            quota_multiplier: None,
+            local_adjustment_multiplier: None,
+            service_tier: None,
+            cost_state: "not_applicable".into(),
+            error_message: None,
+            request_id: None,
+            attempt: None,
+            error_source: None,
+            error_stage: None,
+            duration_ms: None,
+            diagnostic: None,
+        };
+        // A lexicographically "larger" historical name must not win: it was
+        // written first, the current name last.
+        let mut zzz = base.clone();
+        zzz.client_key_name = Some("zzz-old".into());
+        db.log_forward(&zzz).unwrap();
+        db.log_forward(&base).unwrap();
+        let mut renamed = base.clone();
+        renamed.client_key_name = Some("Deck".into());
+        db.log_forward(&renamed).unwrap();
+
+        let keys = db.list_forward_log_keys().unwrap();
+        assert_eq!(keys.len(), 1, "one entry per distinct key id");
+        assert_eq!(keys[0].id, "sub-1");
+        assert_eq!(keys[0].name, "Deck", "the latest snapshot wins");
+
+        // NULL-name rows fall back to the id label.
+        let mut unnamed = base.clone();
+        unnamed.client_key_id = Some("ghost".into());
+        unnamed.client_key_name = None;
+        db.log_forward(&unnamed).unwrap();
+        let keys = db.list_forward_log_keys().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            keys.iter().find(|key| key.id == "ghost").unwrap().name,
+            "ghost"
+        );
+
+        // The list stays purely log-driven: an id with no rows (e.g. the
+        // primary key before its first attributed request) never appears.
+        assert!(
+            !keys
+                .iter()
+                .any(|key| key.id == "00000000-0000-0000-0000-000000000001")
+        );
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();

@@ -62,7 +62,7 @@
                   @keydown.esc="keyMenuOpen = false"
                 >
                   <span class="key-switcher-name">{{ selectedKey?.name }}</span>
-                  <span v-if="selectedKey?.id === primaryKeyId" class="key-switcher-badge">{{ t("主 Key") }}</span>
+                  <span v-if="selectedKey?.id === PRIMARY_KEY_ID" class="key-switcher-badge">{{ t("主 Key") }}</span>
                   <n-icon size="12" aria-hidden="true"><DownOutlined /></n-icon>
                 </button>
               </template>
@@ -77,9 +77,9 @@
                 >
                   <span class="key-switcher-option-main">
                     <span class="key-switcher-option-name">{{ entry.name }}</span>
-                    <span v-if="entry.id === primaryKeyId" class="key-switcher-badge">{{ t("主 Key") }}</span>
+                    <span v-if="entry.id === PRIMARY_KEY_ID" class="key-switcher-badge">{{ t("主 Key") }}</span>
                   </span>
-                  <code class="key-switcher-option-value">{{ maskConnectionKey(entry.key) }}</code>
+                  <code class="key-switcher-option-value">{{ maskConnectionKey(entry.value) }}</code>
                   <n-icon
                     v-if="entry.id === selectedKey?.id"
                     class="key-switcher-check"
@@ -126,7 +126,7 @@
                     size="small"
                     :aria-label="t('复制 Key')"
                     :disabled="refreshingKey || !selectedKey"
-                    @click="copyConnection('key', selectedKey?.key ?? '', t('Key'))"
+                    @click="copyConnection('key', selectedKey?.value ?? '', t('Key'))"
                   >
                     <template #icon>
                       <n-icon :component="copiedTarget === 'key' ? CheckOutlined : CopyOutlined" />
@@ -299,14 +299,12 @@ import {
   WalletOutlined,
 } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
-import { tauriApi } from "../api/tauri";
+import { PRIMARY_KEY_ID, tauriApi } from "../api/tauri";
 import type {
   Account,
-  AppConfig,
+  ConnectionInfo,
   DailyModelCost,
   DashboardSummary,
-  GatewayKeyEntry,
-  GatewayKeyEntryResponse,
   UsageWindow,
 } from "../api/tauri";
 import { CHART_PALETTE } from "../theme";
@@ -318,6 +316,13 @@ import { daysUntilDate, expiryTagType } from "./account-lifecycle";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
 
 type ConnectionTarget = "api" | "key" | "upstream";
+
+/** One selectable credential in the connection switcher. */
+interface SwitcherKey {
+  id: string;
+  name: string;
+  value: string;
+}
 
 const message = useMessage();
 const { copiedTarget, copy, cleanup } = useClipboard();
@@ -334,27 +339,14 @@ const usageFailedAccountIds = ref(new Set<string>());
 const refreshingKey = ref(false);
 const lifecycleNow = ref(Date.now());
 
-const serviceConfig = ref<AppConfig>({
-  revision: 0,
+// ponytail: keep this pre-load fallback in sync with ConnectionInfo.
+const serviceConfig = ref<ConnectionInfo>({
   gateway_port: 9042,
-  gateway_key: "",
-  gateway_keys: [],
-  upstream_base_url: "",
-  proxy_mode: "auto",
-  proxy_url: "",
-  opencode_invite_url: "",
   client_root_url: "",
-  client_root_url_from_env: false,
-  auto_start: false,
-  auto_start_supported: false,
-  show_dock_icon: true,
-  dock_visibility_supported: false,
-  connect_timeout_secs: 30,
-  non_stream_timeout_secs: 900,
-  stream_idle_timeout_secs: 300,
-  routing_mode: "strict-priority",
-  conversation_sticky: false,
-  free_model_routing: "explicit",
+  upstream_base_url: "",
+  primary_key: "",
+  sub_keys: [],
+  revision: 0,
 });
 const selectedKeyId = ref("");
 const summary = ref<DashboardSummary>({
@@ -374,20 +366,20 @@ const legendModels = computed(() => {
     .map((model, index) => ({ model, color: CHART_PALETTE[index % CHART_PALETTE.length] }));
 });
 const totalChartCost = computed(() => dailyCosts.value.reduce((sum, row) => sum + row.cost, 0));
-const maskedKey = computed(() => maskConnectionKey(selectedKey.value?.key ?? ""));
-const enabledGatewayKeys = computed<GatewayKeyEntry[]>(() =>
-  (serviceConfig.value.gateway_keys ?? []).filter((entry) => entry.enabled && !entry.deleted_at),
-);
-// The backend defines the primary key as the first non-deleted entry.
-const primaryKeyId = computed(
-  () => (serviceConfig.value.gateway_keys ?? []).find((entry) => !entry.deleted_at)?.id ?? "",
-);
+const maskedKey = computed(() => maskConnectionKey(selectedKey.value?.value ?? ""));
+// The primary key is pinned first; only enabled sub keys join the switcher.
+const enabledGatewayKeys = computed<SwitcherKey[]>(() => [
+  { id: PRIMARY_KEY_ID, name: t("主 Key"), value: serviceConfig.value.primary_key },
+  ...serviceConfig.value.sub_keys
+    .filter((entry) => entry.enabled)
+    .map((entry) => ({ id: entry.id, name: entry.name, value: entry.value })),
+]);
 const keyMenuOpen = ref(false);
-// Default to the primary key (first active entry) and keep the selection
-// valid across settings reloads and key lifecycle changes.
-const selectedKey = computed<GatewayKeyEntry | null>(() => {
+// Default to the primary key and keep the selection valid across connection
+// reloads and key lifecycle changes.
+const selectedKey = computed<SwitcherKey | null>(() => {
   const keys = enabledGatewayKeys.value;
-  if (keys.length === 0) return null;
+  if (keys.length === 0 || !keys[0].value) return null;
   return keys.find((entry) => entry.id === selectedKeyId.value) ?? keys[0];
 });
 // Keep the switcher explicitly on the primary key until the user picks
@@ -477,24 +469,37 @@ async function copyConnection(target: ConnectionTarget, value: string, label: st
 async function regenerateKey() {
   const target = selectedKey.value;
   if (refreshingKey.value || dashboardRequestActive || !target) return;
-  const previousKey = target.key;
+  const previousValue = target.value;
+  const isPrimary = target.id === PRIMARY_KEY_ID;
   refreshingKey.value = true;
   let mutationFailed = false;
   let mutationError: unknown = null;
-  let result: GatewayKeyEntryResponse | null = null;
+  let newValue = "";
   try {
     try {
-      result = await tauriApi.regenerateGatewayKeyEntry(target.id, serviceConfig.value.revision);
+      if (isPrimary) {
+        // Primary rotation uses the legacy endpoint; sub keys rotate in place.
+        const result = await tauriApi.regenerateGatewayKey();
+        newValue = result.key;
+      } else {
+        const result = await tauriApi.regenerateGatewayKeyEntry(
+          target.id,
+          serviceConfig.value.revision,
+        );
+        newValue = result.key;
+      }
     } catch (error) {
       mutationFailed = true;
       mutationError = error;
     }
 
     try {
-      const latest = await tauriApi.getSettings();
+      const latest = await tauriApi.getConnection();
       serviceConfig.value = latest;
-      const refreshed = (latest.gateway_keys ?? []).find((entry) => entry.id === target.id);
-      if (!mutationFailed || refreshed?.key !== previousKey) {
+      const refreshed = latest.primary_key === newValue
+        ? newValue
+        : latest.sub_keys.find((entry) => entry.id === target.id)?.value;
+      if (!mutationFailed || refreshed !== previousValue) {
         selectedKeyId.value = target.id;
         message.success(t("Key 已刷新"));
       } else {
@@ -503,20 +508,19 @@ async function regenerateKey() {
         }));
       }
     } catch {
-      if (result) {
-        // Settings refresh failed; apply the regenerated value locally so
+      if (newValue) {
+        // Connection refresh failed; apply the regenerated value locally so
         // the panel never shows or copies the now-invalid old key.
-        const regenerated = result.key;
-        serviceConfig.value.gateway_keys = (serviceConfig.value.gateway_keys ?? []).map(
-          (entry) => (entry.id === target.id ? { ...entry, key: regenerated } : entry),
-        );
-        if (serviceConfig.value.gateway_key === previousKey) {
-          serviceConfig.value.gateway_key = regenerated;
+        if (isPrimary) {
+          serviceConfig.value.primary_key = newValue;
+        } else {
+          serviceConfig.value.sub_keys = serviceConfig.value.sub_keys.map((entry) =>
+            entry.id === target.id ? { ...entry, value: newValue } : entry,
+          );
         }
         selectedKeyId.value = target.id;
         message.success(t("Key 已刷新"));
       } else {
-        serviceConfig.value.gateway_key = "";
         dashboardError.value = true;
         message.error(t("刷新 Key 失败: {error}", {
           error: userFacingError(mutationError, t("无法连接到本地服务，请确认程序正在运行后重试")),
@@ -549,11 +553,11 @@ async function loadDashboard() {
   accounts.value = [];
   usageMap.value = {};
   dailyCosts.value = [];
-  const [loadedAccounts, settings, loadedSummary, costs] = await Promise.allSettled([
-      tauriApi.getAccounts(),
-      tauriApi.getSettings(),
-      tauriApi.getDashboardSummary(),
-      tauriApi.getDailyCostByModel(30),
+  const [loadedAccounts, connection, loadedSummary, costs] = await Promise.allSettled([
+    tauriApi.getAccounts(),
+    tauriApi.getConnection(),
+    tauriApi.getDashboardSummary(),
+    tauriApi.getDailyCostByModel(30),
   ]);
   if (loadedAccounts.status === "fulfilled") {
     accounts.value = loadedAccounts.value;
@@ -574,7 +578,7 @@ async function loadDashboard() {
         : []
     )));
   }
-  if (settings.status === "fulfilled") serviceConfig.value = settings.value;
+  if (connection.status === "fulfilled") serviceConfig.value = connection.value;
   if (loadedSummary.status === "fulfilled") {
     summary.value = loadedSummary.value;
     summaryLoaded.value = true;
@@ -583,7 +587,7 @@ async function loadDashboard() {
     dailyCosts.value = costs.value;
     costsLoaded.value = true;
   }
-  dashboardError.value = [loadedAccounts, settings, loadedSummary, costs].some((result) => result.status === "rejected")
+  dashboardError.value = [loadedAccounts, connection, loadedSummary, costs].some((result) => result.status === "rejected")
     || usageFailedAccountIds.value.size > 0;
   if (dashboardError.value) {
     message.error(t("部分仪表盘数据加载失败"));

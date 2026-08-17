@@ -2,6 +2,7 @@ import type { AppConfig } from "../api/tauri";
 
 export const EDITABLE_SETTING_KEYS = [
   "gateway_port",
+  "gateway_key",
   "upstream_base_url",
   "proxy_mode",
   "proxy_url",
@@ -19,7 +20,7 @@ export const EDITABLE_SETTING_KEYS = [
 
 /**
  * Keep locally edited fields while adopting a newer server snapshot.
- * Revision, Key values, environment flags, and capability flags always come
+ * Revision, sub keys, environment flags, and capability flags always come
  * from the server and are intentionally excluded from the editable key list.
  */
 export function mergeUnsavedSettings(

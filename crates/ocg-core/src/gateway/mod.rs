@@ -106,19 +106,18 @@ pub async fn start_gateway_on(state: CoreState, addr: SocketAddr) -> Result<Gate
 
 /// Attributes pre-multi-key forward logs to the primary key in bounded
 /// chunks. The runtime context (not `CoreStateInner` construction) owns this
-/// because the primary key id is only known after `load_config`; pure
-/// synchronous construction never starts it. Small tables finish inline; a
-/// dedicated thread (holding only a weak state reference) continues large
-/// ones chunk by chunk so request logging never waits behind more than one
-/// short transaction. DB work is synchronous, so no lock is ever held across
-/// an await point.
+/// so pure synchronous construction never starts it. Small tables finish
+/// inline; a dedicated thread (holding only a weak state reference) continues
+/// large ones chunk by chunk so request logging never waits behind more than
+/// one short transaction. DB work is synchronous, so no lock is ever held
+/// across an await point.
 fn spawn_forward_log_backfill(state: CoreState) {
-    // Snapshot the primary key before touching any lock, per lock ordering.
-    let config = state.config();
-    let Some(primary) = crate::gateway_keys::primary_key(&config) else {
-        return;
-    };
-    let (key_id, key_name) = (primary.id.clone(), primary.name.clone());
+    // The primary key attributes under its fixed hardcoded id (see
+    // `gateway_keys::PRIMARY_KEY_ID`); no config or db lock is needed.
+    let (key_id, key_name) = (
+        crate::gateway_keys::PRIMARY_KEY_ID.to_string(),
+        crate::gateway_keys::PRIMARY_KEY_NAME.to_string(),
+    );
     // Fast path: one bounded step inline. Fresh databases (and tests) have no
     // NULL rows, so this records the completion marker and never spawns.
     let more_chunks = {
@@ -197,8 +196,7 @@ mod tests {
         let state =
             Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should load"));
         let mut config = state.config();
-        // gateway_key mirrors the primary entry; pin the primary's value.
-        config.gateway_keys[0].key = "gateway-test-key".to_string();
+        // Pin the primary key value for the test requests.
         config.gateway_key = "gateway-test-key".to_string();
         state.set_config(config).expect("test config should save");
         let handle = start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -300,8 +298,7 @@ mod tests {
         let state =
             Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should load"));
         let mut config = state.config();
-        // gateway_key mirrors the primary entry; pin the primary's value.
-        config.gateway_keys[0].key = "gateway-test-key".to_string();
+        // Pin the primary key value for the test requests.
         config.gateway_key = "gateway-test-key".to_string();
         state.set_config(config).expect("test config should save");
         let handle = start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -493,8 +490,7 @@ mod tests {
         let state =
             Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should load"));
         let mut config = state.config();
-        // gateway_key mirrors the primary entry; pin the primary's value.
-        config.gateway_keys[0].key = "gateway-test-key".to_string();
+        // Pin the primary key value for the test requests.
         config.gateway_key = "gateway-test-key".to_string();
         state.set_config(config).expect("test config should save");
         let handle = start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))

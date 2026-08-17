@@ -47,6 +47,16 @@ fn settings_payload_at(config: &AppConfig, expected_revision: u64) -> serde_json
     payload
 }
 
+/// Every request in this suite targets loopback listeners; never route them
+/// through an ambient system/environment proxy (which aborts such
+/// connections on some machines).
+fn loopback_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client should build")
+}
+
 #[tokio::test]
 async fn public_dashboard_uses_first_registration_and_session_cookie() {
     let state = state("public");
@@ -54,7 +64,7 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
         .await
         .unwrap();
     let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
-    let client = reqwest::Client::new();
+    let client = loopback_client();
 
     let status = client
         .get(format!("{base}/auth/status"))
@@ -265,7 +275,7 @@ async fn loopback_dashboard_skips_login() {
         .await
         .unwrap();
     let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
-    let client = reqwest::Client::new();
+    let client = loopback_client();
 
     let status = client
         .get(format!("{base}/auth/status"))
@@ -322,7 +332,7 @@ async fn loopback_desktop_update_api_is_safe_atomic_and_pollable() {
         .parse::<u64>()
         .unwrap();
     let newer_version = format!("{}.0.0", current_major + 1);
-    let client = reqwest::Client::new();
+    let client = loopback_client();
 
     let unsupported_state = state("desktop-update-unsupported");
     let unsupported_handle =
@@ -478,12 +488,10 @@ async fn loopback_settings_trim_and_require_gateway_key() {
         .await
         .unwrap();
     let url = format!("http://127.0.0.1:{}/dashboard/api/settings", handle.port);
-    let client = reqwest::Client::new();
+    let client = loopback_client();
 
-    // Keys are managed exclusively through the key lifecycle API: a settings
-    // payload's gateway_key/gateway_keys values are sanity-checked but never
-    // applied, so a stale client can never wipe or replace the key list.
-    let key_before = state.config().gateway_key;
+    // v1.6.1 semantics: a settings update may customize the primary key
+    // (trimmed, non-blank, unique across credentials).
     let mut config = state.config();
     config.gateway_key = "  trimmed-key  ".into();
     config.client_root_url = "  http://192.168.1.20:9042/proxy/v1/  ".into();
@@ -501,12 +509,7 @@ async fn loopback_settings_trim_and_require_gateway_key() {
         StatusCode::OK
     );
     let saved = state.config();
-    assert_eq!(saved.gateway_key, key_before);
-    assert!(!saved.gateway_keys.is_empty());
-    assert_eq!(
-        saved.gateway_keys[0].key, key_before,
-        "the primary entry must mirror into gateway_key"
-    );
+    assert_eq!(saved.gateway_key, "trimmed-key");
     assert_eq!(saved.client_root_url, "http://192.168.1.20:9042/proxy");
     assert_eq!(saved.connect_timeout_secs, 12);
     assert_eq!(saved.non_stream_timeout_secs, 345);
@@ -528,13 +531,9 @@ async fn loopback_settings_trim_and_require_gateway_key() {
     );
     assert_eq!(roundtrip["auto_start_supported"], false);
     assert_eq!(roundtrip["client_root_url_from_env"], false);
-    assert_eq!(roundtrip["gateway_key"], json!(key_before));
-    assert!(
-        roundtrip["gateway_keys"]
-            .as_array()
-            .is_some_and(|keys| !keys.is_empty())
-    );
+    assert_eq!(roundtrip["gateway_key"], json!("trimmed-key"));
 
+    // A blank key is rejected and keeps the previous value.
     config.gateway_key = "   ".into();
     assert_eq!(
         client
@@ -546,7 +545,67 @@ async fn loopback_settings_trim_and_require_gateway_key() {
             .status(),
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(state.config().gateway_key, key_before);
+    assert_eq!(state.config().gateway_key, "trimmed-key");
+
+    // A key colliding with any non-deleted sub key — enabled or disabled —
+    // is rejected by the unified gate.
+    let sub = ocg_core::gateway_keys::create_sub_key(&state, "Laptop").unwrap();
+    let mut colliding = state.config();
+    colliding.gateway_key = sub.key.clone();
+    assert_eq!(
+        client
+            .post(&url)
+            .json(&settings_payload(&state, &colliding))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(state.config().gateway_key, "trimmed-key");
+    ocg_core::gateway_keys::set_sub_key_enabled(&state, &sub.id, false).unwrap();
+    assert_eq!(
+        client
+            .post(&url)
+            .json(&settings_payload(&state, &colliding))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST,
+        "disabled sub keys still hold their value and block the primary"
+    );
+    assert_eq!(state.config().gateway_key, "trimmed-key");
+
+    // Sub key material submitted through the generic settings save never
+    // touches the sub key table.
+    let before = state.db.lock().list_sub_gateway_keys().unwrap();
+    let mut with_keys = state.config();
+    with_keys.gateway_key = "final-key".into();
+    let payload = {
+        let mut value = settings_payload(&state, &with_keys);
+        value["gateway_keys"] = json!([
+            {"id": "forged", "name": "Forged", "key": "ocg-forged", "enabled": true,
+             "created_at": "2026-08-16T00:00:00Z"}
+        ]);
+        value
+    };
+    assert_eq!(
+        client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(state.config().gateway_key, "final-key");
+    assert_eq!(
+        state.db.lock().list_sub_gateway_keys().unwrap(),
+        before,
+        "settings updates cannot create, modify, or remove sub keys"
+    );
 
     for client_root_url in [
         "ocg.example.com",
@@ -623,7 +682,7 @@ async fn loopback_settings_accept_legacy_payload_without_revision() {
     let payload = serde_json::to_value(&config).unwrap();
     assert!(payload.get("expected_revision").is_none());
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .post(&url)
         .json(&payload)
         .send()
@@ -642,7 +701,7 @@ async fn loopback_settings_round_trip_routing_modes_and_reject_unknown_values() 
         .await
         .unwrap();
     let url = format!("http://127.0.0.1:{}/dashboard/api/settings", handle.port);
-    let client = reqwest::Client::new();
+    let client = loopback_client();
 
     for mode in [
         RoutingMode::StrictPriority,
@@ -698,7 +757,7 @@ async fn loopback_settings_reject_stale_revision_after_key_regeneration() {
         .await
         .unwrap();
     let url = format!("http://127.0.0.1:{}/dashboard/api/settings", handle.port);
-    let client = reqwest::Client::new();
+    let client = loopback_client();
     let loaded = client
         .get(&url)
         .send()
@@ -752,7 +811,7 @@ async fn loopback_settings_gate_and_sync_auto_start() {
         "http://127.0.0.1:{}/dashboard/api/settings",
         unsupported_handle.port
     );
-    let client = reqwest::Client::new();
+    let client = loopback_client();
     let mut unsupported_config = unsupported_state.config();
     unsupported_config.auto_start = true;
     assert_eq!(
@@ -926,7 +985,7 @@ async fn loopback_forward_logs_apply_filters_before_pagination() {
     let handle = gateway::start_gateway_on(state, SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .get(format!(
             "http://127.0.0.1:{}/dashboard/api/logs/forward?limit=1&offset=0&status=success&account_id=selected",
             handle.port
@@ -947,20 +1006,44 @@ async fn loopback_forward_logs_apply_filters_before_pagination() {
 }
 
 #[tokio::test]
-async fn gateway_key_lifecycle_api_manages_multiple_keys() {
+async fn gateway_key_lifecycle_api_manages_sub_keys() {
     let state = state("keys-lifecycle");
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
     let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
-    let client = reqwest::Client::new();
+    let client = loopback_client();
 
-    let primary_id = ocg_core::gateway_keys::primary_key(&state.config())
-        .unwrap()
-        .id
-        .clone();
+    // The primary key id never addresses a sub key row: lifecycle operations
+    // on it fail cleanly.
+    let primary_id = ocg_core::gateway_keys::PRIMARY_KEY_ID;
+    for operation in ["patch", "delete"] {
+        let request = match operation {
+            "patch" => client
+                .patch(format!("{base}/settings/keys/{primary_id}"))
+                .json(&json!({ "name": "Nope" })),
+            _ => client.delete(format!("{base}/settings/keys/{primary_id}")),
+        };
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::BAD_REQUEST,
+            "the primary id must not address a sub key ({operation})"
+        );
+    }
+    assert!(
+        state
+            .db
+            .lock()
+            .get_sub_gateway_key(primary_id)
+            .unwrap()
+            .is_none()
+    );
 
-    // Create a secondary key; the full value comes back exactly once.
+    // Every successful key mutation advances the shared settings revision,
+    // keeping the optimistic lock meaningful between key-API writers.
+    let revision_before = state.settings_revision();
+
+    // Create a sub key; the full value comes back exactly once.
     let created = client
         .post(format!("{base}/settings/keys"))
         .json(&json!({ "name": "Laptop" }))
@@ -972,10 +1055,24 @@ async fn gateway_key_lifecycle_api_manages_multiple_keys() {
     let secondary_id = created["id"].as_str().unwrap().to_string();
     let secondary_value = created["key"].as_str().unwrap().to_string();
     assert_eq!(created["name"], "Laptop");
-    assert!(created["enabled"].as_bool().unwrap());
+    assert_eq!(created["enabled"], true);
+    assert!(created["deleted_at"].is_null());
     assert!(!secondary_value.is_empty());
+    assert!(
+        created["revision"].as_u64().unwrap() > revision_before,
+        "creating a key must advance the settings revision"
+    );
 
-    // Rename via PATCH.
+    // A stale revision (captured before the create) is rejected with 409.
+    let stale_create = client
+        .post(format!("{base}/settings/keys"))
+        .json(&json!({ "name": "Deck", "expected_revision": revision_before }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_create.status(), StatusCode::CONFLICT);
+
+    // Rename via PATCH audits old and new names.
     let renamed = client
         .patch(format!("{base}/settings/keys/{secondary_id}"))
         .json(&json!({ "name": "Deck" }))
@@ -1002,7 +1099,11 @@ async fn gateway_key_lifecycle_api_manages_multiple_keys() {
         .unwrap();
     assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
     assert_eq!(
-        ocg_core::gateway_keys::key_by_id(&state.config(), &secondary_id)
+        state
+            .db
+            .lock()
+            .get_sub_gateway_key(&secondary_id)
+            .unwrap()
             .unwrap()
             .key,
         secondary_value,
@@ -1029,6 +1130,27 @@ async fn gateway_key_lifecycle_api_manages_multiple_keys() {
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
+    // A wrong x-api-key alongside a correct x-goog-api-key must pass (the
+    // OR semantics regression from the config-list form); the request then
+    // fails downstream on the unknown model instead of with 401.
+    let current_primary = state.config().gateway_key;
+    let or_semantics = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            handle.port
+        ))
+        .header("x-api-key", "wrong-key")
+        .header("x-goog-api-key", &current_primary)
+        .json(&json!({"model":"m","messages":[],"max_tokens":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        or_semantics.status(),
+        StatusCode::UNAUTHORIZED,
+        "a correct x-goog-api-key must win over a wrong x-api-key"
+    );
+
     // Regenerate returns the new value; the old one is invalid immediately.
     let re_enabled = client
         .patch(format!("{base}/settings/keys/{secondary_id}"))
@@ -1047,55 +1169,25 @@ async fn gateway_key_lifecycle_api_manages_multiple_keys() {
     let new_value = regenerated["key"].as_str().unwrap();
     assert_ne!(new_value, secondary_value);
 
-    // The last enabled key cannot be disabled or deleted: leave only the
-    // primary enabled and both protections must reject.
-    let park = client
-        .patch(format!("{base}/settings/keys/{secondary_id}"))
-        .json(&json!({ "enabled": false }))
+    // The connection endpoint aggregates the primary value and sub keys
+    // with values, behind the same session layer.
+    let connection = client
+        .get(format!("{base}/connection"))
         .send()
         .await
         .unwrap();
-    assert_eq!(park.status(), StatusCode::OK);
-    let last_disable = client
-        .patch(format!("{base}/settings/keys/{primary_id}"))
-        .json(&json!({ "enabled": false }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(last_disable.status(), StatusCode::BAD_REQUEST);
-    let last_delete = client
-        .delete(format!("{base}/settings/keys/{primary_id}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(last_delete.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(connection.status(), StatusCode::OK);
+    let connection: serde_json::Value = connection.json().await.unwrap();
+    assert_eq!(connection["primary_key"], json!(current_primary));
+    assert_eq!(
+        connection["sub_keys"][0]["value"],
+        json!(new_value),
+        "sub key values ride along for the switcher's copy action"
+    );
+    assert!(connection["revision"].as_u64().is_some());
 
-    // Re-enable the secondary, then delete the primary: the earliest enabled
-    // key is promoted and the mirror follows.
-    let unpark = client
-        .patch(format!("{base}/settings/keys/{secondary_id}"))
-        .json(&json!({ "enabled": true }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unpark.status(), StatusCode::OK);
-    let deleted = client
-        .delete(format!("{base}/settings/keys/{primary_id}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(deleted.status(), StatusCode::OK);
-    let config = state.config();
-    let promoted = ocg_core::gateway_keys::primary_key(&config).unwrap();
-    assert_eq!(promoted.id, secondary_id);
-    assert_eq!(config.gateway_key, promoted.key);
-    // The soft-deleted record keeps its attribution data with no plaintext.
-    let tombstone = ocg_core::gateway_keys::key_by_id(&config, &primary_id).unwrap();
-    assert!(tombstone.deleted_at.is_some());
-    assert!(tombstone.key.is_empty());
-    assert_eq!(tombstone.name, "Primary");
-
-    // The legacy regenerate endpoint rotates the (new) primary.
+    // The legacy regenerate endpoint rotates the primary key: the old value
+    // stops authenticating and the new one passes.
     let legacy = client
         .post(format!("{base}/settings/regenerate-gateway-key"))
         .send()
@@ -1103,7 +1195,52 @@ async fn gateway_key_lifecycle_api_manages_multiple_keys() {
         .unwrap();
     assert_eq!(legacy.status(), StatusCode::OK);
     let legacy: serde_json::Value = legacy.json().await.unwrap();
-    assert_eq!(legacy["key"], json!(state.config().gateway_key));
+    let rotated = legacy["key"].as_str().unwrap().to_string();
+    assert_ne!(rotated, current_primary);
+    assert_eq!(state.config().gateway_key, rotated);
+    let old_rejected = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            handle.port
+        ))
+        .header("authorization", format!("Bearer {current_primary}"))
+        .json(&json!({"model":"m","messages":[],"max_tokens":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old_rejected.status(), StatusCode::UNAUTHORIZED);
+    let new_accepted = client
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            handle.port
+        ))
+        .header("authorization", format!("Bearer {rotated}"))
+        .json(&json!({"model":"m","messages":[],"max_tokens":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        new_accepted.status(),
+        StatusCode::UNAUTHORIZED,
+        "the rotated primary value authenticates"
+    );
+
+    // Deleting the sub key keeps attribution data with no plaintext.
+    let deleted = client
+        .delete(format!("{base}/settings/keys/{secondary_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let tombstone = state
+        .db
+        .lock()
+        .get_sub_gateway_key(&secondary_id)
+        .unwrap()
+        .unwrap();
+    assert!(tombstone.deleted_at.is_some());
+    assert!(tombstone.key.is_empty());
+    assert_eq!(tombstone.name, "Deck");
 
     // Unknown keys are reported, not silently ignored.
     let missing = client
@@ -1113,12 +1250,21 @@ async fn gateway_key_lifecycle_api_manages_multiple_keys() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
 
-    // Every mutation wrote an audit entry.
+    // Every mutation wrote an audit entry, without "gateway key" wording.
     let audits = state.db.lock().list_gateway_logs(100).unwrap();
+    for expected in ["created key `Laptop`", "renamed key `Laptop` to `Deck`"] {
+        assert!(
+            audits
+                .iter()
+                .any(|log| log.category == "keys" && log.message.contains(expected)),
+            "missing audit containing {expected:?}"
+        );
+    }
     assert!(
-        audits
+        !audits
             .iter()
-            .any(|log| log.category == "keys" && log.message.contains("created gateway key"))
+            .any(|log| log.category == "keys" && log.message.contains("gateway key")),
+        "audit wording must say \"key\" only"
     );
 
     gateway::stop_gateway(handle);

@@ -865,20 +865,24 @@ test("dashboard keeps the connection center first and protects key regeneration"
   assert.match(template, /:aria-label="t\('复制 API Base URL'\)"/);
   assert.match(template, /:aria-label="t\('刷新 Key'\)"/);
   assert.match(template, /copyConnection\('api', serviceApiUrl, t\('API 地址'\)\)/);
-  assert.match(template, /copyConnection\('key', selectedKey\?\.key \?\? '', t\('Key'\)\)/);
+  assert.match(template, /copyConnection\('key', selectedKey\?\.value \?\? '', t\('Key'\)\)/);
   assert.doesNotMatch(template, /<span class="sr-only">(?:API Base URL|Key)<\/span>/);
   assert.match(template, /\{\{ maskedKey \}\}/);
   assert.doesNotMatch(template, /<code>\{\{ serviceConfig\.gateway_key \}\}<\/code>/);
-  // Key selector appears only with more than one enabled key; it is a
-  // popover switcher (name + badge + masked preview), not a bare dropdown,
-  // and it defaults to the primary key instead of a blank selection.
+  // The switcher renders only with more than one credential: with a single
+  // (primary) key the layout matches the pre-multi-key single-key row.
   assert.match(template, /v-if="enabledGatewayKeys\.length > 1"/);
   assert.match(template, /class="key-switcher-trigger"/);
   assert.match(template, /:aria-label="t\('选择 Key'\)"/);
   assert.doesNotMatch(template, /connection-key-select/);
   assert.match(source, /watch\(enabledGatewayKeys, \(keys\) =>/);
   assert.match(source, /selectedKeyId\.value = keys\[0\]\.id/);
-  assert.match(source, /const primaryKeyId = computed\(/);
+  // The connection center consumes the lightweight ConnectionInfo payload,
+  // never the full settings shape.
+  assert.match(source, /import type \{\s*Account,\s*ConnectionInfo,/);
+  assert.doesNotMatch(source, /ref<AppConfig>/);
+  // The primary key is pinned first and identified by the fixed constant.
+  assert.match(source, /const enabledGatewayKeys = computed<SwitcherKey\[\]>\(\(\) => \[\s*\{ id: PRIMARY_KEY_ID, name: t\("主 Key"\), value: serviceConfig\.value\.primary_key \},/);
   assert.match(template, /class="account-usage-row"/);
   assert.match(source, /grid-template-columns: minmax\(3\.5em, auto\) minmax\(0, 1fr\)/);
 });
@@ -896,8 +900,23 @@ test("dashboard reports gateway health and serializes key regeneration", async (
   assert.match(source, /:loading="refreshingKey"\s+:disabled="refreshingKey \|\| loading \|\| !selectedKey"/);
   assert.match(source, /async function regenerateKey\(\) \{\s*const target = selectedKey\.value;\s*if \(refreshingKey\.value \|\| dashboardRequestActive \|\| !target\) return;/);
   assert.match(source, /async function loadDashboard\(\) \{\s*if \(dashboardRequestActive \|\| refreshingKey\.value\) return;/);
-  assert.match(source, /mutationFailed = true;[\s\S]*?const latest = await tauriApi\.getSettings\(\)/);
-  assert.match(source, /serviceConfig\.value\.gateway_key = "";[\s\S]*?dashboardError\.value = true/);
+  // Primary rotation goes through the legacy endpoint; sub keys rotate via
+  // the key lifecycle API.
+  assert.match(source, /const isPrimary = target\.id === PRIMARY_KEY_ID;/);
+  assert.match(source, /tauriApi\.regenerateGatewayKey\(\)/);
+  assert.match(source, /tauriApi\.regenerateGatewayKeyEntry\(/);
+  assert.match(source, /mutationFailed = true;[\s\S]*?tauriApi\.getConnection\(\)/);
+  // When regeneration succeeds but the follow-up refresh fails, the panel
+  // applies the new value locally instead of showing the invalidated one.
+  assert.match(
+    source,
+    /if \(newValue\) \{\s*\/\/ Connection refresh failed; apply the regenerated value locally/,
+  );
+  assert.match(source, /serviceConfig\.value\.primary_key = newValue;/);
+  assert.match(
+    source,
+    /serviceConfig\.value\.sub_keys = serviceConfig\.value\.sub_keys\.map\(\(entry\) =>\s*entry\.id === target\.id \? \{ \.\.\.entry, value: newValue \} : entry,/,
+  );
 });
 
 test("app recovers first-run auth and contains intentional logout failures", async () => {
@@ -929,12 +948,14 @@ test("dashboard and settings keep partial data safe", async () => {
   const app = await readFile(new URL("../App.vue", import.meta.url), "utf8");
 
   assert.match(dashboard, /Promise\.allSettled/);
-  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| testingProxy \|\| proxyUrlPreview\.status === 'error' \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error'"/);
+  assert.match(settings, /:disabled="!loaded \|\| regenerating \|\| testingProxy \|\| proxyUrlPreview\.status === 'error' \|\| clientRootPreview\.status === 'error' \|\| inviteUrlPreview\.status === 'error' \|\| primaryKeyPreview\.status === 'error'"/);
   assert.match(settings, /if \(!loaded\.value\) return/);
   // Every key row is masked; raw values never render in the settings page.
-  assert.match(settings, /\{\{ maskConnectionKey\(entry\.key\) \}\}/);
-  assert.doesNotMatch(settings, /v-model:value="config\.gateway_key"/);
-  assert.doesNotMatch(settings, /v-model:value="config\.gateway_keys"/);
+  assert.match(settings, /\{\{ maskConnectionKey\(entry\.value\) \}\}/);
+  assert.match(settings, /\{\{ maskConnectionKey\(config\.gateway_key\) \}\}/);
+  // v1.6.1 semantics: the primary key value is editable through the generic
+  // settings save (the management row above stays read-only + rotate).
+  assert.match(settings, /v-model:value="config\.gateway_key"/);
   assert.match(app, /mode === "register"[\s\S]*getAuthStatus\(\)[\s\S]*status\?\.initialized/);
 });
 
@@ -1079,9 +1100,9 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(api, /expected_revision: revision/);
   assert.match(settings, /if \(!validateTimeouts\(\)\) return/);
   assert.match(settings, /\{field\}必须为 \{min\}–\{max\} 秒的整数/);
-  // Custom key values are no longer editable through generic settings; the
-  // key lifecycle API is the only management path.
-  assert.doesNotMatch(settings, /保存自定义 Key|gatewayKeyDraft|startGatewayKeyEdit|saveGatewayKey/);
+  // The primary key value is editable again (v1.6.1 semantics) through the
+  // generic settings save; sub keys stay on the lifecycle API.
+  assert.doesNotMatch(settings, /gatewayKeyDraft|startGatewayKeyEdit|saveGatewayKey/);
   assert.match(settings, /tauriApi\.createGatewayKey\(name, config\.value\.revision\)/);
   assert.match(settings, /tauriApi\.updateGatewayKey\(entry\.id, \{ enabled \}, config\.value\.revision\)/);
   assert.match(settings, /tauriApi\.deleteGatewayKey\(entry\.id, config\.value\.revision\)/);
@@ -1094,9 +1115,10 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(api, /routing_mode: RoutingMode/);
   assert.match(api, /conversation_sticky: boolean/);
   assert.match(api, /export type RoutingMode = "strict-priority" \| "sticky-global" \| "round-robin"/);
-  // The connection panel needs the full settings shape (including the key
-  // list) to drive the key selector.
-  assert.match(dashboard, /ref<AppConfig>/);
+  // The connection panel consumes the lightweight ConnectionInfo payload,
+  // never the full settings shape.
+  assert.match(dashboard, /ref<ConnectionInfo>/);
+  assert.doesNotMatch(dashboard, /ref<AppConfig>/);
   assert.doesNotMatch(settings, /PricingCatalog/);
   assert.match(api, /getPricing: \(\) => request<PricingSnapshot>\("\/pricing"\)/);
   assert.match(api, /refreshPricing: \(refresh: PricingRefreshRequest = \{\}\) => request<PricingRefreshResult>/);
@@ -1176,19 +1198,19 @@ test("settings expose supported Windows auto-start safely", async () => {
   // Key management lives in its own section; copies and regeneration are per
   // entry and never read the legacy mirror value directly.
   assert.match(settings, /class="settings-subsection gateway-keys"/);
-  assert.match(settings, /:aria-label="t\('复制 Key'\)"\s+:disabled="regenerating \|\| !entry\.key"/);
-  assert.match(settings, /async function copyEntryKey\(entry: GatewayKeyEntry\): Promise<void> \{\s+if \(!entry\.key\) return;/);
+  assert.match(settings, /:aria-label="t\('复制 Key'\)"\s+:disabled="regenerating \|\| !entry\.value"/);
+  assert.match(settings, /async function copyEntryKey\(entry: ConnectionSubKey\): Promise<void> \{\s+if \(!entry\.value\) return;/);
   assert.match(settings, /:disabled="!loaded \|\| saving \|\| regenerating"/);
   assert.match(settings, /:loading="regenerating && keyMutation === `regenerate:\$\{entry\.id\}`"\s+:disabled="regenerating"/);
   assert.match(settings, /async function handleAutoStartToggle\(newValue: boolean\)/);
   assert.match(settings, /savedConfig\.value/);
   assert.match(settings, /if \(!loaded\.value \|\| regenerating\.value \|\| !savedConfig\.value\) return;/);
-  assert.match(settings, /const latest = await tauriApi\.getSettings\(\)/);
+  assert.match(settings, /const \[latest, connection\] = await Promise\.all\(\[\s*tauriApi\.getSettings\(\),\s*tauriApi\.getConnection\(\),\s*\]\);/);
   assert.match(settings, /savedConfig\.value = \{ \.\.\.latest \}/);
   assert.match(settings, /pendingSettingsMerge = \{ current: \{ \.\.\.config\.value \}, saved: \{ \.\.\.savedConfig\.value \} \};/);
   assert.match(settings, /mergeUnsavedSettings\(latest, pending\.current, pending\.saved\)/);
   assert.match(settings, /pendingSettingsMerge = null/);
-  assert.match(settings, /mutationError = error[\s\S]*?const latest = await tauriApi\.getSettings\(\)/);
+  assert.match(settings, /mutationError = error[\s\S]*?const \[latest, connection\] = await Promise\.all\(/);
   assert.match(settings, /savedConfig\.value = null;[\s\S]*?loaded\.value = false/);
   assert.match(settings, /const generation = \+\+settingsLoadGeneration/);
   assert.match(settings, /const payload = \{ \.\.\.config\.value \}/);

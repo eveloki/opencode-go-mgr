@@ -9,7 +9,7 @@ use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
-use ocg_core::models::{Account, AccountUpdate, ForwardLog, RoutingMode};
+use ocg_core::models::{Account, AccountUpdate, ForwardLog, ProxyMode, RoutingMode};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -332,6 +332,16 @@ fn build_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf
     build_state_with_routing(base_url, keys, RoutingMode::StrictPriority, false)
 }
 
+/// Every request in this suite targets loopback listeners; never route them
+/// through an ambient system/environment proxy (which aborts such
+/// connections on some machines).
+fn loopback_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client should build")
+}
+
 fn build_state_with_routing(
     base_url: String,
     keys: &[&str],
@@ -343,10 +353,11 @@ fn build_state_with_routing(
     let db = Database::open(dir.clone()).unwrap();
     let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
     let mut config = state.config();
-    // Pin the primary entry's value; gateway_key mirrors it.
-    config.gateway_keys[0].key = "gw-test".into();
+    // Pin the primary key value for the test requests. The mock upstream is
+    // loopback: never route test traffic through an ambient proxy.
     config.gateway_key = "gw-test".into();
     config.upstream_base_url = base_url;
+    config.proxy_mode = ProxyMode::Direct;
     config.routing_mode = routing_mode;
     config.conversation_sticky = conversation_sticky;
     state.set_config(config).unwrap();
@@ -398,7 +409,7 @@ async fn chat_with_conversation(
     conversation_id: Option<&str>,
     user: &str,
 ) -> (u16, String) {
-    let request = reqwest::Client::new()
+    let request = loopback_client()
         .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
         .header(reqwest::header::AUTHORIZATION, "Bearer gw-test")
         .header(reqwest::header::ACCEPT_ENCODING, "gzip")
@@ -441,7 +452,7 @@ fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str, enabled: b
 }
 
 async fn models(port: u16) -> (StatusCode, String) {
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .get(format!("http://127.0.0.1:{port}/v1/models"))
         .header(reqwest::header::AUTHORIZATION, "Bearer gw-test")
         .send()
@@ -475,7 +486,7 @@ async fn protocol_call(port: u16, path: &str, model: &str) -> (StatusCode, serde
         }),
         _ => panic!("unsupported test path: {path}"),
     };
-    let client = reqwest::Client::new();
+    let client = loopback_client();
     let request = client
         .post(format!("http://127.0.0.1:{port}{path}"))
         .json(&body);
@@ -523,7 +534,7 @@ async fn protocol_stream_call(port: u16, path: &str, model: &str) -> (StatusCode
         }),
         _ => panic!("unsupported test path: {path}"),
     };
-    let client = reqwest::Client::new();
+    let client = loopback_client();
     let request = client
         .post(format!("http://127.0.0.1:{port}{path}"))
         .json(&body);
@@ -767,7 +778,7 @@ async fn application_models_falls_back_after_rate_limit_but_not_5xx() {
     let (state, dir) = build_state(base_url, &["key-1", "key-2", "key-3"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .get(format!(
             "http://127.0.0.1:{port}/dashboard/api/application-models"
         ))
@@ -831,7 +842,7 @@ async fn application_models_skip_accounts_with_unusable_stored_credentials() {
         .unwrap();
     let (port, gateway_handle) = start_gateway(state).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .get(format!(
             "http://127.0.0.1:{port}/dashboard/api/application-models"
         ))
@@ -867,7 +878,7 @@ async fn application_models_intersects_upstream_models_in_upstream_order() {
     state.activate_pricing_snapshot(pricing).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .get(format!(
             "http://127.0.0.1:{port}/dashboard/api/application-models"
         ))
@@ -928,7 +939,7 @@ async fn application_models_maps_upstream_failure_to_bad_gateway() {
     let (state, dir) = build_state(base_url, &["key-1"]);
     let (port, gateway_handle) = start_gateway(state).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .get(format!(
             "http://127.0.0.1:{port}/dashboard/api/application-models"
         ))
@@ -2095,7 +2106,7 @@ async fn connect_failure_retries_once_without_account_fallback() {
     state.set_config(config).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/messages"))
         .header("x-api-key", "gw-test")
         .json(&serde_json::json!({
@@ -2197,7 +2208,7 @@ async fn messages_forwards_account_key_as_x_api_key() {
     let (state, dir) = build_state(base_url, &["key-1"]);
     let (port, gateway_handle) = start_gateway(state).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .post(format!("http://127.0.0.1:{}/v1/messages", port))
         .header("x-api-key", "gw-test")
         .header("anthropic-version", "2023-06-01")
@@ -2421,7 +2432,7 @@ async fn upstream_payload_too_large_is_not_mislabeled_as_client_body_limit() {
     let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/messages"))
         .header("x-api-key", "gw-test")
         .json(&serde_json::json!({
@@ -2482,7 +2493,7 @@ async fn model_discovery_payload_too_large_is_not_mislabeled_as_client_body_limi
     let (state, dir) = build_state(base_url, &["key-1"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .get(format!("http://127.0.0.1:{port}/v1/models"))
         .bearer_auth("gw-test")
         .send()
@@ -2831,7 +2842,7 @@ async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
         port
     );
 
-    let first = reqwest::Client::new().post(&endpoint).send().await.unwrap();
+    let first = loopback_client().post(&endpoint).send().await.unwrap();
     assert_eq!(first.status(), StatusCode::BAD_REQUEST);
     let first_body = first.text().await.unwrap();
     assert!(
@@ -2849,7 +2860,7 @@ async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
     assert!(auth_error.contains("401"));
     assert!(!auth_error.contains(OPAQUE_ACCOUNT_KEY));
 
-    let second = reqwest::Client::new().post(&endpoint).send().await.unwrap();
+    let second = loopback_client().post(&endpoint).send().await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
     assert!(
         state
@@ -2888,7 +2899,7 @@ async fn dashboard_ping_marks_quota_cooldown() {
         .unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = reqwest::Client::new()
+    let response = loopback_client()
         .post(format!(
             "http://127.0.0.1:{}/dashboard/api/accounts/acct-1/test",
             port
@@ -2930,7 +2941,7 @@ async fn delayed_dashboard_ping_429_does_not_cool_down_replaced_key() {
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let request = tokio::spawn(async move {
-        reqwest::Client::new()
+        loopback_client()
             .post(format!(
                 "http://127.0.0.1:{}/dashboard/api/accounts/acct-1/test",
                 port
@@ -3295,7 +3306,7 @@ async fn dashboard_port_change_is_saved_for_next_restart() {
     config.gateway_port = requested_port;
     let mut settings_payload = serde_json::to_value(&config).unwrap();
     settings_payload["expected_revision"] = serde_json::json!(state.settings_revision());
-    let client = reqwest::Client::new();
+    let client = loopback_client();
     let response = client
         .post(format!(
             "http://127.0.0.1:{}/dashboard/api/settings",
@@ -3345,13 +3356,11 @@ async fn forwarded_requests_are_attributed_to_the_authenticating_key() {
     let (state, dir) = build_state(base_url, &["key-1"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    // A second gateway key shares the same upstream account; usage written
-    // under it must be attributable per key.
-    let mut config = state.config();
-    let secondary = ocg_core::gateway_keys::create_key(&mut config, "Laptop").unwrap();
-    state.set_config(config).unwrap();
+    // A sub key shares the same upstream account; usage written under it
+    // must be attributable per key.
+    let secondary = ocg_core::gateway_keys::create_sub_key(&state, "Laptop").unwrap();
 
-    let client = reqwest::Client::new();
+    let client = loopback_client();
     let body = serde_json::json!({
         "model": "deepseek-v4-flash",
         "messages": [{"role": "user", "content": "hello"}],
@@ -3389,10 +3398,7 @@ async fn forwarded_requests_are_attributed_to_the_authenticating_key() {
         "only authenticated requests forward"
     );
 
-    let primary_id = ocg_core::gateway_keys::primary_key(&state.config())
-        .unwrap()
-        .id
-        .clone();
+    let primary_id = ocg_core::gateway_keys::PRIMARY_KEY_ID;
     let logs = state.db.lock().list_forward_logs(10).unwrap();
     assert_eq!(
         logs.len(),
@@ -3411,7 +3417,7 @@ async fn forwarded_requests_are_attributed_to_the_authenticating_key() {
     );
     let primary_rows = logs
         .iter()
-        .filter(|log| log.client_key_id.as_deref() == Some(primary_id.as_str()))
+        .filter(|log| log.client_key_id.as_deref() == Some(primary_id))
         .collect::<Vec<_>>();
     assert_eq!(primary_rows.len(), 1);
 
@@ -3508,7 +3514,7 @@ async fn gateway_stays_available_while_large_backfill_runs() {
     // logging only ever queues behind one short chunk transaction.
     let (status, _body) = chat(port).await;
     assert_eq!(status, StatusCode::OK);
-    let client = reqwest::Client::new();
+    let client = loopback_client();
     let unauthorized = client
         .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
         .header(reqwest::header::AUTHORIZATION, "Bearer wrong-key")

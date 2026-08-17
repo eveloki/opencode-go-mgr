@@ -1,479 +1,757 @@
-//! Pure lifecycle helpers for the multi gateway key list on [`AppConfig`].
+//! Database-owned sub gateway keys and the in-memory credential snapshot.
 //!
-//! Invariants enforced here and relied on by `state.rs` / `dashboard.rs`:
-//! - the first non-deleted entry is the primary key and `gateway_key` always
-//!   mirrors its value (legacy readers and downgrade paths depend on it);
-//! - at least one enabled, non-deleted key with a non-empty value exists;
-//! - key values are unique across all non-deleted entries;
-//! - soft-deleted entries keep id/name/deleted_at with an empty plaintext.
+//! Two credential tiers share one auth surface:
+//! - the primary key is the legacy `AppConfig::gateway_key` scalar: never
+//!   disabled or deleted, attributed under the fixed [`PRIMARY_KEY_ID`];
+//! - sub keys live in the `sub_gateway_keys` table (schema v19) and change
+//!   only through the key lifecycle API.
+//!
+//! The credential snapshot (`credential_snapshot` on `CoreStateInner`) maps
+//! value -> (id, name) and is the single source for both the auth hot path
+//! and forward-log name snapshots; readers never take the config or db locks.
+//!
+//! Invalidation model: the table is written only by this module's mutation
+//! entry points (called with the `settings_update` lock held, snapshot
+//! updated in the same critical section) and the config scalar only through
+//! `set_config` (which refreshes the primary entry). Direct external edits to
+//! SQLite or the config store are outside the model and do not take effect
+//! until the next restart.
 
-use crate::models::{AppConfig, GatewayKeyEntry};
+use crate::db::Database;
+use crate::models::SubGatewayKey;
+use crate::state::CoreStateInner;
 use chrono::{DateTime, Utc};
-use std::collections::HashSet;
+use std::collections::HashMap;
+
+/// Fixed attribution id for the primary key. The recognizable fixed pattern
+/// keeps it visually distinct from generated v4 UUIDs and the nil UUID.
+/// Stable from release onwards; it may change only through an explicit
+/// migration that re-attributes historical forward log rows (a chunked
+/// UPDATE, the same mechanism as the startup backfill).
+pub const PRIMARY_KEY_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+/// Fixed display name for the primary key in snapshots and backfills; the UI
+/// labels the entry with the localized "主 Key".
+pub const PRIMARY_KEY_NAME: &str = "Primary";
 
 const MAX_NAME_CHARS: usize = 64;
-/// Ceiling on active (non-deleted) keys. The auth scan, the per-request
-/// config clone, and the settings payload all scale with the list, and a
-/// local node has no realistic need for more devices than this.
-const MAX_ACTIVE_KEYS: usize = 64;
+/// Ceiling on active (non-deleted) sub keys. Auth scans, the credential
+/// snapshot, and management payloads all scale with the list, and a local
+/// node has no realistic need for more devices than this. Tombstones do not
+/// count against the ceiling.
+const MAX_ACTIVE_SUB_KEYS: usize = 64;
 
-/// The primary key: first non-deleted entry in the list.
-pub fn primary_key(config: &AppConfig) -> Option<&GatewayKeyEntry> {
-    config.gateway_keys.iter().find(|key| key.is_active())
+/// Key lifecycle failure: user-correctable rejections vs internal errors.
+/// Rollback paths that cannot restore the snapshot consistently return
+/// `Internal` so endpoints surface 500 and the next key API entry rebuilds
+/// the snapshot from the database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyError {
+    BadRequest(String),
+    Internal(String),
 }
 
-pub fn key_by_id<'a>(config: &'a AppConfig, id: &str) -> Option<&'a GatewayKeyEntry> {
-    config.gateway_keys.iter().find(|key| key.id == id)
+impl std::fmt::Display for KeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest(message) | Self::Internal(message) => f.write_str(message),
+        }
+    }
 }
 
-/// Write-time name snapshot for a key id; resolves enabled and soft-deleted
-/// keys alike so historical logs keep their attribution.
-pub fn key_name(config: &AppConfig, id: &str) -> Option<String> {
-    key_by_id(config, id).map(|key| key.name.clone())
+impl KeyError {
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::BadRequest(message.into())
+    }
+
+    fn internal(context: &str, error: impl std::fmt::Display) -> Self {
+        Self::Internal(format!("{context}: {error}"))
+    }
 }
 
-/// Sorted set of values that currently authenticate; the routing runtime
-/// resets when one of them stops authenticating (values are sorted so the
-/// caller can subset-check with a binary search).
-pub fn enabled_key_values(config: &AppConfig) -> Vec<&str> {
-    let mut values: Vec<&str> = config
-        .gateway_keys
-        .iter()
-        .filter(|key| key.authenticates())
-        .map(|key| key.key.as_str())
-        .collect();
-    values.sort_unstable();
-    values
+/// One authenticating credential as seen by the auth hot path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialEntry {
+    pub id: String,
+    pub name: String,
 }
 
-fn generate_key_value(config: &AppConfig) -> String {
+/// value -> credential; built from the config scalar plus the enabled,
+/// non-deleted sub keys.
+pub type CredentialSnapshot = HashMap<String, CredentialEntry>;
+
+/// Snapshot ground truth. The primary entry is inserted first; cross-tier
+/// value uniqueness (enforced by the API gates) means one value can never
+/// resolve to two ids.
+pub fn build_credential_snapshot(
+    db: &Database,
+    primary_value: &str,
+) -> anyhow::Result<CredentialSnapshot> {
+    let mut snapshot = CredentialSnapshot::new();
+    if !primary_value.is_empty() {
+        snapshot.insert(
+            primary_value.to_string(),
+            CredentialEntry {
+                id: PRIMARY_KEY_ID.to_string(),
+                name: PRIMARY_KEY_NAME.to_string(),
+            },
+        );
+    }
+    for key in db.list_active_sub_gateway_keys()? {
+        if !key.authenticates() {
+            continue;
+        }
+        // Primary attribution wins on a cross-tier value collision (only
+        // possible after an out-of-model write): a later revoke of the sub
+        // key then cannot evict the primary's live entry.
+        if snapshot
+            .get(&key.key)
+            .is_some_and(|entry| entry.id == PRIMARY_KEY_ID)
+        {
+            eprintln!(
+                "warning: enabled sub key `{}` shares the primary key's value; \
+                 attributing the value to the primary key",
+                key.id
+            );
+            continue;
+        }
+        snapshot.insert(
+            key.key.clone(),
+            CredentialEntry {
+                id: key.id,
+                name: key.name,
+            },
+        );
+    }
+    Ok(snapshot)
+}
+
+/// Rebuilds the snapshot from the database and the config scalar. Called at
+/// every key API entry point (already under `settings_update`) so a snapshot
+/// left inconsistent by a failed rollback converges on the next operation;
+/// startup loading is the natural self-healing point.
+pub fn refresh_snapshot(state: &CoreStateInner) {
+    let next = {
+        let db = state.db.lock();
+        let primary_value = state.config.lock().gateway_key.clone();
+        build_credential_snapshot(&db, &primary_value)
+    };
+    match next {
+        Ok(next) => *state.credential_snapshot.write() = next,
+        Err(error) => {
+            eprintln!("warning: failed to rebuild the credential snapshot: {error}");
+        }
+    }
+}
+
+/// Unified cross-tier gate (design D2): a candidate primary key value must
+/// differ from every non-deleted sub key's value, enabled or disabled, so
+/// the same credential can never authenticate under two ids. Shared by the
+/// dashboard settings update, the Tauri settings update, and the sub key
+/// enable path.
+pub fn ensure_primary_value_allowed(db: &Database, value: &str) -> Result<(), KeyError> {
+    let exists = db
+        .sub_gateway_key_value_exists(value)
+        .map_err(|error| KeyError::internal("failed to check key values", error))?;
+    if exists {
+        return Err(KeyError::bad_request(
+            "key value is already used by another key",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_name(name: &str) -> Result<String, KeyError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(KeyError::bad_request("key name is required"));
+    }
+    if trimmed.chars().count() > MAX_NAME_CHARS {
+        return Err(KeyError::bad_request(format!(
+            "key name must be at most {MAX_NAME_CHARS} characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Generates a fresh value that collides with no snapshot credential (the
+/// primary plus enabled sub keys) and no stored non-deleted sub key value
+/// (disabled entries keep their plaintext).
+fn generate_unique_value(db: &Database, snapshot: &CredentialSnapshot) -> Result<String, KeyError> {
+    let stored_values = db
+        .active_sub_gateway_key_values()
+        .map_err(|error| KeyError::internal("failed to load key values", error))?;
     loop {
         let candidate = format!(
             "ocg-{}-{}",
             crate::state::random_word(),
             crate::state::random_word()
         );
-        let collision = config
-            .gateway_keys
-            .iter()
-            .any(|key| key.is_active() && key.key == candidate);
-        if !collision {
-            return candidate;
+        if snapshot.contains_key(&candidate) {
+            continue;
         }
+        if stored_values.iter().any(|value| value == &candidate) {
+            continue;
+        }
+        return Ok(candidate);
     }
 }
 
-/// Enforces the mirror and self-heals degenerate lists. Returns `true` when
-/// the config changed and therefore needs persisting.
-pub fn normalize(config: &mut AppConfig) -> bool {
-    let original_keys = config.gateway_keys.clone();
-    let original_mirror = config.gateway_key.clone();
-
-    if !config.gateway_keys.iter().any(|key| key.is_active()) {
-        // Corrupt or fully-deleted list: keep the legacy value (or mint one)
-        // so the gateway never runs without a usable credential.
-        let value = if config.gateway_key.is_empty() {
-            generate_key_value(config)
-        } else {
-            config.gateway_key.clone()
-        };
-        config.gateway_keys.insert(
-            0,
-            GatewayKeyEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                name: "Primary".to_string(),
-                key: value,
-                enabled: true,
-                deleted_at: None,
-                created_at: Utc::now(),
+/// Generates a fresh primary key value that collides with no non-deleted sub
+/// key value; used by both primary rotation entry points.
+pub fn generate_primary_value(db: &Database, current: &str) -> Result<String, KeyError> {
+    let mut snapshot = CredentialSnapshot::new();
+    if !current.is_empty() {
+        snapshot.insert(
+            current.to_string(),
+            CredentialEntry {
+                id: PRIMARY_KEY_ID.to_string(),
+                name: PRIMARY_KEY_NAME.to_string(),
             },
         );
     }
-
-    // Active entries must carry a value; corrupt blanks get fresh unique ones.
-    for index in 0..config.gateway_keys.len() {
-        if config.gateway_keys[index].is_active() && config.gateway_keys[index].key.is_empty() {
-            let value = generate_key_value(config);
-            config.gateway_keys[index].key = value;
-        }
-    }
-
-    config.gateway_key = primary_key(config)
-        .map(|key| key.key.clone())
-        .unwrap_or_default();
-
-    original_keys != config.gateway_keys || original_mirror != config.gateway_key
+    generate_unique_value(db, &snapshot)
 }
 
-/// Validates the full invariant set. Called by `AppConfig::validate`.
-pub fn validate(config: &AppConfig) -> Result<(), String> {
-    let active_count = active_key_count(config);
-    if active_count == 0 {
-        return Err("at least one active gateway key is required".to_string());
+fn active_sub_key(state: &CoreStateInner, id: &str) -> Result<SubGatewayKey, KeyError> {
+    let found = state
+        .db
+        .lock()
+        .get_sub_gateway_key(id)
+        .map_err(|error| KeyError::internal("failed to load the key", error))?;
+    match found {
+        Some(key) if key.is_active() => Ok(key),
+        _ => Err(KeyError::bad_request("key not found")),
     }
-    if active_count > MAX_ACTIVE_KEYS {
-        return Err(format!(
-            "at most {MAX_ACTIVE_KEYS} active gateway keys are supported"
-        ));
-    }
-    if !config.gateway_keys.iter().any(|key| key.authenticates()) {
-        return Err("at least one enabled gateway key is required".to_string());
-    }
-    let primary =
-        primary_key(config).ok_or_else(|| "a primary gateway key is required".to_string())?;
-    if primary.key.is_empty() {
-        return Err("the primary gateway key must have a value".to_string());
-    }
-    if config.gateway_key != primary.key {
-        return Err("gateway_key must mirror the primary gateway key".to_string());
-    }
-    let mut seen_ids = HashSet::new();
-    let mut seen_values = HashSet::new();
-    for key in &config.gateway_keys {
-        if !key.is_active() && !key.key.is_empty() {
-            return Err("deleted gateway keys must not keep their value".to_string());
-        }
-        if !seen_ids.insert(key.id.as_str()) {
-            return Err("gateway key ids must be unique".to_string());
-        }
-        if key.is_active() && !key.key.is_empty() && !seen_values.insert(key.key.as_str()) {
-            return Err("gateway key values must be unique".to_string());
-        }
-        if key.enabled && key.is_active() && key.key.is_empty() {
-            return Err("enabled gateway keys must have a value".to_string());
-        }
-    }
-    Ok(())
 }
 
-fn active_key_count(config: &AppConfig) -> usize {
-    config
-        .gateway_keys
-        .iter()
-        .filter(|key| key.is_active())
-        .count()
+/// Removes the sub key's own snapshot entry and returns it so a failed
+/// table write can restore it. The primary entry is never evicted: a value
+/// shared with the primary can only exist after an out-of-model write
+/// (`set_config` gates warn), and dropping it would 401 the primary until
+/// the next rebuild for no security gain.
+fn revoke_snapshot_value(
+    state: &CoreStateInner,
+    key_id: &str,
+    value: &str,
+) -> Option<CredentialEntry> {
+    let mut snapshot = state.credential_snapshot.write();
+    match snapshot.get(value) {
+        Some(entry) if entry.id == key_id => snapshot.remove(value),
+        Some(entry) => {
+            eprintln!(
+                "warning: value of sub key `{key_id}` collides with the primary key entry \
+                 (`{}`); keeping the primary snapshot entry",
+                entry.id
+            );
+            None
+        }
+        None => None,
+    }
 }
 
-fn validate_name(name: &str) -> Result<String, String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err("key name is required".to_string());
-    }
-    if trimmed.chars().count() > MAX_NAME_CHARS {
-        return Err(format!(
-            "key name must be at most {MAX_NAME_CHARS} characters"
-        ));
-    }
-    Ok(trimmed.to_string())
+fn restore_snapshot_entry(state: &CoreStateInner, value: &str, entry: CredentialEntry) {
+    state
+        .credential_snapshot
+        .write()
+        .insert(value.to_string(), entry);
 }
 
-/// Creates a new enabled key and appends it to the list. The ceiling is
-/// checked before any mutation so a rejected create leaves the config
-/// untouched.
-pub fn create_key(config: &mut AppConfig, name: &str) -> Result<GatewayKeyEntry, String> {
-    validate(config)?;
+/// Creates a new enabled sub key and returns it; the response carries the
+/// full value exactly once. Order: commit the table write first, then
+/// rebuild the snapshot — worst case the new key starts authenticating
+/// slightly late (fail-open).
+pub fn create_sub_key(state: &CoreStateInner, name: &str) -> Result<SubGatewayKey, KeyError> {
     let name = validate_name(name)?;
-    if active_key_count(config) >= MAX_ACTIVE_KEYS {
-        return Err(format!(
-            "at most {MAX_ACTIVE_KEYS} active gateway keys are supported"
-        ));
+    refresh_snapshot(state);
+    let active_count = state
+        .db
+        .lock()
+        .count_active_sub_gateway_keys()
+        .map_err(|error| KeyError::internal("failed to count keys", error))?;
+    if active_count >= MAX_ACTIVE_SUB_KEYS {
+        return Err(KeyError::bad_request(format!(
+            "at most {MAX_ACTIVE_SUB_KEYS} active keys are supported"
+        )));
     }
-    let entry = GatewayKeyEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        name,
-        key: generate_key_value(config),
-        enabled: true,
-        deleted_at: None,
-        created_at: Utc::now(),
+    let entry = {
+        let db = state.db.lock();
+        let snapshot = state.credential_snapshot.read().clone();
+        SubGatewayKey {
+            id: uuid::Uuid::new_v4().to_string(),
+            key: generate_unique_value(&db, &snapshot)?,
+            name,
+            enabled: true,
+            deleted_at: None,
+            created_at: Utc::now(),
+        }
     };
-    config.gateway_keys.push(entry.clone());
-    sync_mirror(config);
-    validate(config)?;
-    Ok(entry)
+    let insert = state
+        .db
+        .lock()
+        .insert_sub_gateway_key(&entry)
+        .map_err(|error| KeyError::internal("failed to create the key", error));
+    match insert {
+        Ok(()) => {
+            refresh_snapshot(state);
+            Ok(entry)
+        }
+        Err(error) => Err(error),
+    }
 }
 
-/// Renames an active key.
-pub fn rename_key(config: &mut AppConfig, id: &str, name: &str) -> Result<(), String> {
+/// Renames a non-deleted sub key. The snapshot rebuild afterwards keeps
+/// write-time name snapshots current.
+pub fn rename_sub_key(state: &CoreStateInner, id: &str, name: &str) -> Result<(), KeyError> {
     let name = validate_name(name)?;
-    let entry = active_entry_mut(config, id)?;
-    entry.name = name;
+    refresh_snapshot(state);
+    let renamed = state
+        .db
+        .lock()
+        .rename_sub_gateway_key(id, &name)
+        .map_err(|error| KeyError::internal("failed to rename the key", error))?;
+    if !renamed {
+        return Err(KeyError::bad_request("key not found"));
+    }
+    refresh_snapshot(state);
     Ok(())
 }
 
-/// Enables or disables an active key; the last enabled key is protected.
-pub fn set_key_enabled(config: &mut AppConfig, id: &str, enabled: bool) -> Result<(), String> {
-    let index = active_index(config, id)?;
-    if !enabled && config.gateway_keys[index].enabled && enabled_count(config) <= 1 {
-        return Err("the last enabled gateway key cannot be disabled".to_string());
-    }
-    config.gateway_keys[index].enabled = enabled;
-    sync_mirror(config);
-    validate(config)?;
-    Ok(())
-}
-
-/// Assigns a fresh unique value to an active key and returns it.
-pub fn regenerate_key(config: &mut AppConfig, id: &str) -> Result<GatewayKeyEntry, String> {
-    validate(config)?;
-    let new_value = generate_key_value(config);
-    let index = active_index(config, id)?;
-    let entry = &mut config.gateway_keys[index];
-    entry.key = new_value;
-    let updated = entry.clone();
-    sync_mirror(config);
-    validate(config)?;
-    Ok(updated)
-}
-
-/// Soft-deletes an active key: clears the plaintext, keeps the record for
-/// attribution, and promotes the earliest enabled key when the primary goes.
-pub fn delete_key(config: &mut AppConfig, id: &str, now: DateTime<Utc>) -> Result<(), String> {
-    validate(config)?;
-    let index = active_index(config, id)?;
-    let is_primary = config.gateway_keys.iter().position(|key| key.is_active()) == Some(index);
-    if config.gateway_keys[index].authenticates() && enabled_count(config) <= 1 {
-        return Err("the last enabled gateway key cannot be deleted".to_string());
-    }
-    let removed = config.gateway_keys[index].clone();
-    config.gateway_keys[index] = GatewayKeyEntry {
-        deleted_at: Some(now),
-        key: String::new(),
-        enabled: false,
-        ..removed
-    };
-    if is_primary {
-        promote_earliest_enabled(config);
-    }
-    sync_mirror(config);
-    validate(config)?;
-    Ok(())
-}
-
-fn active_index(config: &AppConfig, id: &str) -> Result<usize, String> {
-    config
-        .gateway_keys
-        .iter()
-        .position(|key| key.id == id && key.is_active())
-        .ok_or_else(|| "gateway key not found".to_string())
-}
-
-fn active_entry_mut<'a>(
-    config: &'a mut AppConfig,
+/// Enables or disables a non-deleted sub key.
+///
+/// Enabling revalidates the stored value against the current primary value
+/// (the unified gate's third arm) so the disable -> primary adopts value ->
+/// re-enable bypass can never create a dual-attributed credential, then
+/// commits before rebuilding (fail-open).
+///
+/// Disabling is a revocation: the snapshot drops the value before the table
+/// write (fail-closed) and restores it when the write fails.
+pub fn set_sub_key_enabled(
+    state: &CoreStateInner,
     id: &str,
-) -> Result<&'a mut GatewayKeyEntry, String> {
-    let index = active_index(config, id)?;
-    Ok(&mut config.gateway_keys[index])
-}
+    enabled: bool,
+) -> Result<(), KeyError> {
+    refresh_snapshot(state);
+    let current = active_sub_key(state, id)?;
+    if enabled {
+        let primary_value = state.config.lock().gateway_key.clone();
+        if current.key == primary_value {
+            return Err(KeyError::bad_request(
+                "key value collides with the primary key",
+            ));
+        }
+        let updated = state
+            .db
+            .lock()
+            .set_sub_gateway_key_enabled(id, true)
+            .map_err(|error| KeyError::internal("failed to enable the key", error));
+        return match updated {
+            Ok(true) => {
+                refresh_snapshot(state);
+                Ok(())
+            }
+            Ok(false) => Err(KeyError::bad_request("key not found")),
+            Err(error) => Err(error),
+        };
+    }
 
-fn enabled_count(config: &AppConfig) -> usize {
-    config
-        .gateway_keys
-        .iter()
-        .filter(|key| key.authenticates())
-        .count()
-}
-
-/// Moves the earliest enabled active key to the front of the list so it
-/// becomes the new primary.
-fn promote_earliest_enabled(config: &mut AppConfig) {
-    let promoted = config
-        .gateway_keys
-        .iter()
-        .position(|key| key.authenticates());
-    if let Some(from) = promoted {
-        let entry = config.gateway_keys.remove(from);
-        config.gateway_keys.insert(0, entry);
+    if !current.enabled {
+        return Ok(());
+    }
+    let revoked = revoke_snapshot_value(state, &current.id, &current.key);
+    let updated = state
+        .db
+        .lock()
+        .set_sub_gateway_key_enabled(id, false)
+        .map_err(|error| KeyError::internal("failed to disable the key", error));
+    match updated {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            if let Some(entry) = revoked {
+                restore_snapshot_entry(state, &current.key, entry);
+            }
+            Err(KeyError::bad_request("key not found"))
+        }
+        Err(error) => {
+            if let Some(entry) = revoked {
+                restore_snapshot_entry(state, &current.key, entry);
+            }
+            Err(error)
+        }
     }
 }
 
-fn sync_mirror(config: &mut AppConfig) {
-    if let Some(primary) = primary_key(config) {
-        config.gateway_key = primary.key.clone();
+/// Assigns a fresh unique value to a non-deleted sub key. Revocation of the
+/// old value is fail-closed: the snapshot swaps first and rolls back when
+/// the table write fails. Regenerating a disabled key rotates its stored
+/// value but does NOT grant the new value: disabled credentials never
+/// authenticate (spec MUST), so the snapshot entry only appears once the
+/// key is re-enabled (which revalidates the value against the primary).
+pub fn regenerate_sub_key(state: &CoreStateInner, id: &str) -> Result<SubGatewayKey, KeyError> {
+    refresh_snapshot(state);
+    let current = active_sub_key(state, id)?;
+    let new_value = {
+        let db = state.db.lock();
+        let snapshot = state.credential_snapshot.read().clone();
+        generate_unique_value(&db, &snapshot)?
+    };
+    let revoked = revoke_snapshot_value(state, &current.id, &current.key);
+    if current.enabled {
+        let granted = CredentialEntry {
+            id: current.id.clone(),
+            name: current.name.clone(),
+        };
+        state
+            .credential_snapshot
+            .write()
+            .insert(new_value.clone(), granted);
+    }
+    let updated = state
+        .db
+        .lock()
+        .update_sub_gateway_key_value(id, &new_value)
+        .map_err(|error| KeyError::internal("failed to regenerate the key", error));
+    match updated {
+        Ok(true) => Ok(SubGatewayKey {
+            key: new_value,
+            ..current
+        }),
+        Ok(false) => {
+            rollback_snapshot_swap(state, &current.key, revoked, &new_value);
+            Err(KeyError::bad_request("key not found"))
+        }
+        Err(error) => {
+            rollback_snapshot_swap(state, &current.key, revoked, &new_value);
+            Err(error)
+        }
+    }
+}
+
+fn rollback_snapshot_swap(
+    state: &CoreStateInner,
+    old_value: &str,
+    revoked: Option<CredentialEntry>,
+    new_value: &str,
+) {
+    // Remove/insert on the HashMap cannot fail; if this ever changes, the
+    // entry-point rebuild on the next key API operation converges anyway.
+    state.credential_snapshot.write().remove(new_value);
+    if let Some(entry) = revoked {
+        restore_snapshot_entry(state, old_value, entry);
+    }
+}
+
+/// Soft-deletes a non-deleted sub key: clears the plaintext, keeps id/name/
+/// deleted_at for attribution. Revocation is fail-closed; the snapshot drops
+/// the value before the table write and restores it on failure.
+pub fn delete_sub_key(
+    state: &CoreStateInner,
+    id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), KeyError> {
+    refresh_snapshot(state);
+    let current = active_sub_key(state, id)?;
+    let revoked = revoke_snapshot_value(state, &current.id, &current.key);
+    let deleted = state
+        .db
+        .lock()
+        .soft_delete_sub_gateway_key(id, now)
+        .map_err(|error| KeyError::internal("failed to delete the key", error));
+    match deleted {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            if let Some(entry) = revoked {
+                restore_snapshot_entry(state, &current.key, entry);
+            }
+            Err(KeyError::bad_request("key not found"))
+        }
+        Err(error) => {
+            if let Some(entry) = revoked {
+                restore_snapshot_entry(state, &current.key, entry);
+            }
+            Err(error)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::models::AppConfig;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
-    fn primary_only() -> AppConfig {
-        AppConfig {
-            gateway_key: "ocg-primary".into(),
-            gateway_keys: vec![GatewayKeyEntry {
-                id: "primary".into(),
-                name: "Primary".into(),
-                key: "ocg-primary".into(),
-                enabled: true,
-                deleted_at: None,
-                created_at: Utc::now(),
-            }],
-            ..AppConfig::default()
-        }
+    fn temp_state(label: &str) -> (PathBuf, Arc<CoreStateInner>) {
+        let mut dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be valid")
+            .as_nanos();
+        dir.push(format!("ocg-sub-keys-{label}-{nanos}"));
+        fs::create_dir_all(&dir).expect("test data directory should be created");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+        (dir, Arc::new(state))
+    }
+
+    fn snapshot_values(state: &CoreStateInner) -> HashSet<String> {
+        state.credential_snapshot.read().keys().cloned().collect()
     }
 
     #[test]
-    fn create_appends_enabled_key_with_unique_value_and_keeps_mirror() {
-        let mut config = primary_only();
-        let second = create_key(&mut config, "Laptop").expect("second key should create");
-        assert_eq!(config.gateway_keys.len(), 2);
-        assert!(second.authenticates());
-        assert_ne!(second.key, "ocg-primary");
-        assert_eq!(config.gateway_key, "ocg-primary");
-        validate(&config).expect("invariants should hold");
+    fn create_returns_full_value_and_authenticates_via_snapshot() {
+        let (dir, state) = temp_state("create");
+        let primary = state.config().gateway_key;
+        let created = create_sub_key(&state, " Laptop ").expect("sub key should create");
+        assert_eq!(created.name, "Laptop");
+        assert!(created.authenticates());
+        assert_ne!(created.key, primary);
+        let values = snapshot_values(&state);
+        assert!(values.contains(&primary));
+        assert!(values.contains(&created.key));
+        let stored = state
+            .db
+            .lock()
+            .get_sub_gateway_key(&created.id)
+            .unwrap()
+            .expect("created key should persist");
+        assert_eq!(stored.key, created.key);
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn create_rejects_blank_and_overlong_names() {
-        let mut config = primary_only();
-        assert!(create_key(&mut config, "  ").is_err());
-        assert!(create_key(&mut config, &"x".repeat(65)).is_err());
-        assert!(create_key(&mut config, " pad ").is_ok());
-        assert_eq!(config.gateway_keys[1].name, "pad");
-    }
-
-    #[test]
-    fn create_enforces_the_active_key_ceiling() {
-        let mut config = primary_only();
-        for index in 0..(MAX_ACTIVE_KEYS - 1) {
-            create_key(&mut config, &format!("key-{index}"))
+    fn create_rejects_blank_overlong_names_and_the_active_ceiling() {
+        let (dir, state) = temp_state("limits");
+        assert!(matches!(
+            create_sub_key(&state, "  "),
+            Err(KeyError::BadRequest(_))
+        ));
+        assert!(matches!(
+            create_sub_key(&state, &"x".repeat(65)),
+            Err(KeyError::BadRequest(_))
+        ));
+        for index in 0..MAX_ACTIVE_SUB_KEYS {
+            create_sub_key(&state, &format!("key-{index}"))
                 .expect("keys below the ceiling should create");
         }
-        assert_eq!(
-            config
-                .gateway_keys
-                .iter()
-                .filter(|key| key.is_active())
-                .count(),
-            MAX_ACTIVE_KEYS
-        );
-        let overflow = create_key(&mut config, "overflow");
-        assert!(overflow.is_err());
+        let overflow = create_sub_key(&state, "overflow");
         assert_eq!(
             overflow.unwrap_err(),
-            format!("at most {MAX_ACTIVE_KEYS} active gateway keys are supported")
+            KeyError::bad_request(format!(
+                "at most {MAX_ACTIVE_SUB_KEYS} active keys are supported"
+            ))
+        );
+        // Tombstones do not count: deleting one frees a slot.
+        let retired = state.db.lock().list_active_sub_gateway_keys().unwrap()[0]
+            .id
+            .clone();
+        delete_sub_key(&state, &retired, Utc::now()).expect("delete should work");
+        create_sub_key(&state, "fresh").expect("deleted key frees a slot");
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rename_updates_the_name_snapshot_for_later_rows() {
+        let (dir, state) = temp_state("rename");
+        let created = create_sub_key(&state, "Laptop").expect("sub key should create");
+        rename_sub_key(&state, &created.id, "Deck").expect("rename should work");
+        assert_eq!(
+            state.client_key_name(&created.id).as_deref(),
+            Some("Deck"),
+            "the snapshot must serve the new name to log writes"
+        );
+        assert!(matches!(
+            rename_sub_key(&state, "missing", "x"),
+            Err(KeyError::BadRequest(_))
+        ));
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn disable_is_fail_closed_and_reenable_checks_the_primary_value() {
+        let (dir, state) = temp_state("disable");
+        let created = create_sub_key(&state, "Laptop").expect("sub key should create");
+
+        set_sub_key_enabled(&state, &created.id, false).expect("disable should work");
+        assert!(!snapshot_values(&state).contains(&created.key));
+        let stored = state
+            .db
+            .lock()
+            .get_sub_gateway_key(&created.id)
+            .unwrap()
+            .unwrap();
+        assert!(!stored.enabled, "disabled keys keep their plaintext");
+        assert_eq!(stored.key, created.key);
+
+        // The bypass sequence: an unchecked writer makes the primary adopt
+        // the disabled key's value, then re-enabling must be rejected.
+        let mut config = state.config();
+        config.gateway_key = created.key.clone();
+        state
+            .set_config(config)
+            .expect("set_config itself carries no cross-tier gate");
+        let re_enable = set_sub_key_enabled(&state, &created.id, true);
+        assert_eq!(
+            re_enable.unwrap_err(),
+            KeyError::bad_request("key value collides with the primary key")
         );
 
-        // Soft-deleted tombstones do not count against the ceiling, so
-        // deleting one frees a slot again.
-        let demoted_id = config.gateway_keys[1].id.clone();
-        delete_key(&mut config, &demoted_id, Utc::now()).unwrap();
-        create_key(&mut config, "fresh").expect("deleted key frees a slot");
+        // Repair the collision and re-enable normally.
+        let mut config = state.config();
+        config.gateway_key = "ocg-primary-restored".to_string();
+        state.set_config(config).expect("repair should save");
+        set_sub_key_enabled(&state, &created.id, true).expect("re-enable should work");
+        assert!(snapshot_values(&state).contains(&created.key));
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn rename_rejects_missing_and_deleted_keys() {
-        let mut config = primary_only();
-        rename_key(&mut config, "primary", "Renamed").expect("active key should rename");
-        assert_eq!(config.gateway_keys[0].name, "Renamed");
-        assert!(rename_key(&mut config, "missing", "x").is_err());
+    fn regenerate_swaps_the_snapshot_value_and_keeps_attribution() {
+        let (dir, state) = temp_state("regenerate");
+        let created = create_sub_key(&state, "Laptop").expect("sub key should create");
+        let regenerated = regenerate_sub_key(&state, &created.id).expect("regenerate should work");
+        assert_ne!(regenerated.key, created.key);
+        let values = snapshot_values(&state);
+        assert!(!values.contains(&created.key), "the old value is revoked");
+        assert!(values.contains(&regenerated.key));
+        assert_eq!(regenerated.id, created.id);
+        assert_eq!(
+            state.client_key_name(&created.id).as_deref(),
+            Some("Laptop")
+        );
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn last_enabled_key_cannot_be_disabled_or_deleted() {
-        let mut config = primary_only();
-        assert!(set_key_enabled(&mut config, "primary", false).is_err());
-        assert!(delete_key(&mut config, "primary", Utc::now()).is_err());
-        validate(&config).expect("failed operations must not corrupt state");
+    fn regenerating_a_disabled_sub_key_does_not_grant_the_new_value() {
+        let (dir, state) = temp_state("regenerate-disabled");
+        let created = create_sub_key(&state, "Laptop").expect("sub key should create");
+        set_sub_key_enabled(&state, &created.id, false).expect("disable should work");
+        let regenerated = regenerate_sub_key(&state, &created.id).expect("regenerate should work");
+        assert!(
+            state.credential_entry_for_value(&regenerated.key).is_none(),
+            "a disabled key's fresh value must not authenticate"
+        );
+        let stored = state
+            .db
+            .lock()
+            .get_sub_gateway_key(&created.id)
+            .unwrap()
+            .unwrap();
+        assert!(!stored.enabled, "regeneration must not re-enable the key");
+        assert_eq!(stored.key, regenerated.key);
+
+        // Re-enabling (with a non-colliding value) puts the value back.
+        set_sub_key_enabled(&state, &created.id, true).expect("re-enable should work");
+        assert!(state.credential_entry_for_value(&regenerated.key).is_some());
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn disable_and_delete_stop_authentication_but_keep_records() {
-        let mut config = primary_only();
-        let second = create_key(&mut config, "Laptop").expect("second key should create");
+    fn delete_clears_plaintext_and_keeps_the_attribution_record() {
+        let (dir, state) = temp_state("delete");
+        let created = create_sub_key(&state, "Laptop").expect("sub key should create");
+        delete_sub_key(&state, &created.id, Utc::now()).expect("delete should work");
+        let tombstone = state
+            .db
+            .lock()
+            .get_sub_gateway_key(&created.id)
+            .unwrap()
+            .expect("tombstone should persist");
+        assert!(tombstone.deleted_at.is_some());
+        assert!(tombstone.key.is_empty());
+        assert_eq!(tombstone.name, "Laptop");
+        assert!(!snapshot_values(&state).contains(&created.key));
+        assert!(matches!(
+            delete_sub_key(&state, &created.id, Utc::now()),
+            Err(KeyError::BadRequest(_))
+        ));
 
-        set_key_enabled(&mut config, &second.id, false).expect("disable should work");
-        assert!(!key_by_id(&config, &second.id).unwrap().authenticates());
-        assert!(key_by_id(&config, &second.id).unwrap().is_active());
-
-        set_key_enabled(&mut config, &second.id, true).expect("re-enable should work");
-        delete_key(&mut config, &second.id, Utc::now()).expect("delete should work");
-        let deleted = key_by_id(&config, &second.id).unwrap();
-        assert!(!deleted.is_active());
-        assert!(deleted.key.is_empty());
-        assert_eq!(deleted.name, "Laptop");
-        assert_eq!(key_name(&config, &second.id).as_deref(), Some("Laptop"));
-        validate(&config).expect("invariants should hold after delete");
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn deleting_primary_promotes_earliest_enabled_key_and_updates_mirror() {
-        let mut config = primary_only();
-        let second = create_key(&mut config, "Laptop").expect("second key should create");
-        let third = create_key(&mut config, "Desktop").expect("third key should create");
-        // Disable the earliest-created secondary; promotion must skip it.
-        set_key_enabled(&mut config, &second.id, false).expect("disable second");
+    fn primary_value_gate_rejects_values_held_by_non_deleted_sub_keys() {
+        let (dir, state) = temp_state("gate");
+        let created = create_sub_key(&state, "Laptop").expect("sub key should create");
+        set_sub_key_enabled(&state, &created.id, false).expect("disable should work");
+        {
+            let db = state.db.lock();
+            assert!(ensure_primary_value_allowed(&db, &created.key).is_err());
+        }
+        delete_sub_key(&state, &created.id, Utc::now()).expect("delete should work");
+        {
+            let db = state.db.lock();
+            ensure_primary_value_allowed(&db, &created.key)
+                .expect("tombstoned values are free for the primary");
+        }
 
-        delete_key(&mut config, "primary", Utc::now()).expect("primary delete should work");
-
-        let primary = primary_key(&config).expect("a primary must exist");
-        assert_eq!(primary.id, third.id);
-        assert_eq!(config.gateway_key, third.key);
-        // Historical attribution survives via the tombstone.
-        assert_eq!(key_name(&config, "primary").as_deref(), Some("Primary"));
-        validate(&config).expect("invariants should hold after promotion");
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn regenerate_changes_value_and_mirror_when_primary() {
-        let mut config = primary_only();
-        let updated = regenerate_key(&mut config, "primary").expect("regenerate should work");
-        assert_ne!(updated.key, "ocg-primary");
-        assert_eq!(config.gateway_key, updated.key);
-        assert_eq!(primary_key(&config).unwrap().id, "primary");
-        validate(&config).expect("invariants should hold after regenerate");
+    fn primary_attribution_survives_an_out_of_model_value_collision() {
+        let (dir, state) = temp_state("collision-hardening");
+        let created = create_sub_key(&state, "Laptop").expect("sub key should create");
+        // An unchecked writer makes the primary adopt the enabled sub key's
+        // value (out of model; every real settings writer gates this).
+        let mut config = state.config();
+        config.gateway_key = created.key.clone();
+        state.set_config(config).expect("save should work");
+        // Any key API entry point rebuilds the snapshot: the shared value
+        // stays attributed to the primary.
+        refresh_snapshot(&state);
+        let entry = state.credential_entry_for_value(&created.key).unwrap();
+        assert_eq!(entry.id, crate::gateway_keys::PRIMARY_KEY_ID);
+        // Revoking the sub key never evicts the primary's live entry.
+        delete_sub_key(&state, &created.id, Utc::now()).expect("delete should work");
+        assert!(
+            state.credential_entry_for_value(&created.key).is_some(),
+            "the primary keeps authenticating after the colliding sub key is deleted"
+        );
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn duplicate_values_are_rejected() {
-        let mut config = primary_only();
-        config.gateway_keys[0].key = "ocg-dup".into();
-        config.gateway_keys.push(GatewayKeyEntry {
-            id: "second".into(),
-            name: "Second".into(),
-            key: "ocg-dup".into(),
-            enabled: true,
-            deleted_at: None,
-            created_at: Utc::now(),
-        });
-        assert!(validate(&config).is_err());
-    }
-
-    #[test]
-    fn normalize_self_heals_empty_and_fully_deleted_lists() {
+    fn set_config_refreshes_the_primary_snapshot_entry() {
+        let (dir, state) = temp_state("primary-refresh");
         let mut config = AppConfig {
-            gateway_key: "ocg-legacy".into(),
-            ..AppConfig::default()
+            gateway_key: "ocg-custom-primary".to_string(),
+            ..state.config()
         };
-        assert!(normalize(&mut config));
-        let primary = primary_key(&config).expect("normalize should mint a primary");
-        assert_eq!(primary.key, "ocg-legacy");
-        assert_eq!(config.gateway_key, "ocg-legacy");
-        validate(&config).expect("healed config should validate");
+        state.set_config(config.clone()).expect("save should work");
+        assert!(snapshot_values(&state).contains("ocg-custom-primary"));
+        assert_eq!(
+            state.client_key_name(PRIMARY_KEY_ID).as_deref(),
+            Some(PRIMARY_KEY_NAME)
+        );
 
-        // Fully deleted list heals from the mirror value too.
-        let mut deleted_all = primary_only();
-        let now = Utc::now();
-        delete_key(&mut deleted_all, "primary", now)
-            .expect_err("cannot delete the last enabled key");
+        config.gateway_key = "  ".to_string();
+        assert!(state.set_config(config).is_err(), "blank keys are rejected");
+        assert!(snapshot_values(&state).contains("ocg-custom-primary"));
 
-        let mut corrupt = primary_only();
-        corrupt.gateway_keys[0].deleted_at = Some(now);
-        corrupt.gateway_keys[0].key = String::new();
-        corrupt.gateway_keys[0].enabled = false;
-        assert!(normalize(&mut corrupt));
-        let primary = primary_key(&corrupt).expect("healed primary should exist");
-        assert_eq!(primary.key, "ocg-primary");
-        assert!(primary.authenticates());
-        validate(&corrupt).expect("healed config should validate");
-    }
-
-    #[test]
-    fn normalize_is_a_noop_for_healthy_configs() {
-        let mut config = primary_only();
-        create_key(&mut config, "Laptop").expect("second key should create");
-        let before = config.clone();
-        assert!(!normalize(&mut config));
-        assert_eq!(config.gateway_keys, before.gateway_keys);
-        assert_eq!(config.gateway_key, before.gateway_key);
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

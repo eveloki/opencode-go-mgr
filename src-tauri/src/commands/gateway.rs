@@ -25,10 +25,6 @@ pub(super) fn status_from_config(
         running,
         port: core.active_gateway_port(),
         key: config.gateway_key.clone(),
-        primary_key_id: ocg_core::gateway_keys::primary_key(config)
-            .map(|key| key.id.clone())
-            .unwrap_or_default(),
-        keys: config.gateway_keys.clone(),
         upstream_base_url: config.upstream_base_url.clone(),
         last_error,
     }

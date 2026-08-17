@@ -53,7 +53,11 @@ export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 export type FreeModelRouting = "deny" | "explicit" | "prefer";
 export type ProxyMode = "auto" | "manual" | "direct";
 
-export interface GatewayKeyEntry {
+/** Fixed attribution id of the primary key; mirrors the backend constant. */
+export const PRIMARY_KEY_ID = "00000000-0000-0000-0000-000000000001";
+
+/** One database-owned sub key as returned by the key lifecycle API. */
+export interface SubGatewayKey {
   id: string;
   name: string;
   key: string;
@@ -66,7 +70,6 @@ export interface AppConfig {
   revision: number;
   gateway_port: number;
   gateway_key: string;
-  gateway_keys?: GatewayKeyEntry[] | null;
   upstream_base_url: string;
   proxy_mode: ProxyMode;
   proxy_url: string;
@@ -83,6 +86,28 @@ export interface AppConfig {
   routing_mode: RoutingMode;
   conversation_sticky: boolean;
   free_model_routing: FreeModelRouting;
+}
+
+/** Sub key entry in the lightweight connection payload. */
+export interface ConnectionSubKey {
+  id: string;
+  name: string;
+  enabled: boolean;
+  value: string;
+}
+
+/**
+ * Aggregated connection view for the connection center: the primary key
+ * value, non-deleted sub keys with values, the settings revision, and URL
+ * fields. Plaintext sits behind the dashboard session layer.
+ */
+export interface ConnectionInfo {
+  gateway_port: number;
+  client_root_url: string;
+  upstream_base_url: string;
+  primary_key: string;
+  sub_keys: ConnectionSubKey[];
+  revision: number;
 }
 
 export type BrowserMode = "native" | "remote" | "unsupported";
@@ -254,13 +279,20 @@ export interface ForwardLogClientKey {
   name: string;
 }
 
-export interface GatewayKeyEntryResponse extends GatewayKeyEntry {
+export interface SubGatewayKeyResponse extends SubGatewayKey {
   revision: number;
 }
 
-export interface GatewayKeyRevisionResponse {
+/** Summary entry in list-shaped lifecycle responses; plaintext is omitted. */
+export interface SubGatewayKeySummary {
+  id: string;
+  name: string;
+  enabled: boolean;
+}
+
+export interface SubGatewayKeyRevisionResponse {
   revision: number;
-  keys: GatewayKeyEntry[];
+  keys: SubGatewayKeySummary[];
 }
 
 export interface UsageWindow {
@@ -534,8 +566,9 @@ export const tauriApi = {
       method: "POST",
     });
   },
+  getConnection: () => request<ConnectionInfo>("/connection"),
   createGatewayKey: (name: string, expectedRevision?: number) =>
-    request<GatewayKeyEntryResponse>("/settings/keys", {
+    request<SubGatewayKeyResponse>("/settings/keys", {
       method: "POST",
       body: jsonBody({ name, expected_revision: expectedRevision }),
     }),
@@ -544,17 +577,17 @@ export const tauriApi = {
     update: { name?: string; enabled?: boolean },
     expectedRevision?: number,
   ) =>
-    request<GatewayKeyRevisionResponse>(`/settings/keys/${encodeURIComponent(id)}`, {
+    request<SubGatewayKeyRevisionResponse>(`/settings/keys/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: jsonBody({ ...update, expected_revision: expectedRevision }),
     }),
   deleteGatewayKey: (id: string, expectedRevision?: number) =>
-    request<GatewayKeyRevisionResponse>(`/settings/keys/${encodeURIComponent(id)}`, {
+    request<SubGatewayKeyRevisionResponse>(`/settings/keys/${encodeURIComponent(id)}`, {
       method: "DELETE",
       body: jsonBody({ expected_revision: expectedRevision }),
     }),
   regenerateGatewayKeyEntry: (id: string, expectedRevision?: number) =>
-    request<GatewayKeyEntryResponse>(
+    request<SubGatewayKeyResponse>(
       `/settings/keys/${encodeURIComponent(id)}/regenerate`,
       { method: "POST", body: jsonBody({ expected_revision: expectedRevision }) },
     ),

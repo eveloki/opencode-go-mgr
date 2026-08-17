@@ -323,52 +323,11 @@ pub const DEFAULT_OPENCODE_INVITE_URL: &str = "https://opencode.ai/go?ref=68XPB6
 /// (written before multi-key support or not yet backfilled).
 pub const UNATTRIBUTED_KEY_FILTER: &str = "__unattributed__";
 
-/// One client-facing gateway key. `key` holds the plaintext value and is
-/// cleared on soft delete so deleted credentials never resurface in
-/// management APIs while the record stays resolvable for log attribution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GatewayKeyEntry {
-    pub id: String,
-    pub name: String,
-    pub key: String,
-    pub enabled: bool,
-    pub deleted_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-impl Default for GatewayKeyEntry {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            key: String::new(),
-            enabled: true,
-            deleted_at: None,
-            created_at: Utc::now(),
-        }
-    }
-}
-
-impl GatewayKeyEntry {
-    pub fn is_active(&self) -> bool {
-        self.deleted_at.is_none()
-    }
-
-    pub fn authenticates(&self) -> bool {
-        self.enabled && self.is_active() && !self.key.is_empty()
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub gateway_port: u16,
     pub gateway_key: String,
-    /// All gateway keys; the first non-deleted entry is the primary key and
-    /// `gateway_key` always mirrors its value for legacy readers.
-    #[serde(default)]
-    pub gateway_keys: Vec<GatewayKeyEntry>,
     pub upstream_base_url: String,
     pub proxy_mode: ProxyMode,
     pub proxy_url: String,
@@ -391,7 +350,6 @@ impl Default for AppConfig {
         Self {
             gateway_port: 9042,
             gateway_key: String::new(),
-            gateway_keys: Vec::new(),
             upstream_base_url: "https://opencode.ai/zen/go".to_string(),
             proxy_mode: ProxyMode::Auto,
             proxy_url: String::new(),
@@ -555,6 +513,9 @@ pub fn normalize_client_root_url(value: &str) -> Result<String, String> {
 
 impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if self.gateway_key.trim().is_empty() {
+            return Err("key is required".to_string());
+        }
         self.validate_timeouts()?;
         normalize_proxy_url(self.proxy_mode, &self.proxy_url)?;
         normalize_opencode_invite_url(&self.opencode_invite_url)?;
@@ -788,12 +749,55 @@ pub struct GatewayStatus {
     pub port: u16,
     /// Primary key value; kept for legacy consumers.
     pub key: String,
-    #[serde(default)]
-    pub keys: Vec<GatewayKeyEntry>,
-    #[serde(default)]
-    pub primary_key_id: String,
     pub upstream_base_url: String,
     pub last_error: Option<String>,
+}
+
+/// One database-owned sub gateway key (schema v19 `sub_gateway_keys`).
+/// `key` holds the plaintext value and is cleared on soft delete so deleted
+/// credentials never resurface in management APIs while the record stays
+/// resolvable for log attribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubGatewayKey {
+    pub id: String,
+    pub name: String,
+    pub key: String,
+    pub enabled: bool,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl SubGatewayKey {
+    pub fn is_active(&self) -> bool {
+        self.deleted_at.is_none()
+    }
+
+    pub fn authenticates(&self) -> bool {
+        self.enabled && self.is_active() && !self.key.is_empty()
+    }
+}
+
+/// A sub key as exposed by the lightweight connection endpoint. Plaintext is
+/// behind the dashboard session layer, same as the primary key value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionSubKey {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub value: String,
+}
+
+/// Aggregated connection view for the dashboard connection center: primary
+/// key value, non-deleted sub keys with values, settings revision, and the
+/// fields needed to derive client-facing URLs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionInfo {
+    pub gateway_port: u16,
+    pub client_root_url: String,
+    pub upstream_base_url: String,
+    pub primary_key: String,
+    pub sub_keys: Vec<ConnectionSubKey>,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -821,7 +825,7 @@ mod tests {
     use super::{
         AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
         CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL,
-        FreeModelRouting, GatewayKeyEntry, ProxyMode, RoutingMode, normalize_opencode_invite_url,
+        FreeModelRouting, ProxyMode, RoutingMode, normalize_opencode_invite_url,
         normalize_proxy_url, normalize_purchase_date, purchase_expires_on,
     };
 
@@ -951,59 +955,56 @@ mod tests {
     }
 
     #[test]
-    fn legacy_config_json_without_gateway_keys_deserializes_to_empty_list() {
+    fn legacy_config_json_with_gateway_keys_list_keeps_the_scalar_key() {
+        // Config JSON written by the never-released PR #43 form embeds a
+        // `gateway_keys` list; current builds ignore it and keep the legacy
+        // scalar, so downgraded databases stay readable either way.
         let legacy: AppConfig = serde_json::from_value(serde_json::json!({
             "gateway_key": "ocg-legacy-key",
+            "gateway_keys": [
+                {
+                    "id": "key-1",
+                    "name": "Primary",
+                    "key": "ocg-legacy-key",
+                    "enabled": true,
+                    "created_at": "2026-08-16T00:00:00Z"
+                }
+            ],
             "upstream_base_url": "https://opencode.ai/zen/go"
         }))
-        .expect("legacy config without gateway_keys should deserialize");
+        .expect("legacy config with an embedded key list should deserialize");
         assert_eq!(legacy.gateway_key, "ocg-legacy-key");
-        assert!(legacy.gateway_keys.is_empty());
-    }
+        legacy
+            .validate()
+            .expect("the scalar key satisfies validation");
 
-    #[test]
-    fn gateway_keys_round_trip_and_mirror_field_both_serialize() {
-        let entry = GatewayKeyEntry {
-            id: "key-1".into(),
-            name: "Primary".into(),
-            key: "ocg-abc-def".into(),
-            enabled: true,
-            deleted_at: None,
-            created_at: chrono::Utc::now(),
-        };
-        let config = AppConfig {
-            gateway_key: "ocg-abc-def".into(),
-            gateway_keys: vec![entry],
+        let encoded = serde_json::to_value(&AppConfig {
+            gateway_key: "ocg-keep".into(),
             ..AppConfig::default()
-        };
-        let encoded = serde_json::to_value(&config).expect("config should serialize");
-        assert_eq!(encoded["gateway_key"], "ocg-abc-def");
-        assert_eq!(encoded["gateway_keys"][0]["id"], "key-1");
-        let decoded: AppConfig = serde_json::from_value(encoded).expect("config should round-trip");
-        assert_eq!(decoded.gateway_keys, config.gateway_keys);
-        assert_eq!(decoded.gateway_key, decoded.gateway_keys[0].key);
+        })
+        .expect("config should serialize");
+        assert!(encoded.get("gateway_keys").is_none());
     }
 
     #[test]
-    fn gateway_key_entry_defaults_are_enabled_without_deleted_at() {
-        let entry: GatewayKeyEntry = serde_json::from_value(serde_json::json!({
-            "id": "key-1",
-            "name": "Primary",
-            "key": "ocg-abc-def",
-            "created_at": "2026-08-16T00:00:00Z"
-        }))
-        .expect("entry without lifecycle fields should deserialize");
-        assert!(entry.enabled);
-        assert!(entry.deleted_at.is_none());
-        assert!(entry.is_active());
-        assert!(entry.authenticates());
-
-        let deleted = GatewayKeyEntry {
-            deleted_at: Some(chrono::Utc::now()),
-            ..entry
-        };
-        assert!(!deleted.is_active());
-        assert!(!deleted.authenticates());
+    fn blank_primary_key_is_rejected_by_validate() {
+        for blank in ["", "   ", "\t"] {
+            let config = AppConfig {
+                gateway_key: blank.to_string(),
+                ..AppConfig::default()
+            };
+            assert_eq!(
+                config.validate().unwrap_err(),
+                "key is required",
+                "{blank:?} must be rejected"
+            );
+        }
+        AppConfig {
+            gateway_key: "  padded  ".into(),
+            ..AppConfig::default()
+        }
+        .validate()
+        .expect("a non-blank key passes");
     }
 
     #[test]
@@ -1038,6 +1039,7 @@ mod tests {
         }
 
         AppConfig {
+            gateway_key: "k".to_string(),
             proxy_mode: ProxyMode::Auto,
             proxy_url: "not-a-proxy".to_string(),
             ..AppConfig::default()
