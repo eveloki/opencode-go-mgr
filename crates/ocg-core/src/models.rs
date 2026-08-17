@@ -797,7 +797,7 @@ pub struct GatewayStatus {
     pub last_error: Option<String>,
 }
 
-/// One database-owned sub gateway key (schema v19 `sub_gateway_keys`).
+/// One database-owned sub gateway key (schema v20 `sub_gateway_keys`).
 /// `key` holds the plaintext value and is cleared on soft delete so deleted
 /// credentials never resurface in management APIs while the record stays
 /// resolvable for log attribution.

@@ -3,7 +3,7 @@
 //! Two credential tiers share one auth surface:
 //! - the primary key is the legacy `AppConfig::gateway_key` scalar: never
 //!   disabled or deleted, attributed under the fixed [`PRIMARY_KEY_ID`];
-//! - sub keys live in the `sub_gateway_keys` table (schema v19) and change
+//! - sub keys live in the `sub_gateway_keys` table (schema v20) and change
 //!   only through the key lifecycle API.
 //!
 //! The credential snapshot (`credential_snapshot` on `CoreStateInner`) maps
