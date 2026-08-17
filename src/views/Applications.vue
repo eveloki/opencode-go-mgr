@@ -679,12 +679,14 @@ async function loadSettings(loadApplicationModels = true) {
   settingsLoaded.value = false;
   settingsError.value = "";
   try {
-    const settings = await tauriApi.getSettings();
+    // The view only needs connection fields; the lightweight payload keeps
+    // it off the full settings shape.
+    const connection = await tauriApi.getConnection();
     const nextServiceConfig = {
-      gateway_port: settings.gateway_port,
-      gateway_key: settings.gateway_key,
-      client_root_url: settings.client_root_url,
-      upstream_base_url: settings.upstream_base_url || "",
+      gateway_port: connection.gateway_port,
+      gateway_key: connection.primary_key,
+      client_root_url: connection.client_root_url,
+      upstream_base_url: connection.upstream_base_url || "",
     };
     snippetDrafts.value = reconcileConnectionDrafts(
       serviceConfig.value,

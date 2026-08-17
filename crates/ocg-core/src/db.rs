@@ -1513,8 +1513,9 @@ impl Database {
         })?;
         let mut keys = rows.collect::<Result<Vec<_>, _>>()?;
         // Empty snapshot names (logs written before the key existed in
-        // config) still deserve a stable display label; the primary key's
-        // fixed display name always wins over the raw id.
+        // config) still deserve a stable display label; within that
+        // fallback the primary key's fixed display name takes precedence
+        // over its raw id.
         for key in &mut keys {
             if key.name.is_empty() {
                 key.name = if key.id == crate::gateway_keys::PRIMARY_KEY_ID {

@@ -981,6 +981,9 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.match(applications, /function guideOptionLabel[\s\S]*?guide\.popular[\s\S]*?t\("常用"\)/);
   assert.match(applications, /tauriApi\.getApplicationModels\(\)/);
   assert.match(applications, /tauriApi\.getClaudeDesktopModels\(\)/);
+  // Connection fields come from the lightweight payload, not full settings.
+  assert.match(applications, /tauriApi\.getConnection\(\)/);
+  assert.doesNotMatch(applications, /tauriApi\.getSettings\(\)/);
   assert.match(applications, /Promise\.allSettled/);
   assert.match(applications, /const claudeDesktopModelsLoaded = ref\(false\)/);
   assert.match(applications, /activeGuide\.value\.id !== "claude-desktop" \|\| claudeDesktopModelsLoaded\.value/);
