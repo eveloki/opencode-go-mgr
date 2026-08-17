@@ -95,6 +95,15 @@
               :placeholder="t('模型')"
             />
           </div>
+          <div class="filter-field key-filter-field">
+            <span class="filter-label">{{ t("接入 Key") }}</span>
+            <n-select
+              v-model:value="keyFilter"
+              :options="keyOptions"
+              :placeholder="t('接入 Key')"
+              :consistent-menu-width="false"
+            />
+          </div>
           <div class="filter-field time-range-field">
             <span class="filter-label">{{ t("时间范围") }}</span>
             <n-popover
@@ -151,22 +160,22 @@
               class="sort-select"
             />
           </div>
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-button
-                circle
-                quaternary
-                :aria-label="sortOrder === 'asc' ? t('升序') : t('降序')"
-                @click="toggleSortOrder"
-              >
-                <template #icon>
-                  <n-icon :component="sortOrder === 'asc' ? ArrowUpOutlined : ArrowDownOutlined" />
-                </template>
-              </n-button>
-            </template>
-            {{ sortOrder === "asc" ? t("升序") : t("降序") }}
-          </n-tooltip>
           <div class="filter-actions">
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  circle
+                  quaternary
+                  :aria-label="sortOrder === 'asc' ? t('升序') : t('降序')"
+                  @click="toggleSortOrder"
+                >
+                  <template #icon>
+                    <n-icon :component="sortOrder === 'asc' ? ArrowUpOutlined : ArrowDownOutlined" />
+                  </template>
+                </n-button>
+              </template>
+              {{ sortOrder === "asc" ? t("升序") : t("降序") }}
+            </n-tooltip>
             <n-tooltip v-if="hasFilters" trigger="hover">
               <template #trigger>
                 <n-button circle quaternary :aria-label="t('清除筛选')" @click="clearFilters">
@@ -191,6 +200,9 @@
             </n-tooltip>
           </div>
         </div>
+        <p v-if="keyFilter" class="key-filter-note" role="status">
+          {{ t("升级前用量统一计入主 Key") }}
+        </p>
         <n-data-table
           :columns="forwardColumns"
           :data="forwardLogs"
@@ -230,8 +242,14 @@ import {
   useMessage,
 } from "naive-ui";
 import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
-import { tauriApi } from "../api/tauri";
-import type { Account, ForwardLog, ForwardLogSummary, GatewayLog } from "../api/tauri";
+import { UNATTRIBUTED_KEY_FILTER, tauriApi } from "../api/tauri";
+import type {
+  Account,
+  ForwardLog,
+  ForwardLogClientKey,
+  ForwardLogSummary,
+  GatewayLog,
+} from "../api/tauri";
 import { t } from "../i18n/index.ts";
 import { locale } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
@@ -258,12 +276,14 @@ const gatewayLogs = ref<GatewayLog[]>([]);
 const forwardLogs = ref<ForwardLog[]>([]);
 const accounts = ref<Account[]>([]);
 const models = ref<string[]>([]);
+const clientKeys = ref<ForwardLogClientKey[]>([]);
 const gatewayLoading = ref(false);
 const gatewayError = ref("");
 const forwardLoading = ref(false);
 const statusFilter = ref<string>(query.get("status") ?? "");
 const accountFilter = ref<string>(query.get("account") ?? "");
 const modelFilter = ref<string>(query.get("model") ?? "");
+const keyFilter = ref<string>(query.get("key") ?? "");
 const requestIdFilter = ref<string>(query.get("request_id") ?? "");
 const querySort = query.get("sort");
 const queryOrder = query.get("order");
@@ -358,6 +378,13 @@ const allOption = computed(() => ({ label: t("全部"), value: "" }));
 const statusOptions = computed(() => [allOption.value, ...Object.entries(statusMeta.value).map(([value, meta]) => ({ label: meta.label, value }))]);
 const accountOptions = computed(() => [allOption.value, ...accounts.value.map((account) => ({ label: account.name, value: account.id }))]);
 const modelOptions = computed(() => [allOption.value, ...models.value.map((model) => ({ label: model, value: model }))]);
+// Keys come from the log table itself (not config) so disabled, deleted, and
+// dangling ids stay filterable exactly as they appear on the rows.
+const keyOptions = computed(() => [
+  allOption.value,
+  ...clientKeys.value.map((key) => ({ label: key.name, value: key.id })),
+  { label: t("未归因"), value: UNATTRIBUTED_KEY_FILTER },
+]);
 const sortOptions = computed(() => [
   { label: t("时间"), value: "timestamp" },
   { label: t("尝试次数"), value: "attempt" },
@@ -370,6 +397,7 @@ const hasFilters = computed(() =>
   !!statusFilter.value
   || !!accountFilter.value
   || !!modelFilter.value
+  || !!keyFilter.value
   || !!requestIdFilter.value
   || !!timeRange.value,
 );
@@ -438,6 +466,10 @@ async function copyText(target: string, value: string, label: string) {
   }
 }
 
+function shortRequestId(requestId: string): string {
+  return requestId.length <= 18 ? requestId : `${requestId.slice(0, 13)}…${requestId.slice(-4)}`;
+}
+
 function renderRequestId(row: GatewayLog | ForwardLog) {
   const requestId = row.request_id;
   if (!requestId) return "—";
@@ -449,7 +481,7 @@ function renderRequestId(row: GatewayLog | ForwardLog) {
       class: "request-id-link",
       title: requestId,
       onClick: () => focusRequestChain(requestId),
-    }, { default: () => h("code", requestId) }),
+    }, { default: () => h("code", shortRequestId(requestId)) }),
     h(NButton, {
       text: true,
       type: "primary",
@@ -549,7 +581,7 @@ const gatewayColumns = computed(() => [
     renderExpand: renderDiagnostic,
   },
   { title: t("时间"), key: "created_at", width: 150, render: (row: GatewayLog) => formatDate(row.created_at) },
-  { title: t("请求 ID"), key: "request_id", width: 245, render: renderRequestId },
+  { title: t("请求 ID"), key: "request_id", width: 170, render: renderRequestId },
   { title: t("级别"), key: "level", width: 80 },
   { title: t("分类"), key: "category", width: 100 },
   { title: t("消息"), key: "message", minWidth: 480, ellipsis: { tooltip: true } },
@@ -611,6 +643,7 @@ function clearFilters() {
   statusFilter.value = "";
   accountFilter.value = "";
   modelFilter.value = "";
+  keyFilter.value = "";
   requestIdFilter.value = "";
   activePreset.value = "all";
   timeRange.value = null;
@@ -631,6 +664,8 @@ function syncQueryState() {
   else url.searchParams.delete("account");
   if (modelFilter.value) url.searchParams.set("model", modelFilter.value);
   else url.searchParams.delete("model");
+  if (keyFilter.value) url.searchParams.set("key", keyFilter.value);
+  else url.searchParams.delete("key");
   if (requestIdFilter.value) url.searchParams.set("request_id", requestIdFilter.value);
   else url.searchParams.delete("request_id");
   if (activePreset.value === "custom" && timeRange.value) {
@@ -685,6 +720,7 @@ async function loadForwardLogs() {
       status: statusFilter.value,
       account_id: accountFilter.value,
       model: modelFilter.value,
+      key_id: keyFilter.value,
       request_id: requestIdFilter.value,
       start_time: requestRange ? toIsoString(requestRange[0]) : null,
       end_time: requestRange ? toIsoString(requestRange[1]) : null,
@@ -721,8 +757,16 @@ async function loadForwardLogModels() {
   }
 }
 
+async function loadForwardLogKeys() {
+  try {
+    clientKeys.value = await tauriApi.getForwardLogKeys();
+  } catch (e) {
+    message.error(t("加载 Key 筛选失败: {error}", { error: String(e) }));
+  }
+}
+
 async function refreshForwardLogs() {
-  await Promise.all([loadForwardLogs(), loadForwardLogModels()]);
+  await Promise.all([loadForwardLogs(), loadForwardLogModels(), loadForwardLogKeys()]);
 }
 
 function changeForwardPage(page: number) {
@@ -736,7 +780,7 @@ function changeGatewayPage(page: number) {
 
 watch(activeTab, syncQueryState);
 watch(
-  [statusFilter, accountFilter, modelFilter, timeRange, activePreset, sortBy, sortOrder],
+  [statusFilter, accountFilter, modelFilter, keyFilter, timeRange, activePreset, sortBy, sortOrder],
   () => {
     forwardPage.value = 1;
     syncQueryState();
@@ -779,12 +823,18 @@ onMounted(() => {
   void loadForwardLogs();
   void loadAccounts();
   void loadForwardLogModels();
+  void loadForwardLogKeys();
 });
 
 onUnmounted(cleanup);
 </script>
 
 <style scoped>
+.key-filter-note {
+  margin: -6px 0 10px;
+  color: var(--ocg-subtle);
+  font-size: var(--ocg-font-xs);
+}
 .log-limit-note {
   margin: 6px 0 10px;
   color: var(--ocg-subtle);
@@ -827,7 +877,8 @@ onUnmounted(cleanup);
 }
 .filter-bar {
   display: grid;
-  grid-template-columns: 240px 140px 180px 180px auto 120px auto 1fr;
+  /* request-id, status, account, model, key, time-range, sort, actions */
+  grid-template-columns: 240px 140px 180px 180px 180px 120px auto 1fr;
   align-items: end;
   gap: 8px;
   margin-bottom: 12px;
@@ -928,6 +979,7 @@ onUnmounted(cleanup);
 }
 :deep(.request-id-cell code) {
   overflow: hidden;
+  font: var(--ocg-font-xs)/1.4 "Cascadia Mono", Consolas, monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -359,6 +359,14 @@ pub enum ProxyMode {
 
 pub const DEFAULT_OPENCODE_INVITE_URL: &str = "https://opencode.ai/go?ref=68XPB6NP8V";
 
+/// Shared rejection message for a blank primary gateway key; used by
+/// `AppConfig::validate` and both settings-update entry points.
+pub const PRIMARY_KEY_REQUIRED_MESSAGE: &str = "key is required";
+
+/// Sentinel filter value selecting forward logs without a client key
+/// (written before multi-key support or not yet backfilled).
+pub const UNATTRIBUTED_KEY_FILTER: &str = "__unattributed__";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -549,6 +557,9 @@ pub fn normalize_client_root_url(value: &str) -> Result<String, String> {
 
 impl AppConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if self.gateway_key.trim().is_empty() {
+            return Err(PRIMARY_KEY_REQUIRED_MESSAGE.to_string());
+        }
         self.validate_timeouts()?;
         normalize_proxy_url(self.proxy_mode, &self.proxy_url)?;
         normalize_opencode_invite_url(&self.opencode_invite_url)?;
@@ -670,6 +681,10 @@ pub struct ForwardLog {
     pub model: String,
     pub account_id: String,
     pub account_name: String,
+    #[serde(default)]
+    pub client_key_id: Option<String>,
+    #[serde(default)]
+    pub client_key_name: Option<String>,
     pub status: String,
     pub http_status: Option<i32>,
     pub prompt_tokens: i64,
@@ -737,6 +752,15 @@ pub struct ForwardLogPage {
     pub summary: ForwardLogSummary,
 }
 
+/// One distinct client key observed in forward logs (see
+/// `Database::list_forward_log_keys`). Covers enabled, disabled, and
+/// soft-deleted keys plus dangling ids left by a downgrade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardLogClientKey {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageWindow {
     pub account_id: String,
@@ -767,9 +791,57 @@ pub enum UsageWindowKind {
 pub struct GatewayStatus {
     pub running: bool,
     pub port: u16,
+    /// Primary key value; kept for legacy consumers.
     pub key: String,
     pub upstream_base_url: String,
     pub last_error: Option<String>,
+}
+
+/// One database-owned sub gateway key (schema v20 `sub_gateway_keys`).
+/// `key` holds the plaintext value and is cleared on soft delete so deleted
+/// credentials never resurface in management APIs while the record stays
+/// resolvable for log attribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubGatewayKey {
+    pub id: String,
+    pub name: String,
+    pub key: String,
+    pub enabled: bool,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl SubGatewayKey {
+    pub fn is_active(&self) -> bool {
+        self.deleted_at.is_none()
+    }
+
+    pub fn authenticates(&self) -> bool {
+        self.enabled && self.is_active() && !self.key.is_empty()
+    }
+}
+
+/// A sub key as exposed by the lightweight connection endpoint. Plaintext is
+/// behind the dashboard session layer, same as the primary key value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionSubKey {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub value: String,
+}
+
+/// Aggregated connection view for the dashboard connection center: primary
+/// key value, non-deleted sub keys with values, settings revision, and the
+/// fields needed to derive client-facing URLs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionInfo {
+    pub gateway_port: u16,
+    pub client_root_url: String,
+    pub upstream_base_url: String,
+    pub primary_key: String,
+    pub sub_keys: Vec<ConnectionSubKey>,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -945,6 +1017,59 @@ mod tests {
     }
 
     #[test]
+    fn legacy_config_json_with_gateway_keys_list_keeps_the_scalar_key() {
+        // Config JSON written by the never-released PR #43 form embeds a
+        // `gateway_keys` list; current builds ignore it and keep the legacy
+        // scalar, so downgraded databases stay readable either way.
+        let legacy: AppConfig = serde_json::from_value(serde_json::json!({
+            "gateway_key": "ocg-legacy-key",
+            "gateway_keys": [
+                {
+                    "id": "key-1",
+                    "name": "Primary",
+                    "key": "ocg-legacy-key",
+                    "enabled": true,
+                    "created_at": "2026-08-16T00:00:00Z"
+                }
+            ],
+            "upstream_base_url": "https://opencode.ai/zen/go"
+        }))
+        .expect("legacy config with an embedded key list should deserialize");
+        assert_eq!(legacy.gateway_key, "ocg-legacy-key");
+        legacy
+            .validate()
+            .expect("the scalar key satisfies validation");
+
+        let encoded = serde_json::to_value(&AppConfig {
+            gateway_key: "ocg-keep".into(),
+            ..AppConfig::default()
+        })
+        .expect("config should serialize");
+        assert!(encoded.get("gateway_keys").is_none());
+    }
+
+    #[test]
+    fn blank_primary_key_is_rejected_by_validate() {
+        for blank in ["", "   ", "\t"] {
+            let config = AppConfig {
+                gateway_key: blank.to_string(),
+                ..AppConfig::default()
+            };
+            assert_eq!(
+                config.validate().unwrap_err(),
+                "key is required",
+                "{blank:?} must be rejected"
+            );
+        }
+        AppConfig {
+            gateway_key: "  padded  ".into(),
+            ..AppConfig::default()
+        }
+        .validate()
+        .expect("a non-blank key passes");
+    }
+
+    #[test]
     fn proxy_url_requires_a_supported_origin_without_credentials() {
         assert_eq!(
             normalize_proxy_url(ProxyMode::Manual, " http://127.0.0.1:7890/ ").unwrap(),
@@ -976,6 +1101,7 @@ mod tests {
         }
 
         AppConfig {
+            gateway_key: "k".to_string(),
             proxy_mode: ProxyMode::Auto,
             proxy_url: "not-a-proxy".to_string(),
             ..AppConfig::default()

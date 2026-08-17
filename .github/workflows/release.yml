@@ -205,6 +205,9 @@ jobs:
           & $cli "--data-dir=$data" key disable $id
           & $cli "--data-dir=$data" key enable $id
           if (-not (& $cli "--data-dir=$data" status | Select-String -SimpleMatch '1 total, 1 enabled')) { throw 'Unexpected CLI status' }
+          # The primary gateway key (legacy mirror field) must stay visible.
+          $gatewayKey = (& $cli "--data-dir=$data" status | Select-String -Pattern '^gateway key: (\S+)$').Matches[0].Groups[1].Value
+          if (-not $gatewayKey.StartsWith('ocg-')) { throw "CLI status did not expose the primary gateway key: $gatewayKey" }
 
           $stdout = Join-Path $env:RUNNER_TEMP cli-serve.stdout.log
           $stderr = Join-Path $env:RUNNER_TEMP cli-serve.stderr.log
@@ -253,6 +256,8 @@ jobs:
           "$cli" --data-dir="$data" key disable "$id"
           "$cli" --data-dir="$data" key enable "$id"
           "$cli" --data-dir="$data" status | grep -q '1 total, 1 enabled'
+          # The primary gateway key (legacy mirror field) must stay visible.
+          "$cli" --data-dir="$data" status | grep -Eq '^gateway key: ocg-\S+'
 
           log="$RUNNER_TEMP/cli-serve.log"
           "$cli" --data-dir="$data" serve --port=19042 >"$log" 2>&1 &

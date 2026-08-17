@@ -245,6 +245,8 @@ mod tests {
             model: "test".into(),
             account_id: "estimated-full".into(),
             account_name: "estimated-full".into(),
+            client_key_id: None,
+            client_key_name: None,
             status: "success".into(),
             http_status: Some(200),
             prompt_tokens: 0,

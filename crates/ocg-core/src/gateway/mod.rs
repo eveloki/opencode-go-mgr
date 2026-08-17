@@ -81,6 +81,7 @@ pub async fn start_gateway_on(state: CoreState, addr: SocketAddr) -> Result<Gate
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
     state.set_dashboard_local_mode(local_addr.ip().is_loopback());
+    spawn_forward_log_backfill(state.clone());
     let app = build_router(state);
     let port = local_addr.port();
 
@@ -101,6 +102,64 @@ pub async fn start_gateway_on(state: CoreState, addr: SocketAddr) -> Result<Gate
         shutdown: shutdown_tx,
         task: handle,
     })
+}
+
+/// Attributes pre-multi-key forward logs to the primary key in bounded
+/// chunks. The runtime context (not `CoreStateInner` construction) owns this
+/// so pure synchronous construction never starts it. Small tables finish
+/// inline; a dedicated thread (holding only a weak state reference) continues
+/// large ones chunk by chunk so request logging never waits behind more than
+/// one short transaction. DB work is synchronous, so no lock is ever held
+/// across an await point.
+fn spawn_forward_log_backfill(state: CoreState) {
+    // The primary key attributes under its fixed hardcoded id (see
+    // `gateway_keys::PRIMARY_KEY_ID`); no config or db lock is needed.
+    let (key_id, key_name) = (
+        crate::gateway_keys::PRIMARY_KEY_ID.to_string(),
+        crate::gateway_keys::PRIMARY_KEY_NAME.to_string(),
+    );
+    // Fast path: one bounded step inline. Fresh databases (and tests) have no
+    // NULL rows, so this records the completion marker and never spawns.
+    let more_chunks = {
+        let db = state.db.lock();
+        db.backfill_forward_logs_client_key_step(
+            &key_id,
+            &key_name,
+            crate::db::FORWARD_LOG_BACKFILL_CHUNK_ROWS,
+        )
+    };
+    match more_chunks {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            eprintln!("warning: forward log key backfill unavailable: {error}");
+            return;
+        }
+    }
+    let weak = std::sync::Arc::downgrade(&state);
+    std::thread::Builder::new()
+        .name("ocg-forward-log-backfill".to_string())
+        .spawn(move || {
+            while let Some(state) = weak.upgrade() {
+                let step = {
+                    let db = state.db.lock();
+                    db.backfill_forward_logs_client_key_step(
+                        &key_id,
+                        &key_name,
+                        crate::db::FORWARD_LOG_BACKFILL_CHUNK_ROWS,
+                    )
+                };
+                match step {
+                    Ok(true) => std::thread::sleep(crate::db::FORWARD_LOG_BACKFILL_CHUNK_PAUSE),
+                    Ok(false) => return,
+                    Err(error) => {
+                        eprintln!("warning: forward log key backfill paused: {error}");
+                        return;
+                    }
+                }
+            }
+        })
+        .ok();
 }
 
 pub fn stop_gateway(handle: GatewayHandle) {
@@ -137,6 +196,7 @@ mod tests {
         let state =
             Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should load"));
         let mut config = state.config();
+        // Pin the primary key value for the test requests.
         config.gateway_key = "gateway-test-key".to_string();
         state.set_config(config).expect("test config should save");
         let handle = start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -238,6 +298,7 @@ mod tests {
         let state =
             Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should load"));
         let mut config = state.config();
+        // Pin the primary key value for the test requests.
         config.gateway_key = "gateway-test-key".to_string();
         state.set_config(config).expect("test config should save");
         let handle = start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -429,6 +490,7 @@ mod tests {
         let state =
             Arc::new(CoreStateInner::new(db, dir.clone(), cipher).expect("state should load"));
         let mut config = state.config();
+        // Pin the primary key value for the test requests.
         config.gateway_key = "gateway-test-key".to_string();
         state.set_config(config).expect("test config should save");
         let handle = start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))

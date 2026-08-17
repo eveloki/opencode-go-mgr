@@ -40,8 +40,10 @@ fn benchmark_state(base_url: String) -> (Arc<CoreStateInner>, std::path::PathBuf
     let db = Database::open(dir.clone()).unwrap();
     let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
     let mut config = state.config();
+    // Pin the primary key value for the test requests.
     config.gateway_key = "bench-gateway-key".to_string();
     config.upstream_base_url = base_url;
+    config.proxy_mode = ocg_core::models::ProxyMode::Direct;
     state.set_config(config).unwrap();
     let now = Utc::now();
     state
@@ -110,6 +112,7 @@ async fn successful_gateway_requests_have_a_repeatable_release_benchmark() {
     let handle = gateway::start_gateway(state.clone(), 0).await.unwrap();
     let url = format!("http://127.0.0.1:{}/v1/chat/completions", handle.port);
     let client = reqwest::Client::builder()
+        .no_proxy()
         .pool_max_idle_per_host(32)
         .build()
         .unwrap();

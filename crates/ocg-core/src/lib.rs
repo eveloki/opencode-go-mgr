@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod dashboard;
 pub mod db;
 pub mod gateway;
+pub mod gateway_keys;
 pub(crate) mod http_client;
 pub mod models;
 pub mod pricing;

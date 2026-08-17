@@ -44,6 +44,51 @@
 
           <div class="connection-row">
             <n-icon size="18" aria-hidden="true"><KeyOutlined /></n-icon>
+            <n-popover
+              v-if="enabledGatewayKeys.length > 1"
+              trigger="click"
+              placement="bottom-start"
+              :show="keyMenuOpen"
+              @update:show="keyMenuOpen = $event"
+            >
+              <template #trigger>
+                <button
+                  type="button"
+                  class="key-switcher-trigger"
+                  :disabled="refreshingKey || loading"
+                  :aria-label="t('选择 Key')"
+                  :aria-expanded="keyMenuOpen"
+                  aria-haspopup="menu"
+                  @keydown.esc="keyMenuOpen = false"
+                >
+                  <span class="key-switcher-name">{{ selectedKey?.name }}</span>
+                  <span v-if="selectedKey?.id === PRIMARY_KEY_ID" class="key-switcher-badge">{{ t("主 Key") }}</span>
+                  <n-icon size="12" aria-hidden="true"><DownOutlined /></n-icon>
+                </button>
+              </template>
+              <div class="key-switcher-menu" @keydown.esc="keyMenuOpen = false">
+                <button
+                  v-for="entry in enabledGatewayKeys"
+                  :key="entry.id"
+                  type="button"
+                  class="key-switcher-option"
+                  :class="{ selected: entry.id === selectedKey?.id }"
+                  @click="selectGatewayKey(entry.id)"
+                >
+                  <span class="key-switcher-option-main">
+                    <span class="key-switcher-option-name">{{ entry.name }}</span>
+                    <span v-if="entry.id === PRIMARY_KEY_ID" class="key-switcher-badge">{{ t("主 Key") }}</span>
+                  </span>
+                  <code class="key-switcher-option-value">{{ maskConnectionKey(entry.value) }}</code>
+                  <n-icon
+                    v-if="entry.id === selectedKey?.id"
+                    class="key-switcher-check"
+                    size="14"
+                    aria-hidden="true"
+                  ><CheckOutlined /></n-icon>
+                </button>
+              </div>
+            </n-popover>
             <div class="connection-value">
               <span class="sr-only">{{ t("Key") }}</span>
               <code>{{ maskedKey }}</code>
@@ -63,7 +108,7 @@
                         size="small"
                         :aria-label="t('刷新 Key')"
                         :loading="refreshingKey"
-                        :disabled="refreshingKey || loading || !serviceConfig.gateway_key"
+                        :disabled="refreshingKey || loading || !selectedKey"
                       >
                         <template #icon><n-icon :component="ReloadOutlined" /></template>
                       </n-button>
@@ -71,7 +116,7 @@
                     {{ t("刷新 Key") }}
                   </n-tooltip>
                 </template>
-                {{ t("旧 Key 将立即失效，继续生成新 Key？") }}
+                {{ t("仅当前 Key 的旧值立即失效，其他 Key 不受影响。确定生成新值？") }}
               </n-popconfirm>
               <n-tooltip trigger="hover" :delay="200">
                 <template #trigger>
@@ -80,8 +125,8 @@
                     quaternary
                     size="small"
                     :aria-label="t('复制 Key')"
-                    :disabled="refreshingKey || !serviceConfig.gateway_key"
-                    @click="copyConnection('key', serviceConfig.gateway_key, t('Key'))"
+                    :disabled="refreshingKey || !selectedKey"
+                    @click="copyConnection('key', selectedKey?.value ?? '', t('Key'))"
                   >
                     <template #icon>
                       <n-icon :component="copiedTarget === 'key' ? CheckOutlined : CopyOutlined" />
@@ -239,8 +284,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
-import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NPopover, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
 import {
   ApiOutlined,
   CalendarOutlined,
@@ -248,13 +293,20 @@ import {
   ClockCircleOutlined,
   CloudServerOutlined,
   CopyOutlined,
+  DownOutlined,
   KeyOutlined,
   ReloadOutlined,
   WalletOutlined,
 } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
-import { tauriApi } from "../api/tauri";
-import type { Account, DailyModelCost, DashboardSummary, UsageWindow } from "../api/tauri";
+import { PRIMARY_KEY_ID, tauriApi } from "../api/tauri";
+import type {
+  Account,
+  ConnectionInfo,
+  DailyModelCost,
+  DashboardSummary,
+  UsageWindow,
+} from "../api/tauri";
 import { CHART_PALETTE } from "../theme";
 import { t } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
@@ -264,6 +316,13 @@ import { daysUntilDate, expiryTagType } from "./account-lifecycle";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
 
 type ConnectionTarget = "api" | "key" | "upstream";
+
+/** One selectable credential in the connection switcher. */
+interface SwitcherKey {
+  id: string;
+  name: string;
+  value: string;
+}
 
 const message = useMessage();
 const { copiedTarget, copy, cleanup } = useClipboard();
@@ -280,12 +339,16 @@ const usageFailedAccountIds = ref(new Set<string>());
 const refreshingKey = ref(false);
 const lifecycleNow = ref(Date.now());
 
-const serviceConfig = ref({
+// ponytail: keep this pre-load fallback in sync with ConnectionInfo.
+const serviceConfig = ref<ConnectionInfo>({
   gateway_port: 9042,
-  gateway_key: "",
-  upstream_base_url: "",
   client_root_url: "",
+  upstream_base_url: "",
+  primary_key: "",
+  sub_keys: [],
+  revision: 0,
 });
+const selectedKeyId = ref("");
 const summary = ref<DashboardSummary>({
   total_accounts: 0,
   available_accounts: 0,
@@ -303,7 +366,33 @@ const legendModels = computed(() => {
     .map((model, index) => ({ model, color: CHART_PALETTE[index % CHART_PALETTE.length] }));
 });
 const totalChartCost = computed(() => dailyCosts.value.reduce((sum, row) => sum + row.cost, 0));
-const maskedKey = computed(() => maskConnectionKey(serviceConfig.value.gateway_key));
+const maskedKey = computed(() => maskConnectionKey(selectedKey.value?.value ?? ""));
+// The primary key is pinned first; only enabled sub keys join the switcher.
+const enabledGatewayKeys = computed<SwitcherKey[]>(() => [
+  { id: PRIMARY_KEY_ID, name: t("主 Key"), value: serviceConfig.value.primary_key },
+  ...serviceConfig.value.sub_keys
+    .filter((entry) => entry.enabled)
+    .map((entry) => ({ id: entry.id, name: entry.name, value: entry.value })),
+]);
+const keyMenuOpen = ref(false);
+// Default to the primary key and keep the selection valid across connection
+// reloads and key lifecycle changes.
+const selectedKey = computed<SwitcherKey | null>(() => {
+  const keys = enabledGatewayKeys.value;
+  if (keys.length === 0 || !keys[0].value) return null;
+  return keys.find((entry) => entry.id === selectedKeyId.value) ?? keys[0];
+});
+// Keep the switcher explicitly on the primary key until the user picks
+// another one, and re-validate whenever the enabled list changes.
+watch(enabledGatewayKeys, (keys) => {
+  if (keys.length > 0 && !keys.some((entry) => entry.id === selectedKeyId.value)) {
+    selectedKeyId.value = keys[0].id;
+  }
+});
+function selectGatewayKey(id: string): void {
+  selectedKeyId.value = id;
+  keyMenuOpen.value = false;
+}
 const connectionUrls = computed(() => {
   try {
     return resolveConnectionUrls(
@@ -378,25 +467,40 @@ async function copyConnection(target: ConnectionTarget, value: string, label: st
 }
 
 async function regenerateKey() {
-  if (refreshingKey.value || dashboardRequestActive || !serviceConfig.value.gateway_key) return;
-  const previousKey = serviceConfig.value.gateway_key;
+  const target = selectedKey.value;
+  if (refreshingKey.value || dashboardRequestActive || !target) return;
+  const previousValue = target.value;
+  const isPrimary = target.id === PRIMARY_KEY_ID;
   refreshingKey.value = true;
   let mutationFailed = false;
   let mutationError: unknown = null;
-  let result: { key: string; revision: number } | null = null;
+  let newValue = "";
   try {
     try {
-      result = await tauriApi.regenerateGatewayKey();
-      serviceConfig.value.gateway_key = result.key;
+      if (isPrimary) {
+        // Primary rotation uses the legacy endpoint; sub keys rotate in place.
+        const result = await tauriApi.regenerateGatewayKey();
+        newValue = result.key;
+      } else {
+        const result = await tauriApi.regenerateGatewayKeyEntry(
+          target.id,
+          serviceConfig.value.revision,
+        );
+        newValue = result.key;
+      }
     } catch (error) {
       mutationFailed = true;
       mutationError = error;
     }
 
     try {
-      const latest = await tauriApi.getSettings();
+      const latest = await tauriApi.getConnection();
       serviceConfig.value = latest;
-      if (!mutationFailed || latest.gateway_key !== previousKey) {
+      const refreshed = latest.primary_key === newValue
+        ? newValue
+        : latest.sub_keys.find((entry) => entry.id === target.id)?.value;
+      if (!mutationFailed || refreshed !== previousValue) {
+        selectedKeyId.value = target.id;
         message.success(t("Key 已刷新"));
       } else {
         message.error(t("刷新 Key 失败: {error}", {
@@ -404,10 +508,19 @@ async function regenerateKey() {
         }));
       }
     } catch {
-      if (result) {
+      if (newValue) {
+        // Connection refresh failed; apply the regenerated value locally so
+        // the panel never shows or copies the now-invalid old key.
+        if (isPrimary) {
+          serviceConfig.value.primary_key = newValue;
+        } else {
+          serviceConfig.value.sub_keys = serviceConfig.value.sub_keys.map((entry) =>
+            entry.id === target.id ? { ...entry, value: newValue } : entry,
+          );
+        }
+        selectedKeyId.value = target.id;
         message.success(t("Key 已刷新"));
       } else {
-        serviceConfig.value.gateway_key = "";
         dashboardError.value = true;
         message.error(t("刷新 Key 失败: {error}", {
           error: userFacingError(mutationError, t("无法连接到本地服务，请确认程序正在运行后重试")),
@@ -440,11 +553,11 @@ async function loadDashboard() {
   accounts.value = [];
   usageMap.value = {};
   dailyCosts.value = [];
-  const [loadedAccounts, settings, loadedSummary, costs] = await Promise.allSettled([
-      tauriApi.getAccounts(),
-      tauriApi.getSettings(),
-      tauriApi.getDashboardSummary(),
-      tauriApi.getDailyCostByModel(30),
+  const [loadedAccounts, connection, loadedSummary, costs] = await Promise.allSettled([
+    tauriApi.getAccounts(),
+    tauriApi.getConnection(),
+    tauriApi.getDashboardSummary(),
+    tauriApi.getDailyCostByModel(30),
   ]);
   if (loadedAccounts.status === "fulfilled") {
     accounts.value = loadedAccounts.value;
@@ -465,7 +578,7 @@ async function loadDashboard() {
         : []
     )));
   }
-  if (settings.status === "fulfilled") serviceConfig.value = settings.value;
+  if (connection.status === "fulfilled") serviceConfig.value = connection.value;
   if (loadedSummary.status === "fulfilled") {
     summary.value = loadedSummary.value;
     summaryLoaded.value = true;
@@ -474,7 +587,7 @@ async function loadDashboard() {
     dailyCosts.value = costs.value;
     costsLoaded.value = true;
   }
-  dashboardError.value = [loadedAccounts, settings, loadedSummary, costs].some((result) => result.status === "rejected")
+  dashboardError.value = [loadedAccounts, connection, loadedSummary, costs].some((result) => result.status === "rejected")
     || usageFailedAccountIds.value.size > 0;
   if (dashboardError.value) {
     message.error(t("部分仪表盘数据加载失败"));
@@ -636,6 +749,100 @@ onUnmounted(() => {
   border: 1px solid var(--ocg-border);
   border-radius: 10px;
   background: color-mix(in srgb, var(--ocg-canvas) 72%, var(--ocg-surface));
+  color: var(--ocg-primary);
+}
+.connection-row:has(.key-switcher-trigger) {
+  grid-template-columns: 28px auto minmax(0, 1fr) auto;
+}
+.key-switcher-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  padding: 3px 8px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 6px;
+  background: var(--ocg-surface);
+  color: var(--ocg-ink);
+  font-size: var(--ocg-font-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.key-switcher-trigger:hover:not(:disabled) {
+  border-color: var(--ocg-primary);
+}
+.key-switcher-trigger:focus-visible {
+  outline: 2px solid var(--ocg-primary);
+  outline-offset: 2px;
+}
+.key-switcher-trigger:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.key-switcher-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-switcher-badge {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 999px;
+  color: var(--ocg-subtle);
+  font-size: var(--ocg-font-xs);
+  font-weight: 400;
+}
+.key-switcher-menu {
+  display: grid;
+  gap: 4px;
+  min-width: 260px;
+}
+.key-switcher-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--ocg-ink);
+  cursor: pointer;
+  text-align: left;
+}
+.key-switcher-option:hover,
+.key-switcher-option.selected {
+  background: var(--ocg-primary-soft);
+}
+.key-switcher-option:focus-visible {
+  outline: 2px solid var(--ocg-primary);
+  outline-offset: -2px;
+}
+.key-switcher-option-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  grid-column: 1;
+  min-width: 0;
+}
+.key-switcher-option-name {
+  overflow: hidden;
+  font-size: var(--ocg-font-sm);
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-switcher-option-value {
+  grid-column: 1;
+  color: var(--ocg-muted);
+  font: var(--ocg-font-xs)/1.4 "Cascadia Mono", Consolas, monospace;
+}
+.key-switcher-check {
+  grid-column: 2;
+  grid-row: 1 / span 2;
   color: var(--ocg-primary);
 }
 .connection-value {

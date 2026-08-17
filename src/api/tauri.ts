@@ -56,6 +56,19 @@ export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 export type FreeModelRouting = "deny" | "explicit" | "prefer";
 export type ProxyMode = "auto" | "manual" | "direct";
 
+/** Fixed attribution id of the primary key; mirrors the backend constant. */
+export const PRIMARY_KEY_ID = "00000000-0000-0000-0000-000000000001";
+
+/** One database-owned sub key as returned by the key lifecycle API. */
+export interface SubGatewayKey {
+  id: string;
+  name: string;
+  key: string;
+  enabled: boolean;
+  deleted_at: string | null;
+  created_at: string;
+}
+
 export interface AppConfig {
   revision: number;
   gateway_port: number;
@@ -76,6 +89,28 @@ export interface AppConfig {
   routing_mode: RoutingMode;
   conversation_sticky: boolean;
   free_model_routing: FreeModelRouting;
+}
+
+/** Sub key entry in the lightweight connection payload. */
+export interface ConnectionSubKey {
+  id: string;
+  name: string;
+  enabled: boolean;
+  value: string;
+}
+
+/**
+ * Aggregated connection view for the connection center: the primary key
+ * value, non-deleted sub keys with values, the settings revision, and URL
+ * fields. Plaintext sits behind the dashboard session layer.
+ */
+export interface ConnectionInfo {
+  gateway_port: number;
+  client_root_url: string;
+  upstream_base_url: string;
+  primary_key: string;
+  sub_keys: ConnectionSubKey[];
+  revision: number;
 }
 
 export type BrowserMode = "native" | "remote" | "unsupported";
@@ -189,6 +224,8 @@ export interface ForwardLog {
   model: string;
   account_id: string;
   account_name: string;
+  client_key_id?: string | null;
+  client_key_name?: string | null;
   status: string;
   http_status: number | null;
   prompt_tokens: number;
@@ -230,10 +267,35 @@ export interface ForwardLogQuery {
   account_id?: string | null;
   model?: string | null;
   request_id?: string | null;
+  key_id?: string | null;
   start_time?: string | null;
   end_time?: string | null;
   sort_by?: string | null;
   sort_order?: string | null;
+}
+
+/** Sentinel selecting forward logs without client key attribution. */
+export const UNATTRIBUTED_KEY_FILTER = "__unattributed__";
+
+export interface ForwardLogClientKey {
+  id: string;
+  name: string;
+}
+
+export interface SubGatewayKeyResponse extends SubGatewayKey {
+  revision: number;
+}
+
+/** Summary entry in list-shaped lifecycle responses; plaintext is omitted. */
+export interface SubGatewayKeySummary {
+  id: string;
+  name: string;
+  enabled: boolean;
+}
+
+export interface SubGatewayKeyRevisionResponse {
+  revision: number;
+  keys: SubGatewayKeySummary[];
 }
 
 export interface UsageWindow {
@@ -508,6 +570,31 @@ export const tauriApi = {
       method: "POST",
     });
   },
+  getConnection: () => request<ConnectionInfo>("/connection"),
+  createGatewayKey: (name: string, expectedRevision?: number) =>
+    request<SubGatewayKeyResponse>("/settings/keys", {
+      method: "POST",
+      body: jsonBody({ name, expected_revision: expectedRevision }),
+    }),
+  updateGatewayKey: (
+    id: string,
+    update: { name?: string; enabled?: boolean },
+    expectedRevision?: number,
+  ) =>
+    request<SubGatewayKeyRevisionResponse>(`/settings/keys/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: jsonBody({ ...update, expected_revision: expectedRevision }),
+    }),
+  deleteGatewayKey: (id: string, expectedRevision?: number) =>
+    request<SubGatewayKeyRevisionResponse>(`/settings/keys/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      body: jsonBody({ expected_revision: expectedRevision }),
+    }),
+  regenerateGatewayKeyEntry: (id: string, expectedRevision?: number) =>
+    request<SubGatewayKeyResponse>(
+      `/settings/keys/${encodeURIComponent(id)}/regenerate`,
+      { method: "POST", body: jsonBody({ expected_revision: expectedRevision }) },
+    ),
   checkForUpdate: () => request<UpdateCheckResult>("/settings/check-update"),
   getUpdateStatus: () => request<UpdateStatus>("/settings/update-status"),
   installUpdate: (expectedVersion: string) => request<UpdateStatus>("/settings/install-update", {
@@ -528,6 +615,7 @@ export const tauriApi = {
     if (query.account_id) params.set("account_id", query.account_id);
     if (query.model) params.set("model", query.model);
     if (query.request_id) params.set("request_id", query.request_id);
+    if (query.key_id) params.set("key_id", query.key_id);
     if (query.start_time) params.set("start_time", query.start_time);
     if (query.end_time) params.set("end_time", query.end_time);
     if (query.sort_by) params.set("sort_by", query.sort_by);
@@ -535,6 +623,7 @@ export const tauriApi = {
     return request<ForwardLogPage>(`/logs/forward?${params}`);
   },
   getForwardLogModels: () => request<string[]>("/logs/forward/models"),
+  getForwardLogKeys: () => request<ForwardLogClientKey[]>("/logs/forward/keys"),
 
   getDashboardSummary: () => request<DashboardSummary>("/dashboard/summary"),
   getDailyCostByModel: (days?: number) =>

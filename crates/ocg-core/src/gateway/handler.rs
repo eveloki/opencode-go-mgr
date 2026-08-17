@@ -38,7 +38,7 @@ pub async fn request_trace_middleware(
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok());
-    let authenticated = check_auth(request.headers(), &state.config());
+    let authenticated = check_auth(request.headers(), &state);
     request.extensions_mut().insert(trace.clone());
     let mut response = next.run(request).await;
 
@@ -136,7 +136,7 @@ pub async fn claude_desktop_models(
     State(state): State<CoreState>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if !check_auth(&headers, &state.config()) {
+    if !check_auth(&headers, &state) {
         return protocol_error_response(
             ApiFormat::Messages,
             StatusCode::UNAUTHORIZED,
@@ -239,7 +239,7 @@ pub async fn models(
     Extension(trace): Extension<RequestTrace>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if !check_auth(&headers, &state.config()) {
+    if !check_auth(&headers, &state) {
         return protocol_error_response(
             ApiFormat::ChatCompletions,
             StatusCode::UNAUTHORIZED,
@@ -286,14 +286,14 @@ async fn proxy_handler_inner(
     let (config, client) = state.upstream_context();
     let client_body_bytes = body.len();
 
-    if !check_auth(&headers, &config) {
+    let Some(client_key_id) = extract_client_key_id(&headers, &state) else {
         return protocol_error_response(
             client_format,
             StatusCode::UNAUTHORIZED,
             "invalid gateway key",
             None,
         );
-    }
+    };
 
     let body = if claude_desktop {
         match rewrite_claude_desktop_model(&body, &config.claude_desktop_models) {
@@ -350,6 +350,7 @@ async fn proxy_handler_inner(
         plan,
         config,
         client,
+        Some(client_key_id),
     )
     .await
 }
@@ -390,14 +391,14 @@ async fn gemini_proxy_handler(
 ) -> axum::response::Response {
     let (config, client) = state.upstream_context();
     let client_body_bytes = body.len();
-    if !check_auth(&headers, &config) {
+    let Some(client_key_id) = extract_client_key_id(&headers, &state) else {
         return protocol_error_response(
             ApiFormat::Gemini,
             StatusCode::UNAUTHORIZED,
             "invalid gateway key",
             None,
         );
-    }
+    };
     let plan = match prepare_gemini_request(model, stream, body.clone()) {
         Ok(plan) => plan,
         Err(error) => {
@@ -428,6 +429,7 @@ async fn gemini_proxy_handler(
         plan,
         config,
         client,
+        Some(client_key_id),
     )
     .await
 }
@@ -442,6 +444,7 @@ async fn execute_plan(
     plan: RequestPlan,
     config: AppConfig,
     client: reqwest::Client,
+    client_key_id: Option<String>,
 ) -> axum::response::Response {
     // One logical client request, including safe retries and account fallback,
     // must use one immutable pricing revision from start to finish.
@@ -702,6 +705,7 @@ async fn execute_plan(
                 !retried_same_account,
                 headers.clone(),
                 pricing_snapshot.clone(),
+                client_key_id.as_deref(),
             )
             .await
             {
@@ -970,23 +974,49 @@ fn rebuild_go_fallback_plan(
     Ok(plan)
 }
 
-fn check_auth(headers: &HeaderMap, config: &AppConfig) -> bool {
-    // Accept the standard bearer token plus Anthropic and Gemini SDK headers.
-    let bearer_matches = headers
+/// Candidate credential values a client may present, in fixed priority
+/// order: the Bearer token, then `x-api-key`, then `x-goog-api-key`. Every
+/// non-empty candidate is an independent credential claim; a wrong value
+/// alongside a correct one never downgrades the request.
+fn candidate_key_values(headers: &HeaderMap) -> Vec<&str> {
+    let mut candidates = Vec::with_capacity(3);
+    let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|auth| {
-            let expected = format!("Bearer {}", config.gateway_key);
-            auth.trim() == expected
-        })
-        .unwrap_or(false);
-    bearer_matches
-        || ["x-api-key", "x-goog-api-key"].iter().any(|name| {
-            headers
-                .get(*name)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|value| value.trim() == config.gateway_key)
-        })
+        .and_then(|value| value.to_str().ok())
+        .and_then(|auth| auth.trim().strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(value) = bearer {
+        candidates.push(value);
+    }
+    for name in ["x-api-key", "x-goog-api-key"] {
+        let value = headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(value) = value {
+            candidates.push(value);
+        }
+    }
+    candidates
+}
+
+/// Extracts the id of the credential that authenticates this request.
+/// Authentication succeeds when ANY non-empty candidate header matches ANY
+/// currently valid credential (the primary key value or an enabled,
+/// non-deleted sub key) in the credential snapshot; the first candidate hit,
+/// in header order, attributes the request (the primary key resolves to the
+/// fixed `PRIMARY_KEY_ID`).
+pub(crate) fn extract_client_key_id(headers: &HeaderMap, state: &CoreState) -> Option<String> {
+    candidate_key_values(headers)
+        .into_iter()
+        .find_map(|value| state.credential_entry_for_value(value))
+        .map(|entry| entry.id)
+}
+
+fn check_auth(headers: &HeaderMap, state: &CoreState) -> bool {
+    extract_client_key_id(headers, state).is_some()
 }
 
 fn gemini_error(
@@ -997,7 +1027,7 @@ fn gemini_error(
     message: &str,
     client_body_bytes: Option<usize>,
 ) -> axum::response::Response {
-    if !check_auth(headers, &state.config()) {
+    if !check_auth(headers, state) {
         return protocol_error_response(
             ApiFormat::Gemini,
             StatusCode::UNAUTHORIZED,
@@ -1024,7 +1054,7 @@ fn gemini_expected_fallback(
     status: StatusCode,
     message: &str,
 ) -> axum::response::Response {
-    if !check_auth(headers, &state.config()) {
+    if !check_auth(headers, state) {
         return protocol_error_response(
             ApiFormat::Gemini,
             StatusCode::UNAUTHORIZED,
@@ -1132,28 +1162,168 @@ fn protocol_error_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_auth, rewrite_claude_desktop_model};
+    use super::{check_auth, extract_client_key_id, rewrite_claude_desktop_model};
     use crate::gateway::protocol::{ApiFormat, prepare_request};
+    use crate::gateway_keys::{CredentialEntry, CredentialSnapshot, PRIMARY_KEY_ID};
     use crate::models::{AppConfig, CLAUDE_DESKTOP_OPUS_ALIAS, ClaudeDesktopModels};
+    use crate::state::{CoreState, CoreStateInner};
     use axum::body::Bytes;
     use axum::http::{HeaderMap, HeaderValue};
     use serde_json::json;
+    use std::collections::HashMap;
+
+    /// Owns the temp data dir and releases the SQLite connection (and thus
+    /// the open database file) before removing the directory on Windows.
+    struct StateDir {
+        state: Option<CoreState>,
+        dir: Option<std::path::PathBuf>,
+    }
+
+    impl std::ops::Deref for StateDir {
+        type Target = CoreState;
+        fn deref(&self) -> &CoreState {
+            self.state.as_ref().expect("state present during use")
+        }
+    }
+
+    impl Drop for StateDir {
+        fn drop(&mut self) {
+            self.state.take();
+            if let Some(dir) = self.dir.take() {
+                std::fs::remove_dir_all(dir).ok();
+            }
+        }
+    }
+
+    fn state_with_snapshot() -> StateDir {
+        let mut dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be valid")
+            .as_nanos();
+        dir.push(format!("ocg-auth-matrix-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("test data directory should be created");
+        let db = crate::db::Database::open(dir.clone()).expect("test database should open");
+        let cipher: std::sync::Arc<dyn crate::crypto::KeyCipher + Send + Sync> =
+            std::sync::Arc::new(crate::crypto::StaticKeyCipher::new("test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+        StateDir {
+            state: Some(std::sync::Arc::new(state)),
+            dir: Some(dir),
+        }
+    }
+
+    fn entry(id: &str, name: &str) -> CredentialEntry {
+        CredentialEntry {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn snapshot() -> CredentialSnapshot {
+        HashMap::from([
+            ("ocg-primary".to_string(), entry(PRIMARY_KEY_ID, "Primary")),
+            ("ocg-laptop".to_string(), entry("laptop", "Laptop")),
+        ])
+    }
 
     #[test]
-    fn gemini_api_key_header_is_accepted_and_wrong_key_is_rejected() {
-        let config = AppConfig {
-            gateway_key: "gateway-test-key".to_string(),
-            ..AppConfig::default()
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-goog-api-key",
-            HeaderValue::from_static("gateway-test-key"),
-        );
-        assert!(check_auth(&headers, &config));
+    fn auth_matrix_across_headers_credentials_and_states() {
+        let state = state_with_snapshot();
+        *state.credential_snapshot.write() = snapshot();
+        let cases = [
+            // (header name, presented value, expected key id)
+            ("authorization", "Bearer ocg-primary", PRIMARY_KEY_ID),
+            ("authorization", "Bearer ocg-laptop", "laptop"),
+            ("x-api-key", "ocg-laptop", "laptop"),
+            ("x-goog-api-key", "ocg-primary", PRIMARY_KEY_ID),
+            ("authorization", "Bearer wrong-key", ""),
+            ("authorization", "Bearer ", ""),
+            ("x-api-key", "", ""),
+            ("x-goog-api-key", "   ", ""),
+        ];
+        for (header, presented, expected) in cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::HeaderName::from_static(header),
+                HeaderValue::from_str(presented).expect("test header value should be valid"),
+            );
+            let matched = extract_client_key_id(&headers, &state);
+            if expected.is_empty() {
+                assert!(
+                    matched.is_none(),
+                    "{header}: {presented} should not authenticate"
+                );
+            } else {
+                assert_eq!(
+                    matched.as_deref(),
+                    Some(expected),
+                    "{header}: {presented} should match {expected}"
+                );
+            }
+        }
 
-        headers.insert("x-goog-api-key", HeaderValue::from_static("wrong-key"));
-        assert!(!check_auth(&headers, &config));
+        let no_headers = HeaderMap::new();
+        assert!(extract_client_key_id(&no_headers, &state).is_none());
+    }
+
+    #[test]
+    fn wrong_x_api_key_alongside_correct_x_goog_api_key_passes() {
+        let state = state_with_snapshot();
+        *state.credential_snapshot.write() = snapshot();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("wrong-key"));
+        headers.insert("x-goog-api-key", HeaderValue::from_static("ocg-laptop"));
+        assert!(check_auth(&headers, &state));
+        assert_eq!(
+            extract_client_key_id(&headers, &state).as_deref(),
+            Some("laptop")
+        );
+
+        // Bearer wins attribution when several candidates hit: it comes first
+        // in the fixed candidate order.
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer ocg-primary"),
+        );
+        assert_eq!(
+            extract_client_key_id(&headers, &state).as_deref(),
+            Some(PRIMARY_KEY_ID)
+        );
+
+        // Two wrong candidates still fail.
+        let mut wrong = HeaderMap::new();
+        wrong.insert("x-api-key", HeaderValue::from_static("wrong-key"));
+        wrong.insert("x-goog-api-key", HeaderValue::from_static("also-wrong"));
+        assert!(!check_auth(&wrong, &state));
+    }
+
+    #[test]
+    fn bearer_without_prefix_falls_back_to_api_key_headers() {
+        let state = state_with_snapshot();
+        *state.credential_snapshot.write() = snapshot();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("ocg-primary"));
+        assert!(extract_client_key_id(&headers, &state).is_none());
+        headers.insert("x-api-key", HeaderValue::from_static("ocg-laptop"));
+        assert_eq!(
+            extract_client_key_id(&headers, &state).as_deref(),
+            Some("laptop")
+        );
+    }
+
+    #[test]
+    fn disabled_and_deleted_sub_keys_leave_the_snapshot() {
+        // The snapshot only ever contains the primary value and enabled
+        // non-deleted sub keys; disabling or soft-deleting removes the entry
+        // (covered end to end by the key lifecycle integration tests).
+        let state = state_with_snapshot();
+        let mut snapshot = snapshot();
+        assert!(snapshot.remove("ocg-laptop").is_some());
+        *state.credential_snapshot.write() = snapshot;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("ocg-laptop"));
+        assert!(!check_auth(&headers, &state));
     }
 
     #[test]
@@ -1180,5 +1350,15 @@ mod tests {
         assert_eq!(plan.model, "glm-5.2");
         // glm-5.2 supports Messages natively (live probe); alias rewrite keeps Messages.
         assert_eq!(plan.upstream, ApiFormat::Messages);
+    }
+
+    #[test]
+    fn app_config_still_compiles_without_a_key_list() {
+        // Compile-time guard: the config shape no longer embeds key entries.
+        let config = AppConfig {
+            gateway_key: "k".into(),
+            ..AppConfig::default()
+        };
+        config.validate().expect("scalar-key config validates");
     }
 }

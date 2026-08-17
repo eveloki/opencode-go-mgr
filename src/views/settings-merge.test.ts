@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AppConfig } from "../api/tauri.ts";
-import { mergeUnsavedSettings } from "./settings-merge.ts";
+import { EDITABLE_SETTING_KEYS, mergeUnsavedSettings } from "./settings-merge.ts";
+
+test("the primary key value is an editable settings field", () => {
+  assert.ok(EDITABLE_SETTING_KEYS.includes("gateway_key"));
+});
 
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -53,24 +57,31 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
   assert.equal(merged.non_stream_timeout_secs, 1_200);
 });
 
-test("settings conflict merge never restores stale secrets or capability flags", () => {
+test("settings conflict merge preserves a locally edited primary key value", () => {
   const saved = config();
-  const current = config({
-    gateway_key: "unpersisted-key",
-    auto_start: true,
-    auto_start_supported: true,
-  });
+  const current = config({ gateway_key: "unpersisted-key", auto_start: true });
   const latest = config({
     revision: 3,
-    gateway_key: "server-key-3",
     auto_start_supported: false,
     client_root_url_from_env: true,
   });
 
   const merged = mergeUnsavedSettings(latest, current, saved);
 
-  assert.equal(merged.gateway_key, "server-key-3");
+  // gateway_key is editable (v1.6.1 semantics): an unsaved local edit
+  // survives the merge; capability flags still come from the server.
+  assert.equal(merged.gateway_key, "unpersisted-key");
   assert.equal(merged.auto_start, true);
   assert.equal(merged.auto_start_supported, false);
   assert.equal(merged.client_root_url_from_env, true);
+});
+
+test("an untouched primary key value follows the server snapshot", () => {
+  const saved = config();
+  const current = config();
+  const latest = config({ revision: 2, gateway_key: "server-key-2" });
+
+  const merged = mergeUnsavedSettings(latest, current, saved);
+
+  assert.equal(merged.gateway_key, "server-key-2");
 });

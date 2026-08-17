@@ -12,6 +12,8 @@
 - UI 文案：接入凭证在面板上显示为 **Key**（不要写 “Gateway Key”）；设计系统以 `DESIGN.md` + `src/theme.ts` 为准。
 - Rust workspace：`crates/ocg-core`、`crates/ocg-cli`（二进制名 `ocg-manager-cli`）、`src-tauri`。
 - 核心 Gateway：Axum + Tokio + reqwest，默认监听 `127.0.0.1:9042`；同一端口提供 OpenAI Chat Completions / Responses、Anthropic Messages、Gemini `generateContent` 客户端入口与 Claude Desktop 别名入口。
+- 接入凭证分两层：主 Key 是遗留 `AppConfig.gateway_key` 标量（`AppConfig::validate` 强制 trim 后非空，永不可禁用/删除，日志归因固定 `gateway_keys::PRIMARY_KEY_ID`，名称快照 "Primary"）；子 Key 存于 SQLite `sub_gateway_keys` 表（schema v20，活跃上限 64，软删保留名称、清除明文），仅经 `/dashboard/api/settings/keys*` 生命周期 API 变更，每次成功变更 bump settings_revision。主/子 Key 值互斥由统一闸口 `gateway_keys::ensure_primary_value_allowed` 在 dashboard、Tauri settings 与子 Key 启用路径强制；config JSON 不再内嵌 Key 列表。
+- 鉴权收集 Bearer / x-api-key / x-goog-api-key 全部非空候选头，任一命中凭证快照（`CoreStateInner.credential_snapshot`，含主 Key 与启用子 Key）即通过，首个命中按候选头顺序归因；快照同源供 forward log 名称快照。`GET /dashboard/api/connection` 返回接入中心专用轻量 `ConnectionInfo`（含明文 Key，处于 dashboard 会话保护层），Dashboard 不持有完整 settings 形状。
 - 持久化：SQLite。GUI 数据目录为 Windows `%USERPROFILE%\.ocg-mgr` 或 macOS/Linux `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
 - 桌面端：Tauri v2 跨平台托盘应用，主窗口默认隐藏；托盘/单实例逻辑用系统浏览器打开 `http://127.0.0.1:<port>/dashboard/`，回环监听自动跳过登录。
 - Tauri commands 仍注册在 `src-tauri/src/commands/`，但不是当前 Vue dashboard 的主调用路径。
@@ -34,6 +36,7 @@
 ## 关键文件
 
 - `crates/ocg-core/src/gateway/`：OpenAI / Anthropic / Gemini 客户端协议路由与转换、Claude Desktop 别名改写、转发、选择器、冷却、费用统计。
+- `crates/ocg-core/src/gateway_keys.rs`：子 Key 生命周期门面（`sub_gateway_keys` CRUD 封装、凭证快照构建/重建、`PRIMARY_KEY_ID` 常量、跨层值唯一闸口）；改 Key 存储或鉴权快照时从这里入手。
 - `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略。
 - `crates/ocg-core/src/dashboard.rs`：当前 Vue 面板使用的 `/dashboard/api`。
 - `crates/ocg-core/src/console_usage.rs`：托管账号从浏览器 Profile 刷新 OpenCode Go 控制台用量。
@@ -119,6 +122,7 @@ git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json s
 
 ## 当前已知缺口
 
+- 曾运行多 Key 开发构建（PR #43 config 内嵌形态，从未发布）的数据库：历史 forward_logs 已按当时主 Key 的随机 UUID 回填（非 NULL，不触发重回填），新二进制下 `/logs/forward/keys` 会出现旧 UUID 与 `PRIMARY_KEY_ID` 两个同名 "Primary" 条目。属可接受开发期残留；洁癖修复可删除 data.sqlite 重建，不提供自动迁移。首次启动照常把 NULL 历史行回填到 `PRIMARY_KEY_ID`。
 - `/embeddings` 与 Gemini `embedContent` 未实现；Gemini `countTokens` 返回 `501`，供 Gemini CLI 回退本地估算。
 - Gemini `generateContent` / `streamGenerateContent` 已实现，但非空 `safetySettings`、`cachedContent`、`fileData`、Google Search、`urlContext` 及未明确支持的非空 `generationConfig` 字段会返回 `400`。`topK` 与 `thinkingConfig` 只能视为跨协议兼容提示，不能承诺与 Gemini 原生后端语义等价。
 - 流式 usage 依赖上游 usage chunk；Chat 流式请求会设置 `stream_options.include_usage`。没有 chunk 时会记为 `success_no_usage`。

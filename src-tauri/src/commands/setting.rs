@@ -1,6 +1,8 @@
 use crate::state::AppState;
-use ocg_core::models::{AppConfig, GatewayStatus, normalize_client_root_url};
-use ocg_core::state::{CoreState, random_word};
+use ocg_core::models::{
+    AppConfig, GatewayStatus, PRIMARY_KEY_REQUIRED_MESSAGE, normalize_client_root_url,
+};
+use ocg_core::state::CoreState;
 use tauri::State;
 
 #[tauri::command]
@@ -26,6 +28,17 @@ pub(crate) fn update_settings_inner(
     sync_auto_start: bool,
 ) -> Result<GatewayStatus, String> {
     let _settings_update = core.settings_update.lock();
+    config.gateway_key = config.gateway_key.trim().to_string();
+    if config.gateway_key.is_empty() {
+        return Err(PRIMARY_KEY_REQUIRED_MESSAGE.to_string());
+    }
+    // Same unified cross-tier gate as the dashboard settings update: the
+    // primary value must differ from every non-deleted sub key's value.
+    {
+        let db = core.db.lock();
+        ocg_core::gateway_keys::ensure_primary_value_allowed(&db, &config.gateway_key)
+            .map_err(|error| error.to_string())?;
+    }
     config.validate_timeouts()?;
     validate_upstream_url(&config.upstream_base_url)?;
     config.client_root_url = normalize_client_root_url(&config.client_root_url)?;
@@ -97,14 +110,25 @@ pub fn regenerate_gateway_key(state: State<'_, AppState>) -> Result<String, Stri
 
 pub(crate) fn regenerate_gateway_key_inner(core: &CoreState) -> Result<String, String> {
     let _settings_update = core.settings_update.lock();
+    // Converged on the primary key: the dashboard endpoint and this command
+    // share one rotation path (set_config refreshes the credential snapshot).
+    let new_value = {
+        let db = core.db.lock();
+        ocg_core::gateway_keys::generate_primary_value(&db, &core.config().gateway_key)
+            .map_err(|error| error.to_string())?
+    };
     let mut config = core.config();
-    config.gateway_key = format!("ocg-{}-{}", random_word(), random_word());
-    core.set_config(config.clone()).map_err(|e| e.to_string())?;
-    let _ = core
-        .db
-        .lock()
-        .log_gateway("info", "settings", "gateway key regenerated");
-    Ok(config.gateway_key)
+    config.gateway_key = new_value;
+    core.set_config(config).map_err(|e| e.to_string())?;
+    let _ = core.db.lock().log_gateway(
+        "info",
+        "keys",
+        &format!(
+            "regenerated primary key `{}`",
+            ocg_core::gateway_keys::PRIMARY_KEY_NAME
+        ),
+    );
+    Ok(core.config().gateway_key)
 }
 
 fn validate_upstream_url(url: &str) -> Result<(), String> {

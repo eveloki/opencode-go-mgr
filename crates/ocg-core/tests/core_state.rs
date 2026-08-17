@@ -293,6 +293,8 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             model: "glm-5.2".into(),
             account_id: "selected".into(),
             account_name: "selected".into(),
+            client_key_id: None,
+            client_key_name: None,
             status: status.into(),
             http_status: Some(200),
             prompt_tokens: prompt,
@@ -324,6 +326,8 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             model: "other".into(),
             account_id: "busy".into(),
             account_name: format!("busy-{index}"),
+            client_key_id: None,
+            client_key_name: None,
             status: "success".into(),
             http_status: Some(200),
             prompt_tokens: 1_000,
@@ -354,6 +358,7 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             status: Some("success"),
             account_id: Some("selected"),
             model: None,
+            key_id: None,
             request_id: None,
             start_time: None,
             end_time: None,
@@ -376,6 +381,7 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             status: Some("success"),
             account_id: Some("selected"),
             model: None,
+            key_id: None,
             request_id: None,
             start_time: None,
             end_time: None,
@@ -394,6 +400,7 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
             status: None,
             account_id: None,
             model: None,
+            key_id: None,
             request_id: None,
             start_time: None,
             end_time: None,
@@ -423,6 +430,8 @@ fn daily_cost_by_model_groups_chargeable_rows_only() {
             model: model.into(),
             account_id: "acct".into(),
             account_name: "main".into(),
+            client_key_id: None,
+            client_key_name: None,
             status: status.into(),
             http_status: Some(200),
             prompt_tokens: 0,
@@ -461,4 +470,280 @@ fn daily_cost_by_model_groups_chargeable_rows_only() {
         rows.iter()
             .any(|row| row.model == "kimi-k2.7-code" && (row.cost - 3.0).abs() < f64::EPSILON)
     );
+}
+
+#[test]
+fn single_key_upgrade_drill_backfills_logs_to_the_primary_key_id() {
+    // Build the pre-multi-key data shape: a config JSON without any key
+    // list plus forward_logs rows without a client key.
+    let dir = temp_data_dir("upgrade-drill");
+    let db = Database::open(dir.clone()).unwrap();
+    db.set_setting(
+        "config",
+        &serde_json::json!({
+            "gateway_port": 9042,
+            "gateway_key": "ocg-legacy-value",
+            "upstream_base_url": "https://opencode.ai/zen/go"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for index in 0..3 {
+        let mut log = ForwardLog {
+            id: 0,
+            timestamp: chrono::Utc::now(),
+            model: "glm-5.2".into(),
+            account_id: "acct".into(),
+            account_name: "acct".into(),
+            client_key_id: None,
+            client_key_name: None,
+            status: "success".into(),
+            http_status: Some(200),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: Some(0.5),
+            pricing_revision_id: None,
+            quota_multiplier: None,
+            local_adjustment_multiplier: None,
+            service_tier: None,
+            cost_state: "legacy_estimate".into(),
+            error_message: None,
+            request_id: None,
+            attempt: None,
+            error_source: None,
+            error_stage: None,
+            duration_ms: None,
+            diagnostic: None,
+        };
+        log.model = format!("m{index}");
+        db.log_forward(&log).unwrap();
+    }
+    drop(db);
+
+    // "Upgrade": the new binary opens the same data directory.
+    let cipher: Arc<StaticKeyCipher> = Arc::new(StaticKeyCipher::new("drill"));
+    let state = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher as Arc<dyn KeyCipher + Send + Sync>,
+    )
+    .unwrap();
+
+    // The legacy scalar still authenticates as the primary key under its
+    // fixed hardcoded id.
+    let config = state.config();
+    assert_eq!(config.gateway_key, "ocg-legacy-value");
+    assert!(
+        state
+            .credential_entry_for_value("ocg-legacy-value")
+            .is_some()
+    );
+    assert_eq!(
+        state
+            .credential_entry_for_value("ocg-legacy-value")
+            .unwrap()
+            .id,
+        ocg_core::gateway_keys::PRIMARY_KEY_ID
+    );
+
+    // Run the startup backfill to completion: historical rows attribute to
+    // the fixed primary id and remain filterable under it.
+    let primary_id = ocg_core::gateway_keys::PRIMARY_KEY_ID.to_string();
+    let primary_name = ocg_core::gateway_keys::PRIMARY_KEY_NAME.to_string();
+    let mut more = true;
+    while more {
+        more = state
+            .db
+            .lock()
+            .backfill_forward_logs_client_key_step(
+                &primary_id,
+                &primary_name,
+                ocg_core::db::FORWARD_LOG_BACKFILL_CHUNK_ROWS,
+            )
+            .unwrap();
+    }
+    let page = state
+        .db
+        .lock()
+        .query_forward_logs(ForwardLogQueryOptions {
+            limit: 10,
+            offset: 0,
+            status: None,
+            account_id: None,
+            model: None,
+            key_id: Some(primary_id.as_str()),
+            request_id: None,
+            start_time: None,
+            end_time: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .unwrap();
+    assert_eq!(page.summary.total_requests, 3);
+    assert!(
+        page.items
+            .iter()
+            .all(|log| log.client_key_name.as_deref() == Some("Primary"))
+    );
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn downgrade_drill_keeps_sub_keys_and_never_resurrects_revoked_ones() {
+    let dir = temp_data_dir("downgrade-drill");
+    let cipher: Arc<StaticKeyCipher> = Arc::new(StaticKeyCipher::new("drill"));
+    let state = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher.clone() as Arc<dyn KeyCipher + Send + Sync>,
+    )
+    .unwrap();
+    let enabled = ocg_core::gateway_keys::create_sub_key(&state, "Laptop").unwrap();
+    let disabled = ocg_core::gateway_keys::create_sub_key(&state, "Paused").unwrap();
+    ocg_core::gateway_keys::set_sub_key_enabled(&state, &disabled.id, false).unwrap();
+    let before = state.config();
+    let primary_value = before.gateway_key.clone();
+
+    // "Downgrade": an old single-key binary rewrites the stored config with
+    // its own (list-free) shape and saves settings; it never reads or
+    // rewrites the sub key table.
+    let legacy_json = serde_json::to_value(&before).unwrap();
+    {
+        let db = state.db.lock();
+        db.set_setting("config", &legacy_json.to_string()).unwrap();
+        // Simulated old-binary settings save: full config rewrite, sub key
+        // table untouched.
+        assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 2);
+    }
+
+    // "Re-upgrade": the new binary loads the stored config and table again.
+    drop(state);
+    let state = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher as Arc<dyn KeyCipher + Send + Sync>,
+    )
+    .unwrap();
+    let config = state.config();
+    // The primary value survived; every sub key is intact with its state.
+    assert_eq!(config.gateway_key, primary_value);
+    assert!(state.credential_entry_for_value(&primary_value).is_some());
+    assert!(state.credential_entry_for_value(&enabled.key).is_some());
+    assert!(
+        state.credential_entry_for_value(&disabled.key).is_none(),
+        "the disabled sub key never authenticates on either binary"
+    );
+    let reloaded = state
+        .db
+        .lock()
+        .get_sub_gateway_key(&disabled.id)
+        .unwrap()
+        .unwrap();
+    assert!(!reloaded.enabled);
+    assert!(reloaded.deleted_at.is_none());
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn backfill_restarts_when_rows_appear_after_completion() {
+    let dir = temp_data_dir("backfill-restart");
+    let cipher: Arc<StaticKeyCipher> = Arc::new(StaticKeyCipher::new("drill"));
+    let state = CoreStateInner::new(
+        Database::open(dir.clone()).unwrap(),
+        dir.clone(),
+        cipher as Arc<dyn KeyCipher + Send + Sync>,
+    )
+    .unwrap();
+    let primary_id = ocg_core::gateway_keys::PRIMARY_KEY_ID.to_string();
+    let primary_name = ocg_core::gateway_keys::PRIMARY_KEY_NAME.to_string();
+    let run_backfill = |state: &CoreStateInner| {
+        let mut more = true;
+        while more {
+            more = state
+                .db
+                .lock()
+                .backfill_forward_logs_client_key_step(
+                    &primary_id,
+                    &primary_name,
+                    ocg_core::db::FORWARD_LOG_BACKFILL_CHUNK_ROWS,
+                )
+                .unwrap();
+        }
+    };
+
+    // Empty table: the backfill completes immediately.
+    run_backfill(&state);
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .forward_log_backfill_marker()
+            .unwrap()
+            .as_deref(),
+        Some(ocg_core::db::BACKFILL_DONE)
+    );
+
+    // A downgrade window writes unattributed rows after completion.
+    let mut unattributed = ForwardLog {
+        id: 0,
+        timestamp: chrono::Utc::now(),
+        model: "glm-5.2".into(),
+        account_id: "acct".into(),
+        account_name: "acct".into(),
+        client_key_id: None,
+        client_key_name: None,
+        status: "success".into(),
+        http_status: Some(200),
+        prompt_tokens: 1,
+        completion_tokens: 1,
+        cached_tokens: 0,
+        cache_creation_tokens: 0,
+        cost: None,
+        pricing_revision_id: None,
+        quota_multiplier: None,
+        local_adjustment_multiplier: None,
+        service_tier: None,
+        cost_state: "not_applicable".into(),
+        error_message: None,
+        request_id: None,
+        attempt: None,
+        error_source: None,
+        error_stage: None,
+        duration_ms: None,
+        diagnostic: None,
+    };
+    unattributed.model = "late".into();
+    state.db.lock().log_forward(&unattributed).unwrap();
+
+    // The next run (i.e. after restart) detects the NULL rows and
+    // re-attributes them without a full-table scan.
+    run_backfill(&state);
+    let page = state
+        .db
+        .lock()
+        .query_forward_logs(ForwardLogQueryOptions {
+            limit: 10,
+            offset: 0,
+            status: None,
+            account_id: None,
+            model: None,
+            key_id: Some(&primary_id),
+            request_id: None,
+            start_time: None,
+            end_time: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .unwrap();
+    assert_eq!(page.summary.total_requests, 1);
+    assert_eq!(page.items[0].model, "late");
+
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
 }

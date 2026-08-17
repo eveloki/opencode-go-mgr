@@ -302,7 +302,7 @@ test("logs view wires filters, race cancellation, debounce, and empty or error s
   assert.ok(forwardLoad.indexOf("forwardLogs.value = []") < forwardLoad.indexOf("await tauriApi.getForwardLogs"));
   assert.ok(forwardLoad.indexOf("forwardTotals.value = emptySummary()") < forwardLoad.indexOf("await tauriApi.getForwardLogs"));
   assert.match(forwardLoad, /catch \(e\)[\s\S]*request === forwardRequest[\s\S]*forwardLogs\.value = \[\]/);
-  assert.match(source, /Promise\.all\(\[loadForwardLogs\(\), loadForwardLogModels\(\)\]\)/);
+  assert.match(source, /Promise\.all\(\[loadForwardLogs\(\), loadForwardLogModels\(\), loadForwardLogKeys\(\)\]\)/);
   assert.match(source, /row\.cost_state === "legacy_estimate"/);
   assert.match(source, /row\.cost_state === "free"/);
   assert.match(source, /t\("免费"\)/);
@@ -380,4 +380,56 @@ test("rolling log presets resolve against the current refresh time", async () =>
   const clearFilters = source.slice(source.indexOf("function clearFilters"), source.indexOf("function toggleSortOrder"));
   assert.match(clearFilters, /activePreset\.value = "all"/);
   assert.match(clearFilters, /timeRange\.value = null/);
+});
+
+test("forward logs can be filtered by client key including the unattributed option", async () => {
+  const source = await readFile(new URL("./Logs.vue", import.meta.url), "utf8");
+  const template = source.slice(source.indexOf("<template>"), source.indexOf("<script setup"));
+
+  // Selector data comes from the log table so deleted/dangling ids stay listed.
+  assert.match(template, /v-model:value="keyFilter"/);
+  assert.match(source, /clientKeys\.value = await tauriApi\.getForwardLogKeys\(\)/);
+  assert.match(source, /label: t\("未归因"\), value: UNATTRIBUTED_KEY_FILTER/);
+  assert.match(source, /key_id: keyFilter\.value/);
+  // Filter changes participate in pagination reset + query state sync.
+  const forwardFilterWatch = source.slice(
+    source.indexOf("[statusFilter, accountFilter"),
+    source.indexOf("watch(requestIdFilter"),
+  );
+  assert.match(forwardFilterWatch, /keyFilter/);
+  assert.match(source, /url\.searchParams\.set\("key", keyFilter\.value\)/);
+  const clearFilters = source.slice(source.indexOf("function clearFilters"), source.indexOf("function toggleSortOrder"));
+  assert.match(clearFilters, /keyFilter\.value = ""/);
+  // Pre-upgrade usage lands on the primary key; the note explains that.
+  assert.match(template, /升级前用量统一计入主 Key/);
+  // The note lives outside the filter-bar grid so it never pushes the
+  // remaining filters onto a second row.
+  assert.ok(
+    template.indexOf("key-filter-note") > template.indexOf("filter-actions"),
+    "key filter note must render after the filter bar, not inside it",
+  );
+  const noteRule = source.slice(
+    source.indexOf(".key-filter-note"),
+    source.indexOf("}", source.indexOf(".key-filter-note")),
+  );
+  assert.doesNotMatch(noteRule, /grid-column/);
+  // The key filter keeps a real column width (an `auto` column collapses an
+  // empty select) and its menu expands to fit long key names.
+  assert.match(source, /grid-template-columns: 240px 140px 180px 180px 180px 120px auto 1fr/);
+  const keyField = template.slice(template.indexOf("接入 Key"), template.indexOf("时间范围"));
+  assert.match(keyField, /:consistent-menu-width="false"/);
+});
+
+test("request ids render shortened while the full value stays reachable", async () => {
+  const source = await readFile(new URL("./Logs.vue", import.meta.url), "utf8");
+
+  // Display keeps the head and tail; tooltip, copy, and chain focus keep
+  // the complete id.
+  assert.match(source, /function shortRequestId/);
+  assert.match(source, /`\$\{requestId\.slice\(0, 13\)\}…\$\{requestId\.slice\(-4\)\}`/);
+  assert.match(source, /h\("code", shortRequestId\(requestId\)\)/);
+  assert.match(source, /title: requestId,/);
+  assert.match(source, /copyText\(target, requestId, t\("请求 ID"\)\)/);
+  assert.match(source, /focusRequestChain\(requestId\)/);
+  assert.match(source, /width: 170, render: renderRequestId/);
 });

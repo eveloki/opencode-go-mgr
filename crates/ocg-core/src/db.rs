@@ -12,6 +12,16 @@ pub struct Database {
     conn: Connection,
 }
 
+/// Settings key holding the forward-log client-key backfill watermark
+/// (max processed rowid), or `BACKFILL_DONE` once complete.
+pub const BACKFILL_SETTING_KEY: &str = "backfill_forward_logs_client_key";
+pub const BACKFILL_DONE: &str = "done";
+/// Rows per backfill transaction; tuned so one chunk holds the connection
+/// for only tens of milliseconds on local SQLite.
+pub const FORWARD_LOG_BACKFILL_CHUNK_ROWS: i64 = 50_000;
+/// Pause between backfill chunks so concurrent request logging wins the lock.
+pub const FORWARD_LOG_BACKFILL_CHUNK_PAUSE: std::time::Duration =
+    std::time::Duration::from_millis(10);
 /// Durable, egress-IP-wide Zen free-channel cooldown.
 ///
 /// This must not be tied only to an account row: disabling or deleting the key
@@ -29,6 +39,9 @@ pub struct ForwardLogQueryOptions<'a> {
     pub end_time: Option<&'a str>,
     pub sort_by: Option<&'a str>,
     pub sort_order: Option<&'a str>,
+    /// Filter by the gateway key that authenticated the request;
+    /// `UNATTRIBUTED_KEY_FILTER` selects rows without a client key.
+    pub key_id: Option<&'a str>,
 }
 
 pub struct ForwardLogDiagnosticUpdate<'a> {
@@ -771,10 +784,53 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (17);")?;
         }
 
+        // v18 (upstream v1.6.3): optional account notes.
         if version < 18 {
             ensure_column(&tx, "accounts", "notes", "TEXT")?;
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (18);")?;
         }
+
+        // v19: client gateway key attribution on forward logs. Nullable columns
+        // keep old binaries (which select explicit column names) downgrade-safe;
+        // historical NULL rows mean "unattributed" until the startup backfill
+        // attributes them to the fixed primary key id (PRIMARY_KEY_ID).
+        if version < 19 {
+            ensure_column(&tx, "forward_logs", "client_key_id", "TEXT")?;
+            ensure_column(&tx, "forward_logs", "client_key_name", "TEXT")?;
+            tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_forward_logs_client_key
+                    ON forward_logs(client_key_id);
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (19);",
+            )?;
+        }
+
+        // v20: sub gateway keys live in their own table, owned exclusively by
+        // the key lifecycle API. Old single-key binaries never read or rewrite
+        // it, so sub keys survive downgrade round trips unchanged. The partial
+        // unique index only backstops uniqueness among non-deleted sub keys;
+        // the primary key lives in the legacy config scalar and cross-tier
+        // collision checks are enforced at the API layer.
+        if version < 20 {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS sub_gateway_keys (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    deleted_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_gateway_keys_key
+                    ON sub_gateway_keys(key) WHERE deleted_at IS NULL AND key <> '';
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (20);",
+            )?;
+        }
+
+        // Unreleased #43 drafts numbered client-key columns as v18 and the
+        // sub-key table as v19, so those databases already report version
+        // >= 18 and skip the notes gate above. ensure_column is idempotent
+        // on released v1.6.3 libraries and on fresh installs.
+        ensure_column(&tx, "accounts", "notes", "TEXT")?;
 
         // Detailed diagnostics are intentionally short-lived. Keep the base log row,
         // stable request id, source, stage, and original compact error indefinitely.
@@ -1156,6 +1212,33 @@ impl Database {
         Ok(())
     }
 
+    /// Insert many forward_logs rows in one transaction (bulk seeding).
+    /// Test-only helper: production writes go through `log_forward`.
+    pub fn log_forward_batch(&self, logs: &[ForwardLog]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for log in logs {
+            tx.execute(
+                "INSERT INTO forward_logs
+                 (timestamp, model, account_id, account_name, client_key_id, client_key_name,
+                  status, http_status, prompt_tokens, completion_tokens, cached_tokens,
+                  cache_creation_tokens, cost, cost_state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, 0, 0, 0, 'legacy_estimate')",
+                params![
+                    log.timestamp.to_rfc3339(),
+                    log.model,
+                    log.account_id,
+                    log.account_name,
+                    log.client_key_id,
+                    log.client_key_name,
+                    log.status,
+                    log.http_status,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Insert a forward_logs row. Returns the auto-assigned row id.
     pub fn log_forward(&self, log: &ForwardLog) -> Result<i64> {
         let diagnostic_json = log
@@ -1165,18 +1248,21 @@ impl Database {
             .transpose()?;
         self.conn.execute(
             "INSERT INTO forward_logs
-             (timestamp, model, account_id, account_name, status, http_status,
+             (timestamp, model, account_id, account_name, client_key_id, client_key_name,
+              status, http_status,
               prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
               pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
               service_tier, cost_state, error_message, request_id, attempt,
               error_source, error_stage, duration_ms, diagnostic_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 log.timestamp.to_rfc3339(),
                 log.model,
                 log.account_id,
                 log.account_name,
+                log.client_key_id,
+                log.client_key_name,
                 log.status,
                 log.http_status,
                 log.prompt_tokens,
@@ -1344,7 +1430,8 @@ impl Database {
                     prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
                     pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
                     service_tier, cost_state, error_message, request_id, attempt,
-                    error_source, error_stage, duration_ms, diagnostic_json
+                    error_source, error_stage, duration_ms, diagnostic_json,
+                    client_key_id, client_key_name
              FROM forward_logs ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], forward_log_from_row)?;
@@ -1364,6 +1451,7 @@ impl Database {
             options.request_id,
             options.start_time,
             options.end_time,
+            options.key_id,
         );
         let order_clause = forward_log_order(options.sort_by, options.sort_order);
         let summary_sql = format!(
@@ -1393,7 +1481,8 @@ impl Database {
                     prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
                     pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
                     service_tier, cost_state, error_message, request_id, attempt,
-                    error_source, error_stage, duration_ms, diagnostic_json
+                    error_source, error_stage, duration_ms, diagnostic_json,
+                    client_key_id, client_key_name
              FROM forward_logs{filter}
              {order_clause}
              LIMIT ? OFFSET ?"
@@ -1415,6 +1504,267 @@ impl Database {
             .prepare("SELECT DISTINCT model FROM forward_logs ORDER BY model ASC")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    /// Distinct client keys that appear in forward logs, mirroring
+    /// [`Database::list_forward_log_models`]. Includes disabled, soft-deleted,
+    /// and dangling ids so historical logs stay filterable. Each id resolves
+    /// its most recent non-null name snapshot, so renamed keys appear under
+    /// their current name.
+    pub fn list_forward_log_keys(&self) -> Result<Vec<ForwardLogClientKey>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT client_key_id, COALESCE((
+                    SELECT f2.client_key_name FROM forward_logs f2
+                    WHERE f2.client_key_id = f.client_key_id
+                      AND f2.client_key_name IS NOT NULL
+                    ORDER BY f2.rowid DESC LIMIT 1
+                ), '')
+             FROM forward_logs f
+             WHERE client_key_id IS NOT NULL
+             GROUP BY client_key_id
+             ORDER BY 2 ASC, client_key_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ForwardLogClientKey {
+                id: row.get(0)?,
+                name: row.get::<_, String>(1)?,
+            })
+        })?;
+        let mut keys = rows.collect::<Result<Vec<_>, _>>()?;
+        // Empty snapshot names (logs written before the key existed in
+        // config) still deserve a stable display label; within that
+        // fallback the primary key's fixed display name takes precedence
+        // over its raw id.
+        for key in &mut keys {
+            if key.name.is_empty() {
+                key.name = if key.id == crate::gateway_keys::PRIMARY_KEY_ID {
+                    crate::gateway_keys::PRIMARY_KEY_NAME.to_string()
+                } else {
+                    key.id.clone()
+                };
+            }
+        }
+        Ok(keys)
+    }
+
+    // ----- sub gateway keys (schema v20) -----
+
+    /// All sub keys including soft-delete tombstones, in creation order.
+    pub fn list_sub_gateway_keys(&self) -> Result<Vec<SubGatewayKey>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, key, enabled, deleted_at, created_at
+             FROM sub_gateway_keys
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map([], sub_gateway_key_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Non-deleted sub keys (enabled and disabled alike); disabled rows keep
+    /// their plaintext so re-enabling can revalidate it.
+    pub fn list_active_sub_gateway_keys(&self) -> Result<Vec<SubGatewayKey>> {
+        let mut keys = self.list_sub_gateway_keys()?;
+        keys.retain(|key| key.is_active());
+        Ok(keys)
+    }
+
+    /// Count of non-deleted sub keys; tombstones never count against the
+    /// active ceiling.
+    pub fn count_active_sub_gateway_keys(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sub_gateway_keys WHERE deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn get_sub_gateway_key(&self, id: &str) -> Result<Option<SubGatewayKey>> {
+        let key = self
+            .conn
+            .query_row(
+                "SELECT id, name, key, enabled, deleted_at, created_at
+                 FROM sub_gateway_keys WHERE id = ?1",
+                params![id],
+                sub_gateway_key_from_row,
+            )
+            .optional()?;
+        Ok(key)
+    }
+
+    /// Inserts a new sub key. The partial unique index backstops value
+    /// uniqueness among non-deleted sub keys; a collision surfaces as a
+    /// constraint error the caller maps to a clear rejection.
+    pub fn insert_sub_gateway_key(&self, key: &SubGatewayKey) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sub_gateway_keys (id, name, key, enabled, deleted_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                key.id,
+                key.name,
+                key.key,
+                key.enabled as i32,
+                key.deleted_at.map(|t| t.to_rfc3339()),
+                key.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Renames a non-deleted sub key. Returns `false` when the id matches no
+    /// active row.
+    pub fn rename_sub_gateway_key(&self, id: &str, name: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sub_gateway_keys SET name = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, name],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Flips the enabled flag of a non-deleted sub key. Returns `false` when
+    /// the id matches no active row.
+    pub fn set_sub_gateway_key_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sub_gateway_keys SET enabled = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, enabled as i32],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Assigns a fresh value to a non-deleted sub key. Returns `false` when
+    /// the id matches no active row.
+    pub fn update_sub_gateway_key_value(&self, id: &str, new_value: &str) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sub_gateway_keys SET key = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, new_value],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Soft-deletes a sub key: clears the plaintext, disables it, and keeps
+    /// id/name/deleted_at for log attribution. Returns `false` when the id
+    /// matches no active row.
+    pub fn soft_delete_sub_gateway_key(&self, id: &str, now: DateTime<Utc>) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE sub_gateway_keys
+             SET key = '', enabled = 0, deleted_at = ?2
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, now.to_rfc3339()],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Plaintext values of all non-deleted sub keys (enabled and disabled);
+    /// used to keep generated values unique across tiers.
+    pub fn active_sub_gateway_key_values(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key FROM sub_gateway_keys
+             WHERE deleted_at IS NULL AND key <> ''",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Whether any non-deleted sub key (enabled or disabled) already holds
+    /// this value; the cross-tier uniqueness gate for candidate primary key
+    /// values.
+    pub fn sub_gateway_key_value_exists(&self, value: &str) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sub_gateway_keys
+                WHERE deleted_at IS NULL AND key = ?1 LIMIT 1
+            )",
+            params![value],
+            |row| row.get(0),
+        )?;
+        Ok(found == 1)
+    }
+
+    // ----- forward log client-key backfill -----
+
+    /// Backfills `client_key_id`/`client_key_name` on historical rows in
+    /// bounded rowid chunks. Each call performs at most one short transaction
+    /// (range update + watermark persist) so callers can release the
+    /// connection between chunks and keep the gateway responsive.
+    /// Returns `true` while more chunks remain.
+    pub fn backfill_forward_logs_client_key_step(
+        &self,
+        key_id: &str,
+        key_name: &str,
+        chunk_rows: i64,
+    ) -> Result<bool> {
+        let chunk_rows = chunk_rows.max(1);
+        let Some(watermark) = self.backfill_watermark()? else {
+            // Completion marker present. A downgrade window (an older binary
+            // writing NULL rows after this marker was recorded) must not
+            // leave those rows permanently unattributed: probe the index
+            // once and restart the scan when any NULL row appears.
+            if !self.forward_logs_have_unattributed_rows()? {
+                return Ok(false);
+            }
+            self.set_setting(BACKFILL_SETTING_KEY, "0")?;
+            return Ok(true);
+        };
+        let max_rowid: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM forward_logs",
+            [],
+            |row| row.get(0),
+        )?;
+        let start = watermark + 1;
+        if start <= max_rowid {
+            let end = (start + chunk_rows - 1).min(max_rowid);
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE forward_logs
+                 SET client_key_id = ?1, client_key_name = ?2
+                 WHERE client_key_id IS NULL AND rowid BETWEEN ?3 AND ?4",
+                params![key_id, key_name, start, end],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                params![BACKFILL_SETTING_KEY, end.to_string()],
+            )?;
+            tx.commit()?;
+            if end < max_rowid {
+                return Ok(true);
+            }
+        }
+        // The whole table is covered. New writes always carry a key id, so
+        // the NULL set can only shrink; record completion once nothing is
+        // left, otherwise late NULL rows (an older binary still writing)
+        // force a restart from the beginning.
+        if !self.forward_logs_have_unattributed_rows()? {
+            self.set_setting(BACKFILL_SETTING_KEY, BACKFILL_DONE)?;
+            return Ok(false);
+        }
+        self.set_setting(BACKFILL_SETTING_KEY, "0")?;
+        Ok(true)
+    }
+
+    /// Whether any forward log row still lacks a client key id; served by
+    /// `idx_forward_logs_client_key` in one index probe.
+    fn forward_logs_have_unattributed_rows(&self) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM forward_logs WHERE client_key_id IS NULL LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(found == 1)
+    }
+
+    /// `None` when the backfill already completed; otherwise the max rowid
+    /// whose range has been attributed.
+    fn backfill_watermark(&self) -> Result<Option<i64>> {
+        Ok(match self.get_setting(BACKFILL_SETTING_KEY)? {
+            None => Some(0),
+            Some(value) if value == BACKFILL_DONE => None,
+            Some(value) => Some(value.parse::<i64>().unwrap_or(0)),
+        })
+    }
+
+    /// Test/inspection helper: the raw persisted backfill marker.
+    pub fn forward_log_backfill_marker(&self) -> Result<Option<String>> {
+        self.get_setting(BACKFILL_SETTING_KEY)
     }
 
     // Cooldown
@@ -2114,28 +2464,45 @@ fn forward_log_filter(
     request_id: Option<&str>,
     start_time: Option<&str>,
     end_time: Option<&str>,
+    key_id: Option<&str>,
 ) -> (String, Vec<Value>) {
     let mut filter = String::new();
     let mut params = Vec::new();
-    for (clause, value) in [
+    // (clause, optional parameter); clause order must match parameter order.
+    // The key filter goes last because the unattributed sentinel expands to
+    // a literal `IS NULL` clause with no parameter.
+    let mut clauses: Vec<(String, Option<&str>)> = [
         ("status = ?", status),
         ("account_id = ?", account_id),
         ("model = ?", model),
         ("request_id = ?", request_id),
         ("julianday(timestamp) >= julianday(?)", start_time),
         ("julianday(timestamp) <= julianday(?)", end_time),
-    ] {
+    ]
+    .into_iter()
+    .filter_map(|(clause, value)| value.map(|value| (clause.to_string(), Some(value))))
+    .collect();
+    match key_id {
+        Some(UNATTRIBUTED_KEY_FILTER) => clauses.push(("client_key_id IS NULL".to_string(), None)),
+        Some(id) => clauses.push(("client_key_id = ?".to_string(), Some(id))),
+        None => {}
+    }
+    for (clause, value) in clauses {
+        append_filter_clause(&mut filter, &clause);
         if let Some(value) = value {
-            filter.push_str(if params.is_empty() {
-                " WHERE "
-            } else {
-                " AND "
-            });
-            filter.push_str(clause);
             params.push(Value::Text(value.to_owned()));
         }
     }
     (filter, params)
+}
+
+fn append_filter_clause(filter: &mut String, clause: &str) {
+    filter.push_str(if filter.is_empty() {
+        " WHERE "
+    } else {
+        " AND "
+    });
+    filter.push_str(clause);
 }
 
 fn forward_log_order(sort_by: Option<&str>, sort_order: Option<&str>) -> String {
@@ -2168,6 +2535,8 @@ fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog>
         model: row.get(2)?,
         account_id: row.get(3)?,
         account_name: row.get(4)?,
+        client_key_id: row.get(24)?,
+        client_key_name: row.get(25)?,
         status: row.get(5)?,
         http_status: row.get(6)?,
         prompt_tokens: row.get(7)?,
@@ -2189,6 +2558,18 @@ fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog>
         diagnostic: row
             .get::<_, Option<String>>(23)?
             .and_then(|json| serde_json::from_str(&json).ok()),
+    })
+}
+
+fn sub_gateway_key_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubGatewayKey> {
+    // SELECT order: id,name,key,enabled,deleted_at,created_at
+    Ok(SubGatewayKey {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        key: row.get(2)?,
+        enabled: row.get::<_, i64>(3)? != 0,
+        deleted_at: row.get::<_, Option<String>>(4)?.map(parse_datetime),
+        created_at: parse_datetime(row.get::<_, String>(5)?),
     })
 }
 
@@ -2323,6 +2704,8 @@ mod tests {
             model: "test".into(),
             account_id: account_id.into(),
             account_name: account_id.into(),
+            client_key_id: None,
+            client_key_name: None,
             status: status.into(),
             http_status: Some(200),
             prompt_tokens: 0,
@@ -2395,8 +2778,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 18);
-
+        assert_eq!(version, 20);
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
@@ -2623,7 +3005,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 18, "{label}");
+            assert_eq!(version, 20, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -2701,7 +3083,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 20);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -2850,7 +3232,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 20);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -2994,7 +3376,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 20);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -3043,8 +3425,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 18);
-
+        assert_eq!(version, 20);
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
             .with_timezone(&Utc);
@@ -3471,7 +3852,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 20);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -3525,7 +3906,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 20);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -3544,6 +3925,7 @@ mod tests {
                 status: None,
                 account_id: None,
                 model: None,
+                key_id: None,
                 request_id: None,
                 start_time: None,
                 end_time: None,
@@ -3599,7 +3981,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 18);
+        assert_eq!(version, 20);
         assert!(auth_error.is_none());
 
         drop(db);
@@ -4287,6 +4669,7 @@ mod tests {
                 status: None,
                 account_id: None,
                 model: None,
+                key_id: None,
                 request_id: None,
                 start_time: Some("2026-07-17T12:00:00+08:00"),
                 end_time: Some("2026-07-17T12:30:00+08:00"),
@@ -4324,6 +4707,7 @@ mod tests {
                 status: None,
                 account_id: None,
                 model: None,
+                key_id: None,
                 request_id: None,
                 start_time: None,
                 end_time: None,
@@ -4341,5 +4725,567 @@ mod tests {
 
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    fn attributed_log(account_id: &str, key_id: Option<&str>, cost: f64) -> ForwardLog {
+        let mut log = forward_log(account_id, "success", cost);
+        log.client_key_id = key_id.map(str::to_string);
+        log.client_key_name = key_id.map(|id| format!("Key-{id}"));
+        log
+    }
+
+    #[test]
+    fn forward_logs_filter_by_key_and_unattributed_sentinel() {
+        let dir = temp_data_dir("forward-key-filter");
+        let db = Database::open(dir.clone()).unwrap();
+        db.log_forward(&attributed_log("acct", Some("key-a"), 1.0))
+            .unwrap();
+        db.log_forward(&attributed_log("acct", Some("key-b"), 2.0))
+            .unwrap();
+        db.log_forward(&attributed_log("acct", None, 4.0)).unwrap();
+
+        let query = |key_id: Option<&str>| {
+            db.query_forward_logs(ForwardLogQueryOptions {
+                limit: 50,
+                offset: 0,
+                status: None,
+                account_id: None,
+                model: None,
+                key_id,
+                request_id: None,
+                start_time: None,
+                end_time: None,
+                sort_by: Some("cost"),
+                sort_order: Some("asc"),
+            })
+            .unwrap()
+        };
+
+        let all = query(None);
+        assert_eq!(all.summary.total_requests, 3);
+        assert_eq!(all.items.len(), 3);
+
+        let key_a = query(Some("key-a"));
+        assert_eq!(key_a.summary.total_requests, 1);
+        assert_eq!(key_a.summary.cost, 1.0);
+        assert_eq!(key_a.items[0].client_key_id.as_deref(), Some("key-a"));
+        assert_eq!(key_a.items[0].client_key_name.as_deref(), Some("Key-key-a"));
+
+        let unattributed = query(Some(UNATTRIBUTED_KEY_FILTER));
+        assert_eq!(unattributed.summary.total_requests, 1);
+        assert_eq!(unattributed.summary.cost, 4.0);
+        assert!(unattributed.items[0].client_key_id.is_none());
+
+        let keys = db.list_forward_log_keys().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(
+            keys.iter()
+                .any(|key| key.id == "key-a" && key.name == "Key-key-a")
+        );
+        assert!(keys.iter().any(|key| key.id == "key-b"));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backfill_attributes_null_rows_in_chunks_with_resume_and_completion() {
+        let dir = temp_data_dir("backfill-chunks");
+        let db = Database::open(dir.clone()).unwrap();
+        for index in 0..7 {
+            let mut log = forward_log("acct", "success", index as f64);
+            log.client_key_id = (index % 2 == 0).then(|| "already-set".to_string());
+            db.log_forward(&log).unwrap();
+        }
+
+        // Chunk size 3 covers rowids 1..=7 in three steps; already-attributed
+        // rows must never be overwritten by the range update.
+        assert!(
+            db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
+                .unwrap()
+        );
+        assert!(
+            db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
+                .unwrap()
+        );
+        // The final chunk exactly reaches max rowid and records completion
+        // in the same call; a further step is a no-op.
+        assert!(
+            !db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
+                .unwrap()
+        );
+        assert!(
+            !db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
+                .unwrap()
+        );
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+
+        let rows = db.list_forward_logs(100).unwrap();
+        assert_eq!(rows.len(), 7);
+        for (index, row) in rows.iter().rev().enumerate() {
+            if index % 2 == 0 {
+                assert_eq!(row.client_key_id.as_deref(), Some("already-set"));
+            } else {
+                assert_eq!(row.client_key_id.as_deref(), Some("primary"));
+                assert_eq!(row.client_key_name.as_deref(), Some("Primary"));
+            }
+        }
+
+        // New NULL rows written by an older binary (a downgrade window)
+        // restart the scan instead of staying "unattributed" forever.
+        db.log_forward(&forward_log("acct", "success", 9.0))
+            .unwrap();
+        assert!(
+            db.backfill_forward_logs_client_key_step("primary", "Primary", 3)
+                .unwrap()
+        );
+        while db
+            .backfill_forward_logs_client_key_step("primary", "Primary", 3)
+            .unwrap()
+        {}
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+        let late_rows: Vec<_> = db
+            .list_forward_logs(100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.client_key_name.as_deref() == Some("Primary"))
+            .collect();
+        assert!(late_rows.iter().any(|row| row.cost == Some(9.0)));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backfill_resumes_from_persisted_watermark_after_interruption() {
+        let dir = temp_data_dir("backfill-resume");
+        let db = Database::open(dir.clone()).unwrap();
+        for index in 0..5 {
+            db.log_forward(&forward_log("acct", "success", index as f64))
+                .unwrap();
+        }
+
+        // Simulate a crash after the first chunk: the watermark persists but
+        // the remaining rows are still NULL.
+        assert!(
+            db.backfill_forward_logs_client_key_step("primary", "Primary", 2)
+                .unwrap()
+        );
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some("2")
+        );
+        let partial = db.list_forward_logs(100).unwrap();
+        assert_eq!(
+            partial
+                .iter()
+                .filter(|row| row.client_key_id.is_some())
+                .count(),
+            2
+        );
+
+        // A restarted run continues from the watermark instead of
+        // rescanning; the last chunk completes the table and records done.
+        assert!(
+            db.backfill_forward_logs_client_key_step("primary", "Primary", 2)
+                .unwrap()
+        );
+        assert!(
+            !db.backfill_forward_logs_client_key_step("primary", "Primary", 2)
+                .unwrap()
+        );
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+        let rows = db.list_forward_logs(100).unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row.client_key_id.as_deref() == Some("primary"))
+        );
+        // No row was attributed twice: costs and row counts are unchanged.
+        assert_eq!(
+            rows.iter().map(|row| row.cost.unwrap_or(0.0)).sum::<f64>() as i64,
+            10
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backfill_restarts_after_done_when_a_downgrade_writes_null_rows() {
+        let dir = temp_data_dir("backfill-restart-after-done");
+        let db = Database::open(dir.clone()).unwrap();
+        db.log_forward(&forward_log("acct", "success", 1.0))
+            .unwrap();
+        assert!(
+            !db.backfill_forward_logs_client_key_step("primary", "Primary", 50)
+                .unwrap()
+        );
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+
+        // A downgrade window writes fresh rows the way the pre-v18 binary
+        // did: without a client key id.
+        db.log_forward(&forward_log("acct", "success", 2.0))
+            .unwrap();
+        db.log_forward(&forward_log("acct", "success", 4.0))
+            .unwrap();
+
+        // The completion marker no longer short-circuits: one index probe
+        // sees the NULL rows, the scan restarts, and they are attributed.
+        assert!(
+            db.backfill_forward_logs_client_key_step("primary", "Primary", 1)
+                .unwrap()
+        );
+        while db
+            .backfill_forward_logs_client_key_step("primary", "Primary", 50)
+            .unwrap()
+        {}
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+        let rows = db.list_forward_logs(100).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .all(|row| row.client_key_id.as_deref() == Some("primary"))
+        );
+
+        // With no fresh NULL rows the marker keeps short-circuiting.
+        let mut attributed = forward_log("acct", "success", 8.0);
+        attributed.client_key_id = Some("primary".into());
+        attributed.client_key_name = Some("Primary".into());
+        db.log_forward(&attributed).unwrap();
+        assert!(
+            !db.backfill_forward_logs_client_key_step("primary", "Primary", 50)
+                .unwrap()
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backfill_completes_inline_for_empty_tables() {
+        let dir = temp_data_dir("backfill-empty");
+        let db = Database::open(dir.clone()).unwrap();
+        assert!(
+            !db.backfill_forward_logs_client_key_step("primary", "Primary", 50_000)
+                .unwrap()
+        );
+        assert_eq!(
+            db.forward_log_backfill_marker().unwrap().as_deref(),
+            Some(BACKFILL_DONE)
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v19_client_key_migration_is_idempotent_and_crash_replay_safe() {
+        let dir = temp_data_dir("v19-idempotent");
+        let db = Database::open(dir.clone()).unwrap();
+        let probe_columns = |conn: &Connection| {
+            let mut stmt = conn.prepare("PRAGMA table_info(forward_logs)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(probe_columns(&db.conn).contains(&"client_key_id".to_string()));
+        assert!(probe_columns(&db.conn).contains(&"client_key_name".to_string()));
+        let version: i32 = db
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let index_exists: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_forward_logs_client_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_exists, 1);
+
+        // Replaying migrate (as after a crash between ALTER TABLE and the
+        // version bump, or simply a second open) converges without error.
+        drop(db);
+        let db = Database::open(dir.clone()).unwrap();
+        db.migrate().unwrap();
+        let version: i32 = db
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 20);
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v20_creates_the_sub_gateway_keys_table_idempotently() {
+        let dir = temp_data_dir("v20-idempotent");
+        let db = Database::open(dir.clone()).unwrap();
+
+        let probe = |conn: &Connection| {
+            let table: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'sub_gateway_keys'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let index: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_sub_gateway_keys_key'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (table, index)
+        };
+        assert_eq!(probe(&db.conn), (1, 1));
+        let version: i32 = db
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 20);
+
+        // Replaying the migration converges to the same shape.
+        db.migrate().unwrap();
+        assert_eq!(probe(&db.conn), (1, 1));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn draft_v19_libraries_without_notes_gain_the_column_on_reopen() {
+        let dir = temp_data_dir("draft-v19-notes-repair");
+        let db = Database::open(dir.clone()).unwrap();
+        db.create_account(&account("legacy")).unwrap();
+        // Unreleased #43 drafts already sat at version 19 (client-key
+        // columns + sub-key table) and never received upstream v18 notes.
+        db.conn
+            .execute_batch(
+                "ALTER TABLE accounts DROP COLUMN notes;
+                 DELETE FROM schema_version;
+                 INSERT INTO schema_version (version) VALUES (19);",
+            )
+            .expect("draft numbering should be reproducible");
+        let notes_before: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = 'notes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(notes_before, 0);
+        drop(db);
+
+        let db = Database::open(dir.clone()).expect("draft database should reopen");
+        let (version, notes_after): (i32, i64) = db
+            .conn
+            .query_row(
+                "SELECT
+                    (SELECT MAX(version) FROM schema_version),
+                    (SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name = 'notes')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("repaired schema should load");
+        assert_eq!(version, 20);
+        assert_eq!(notes_after, 1);
+        db.list_accounts()
+            .expect("account reads must survive a missing notes column on the draft");
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sub_gateway_key_crud_and_unique_index_backstop() {
+        let dir = temp_data_dir("sub-keys-crud");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let key = SubGatewayKey {
+            id: "sub-1".into(),
+            name: "Laptop".into(),
+            key: "ocg-laptop".into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: now,
+        };
+        db.insert_sub_gateway_key(&key).unwrap();
+        assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 1);
+        assert_eq!(
+            db.list_active_sub_gateway_keys().unwrap(),
+            vec![key.clone()]
+        );
+        assert_eq!(db.list_sub_gateway_keys().unwrap().len(), 1);
+
+        // Duplicate active values are rejected by the partial unique index.
+        let duplicate = SubGatewayKey {
+            id: "sub-2".into(),
+            name: "Twin".into(),
+            key: "ocg-laptop".into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: now,
+        };
+        assert!(db.insert_sub_gateway_key(&duplicate).is_err());
+
+        // Disabled keys keep their plaintext, so they still block duplicates.
+        assert!(db.set_sub_gateway_key_enabled("sub-1", false).unwrap());
+        assert!(db.insert_sub_gateway_key(&duplicate).is_err());
+        assert!(db.sub_gateway_key_value_exists("ocg-laptop").unwrap());
+        assert_eq!(
+            db.active_sub_gateway_key_values().unwrap(),
+            vec!["ocg-laptop".to_string()]
+        );
+
+        // Renaming and regenerating address only non-deleted rows.
+        assert!(db.rename_sub_gateway_key("sub-1", "Deck").unwrap());
+        assert!(
+            db.update_sub_gateway_key_value("sub-1", "ocg-deck")
+                .unwrap()
+        );
+        assert!(db.sub_gateway_key_value_exists("ocg-deck").unwrap());
+
+        // Soft delete clears the plaintext; tombstones free the value and do
+        // not count as active.
+        assert!(db.soft_delete_sub_gateway_key("sub-1", now).unwrap());
+        let tombstone = db.get_sub_gateway_key("sub-1").unwrap().unwrap();
+        assert!(tombstone.deleted_at.is_some());
+        assert!(tombstone.key.is_empty());
+        assert!(!tombstone.enabled);
+        assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 0);
+        assert!(!db.sub_gateway_key_value_exists("ocg-deck").unwrap());
+        assert!(!db.rename_sub_gateway_key("sub-1", "Gone").unwrap());
+        assert!(!db.set_sub_gateway_key_enabled("sub-1", true).unwrap());
+        assert!(!db.soft_delete_sub_gateway_key("sub-1", now).unwrap());
+
+        // The freed value is insertable again, and missing ids report false.
+        let recycled = SubGatewayKey {
+            id: "sub-3".into(),
+            name: "Recycled".into(),
+            key: "ocg-deck".into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: now,
+        };
+        db.insert_sub_gateway_key(&recycled).unwrap();
+        assert!(!db.rename_sub_gateway_key("missing", "X").unwrap());
+        assert!(db.get_sub_gateway_key("missing").unwrap().is_none());
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn forward_log_keys_resolve_the_latest_name_per_id() {
+        let dir = temp_data_dir("log-keys-latest-name");
+        let db = Database::open(dir.clone()).unwrap();
+        let base = ForwardLog {
+            id: 0,
+            timestamp: Utc::now(),
+            model: "m".into(),
+            account_id: "a".into(),
+            account_name: "a".into(),
+            client_key_id: Some("sub-1".into()),
+            client_key_name: Some("Laptop".into()),
+            status: "success".into(),
+            http_status: Some(200),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: None,
+            pricing_revision_id: None,
+            quota_multiplier: None,
+            local_adjustment_multiplier: None,
+            service_tier: None,
+            cost_state: "not_applicable".into(),
+            error_message: None,
+            request_id: None,
+            attempt: None,
+            error_source: None,
+            error_stage: None,
+            duration_ms: None,
+            diagnostic: None,
+        };
+        // A lexicographically "larger" historical name must not win: it was
+        // written first, the current name last.
+        let mut zzz = base.clone();
+        zzz.client_key_name = Some("zzz-old".into());
+        db.log_forward(&zzz).unwrap();
+        db.log_forward(&base).unwrap();
+        let mut renamed = base.clone();
+        renamed.client_key_name = Some("Deck".into());
+        db.log_forward(&renamed).unwrap();
+
+        let keys = db.list_forward_log_keys().unwrap();
+        assert_eq!(keys.len(), 1, "one entry per distinct key id");
+        assert_eq!(keys[0].id, "sub-1");
+        assert_eq!(keys[0].name, "Deck", "the latest snapshot wins");
+
+        // NULL-name rows fall back to the id label.
+        let mut unnamed = base.clone();
+        unnamed.client_key_id = Some("ghost".into());
+        unnamed.client_key_name = None;
+        db.log_forward(&unnamed).unwrap();
+        let keys = db.list_forward_log_keys().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            keys.iter().find(|key| key.id == "ghost").unwrap().name,
+            "ghost"
+        );
+
+        // The list stays purely log-driven: an id with no rows (e.g. the
+        // primary key before its first attributed request) never appears.
+        assert!(
+            !keys
+                .iter()
+                .any(|key| key.id == "00000000-0000-0000-0000-000000000001")
+        );
+
+        // A primary-attributed row with a NULL name resolves to the fixed
+        // display name, never the raw id constant.
+        let mut unnamed_primary = base.clone();
+        unnamed_primary.client_key_id = Some("00000000-0000-0000-0000-000000000001".into());
+        unnamed_primary.client_key_name = None;
+        db.log_forward(&unnamed_primary).unwrap();
+        let keys = db.list_forward_log_keys().unwrap();
+        let primary = keys
+            .iter()
+            .find(|key| key.id == "00000000-0000-0000-0000-000000000001")
+            .unwrap();
+        assert_eq!(primary.name, "Primary");
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
