@@ -5012,6 +5012,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
+        assert_eq!(version, 20);
 
         let index_exists: i64 = db
             .conn
