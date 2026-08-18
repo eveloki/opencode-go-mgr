@@ -424,8 +424,9 @@ The `linux/amd64` container is published separately as
 `ghcr.io/klarkxy/opencode-go-mgr`; the GitHub Release contains the seven
 ordinary platform payloads, the extra macOS updater archive, four updater
 signatures, the pull-only Compose example, `latest.json`, and `SHA256SUMS`
-(currently 15 attachments; `verify-release` derives the exact names and count
-from the assembled `release/` set rather than hardcoding 15). The runtime
+(currently 15 attachments). The local verifier pins that current 15-file
+contract, while the workflow also requires the GitHub asset names and count to
+match the assembled `release/` set exactly. The runtime
 image includes `LICENSE` at
 `/usr/share/licenses/ocg-manager/LICENSE`.
 
@@ -563,8 +564,8 @@ three per-runner Actions artifacts, assembles their payloads/signatures and
 tag URLs and bundle-aware platform keys, regenerates `SHA256SUMS` over the
 manifest, signatures, and every other attachment, and creates or updates a
 **draft** GitHub Release. `verify-release` then requires the GitHub asset
-names to match the assembled `release/` set exactly (names and count derived
-from that artifact, not hardcoded), re-derives `latest.json`, recomputes every
+names to match the assembled `release/` set exactly. The local verifier also
+pins the current 15-file contract, then re-derives `latest.json`, recomputes every
 checksum, verifies all four updater signatures, and compares every downloaded
 artifact with the digest reported by GitHub Release storage. The draft job
 passes its numeric Release ID downstream; verification and publication re-check
@@ -645,8 +646,11 @@ clients cannot trust a release signed only by the replacement key.
 
 ### container.yml — the image pipeline
 
-Publishing the GitHub Release triggers `.github/workflows/container.yml`.
-It checks out the release tag and, via `docker-bake.hcl`, builds both
+`.github/workflows/container.yml` accepts a published-Release event, but a
+Release published by `release.yml` with `github.token` does not recursively
+start another workflow. After the signed tag pipeline publishes the Release,
+dispatch `container.yml` explicitly for that tag with `publish_latest=true`
+for a stable release. It checks out the release tag and, via `docker-bake.hcl`, builds both
 `linux/amd64` smoke images in parallel: the main
 `ghcr.io/klarkxy/opencode-go-mgr` service and the
 `ghcr.io/klarkxy/opencode-go-mgr-browser` sidecar. The main smoke covers the
@@ -667,7 +671,8 @@ image records an SPDX SBOM, BuildKit SLSA provenance, and GitHub signed
 provenance. `X.Y.Z` and `sha-*` are release-specific immutable tags; `X.Y`
 and `latest` are monotonic moving channels. The browser image is a GHCR
 package, not a GitHub Release asset, so the native release keeps only the
-assembled GitHub attachments (verifier derives names/count from that set).
+assembled GitHub attachments (the workflow compares that exact set, and the
+local verifier pins the current 15-file contract).
 
 Package visibility is managed separately from the linked repository, so the
 workflow cannot rely on its repository token to make a package public. A new
@@ -775,8 +780,10 @@ across restarts, and remote account switching remain manual checks.
    converted the same verified draft, then review the exact assembled
    attachments, smoke logs, platform warnings, and notes generated from the
    previous-tag diff.
-6. Wait for `container.yml`, verify both GHCR packages are public, inspect
-   each version and digest, and anonymously pull both full-version tags.
+6. Explicitly dispatch `container.yml` for the published tag (for example,
+   `gh workflow run container.yml --ref main -f tag=vX.Y.Z -f publish_latest=true`;
+   omit `source_ref`), wait for it to pass, verify both GHCR packages are public,
+   inspect each version and digest, and anonymously pull both full-version tags.
 
 Treat published assets and tags as immutable. If a published payload is
 wrong, ship a new patch version; do not replace the asset or retarget the

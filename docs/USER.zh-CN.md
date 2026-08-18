@@ -442,7 +442,8 @@ Manager 恢复，只能从备份恢复或重新登录。
 - **刷新额度（已完成的 Key / 托管账号）**：官方用量（`/zen/go/v1/usage`）是周期
   性校准基线；本节点转发日志成本在上次成功同步后仍做实时估算。已启用且近 24
   小时有本地活动的 ready 账号约每小时自动对账，无活动约每天一次；禁用、未完成
-  或空 Key 账号不会自动刷新，打开账号页或启动应用本身也不会触发请求。点击
+  或空 Key 账号不会自动刷新，打开账号页不会触发请求。Gateway 启动时不会立即
+  请求；尚无已保存调度的合格账号会分散到最初 0–15 分钟内，再按正常节奏对账。点击
   **刷新额度** 仍走同一条安全路径，服务端每账号 60 秒节流（返回 Retry-After /
   next-allowed）。卡片会显示上次成功官方同步时间与临时重试等待，而不仅依赖按钮
   loading。本地估算达到 ≥80% 时最多每 15 分钟加速对账一次。真实推理 `429` 仍
@@ -819,7 +820,7 @@ GHCR 上的公开无头镜像无需登录即可拉取。它是 Linux 容器，�
 与 `.env.example` 的仓库目录中运行（建议检出对应 Release tag）：
 
 ```bash
-git clone --branch v1.7.1 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.8.0 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell：Copy-Item .env.example .env
@@ -835,7 +836,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`；Release 中的 `compose.example.yaml`
   默认固定对应的完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:1.7.1`。
+  `ghcr.io/klarkxy/opencode-go-mgr:1.8.0`。
 - 完整版本与 `sha-<commit>` 标签用于标识单次发布，按发布策略不应移动；`1.5`
   与 `latest` 会继续移动。技术上只有
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` digest 真正不可变。
@@ -956,13 +957,13 @@ curl --fail http://127.0.0.1:9042/dashboard/
 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.7.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.7.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.0
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.0
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.7.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.0 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.7.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.0 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -1075,4 +1076,3 @@ ocg.example.com {
 [English user guide](USER.md) · [Maintainer guide](MAINTAINER.md) ·
 [维护者指南](MAINTAINER.zh-CN.md) · [文档索引](README.md) ·
 [回到 README](../README.zh-CN.md)
-

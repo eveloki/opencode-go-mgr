@@ -358,9 +358,10 @@ SHA256SUMS
 
 `linux/amd64` 容器单独发布为 `ghcr.io/klarkxy/opencode-go-mgr`。GitHub Release
 包含七份常规平台 payload、额外的 macOS 升级压缩包、四份升级签名、只拉取镜像
-的 Compose 示例、`latest.json` 与 `SHA256SUMS`（当前共 15 个附件；
-`verify-release` 从组装后的 `release/` 集合推导确切名称与数量，而不是硬编码
-15）。运行镜像内的许可证位于 `/usr/share/licenses/ocg-manager/LICENSE`。
+的 Compose 示例、`latest.json` 与 `SHA256SUMS`（当前共 15 个附件）。本地验证器
+固定校验当前这 15 个文件，工作流同时要求 GitHub 附件的名称与数量和组装后的
+`release/` 集合完全一致。运行镜像内的许可证位于
+`/usr/share/licenses/ocg-manager/LICENSE`。
 
 ### scripts/release.mjs
 
@@ -468,7 +469,7 @@ artifact，把平台 payload、签名与 `compose.example.yaml` 组装进 `relea
 生成使用不可变 tag URL 和 bundle 感知平台键的 `latest.json`，再重写覆盖
 manifest、签名和其余附件的 `SHA256SUMS`，最后创建或更新 **draft** GitHub
 Release。`verify-release` 随后要求 GitHub 附件名称与组装后的 `release/` 集合
-逐名一致（名称与数量由该产物推导，不硬编码），重新推导 `latest.json`、重算
+逐名一致；本地验证器还固定校验当前 15 个文件，再重新推导 `latest.json`、重算
 全部 checksum、验证四份升级签名，并把每个下载文件与 GitHub Release 存储层报告
 的 digest 对比。draft job 会把数字 Release ID 传给下游；验证和公开 job 都重新
 校验该 ID、tag 与 draft 状态，不使用无法显示 draft Release 的 tag 查询端点。
@@ -528,8 +529,11 @@ closed。密钥轮换属于 break-glass 恢复，不是普通 secret 更新。�
 
 ### container.yml —— 镜像流水线
 
-GitHub Release 发布后会触发 `.github/workflows/container.yml`。该工作流检出
-Release tag，通过 `docker-bake.hcl` 并行构建两个 `linux/amd64` 冒烟镜像：主服务
+`.github/workflows/container.yml` 接受 Release 发布事件，但由 `release.yml` 使用
+`github.token` 公开的 Release 不会递归启动另一个工作流。签名 tag 流水线公开
+Release 后，稳定版必须对该 tag 显式触发 `container.yml`，并设置
+`publish_latest=true`。该工作流检出 Release tag，通过 `docker-bake.hcl` 并行构建
+两个 `linux/amd64` 冒烟镜像：主服务
 `ghcr.io/klarkxy/opencode-go-mgr` 与 Sidecar
 `ghcr.io/klarkxy/opencode-go-mgr-browser`。主镜像冒烟检查 Dashboard、鉴权和许可
 证；浏览器镜像在只读根文件系统、零 capability、Chromium 可用的 seccomp
@@ -631,8 +635,10 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
    `verify-release` 和 `publish-release` 通过。确认公开的是同一个已验证 draft，
    再复核与组装产物逐名一致的附件集合、冒烟日志、平台警告，以及基于上一个 tag
    diff 编写的说明。
-6. 等待 `container.yml` 通过，确认两个 GHCR package 已公开，分别核验版本与
-   digest，再匿名拉取两个完整版本标签。
+6. 对已发布 tag 显式触发 `container.yml`（例如
+   `gh workflow run container.yml --ref main -f tag=vX.Y.Z -f publish_latest=true`，
+   不要传 `source_ref`），等待它通过，确认两个 GHCR package 已公开，分别核验
+   版本与 digest，再匿名拉取两个完整版本标签。
 
 应把已发布的资产和 tag 视为不可变。已发布 payload 有误时发新的 patch 版本，
 不要替换资产或移动 tag。

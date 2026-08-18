@@ -285,8 +285,11 @@ pub fn compute_next_after_success(
     jitter01: f64,
 ) -> DateTime<Utc> {
     let cadence_at = now + cadence_for(active);
-    let reset_delay = Duration::minutes(earliest_resets_in_minutes.max(0))
-        + scale_duration(RESET_JITTER_MAX, jitter01);
+    if earliest_resets_in_minutes <= 0 {
+        return cadence_at;
+    }
+    let reset_delay =
+        Duration::minutes(earliest_resets_in_minutes) + scale_duration(RESET_JITTER_MAX, jitter01);
     let reset_at = now + reset_delay;
     cadence_at.min(reset_at)
 }
@@ -866,6 +869,11 @@ mod tests {
         // Reset sooner than daily cadence still schedules around the reset.
         let next = compute_next_after_success(now, false, 500, 0.0);
         assert_eq!(next, now + Duration::minutes(500));
+        // A stale official reset must not create a near-immediate polling loop.
+        let next = compute_next_after_success(now, true, 0, 1.0);
+        assert_eq!(next, now + ACTIVE_CADENCE);
+        let next = compute_next_after_success(now, false, -1, 1.0);
+        assert_eq!(next, now + INACTIVE_CADENCE);
     }
 
     #[test]
@@ -1484,7 +1492,9 @@ mod tests {
         let (dir, state) = test_state("no-reexpedite");
         let account = ready_account(&state, "hi2", "sk-hi2");
         state.db.lock().create_account(&account).unwrap();
-        let now = fixed("2026-08-18T12:00:00Z");
+        // Usage-window reads use the production clock, so keep this integration
+        // test's injected sync clock aligned instead of crossing a real reset.
+        let now = Utc::now();
         state.usage_sync.set_clock_for_test(move || now);
         state.usage_sync.set_jitter_for_test(|| 0.0);
         seed_high_usage(&state, "hi2");
