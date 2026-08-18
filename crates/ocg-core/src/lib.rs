@@ -6,9 +6,11 @@ pub mod dashboard;
 pub mod db;
 pub mod gateway;
 pub mod gateway_keys;
+pub mod go_usage;
 pub(crate) mod http_client;
 pub mod models;
 pub mod pricing;
 pub mod state;
+pub mod usage_sync;
 
 pub type Result<T> = anyhow::Result<T>;

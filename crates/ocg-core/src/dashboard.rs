@@ -9,6 +9,7 @@ use crate::gateway::{
     limit::{parse_reset, parse_usage_limit_window},
     protocol::supported_model_ids,
 };
+use crate::go_usage::GoUsageError;
 use crate::models::*;
 use crate::pricing::{PricingSnapshot, fetch_official_snapshot, stamp_pricing_activation};
 use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
@@ -66,7 +67,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         )
         .route(
             "/accounts/{id}/usage/refresh",
-            post(refresh_account_usage_from_console),
+            post(refresh_account_usage_from_official_go),
         )
         .route(
             "/accounts/{id}/reset-cooldown",
@@ -380,6 +381,8 @@ fn cookie_header(
 struct ApiError {
     status: StatusCode,
     message: String,
+    retry_after_secs: Option<u64>,
+    next_allowed_at: Option<String>,
 }
 
 impl ApiError {
@@ -387,6 +390,8 @@ impl ApiError {
         Self {
             status,
             message: message.into(),
+            retry_after_secs: None,
+            next_allowed_at: None,
         }
     }
 
@@ -394,6 +399,8 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            retry_after_secs: None,
+            next_allowed_at: None,
         }
     }
 
@@ -401,6 +408,8 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: error.to_string(),
+            retry_after_secs: None,
+            next_allowed_at: None,
         }
     }
 
@@ -408,17 +417,38 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            retry_after_secs: None,
+            next_allowed_at: None,
+        }
+    }
+
+    fn throttled(
+        message: impl Into<String>,
+        next_allowed_at: DateTime<Utc>,
+        retry_after_secs: u64,
+    ) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.into(),
+            retry_after_secs: Some(retry_after_secs.max(1)),
+            next_allowed_at: Some(next_allowed_at.to_rfc3339()),
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(serde_json::json!({ "error": self.message })),
-        )
-            .into_response()
+        let mut body = serde_json::json!({ "error": self.message });
+        if let Some(next_allowed_at) = &self.next_allowed_at {
+            body["next_allowed_at"] = serde_json::json!(next_allowed_at);
+        }
+        let mut response = (self.status, Json(body)).into_response();
+        if let Some(secs) = self.retry_after_secs {
+            if let Ok(value) = HeaderValue::from_str(&secs.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
@@ -443,6 +473,10 @@ struct DashboardAccount {
     last_error: Option<String>,
     auth_error: Option<String>,
     notes: String,
+    /// Last successful official Go usage calibration, if any.
+    usage_sync_last_success_at: Option<String>,
+    /// When a manual refresh may be attempted again (60s throttle), if blocked.
+    usage_sync_next_allowed_at: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -467,6 +501,11 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
                 .map(|secret| redact_known_secret(&error, secret))
         })
     };
+    let (usage_sync_last_success_at, usage_sync_next_allowed_at) = {
+        let db = state.db.lock();
+        let sync = db.account_usage_sync_state(&account.id).ok().flatten();
+        crate::usage_sync::dashboard_sync_fields(sync.as_ref(), state.usage_sync.now())
+    };
     DashboardAccount {
         id: account.id,
         name: account.name,
@@ -487,6 +526,8 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
         last_error: sanitize_persisted_error(account.last_error),
         auth_error: sanitize_persisted_error(account.auth_error),
         notes: account.notes.unwrap_or_default(),
+        usage_sync_last_success_at,
+        usage_sync_next_allowed_at,
         created_at: account.created_at.to_rfc3339(),
         updated_at: account.updated_at.to_rfc3339(),
     }
@@ -1808,28 +1849,98 @@ struct AccountUsageUpdate {
     resets_in_minutes: Option<i64>,
 }
 
-async fn refresh_account_usage_from_console(
+async fn refresh_account_usage_from_official_go(
     State(state): State<CoreState>,
     Path(id): Path<String>,
-) -> Result<Json<crate::console_usage::ConsoleUsageRefreshResult>, ApiError> {
-    let limits = state.pricing_snapshot().limits.clone();
-    let data_dir = state.data_dir.clone();
-    let config = state.config();
-    let refreshed = crate::console_usage::refresh_managed_account_usage(
-        &state.db, &data_dir, &id, &limits, &config,
+) -> Result<Json<crate::usage_sync::OfficialUsageRefreshSuccess>, ApiError> {
+    match crate::usage_sync::refresh_official_usage(
+        &state,
+        &id,
+        crate::usage_sync::UsageSyncTrigger::Manual,
     )
     .await
-    .map_err(|error| {
-        let message = error.to_string();
-        if message.contains("only ready managed") {
-            ApiError::bad_request(message)
-        } else if message.contains("not found") || message.contains("missing") {
-            ApiError::not_found(message)
-        } else {
-            ApiError::status(StatusCode::BAD_GATEWAY, message)
+    {
+        Ok(success) => Ok(Json(success)),
+        Err(error) => Err(map_official_usage_refresh_error(error)),
+    }
+}
+
+fn map_official_usage_refresh_error(
+    error: crate::usage_sync::OfficialUsageRefreshError,
+) -> ApiError {
+    use crate::usage_sync::OfficialUsageRefreshError;
+    match error {
+        OfficialUsageRefreshError::NotFound => ApiError::not_found(error.to_string()),
+        OfficialUsageRefreshError::NotEligible(message) => ApiError::bad_request(message),
+        OfficialUsageRefreshError::Conflict(message) => {
+            ApiError::status(StatusCode::CONFLICT, message)
         }
-    })?;
-    Ok(Json(refreshed))
+        OfficialUsageRefreshError::Throttled {
+            next_allowed_at,
+            retry_after_secs,
+        } => ApiError::throttled(error.to_string(), next_allowed_at, retry_after_secs),
+        OfficialUsageRefreshError::Upstream(GoUsageError::Unauthorized)
+        | OfficialUsageRefreshError::Upstream(GoUsageError::Forbidden) => {
+            ApiError::bad_request("official Go usage rejected this account key")
+        }
+        OfficialUsageRefreshError::Upstream(upstream) => {
+            ApiError::status(StatusCode::BAD_GATEWAY, upstream.to_string())
+        }
+        OfficialUsageRefreshError::Internal(message) => ApiError::internal(message),
+    }
+}
+
+// Thin helpers retained for unit tests of eligibility/CAS without network.
+#[cfg(test)]
+fn load_ready_account_for_official_go_usage(
+    db: &crate::db::Database,
+    account_id: &str,
+) -> Result<String, ApiError> {
+    let account = db
+        .get_account(account_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if !account.setup_step.is_ready() || account.key_cipher.is_empty() {
+        return Err(ApiError::bad_request(
+            "only ready accounts with a stored key can refresh official Go usage",
+        ));
+    }
+    Ok(account.key_cipher)
+}
+
+#[cfg(test)]
+fn apply_official_go_usage_snapshot(
+    db: &crate::db::Database,
+    account_id: &str,
+    expected_key_cipher: &str,
+    snapshot: &crate::go_usage::GoUsageSnapshot,
+    limits: &crate::pricing::PricingLimits,
+) -> Result<UsageWindow, ApiError> {
+    let account = db
+        .get_account(account_id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if !account.setup_step.is_ready()
+        || account.key_cipher.is_empty()
+        || account.key_cipher != expected_key_cipher
+    {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "account key or setup changed while refreshing official Go usage",
+        ));
+    }
+    db.calibrate_account_usage_snapshot(
+        account_id,
+        &crate::db::AccountUsageCalibrationSnapshot {
+            rolling_percent: snapshot.rolling_percent,
+            weekly_percent: snapshot.weekly_percent,
+            monthly_percent: snapshot.monthly_percent,
+            rolling_resets_in_minutes: snapshot.rolling_resets_in_minutes,
+            weekly_resets_in_minutes: snapshot.weekly_resets_in_minutes,
+        },
+        limits,
+    )
+    .map_err(ApiError::internal)
 }
 
 async fn update_account_usage(
@@ -3000,9 +3111,11 @@ mod tests {
         MAX_ACCOUNT_NOTES_CHARS, MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES,
         MAX_PRICING_MULTIPLIER, ManagedAccountInput, OpenBrowserInput, PricingMultiplierInput,
         PricingMultiplierUpdate, PricingRefreshPolicy, ProxyTestRequest, SemverVersion,
-        SettingsUpdateRequest, VerifyManagedKeyInput, advance_account_setup, apply_pricing_refresh,
-        asset_path, create_account, create_managed_account, dashboard_account, dashboard_summary,
-        format_error_chain, is_update_available, open_account_browser, parse_semver_version,
+        SettingsUpdateRequest, VerifyManagedKeyInput, advance_account_setup,
+        apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path, create_account,
+        create_managed_account, dashboard_account, dashboard_summary, format_error_chain,
+        is_update_available, load_ready_account_for_official_go_usage,
+        map_official_usage_refresh_error, open_account_browser, parse_semver_version,
         pricing_multiplier_changes, pricing_semantically_equal,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
         reorder_accounts, test_proxy, update_account, update_account_usage,
@@ -3011,10 +3124,11 @@ mod tests {
     };
     use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
-    use crate::db::Database;
+    use crate::db::{AccountUsageCalibrationSnapshot, Database};
+    use crate::go_usage::{GoUsageError, GoUsageSnapshot, GoUsageWindowStatus};
     use crate::models::{
         Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate, AppConfig,
-        ClaudeDesktopModels, ProxyMode, normalize_purchase_date, purchase_expires_on,
+        ClaudeDesktopModels, ProxyMode, UsageWindow, normalize_purchase_date, purchase_expires_on,
     };
     use crate::state::CoreStateInner;
     use axum::Json;
@@ -4288,6 +4402,345 @@ mod tests {
         assert_eq!(summary.available_accounts, 1);
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn official_go_usage_test_state(label: &str) -> (PathBuf, crate::state::CoreState) {
+        let dir = temp_data_dir(label);
+        let cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("official-go-usage"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+        (dir, state)
+    }
+
+    fn official_go_usage_account(
+        state: &crate::state::CoreState,
+        id: &str,
+        account_type: AccountType,
+        setup_step: AccountSetupStep,
+        plaintext_key: &str,
+    ) -> Account {
+        let mut account = test_account(id);
+        account.account_type = account_type;
+        account.setup_step = setup_step;
+        account.enabled = setup_step.is_ready();
+        account.key_cipher = if plaintext_key.is_empty() {
+            String::new()
+        } else {
+            state.encrypt_key(plaintext_key).unwrap()
+        };
+        account
+    }
+
+    fn sample_official_go_usage_snapshot() -> GoUsageSnapshot {
+        GoUsageSnapshot {
+            rolling_status: GoUsageWindowStatus::RateLimited,
+            weekly_status: GoUsageWindowStatus::Ok,
+            monthly_status: GoUsageWindowStatus::Ok,
+            rolling_percent: 50.0,
+            weekly_percent: 20.0,
+            monthly_percent: 10.0,
+            rolling_resets_in_minutes: 180,
+            weekly_resets_in_minutes: 1_440,
+            earliest_resets_in_minutes: 180,
+        }
+    }
+
+    fn assert_usage_windows_unchanged(before: &UsageWindow, after: &UsageWindow) {
+        assert_eq!(after.window_5h, before.window_5h);
+        assert_eq!(after.window_week, before.window_week);
+        assert_eq!(after.window_month, before.window_month);
+        assert_eq!(after.resets_in_5h, before.resets_in_5h);
+        assert_eq!(after.resets_in_week, before.resets_in_week);
+        assert_eq!(after.resets_in_month, before.resets_in_month);
+    }
+
+    fn assert_no_go_usage_cooldown(account: &Account) {
+        assert!(account.cooldown_until.is_none());
+        assert!(account.cooldown_generic_until.is_none());
+        assert!(account.cooldown_5h_until.is_none());
+        assert!(account.cooldown_week_until.is_none());
+        assert!(account.cooldown_month_until.is_none());
+        assert!(account.cooldown_free_until.is_none());
+    }
+
+    #[test]
+    fn official_go_usage_refresh_accepts_ready_key_accounts() {
+        let (dir, state) = official_go_usage_test_state("official-go-ready-key");
+        let account = official_go_usage_account(
+            &state,
+            "ready-key",
+            AccountType::Key,
+            AccountSetupStep::Ready,
+            "sk-ready-key",
+        );
+        state.db.lock().create_account(&account).unwrap();
+        let loaded = {
+            let db = state.db.lock();
+            load_ready_account_for_official_go_usage(&db, "ready-key").unwrap()
+        };
+        assert_eq!(loaded, account.key_cipher);
+
+        let limits = state.pricing_snapshot().limits.clone();
+        let snapshot = sample_official_go_usage_snapshot();
+        let usage = {
+            let db = state.db.lock();
+            apply_official_go_usage_snapshot(&db, "ready-key", &loaded, &snapshot, &limits).unwrap()
+        };
+        assert!((usage.window_5h - limits.window_5h * 0.5).abs() < 1e-9);
+        assert!((usage.window_week - limits.window_week * 0.2).abs() < 1e-9);
+        assert!((usage.window_month - limits.window_month * 0.1).abs() < 1e-9);
+        let stored = state.db.lock().get_account("ready-key").unwrap().unwrap();
+        assert_no_go_usage_cooldown(&stored);
+        let json = serde_json::to_value(crate::usage_sync::OfficialUsageRefreshSuccess {
+            usage,
+            source: "official_go_usage",
+            last_success_at: Utc::now().to_rfc3339(),
+            next_allowed_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+        })
+        .unwrap();
+        assert_eq!(json["source"], "official_go_usage");
+        assert!(json.get("fetched_at").is_none());
+        assert!(json.get("last_success_at").is_some());
+        assert!(json.get("next_allowed_at").is_some());
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn official_go_usage_refresh_accepts_ready_managed_accounts() {
+        let (dir, state) = official_go_usage_test_state("official-go-ready-managed");
+        let account = official_go_usage_account(
+            &state,
+            "ready-managed",
+            AccountType::Managed,
+            AccountSetupStep::Ready,
+            "sk-ready-managed",
+        );
+        state.db.lock().create_account(&account).unwrap();
+        let loaded = {
+            let db = state.db.lock();
+            load_ready_account_for_official_go_usage(&db, "ready-managed").unwrap()
+        };
+        assert_eq!(loaded, account.key_cipher);
+
+        let limits = state.pricing_snapshot().limits.clone();
+        let snapshot = sample_official_go_usage_snapshot();
+        let usage = {
+            let db = state.db.lock();
+            apply_official_go_usage_snapshot(&db, "ready-managed", &loaded, &snapshot, &limits)
+                .unwrap()
+        };
+        assert!((usage.window_5h - limits.window_5h * 0.5).abs() < 1e-9);
+        assert!((usage.window_week - limits.window_week * 0.2).abs() < 1e-9);
+        assert!((usage.window_month - limits.window_month * 0.1).abs() < 1e-9);
+        let stored = state
+            .db
+            .lock()
+            .get_account("ready-managed")
+            .unwrap()
+            .unwrap();
+        assert_no_go_usage_cooldown(&stored);
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn official_go_usage_refresh_rejects_non_ready_accounts() {
+        let (dir, state) = official_go_usage_test_state("official-go-not-ready");
+        let account = official_go_usage_account(
+            &state,
+            "pending",
+            AccountType::Managed,
+            AccountSetupStep::KeyVerification,
+            "sk-pending",
+        );
+        state.db.lock().create_account(&account).unwrap();
+        let error = {
+            let db = state.db.lock();
+            load_ready_account_for_official_go_usage(&db, "pending").unwrap_err()
+        };
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            !error.message.contains("sk-pending"),
+            "plaintext key must not appear in the error"
+        );
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn official_go_usage_refresh_rejects_empty_key_cipher() {
+        let (dir, state) = official_go_usage_test_state("official-go-empty-key");
+        let account = official_go_usage_account(
+            &state,
+            "empty-key",
+            AccountType::Key,
+            AccountSetupStep::Ready,
+            "",
+        );
+        state.db.lock().create_account(&account).unwrap();
+        let error = {
+            let db = state.db.lock();
+            load_ready_account_for_official_go_usage(&db, "empty-key").unwrap_err()
+        };
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn official_go_usage_refresh_returns_not_found_for_missing_accounts() {
+        let (dir, state) = official_go_usage_test_state("official-go-missing");
+        let error = {
+            let db = state.db.lock();
+            load_ready_account_for_official_go_usage(&db, "missing").unwrap_err()
+        };
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        let apply_error = {
+            let db = state.db.lock();
+            apply_official_go_usage_snapshot(
+                &db,
+                "missing",
+                "cipher-snapshot",
+                &sample_official_go_usage_snapshot(),
+                &state.pricing_snapshot().limits,
+            )
+            .unwrap_err()
+        };
+        assert_eq!(apply_error.status, StatusCode::NOT_FOUND);
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn official_go_usage_cas_leaves_all_three_windows_unchanged_when_key_changes() {
+        let (dir, state) = official_go_usage_test_state("official-go-cas");
+        let account = official_go_usage_account(
+            &state,
+            "cas-key",
+            AccountType::Key,
+            AccountSetupStep::Ready,
+            "sk-original",
+        );
+        state.db.lock().create_account(&account).unwrap();
+        let original_cipher = account.key_cipher.clone();
+        let limits = state.pricing_snapshot().limits.clone();
+        let before = {
+            let db = state.db.lock();
+            db.calibrate_account_usage_snapshot(
+                "cas-key",
+                &AccountUsageCalibrationSnapshot {
+                    rolling_percent: 15.0,
+                    weekly_percent: 25.0,
+                    monthly_percent: 35.0,
+                    rolling_resets_in_minutes: 90,
+                    weekly_resets_in_minutes: 600,
+                },
+                &limits,
+            )
+            .unwrap()
+        };
+
+        let replacement = state.encrypt_key("sk-replaced").unwrap();
+        state
+            .db
+            .lock()
+            .update_account(
+                "cas-key",
+                &AccountUpdate::default(),
+                Some(&replacement),
+                None,
+            )
+            .unwrap();
+
+        let error = {
+            let db = state.db.lock();
+            apply_official_go_usage_snapshot(
+                &db,
+                "cas-key",
+                &original_cipher,
+                &sample_official_go_usage_snapshot(),
+                &limits,
+            )
+            .unwrap_err()
+        };
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(!error.message.contains("sk-original"));
+        assert!(!error.message.contains("sk-replaced"));
+
+        let after = state
+            .db
+            .lock()
+            .account_usage_with_limits("cas-key", &limits)
+            .unwrap();
+        assert_usage_windows_unchanged(&before, &after);
+        assert!((after.window_5h - limits.window_5h * 0.15).abs() < 1e-9);
+        assert!((after.window_week - limits.window_week * 0.25).abs() < 1e-9);
+        assert!((after.window_month - limits.window_month * 0.35).abs() < 1e-9);
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn official_go_usage_errors_never_become_dashboard_unauthorized() {
+        use crate::usage_sync::OfficialUsageRefreshError;
+        let mapped = [
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::Unauthorized),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::Forbidden),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::RateLimited),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::Http(500)),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::Timeout),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::Network),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::Oversize),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::Schema),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                OfficialUsageRefreshError::Upstream(GoUsageError::Window),
+                StatusCode::BAD_GATEWAY,
+            ),
+        ];
+        for (error, expected) in mapped {
+            let mapped = map_official_usage_refresh_error(error.clone());
+            assert_eq!(mapped.status, expected, "{error}");
+            assert_ne!(mapped.status, StatusCode::UNAUTHORIZED, "{error}");
+            assert!(!mapped.message.contains("sk-"));
+            assert!(!mapped.message.to_ascii_lowercase().contains("bearer"));
+        }
+        let unauthorized = map_official_usage_refresh_error(OfficialUsageRefreshError::Upstream(
+            GoUsageError::Unauthorized,
+        ));
+        assert_eq!(unauthorized.status, StatusCode::BAD_REQUEST);
+        assert!(!unauthorized.message.contains("401"));
     }
 
     #[tokio::test]

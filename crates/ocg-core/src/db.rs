@@ -51,6 +51,37 @@ pub struct ForwardLogDiagnosticUpdate<'a> {
     pub diagnostic_json: &'a str,
 }
 
+/// Official or test-provided values used to atomically calibrate all three
+/// Go usage windows. Monthly remaining minutes stay derived from purchase date.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountUsageCalibrationSnapshot {
+    pub rolling_percent: f64,
+    pub weekly_percent: f64,
+    pub monthly_percent: f64,
+    pub rolling_resets_in_minutes: i64,
+    pub weekly_resets_in_minutes: i64,
+}
+
+/// Metadata committed in the same transaction as an official usage snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountUsageSyncSuccessMetadata {
+    pub now: DateTime<Utc>,
+    pub next_eligible_at: DateTime<Utc>,
+    pub mark_expedited: bool,
+}
+
+/// Persisted official-usage sync metadata for one account (schema v21).
+/// Never stores plaintext keys or upstream bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountUsageSyncState {
+    pub account_id: String,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub next_eligible_at: Option<DateTime<Utc>>,
+    pub failure_streak: i64,
+    pub last_expedited_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug)]
 pub enum ReorderAccountsError {
     DuplicateAccountId,
@@ -826,11 +857,40 @@ impl Database {
             )?;
         }
 
+        // v21: official Go usage sync metadata. Columns live on accounts so
+        // deleting an account drops scheduler state with it. Defaults keep
+        // pre-v21 rows inert until the adaptive scheduler first touches them.
+        if version < 21 {
+            ensure_column(&tx, "accounts", "usage_sync_last_success_at", "TEXT")?;
+            ensure_column(&tx, "accounts", "usage_sync_last_attempt_at", "TEXT")?;
+            ensure_column(&tx, "accounts", "usage_sync_next_eligible_at", "TEXT")?;
+            ensure_column(
+                &tx,
+                "accounts",
+                "usage_sync_failure_streak",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            ensure_column(&tx, "accounts", "usage_sync_last_expedited_at", "TEXT")?;
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (21);")?;
+        }
+
         // Unreleased #43 drafts numbered client-key columns as v18 and the
         // sub-key table as v19, so those databases already report version
         // >= 18 and skip the notes gate above. ensure_column is idempotent
         // on released v1.6.3 libraries and on fresh installs.
         ensure_column(&tx, "accounts", "notes", "TEXT")?;
+        // Idempotent backstop for v21 columns when an unreleased draft already
+        // reported a higher schema_version number without these fields.
+        ensure_column(&tx, "accounts", "usage_sync_last_success_at", "TEXT")?;
+        ensure_column(&tx, "accounts", "usage_sync_last_attempt_at", "TEXT")?;
+        ensure_column(&tx, "accounts", "usage_sync_next_eligible_at", "TEXT")?;
+        ensure_column(
+            &tx,
+            "accounts",
+            "usage_sync_failure_streak",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(&tx, "accounts", "usage_sync_last_expedited_at", "TEXT")?;
 
         // Detailed diagnostics are intentionally short-lived. Keep the base log row,
         // stable request id, source, stage, and original compact error indefinitely.
@@ -1006,6 +1066,162 @@ impl Database {
         tx.execute("DELETE FROM accounts WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn schema_version(&self) -> Result<i32> {
+        let version = self
+            .conn
+            .query_row(
+                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(version)
+    }
+
+    pub fn account_usage_sync_state(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<AccountUsageSyncState>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT usage_sync_last_success_at, usage_sync_last_attempt_at,
+                        usage_sync_next_eligible_at, usage_sync_failure_streak,
+                        usage_sync_last_expedited_at
+                 FROM accounts WHERE id = ?1",
+                [account_id],
+                |row| {
+                    Ok(AccountUsageSyncState {
+                        account_id: account_id.to_string(),
+                        last_success_at: row.get::<_, Option<String>>(0)?.map(parse_datetime),
+                        last_attempt_at: row.get::<_, Option<String>>(1)?.map(parse_datetime),
+                        next_eligible_at: row.get::<_, Option<String>>(2)?.map(parse_datetime),
+                        failure_streak: row.get::<_, i64>(3)?,
+                        last_expedited_at: row.get::<_, Option<String>>(4)?.map(parse_datetime),
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Pull `next_eligible_at` earlier when `proposal` is sooner.
+    ///
+    /// When `respect_failure_backoff` is true and the account is in a failure
+    /// streak, the existing next-eligible floor is left untouched so threshold,
+    /// cadence, and reset logic cannot defeat the backoff ladder. Callers that
+    /// intentionally override (real inference 429) pass false.
+    pub fn pull_account_usage_sync_next_eligible(
+        &self,
+        account_id: &str,
+        proposal: DateTime<Utc>,
+        respect_failure_backoff: bool,
+    ) -> Result<()> {
+        let current = self.account_usage_sync_state(account_id)?;
+        let Some(current) = current else {
+            // Account gone — nothing to schedule.
+            return Ok(());
+        };
+        if respect_failure_backoff && current.failure_streak > 0 {
+            return Ok(());
+        }
+        let next = match current.next_eligible_at {
+            Some(existing) => existing.min(proposal),
+            None => proposal,
+        };
+        self.conn.execute(
+            "UPDATE accounts
+             SET usage_sync_next_eligible_at = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![next.to_rfc3339(), Utc::now().to_rfc3339(), account_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_account_usage_sync_success(
+        &self,
+        account_id: &str,
+        now: DateTime<Utc>,
+        next_eligible_at: DateTime<Utc>,
+        mark_expedited: bool,
+    ) -> Result<()> {
+        record_account_usage_sync_success_on(
+            &self.conn,
+            account_id,
+            AccountUsageSyncSuccessMetadata {
+                now,
+                next_eligible_at,
+                mark_expedited,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub fn record_account_usage_sync_failure(
+        &self,
+        account_id: &str,
+        now: DateTime<Utc>,
+        failure_streak: i64,
+        next_eligible_at: DateTime<Utc>,
+    ) -> Result<()> {
+        // Never clear last_success_at on failure.
+        self.conn.execute(
+            "UPDATE accounts
+             SET usage_sync_last_attempt_at = ?1,
+                 usage_sync_next_eligible_at = ?2,
+                 usage_sync_failure_streak = ?3,
+                 updated_at = ?1
+             WHERE id = ?4",
+            params![
+                now.to_rfc3339(),
+                next_eligible_at.to_rfc3339(),
+                failure_streak,
+                account_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Touch only the manual-throttle timestamp without changing success,
+    /// streak, or next-eligible fields (e.g. post-network CAS conflicts).
+    pub fn touch_account_usage_sync_attempt(
+        &self,
+        account_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE accounts
+             SET usage_sync_last_attempt_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![now.to_rfc3339(), account_id],
+        )?;
+        Ok(())
+    }
+
+    /// True when the account has at least one successful, possibly
+    /// Go-quota-consuming forward log at or after `since` (active cadence).
+    /// Uses `julianday` so lexicographic RFC3339 edge cases cannot mis-order,
+    /// and `EXISTS` so the scan can stop early. Zen free successes are excluded.
+    pub fn account_has_local_activity_since(
+        &self,
+        account_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM forward_logs
+                WHERE account_id = ?1
+                  AND status IN ('success', 'success_no_usage', 'success_unpriced')
+                  AND cost_state IN ('priced', 'legacy_estimate', 'unpriced', 'usage_missing')
+                  AND julianday(timestamp) >= julianday(?2)
+                LIMIT 1
+             )",
+            params![account_id, since.to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
     }
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>> {
@@ -1999,104 +2215,131 @@ impl Database {
         resets_in_minutes: Option<i64>,
         limit: f64,
     ) -> Result<bool> {
+        calibrate_account_usage_on(
+            &self.conn,
+            account_id,
+            window,
+            percent,
+            resets_in_minutes,
+            limit,
+            Utc::now(),
+        )
+    }
+
+    /// Atomically calibrate rolling, weekly, and monthly Go usage windows.
+    /// Any input, SQL, or missing-account error rolls the whole transaction back.
+    pub fn calibrate_account_usage_snapshot(
+        &self,
+        account_id: &str,
+        snapshot: &AccountUsageCalibrationSnapshot,
+        limits: &PricingLimits,
+    ) -> Result<UsageWindow> {
+        let tx = self.conn.unchecked_transaction()?;
         let now = Utc::now();
-        // (started_at, offset_col, started_col_or_empty)
-        // started_col 为空字符串表示月窗口——不写 started_at 列（起点固定为 purchase_date）。
-        let (started_at, started_col, offset_col): (Option<DateTime<Utc>>, &str, &str) =
-            match window {
-                UsageWindowKind::FiveHours => {
-                    let window_len = Duration::hours(5);
-                    let started_at =
-                        calibrated_window_start(now, window_len, resets_in_minutes, "5-hour")?;
-                    (
-                        Some(started_at),
-                        "usage_5h_window_started_at",
-                        "usage_5h_window_cost_offset",
-                    )
-                }
-                UsageWindowKind::Week => {
-                    let window_len = Duration::days(7);
-                    let started_at =
-                        calibrated_window_start(now, window_len, resets_in_minutes, "weekly")?;
-                    (
-                        Some(started_at),
-                        "usage_week_window_started_at",
-                        "usage_week_window_cost_offset",
-                    )
-                }
-                UsageWindowKind::Month => {
-                    // 月窗口的起点/终点由 purchase_date 决定，不写 started_at 列。
-                    // resets_in_minutes 被忽略——窗口已由账号购买日期固定。
-                    (None, "", "usage_month_window_cost_offset")
-                }
-                UsageWindowKind::Free => {
-                    anyhow::bail!("free promo quota cannot be calibrated as a Go usage window")
-                }
-            };
+        if !calibrate_account_usage_on(
+            &tx,
+            account_id,
+            UsageWindowKind::FiveHours,
+            snapshot.rolling_percent,
+            Some(snapshot.rolling_resets_in_minutes),
+            limits.window_5h,
+            now,
+        )? {
+            anyhow::bail!("account {account_id} not found");
+        }
+        if !calibrate_account_usage_on(
+            &tx,
+            account_id,
+            UsageWindowKind::Week,
+            snapshot.weekly_percent,
+            Some(snapshot.weekly_resets_in_minutes),
+            limits.window_week,
+            now,
+        )? {
+            anyhow::bail!("account {account_id} not found");
+        }
+        if !calibrate_account_usage_on(
+            &tx,
+            account_id,
+            UsageWindowKind::Month,
+            snapshot.monthly_percent,
+            None,
+            limits.window_month,
+            now,
+        )? {
+            anyhow::bail!("account {account_id} not found");
+        }
+        tx.commit()?;
+        self.account_usage_with_limits(account_id, limits)
+    }
 
-        // 计算 actual_cost：窗口内已有 forward_logs 的 cost 总和。
-        // 5h/周窗口的起点是刚算出的 started_at；月窗口的起点是 purchase_date 00:00 本地时区。
-        let actual_cost: f64 = match started_at {
-            Some(started) => self.conn.query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM forward_logs
-                 WHERE account_id = ?1
-                   AND cost_state IN ('priced', 'legacy_estimate')
-                   AND timestamp >= ?2",
-                params![account_id, started.to_rfc3339()],
-                |row| row.get(0),
-            )?,
-            None => {
-                let purchase_date: String = self
-                    .conn
-                    .query_row(
-                        "SELECT recharge_date FROM accounts WHERE id = ?1",
-                        [account_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .ok_or_else(|| anyhow::anyhow!("account not found"))?;
-                let started = month_window_start_utc(&purchase_date)?;
-                self.conn.query_row(
-                    "SELECT COALESCE(SUM(cost), 0) FROM forward_logs
-                     WHERE account_id = ?1
-                       AND cost_state IN ('priced', 'legacy_estimate')
-                       AND timestamp >= ?2",
-                    params![account_id, started.to_rfc3339()],
-                    |row| row.get(0),
-                )?
-            }
-        };
+    /// Atomically CAS the credential/setup state, calibrate all three official
+    /// usage windows, persist sync-success metadata, and compute the returned
+    /// usage. `None` means the account disappeared or changed while the
+    /// network request was in flight. Any SQL/read failure rolls everything
+    /// back, so a failed refresh never exposes a partially updated baseline.
+    pub fn commit_official_usage_sync_success(
+        &self,
+        account_id: &str,
+        expected_key_cipher: &str,
+        snapshot: &AccountUsageCalibrationSnapshot,
+        limits: &PricingLimits,
+        metadata: AccountUsageSyncSuccessMetadata,
+    ) -> Result<Option<UsageWindow>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let matches: i64 = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM accounts
+                WHERE id = ?1
+                  AND key_cipher = ?2
+                  AND key_cipher <> ''
+                  AND setup_step = 'ready'
+             )",
+            params![account_id, expected_key_cipher],
+            |row| row.get(0),
+        )?;
+        if matches == 0 {
+            return Ok(None);
+        }
 
-        let target_cost = limit * percent / 100.0;
-        // Bug 1.5 修复：去掉 max(0, ...) 钳制，允许负 offset。
-        // 之前 max(0, target - actual) 配合 schema CHECK (offset >= 0) 让向左拉
-        // 滑块时被锁死在实际 cost 对应的百分比。现在 offset 可以为负，
-        // compute_fixed_window 返回 offset + actual = target_cost，与用户输入一致。
-        let offset = target_cost - actual_cost;
+        if !calibrate_account_usage_on(
+            &tx,
+            account_id,
+            UsageWindowKind::FiveHours,
+            snapshot.rolling_percent,
+            Some(snapshot.rolling_resets_in_minutes),
+            limits.window_5h,
+            metadata.now,
+        )? {
+            anyhow::bail!("account {account_id} disappeared during official usage sync");
+        }
+        if !calibrate_account_usage_on(
+            &tx,
+            account_id,
+            UsageWindowKind::Week,
+            snapshot.weekly_percent,
+            Some(snapshot.weekly_resets_in_minutes),
+            limits.window_week,
+            metadata.now,
+        )? {
+            anyhow::bail!("account {account_id} disappeared during official usage sync");
+        }
+        if !calibrate_account_usage_on(
+            &tx,
+            account_id,
+            UsageWindowKind::Month,
+            snapshot.monthly_percent,
+            None,
+            limits.window_month,
+            metadata.now,
+        )? {
+            anyhow::bail!("account {account_id} disappeared during official usage sync");
+        }
 
-        let changed = if started_col.is_empty() {
-            // 月窗口：只更新 cost_offset（started_at 由 purchase_date 派生，不存储）
-            self.conn.execute(
-                "UPDATE accounts
-                 SET usage_month_window_cost_offset = ?2,
-                     updated_at = ?3
-                 WHERE id = ?1",
-                params![account_id, offset, now.to_rfc3339()],
-            )?
-        } else {
-            let started = started_at.unwrap();
-            self.conn.execute(
-                &format!(
-                    "UPDATE accounts
-                     SET {started_col} = ?2,
-                         {offset_col} = ?3,
-                         updated_at = ?4
-                     WHERE id = ?1"
-                ),
-                params![account_id, started.to_rfc3339(), offset, now.to_rfc3339()],
-            )?
-        };
-        Ok(changed > 0)
+        record_account_usage_sync_success_on(&tx, account_id, metadata)?;
+        let usage = account_usage_with_limits_on(&tx, account_id, limits, metadata.now)?;
+        tx.commit()?;
+        Ok(Some(usage))
     }
 
     pub fn account_usage(&self, account_id: &str) -> Result<UsageWindow> {
@@ -2112,84 +2355,7 @@ impl Database {
         account_id: &str,
         limits: &PricingLimits,
     ) -> Result<UsageWindow> {
-        let now = Utc::now();
-        let row = self.conn.query_row(
-            "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
-                    usage_week_window_started_at, usage_week_window_cost_offset,
-                    usage_month_window_cost_offset,
-                    recharge_date
-             FROM accounts WHERE id = ?1",
-            [account_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, f64>(3)?,
-                    row.get::<_, f64>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            },
-        );
-        let (started_5h_str, offset_5h, started_week_str, offset_week, offset_month, purchase_date) =
-            match row.optional()? {
-                Some(v) => v,
-                None => {
-                    return Ok(UsageWindow {
-                        account_id: account_id.to_string(),
-                        window_5h: 0.0,
-                        window_week: 0.0,
-                        window_month: 0.0,
-                        resets_in_5h: None,
-                        resets_in_week: None,
-                        resets_in_month: None,
-                    });
-                }
-            };
-
-        let (cost_5h, reset_5h) = compute_fixed_window(
-            &self.conn,
-            account_id,
-            started_5h_str.as_deref(),
-            offset_5h,
-            limits.window_5h,
-            now,
-            FixedWindowSpec {
-                length: Duration::hours(5),
-                started_col: "usage_5h_window_started_at",
-                offset_col: "usage_5h_window_cost_offset",
-            },
-        )?;
-        let (cost_week, reset_week) = compute_fixed_window(
-            &self.conn,
-            account_id,
-            started_week_str.as_deref(),
-            offset_week,
-            limits.window_week,
-            now,
-            FixedWindowSpec {
-                length: Duration::days(7),
-                started_col: "usage_week_window_started_at",
-                offset_col: "usage_week_window_cost_offset",
-            },
-        )?;
-        let (cost_month, reset_month) = compute_month_window(
-            &self.conn,
-            account_id,
-            &purchase_date,
-            offset_month,
-            limits.window_month,
-        )?;
-
-        Ok(UsageWindow {
-            account_id: account_id.to_string(),
-            window_5h: cost_5h,
-            window_week: cost_week,
-            window_month: cost_month,
-            resets_in_5h: reset_5h,
-            resets_in_week: reset_week,
-            resets_in_month: reset_month,
-        })
+        account_usage_with_limits_on(&self.conn, account_id, limits, Utc::now())
     }
 
     pub fn total_usage(&self) -> Result<(f64, f64, f64)> {
@@ -2251,6 +2417,134 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
+}
+
+fn record_account_usage_sync_success_on(
+    conn: &Connection,
+    account_id: &str,
+    metadata: AccountUsageSyncSuccessMetadata,
+) -> Result<()> {
+    let changed = if metadata.mark_expedited {
+        conn.execute(
+            "UPDATE accounts
+             SET usage_sync_last_success_at = ?1,
+                 usage_sync_last_attempt_at = ?1,
+                 usage_sync_next_eligible_at = ?2,
+                 usage_sync_failure_streak = 0,
+                 usage_sync_last_expedited_at = ?1,
+                 updated_at = ?1
+             WHERE id = ?3",
+            params![
+                metadata.now.to_rfc3339(),
+                metadata.next_eligible_at.to_rfc3339(),
+                account_id
+            ],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE accounts
+             SET usage_sync_last_success_at = ?1,
+                 usage_sync_last_attempt_at = ?1,
+                 usage_sync_next_eligible_at = ?2,
+                 usage_sync_failure_streak = 0,
+                 updated_at = ?1
+             WHERE id = ?3",
+            params![
+                metadata.now.to_rfc3339(),
+                metadata.next_eligible_at.to_rfc3339(),
+                account_id
+            ],
+        )?
+    };
+    if changed != 1 {
+        anyhow::bail!("account {account_id} disappeared while recording usage sync success");
+    }
+    Ok(())
+}
+
+fn account_usage_with_limits_on(
+    conn: &Connection,
+    account_id: &str,
+    limits: &PricingLimits,
+    now: DateTime<Utc>,
+) -> Result<UsageWindow> {
+    let row = conn.query_row(
+        "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
+                usage_week_window_started_at, usage_week_window_cost_offset,
+                usage_month_window_cost_offset,
+                recharge_date
+         FROM accounts WHERE id = ?1",
+        [account_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        },
+    );
+    let (started_5h_str, offset_5h, started_week_str, offset_week, offset_month, purchase_date) =
+        match row.optional()? {
+            Some(value) => value,
+            None => {
+                return Ok(UsageWindow {
+                    account_id: account_id.to_string(),
+                    window_5h: 0.0,
+                    window_week: 0.0,
+                    window_month: 0.0,
+                    resets_in_5h: None,
+                    resets_in_week: None,
+                    resets_in_month: None,
+                });
+            }
+        };
+
+    let (cost_5h, reset_5h) = compute_fixed_window(
+        conn,
+        account_id,
+        started_5h_str.as_deref(),
+        offset_5h,
+        limits.window_5h,
+        now,
+        FixedWindowSpec {
+            length: Duration::hours(5),
+            started_col: "usage_5h_window_started_at",
+            offset_col: "usage_5h_window_cost_offset",
+        },
+    )?;
+    let (cost_week, reset_week) = compute_fixed_window(
+        conn,
+        account_id,
+        started_week_str.as_deref(),
+        offset_week,
+        limits.window_week,
+        now,
+        FixedWindowSpec {
+            length: Duration::days(7),
+            started_col: "usage_week_window_started_at",
+            offset_col: "usage_week_window_cost_offset",
+        },
+    )?;
+    let (cost_month, reset_month) = compute_month_window(
+        conn,
+        account_id,
+        &purchase_date,
+        offset_month,
+        limits.window_month,
+    )?;
+
+    Ok(UsageWindow {
+        account_id: account_id.to_string(),
+        window_5h: cost_5h,
+        window_week: cost_week,
+        window_month: cost_month,
+        resets_in_5h: reset_5h,
+        resets_in_week: reset_week,
+        resets_in_month: reset_month,
+    })
 }
 
 /// 计算固定窗口的当前用量与清零时刻。`started_at_str` 为 `None` 表示账号从未使用过该窗口；
@@ -2400,6 +2694,110 @@ fn compute_month_window(
     )?;
     // ponytail: 月窗口已过期也照常返回终点，前端按"已到期"显示。
     Ok(((offset + cost).min(limit), Some(end)))
+}
+
+fn calibrate_account_usage_on(
+    conn: &Connection,
+    account_id: &str,
+    window: UsageWindowKind,
+    percent: f64,
+    resets_in_minutes: Option<i64>,
+    limit: f64,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    // (started_at, offset_col, started_col_or_empty)
+    // started_col 为空字符串表示月窗口——不写 started_at 列（起点固定为 purchase_date）。
+    let (started_at, started_col, offset_col): (Option<DateTime<Utc>>, &str, &str) = match window {
+        UsageWindowKind::FiveHours => {
+            let window_len = Duration::hours(5);
+            let started_at = calibrated_window_start(now, window_len, resets_in_minutes, "5-hour")?;
+            (
+                Some(started_at),
+                "usage_5h_window_started_at",
+                "usage_5h_window_cost_offset",
+            )
+        }
+        UsageWindowKind::Week => {
+            let window_len = Duration::days(7);
+            let started_at = calibrated_window_start(now, window_len, resets_in_minutes, "weekly")?;
+            (
+                Some(started_at),
+                "usage_week_window_started_at",
+                "usage_week_window_cost_offset",
+            )
+        }
+        UsageWindowKind::Month => {
+            // 月窗口的起点/终点由 purchase_date 决定，不写 started_at 列。
+            // resets_in_minutes 被忽略——窗口已由账号购买日期固定。
+            (None, "", "usage_month_window_cost_offset")
+        }
+        UsageWindowKind::Free => {
+            anyhow::bail!("free promo quota cannot be calibrated as a Go usage window")
+        }
+    };
+
+    // 计算 actual_cost：窗口内已有 forward_logs 的 cost 总和。
+    // 5h/周窗口的起点是刚算出的 started_at；月窗口的起点是 purchase_date 00:00 本地时区。
+    let actual_cost: f64 = match started_at {
+        Some(started) => conn.query_row(
+            "SELECT COALESCE(SUM(cost), 0) FROM forward_logs
+             WHERE account_id = ?1
+               AND cost_state IN ('priced', 'legacy_estimate')
+               AND timestamp >= ?2",
+            params![account_id, started.to_rfc3339()],
+            |row| row.get(0),
+        )?,
+        None => {
+            let purchase_date: String = conn
+                .query_row(
+                    "SELECT recharge_date FROM accounts WHERE id = ?1",
+                    [account_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| anyhow::anyhow!("account not found"))?;
+            let started = month_window_start_utc(&purchase_date)?;
+            conn.query_row(
+                "SELECT COALESCE(SUM(cost), 0) FROM forward_logs
+                 WHERE account_id = ?1
+                   AND cost_state IN ('priced', 'legacy_estimate')
+                   AND timestamp >= ?2",
+                params![account_id, started.to_rfc3339()],
+                |row| row.get(0),
+            )?
+        }
+    };
+
+    let target_cost = limit * percent / 100.0;
+    // Bug 1.5 修复：去掉 max(0, ...) 钳制，允许负 offset。
+    // 之前 max(0, target - actual) 配合 schema CHECK (offset >= 0) 让向左拉
+    // 滑块时被锁死在实际 cost 对应的百分比。现在 offset 可以为负，
+    // compute_fixed_window 返回 offset + actual = target_cost，与用户输入一致。
+    let offset = target_cost - actual_cost;
+
+    let changed = if started_col.is_empty() {
+        // 月窗口：只更新 cost_offset（started_at 由 purchase_date 派生，不存储）
+        conn.execute(
+            "UPDATE accounts
+             SET usage_month_window_cost_offset = ?2,
+                 updated_at = ?3
+             WHERE id = ?1",
+            params![account_id, offset, now.to_rfc3339()],
+        )?
+    } else {
+        let started = started_at.unwrap();
+        conn.execute(
+            &format!(
+                "UPDATE accounts
+                 SET {started_col} = ?2,
+                     {offset_col} = ?3,
+                     updated_at = ?4
+                 WHERE id = ?1"
+            ),
+            params![account_id, started.to_rfc3339(), offset, now.to_rfc3339()],
+        )?
+    };
+    Ok(changed > 0)
 }
 
 fn calibrated_window_start(
@@ -2778,7 +3176,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
@@ -3005,7 +3403,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 20, "{label}");
+            assert_eq!(version, 21, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -3083,7 +3481,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -3232,7 +3630,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -3376,7 +3774,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -3425,7 +3823,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
             .with_timezone(&Utc);
@@ -3852,7 +4250,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -3906,7 +4304,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -3981,7 +4379,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         assert!(auth_error.is_none());
 
         drop(db);
@@ -4593,6 +4991,261 @@ mod tests {
         fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
 
+    fn snapshot_limits() -> PricingLimits {
+        PricingLimits {
+            window_5h: 12.0,
+            window_week: 30.0,
+            window_month: 100.0,
+        }
+    }
+
+    fn usage_calibration(
+        rolling_percent: f64,
+        weekly_percent: f64,
+        monthly_percent: f64,
+        rolling_resets_in_minutes: i64,
+        weekly_resets_in_minutes: i64,
+    ) -> AccountUsageCalibrationSnapshot {
+        AccountUsageCalibrationSnapshot {
+            rolling_percent,
+            weekly_percent,
+            monthly_percent,
+            rolling_resets_in_minutes,
+            weekly_resets_in_minutes,
+        }
+    }
+
+    fn usage_offset_row(
+        db: &Database,
+        id: &str,
+    ) -> (Option<String>, f64, Option<String>, f64, f64) {
+        db.conn
+            .query_row(
+                "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
+                        usage_week_window_started_at, usage_week_window_cost_offset,
+                        usage_month_window_cost_offset
+                 FROM accounts WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("usage offset row should load")
+    }
+
+    #[test]
+    fn calibrate_account_usage_snapshot_updates_all_three_windows() {
+        let dir = temp_data_dir("calibrate-snapshot-ok");
+        let db = Database::open(dir.clone()).expect("db should open");
+        let mut acct = account("snap-ok");
+        acct.purchase_date = "2026-07-01".into();
+        db.create_account(&acct).expect("account should be created");
+        finalize_success(&db, "snap-ok", 3.0, Utc::now() - Duration::hours(1));
+
+        let limits = snapshot_limits();
+        let usage = db
+            .calibrate_account_usage_snapshot(
+                "snap-ok",
+                &usage_calibration(50.0, 20.0, 10.0, 180, 1_440),
+                &limits,
+            )
+            .expect("snapshot calibrate should save");
+        assert_cost(usage.window_5h, 6.0);
+        assert_cost(usage.window_week, 6.0);
+        assert_cost(usage.window_month, 10.0);
+        let remaining_5h =
+            (usage.resets_in_5h.expect("5h reset should be set") - Utc::now()).num_minutes();
+        assert!(
+            (175..=185).contains(&remaining_5h),
+            "expected ~180min remaining, got {remaining_5h}"
+        );
+        let remaining_week =
+            (usage.resets_in_week.expect("week reset should be set") - Utc::now()).num_minutes();
+        assert!(
+            (1_435..=1_445).contains(&remaining_week),
+            "expected ~1440min remaining, got {remaining_week}"
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn official_usage_sync_rolls_back_baseline_when_success_metadata_fails() {
+        let dir = temp_data_dir("official-sync-atomic-failure");
+        let db = Database::open(dir.clone()).expect("db should open");
+        let mut acct = account("atomic-sync");
+        acct.purchase_date = "2026-07-01".into();
+        db.create_account(&acct).expect("account should be created");
+        let limits = snapshot_limits();
+        db.calibrate_account_usage_snapshot(
+            "atomic-sync",
+            &usage_calibration(10.0, 20.0, 30.0, 120, 1_200),
+            &limits,
+        )
+        .expect("initial baseline should save");
+        let previous_success = Utc::now() - Duration::hours(2);
+        db.record_account_usage_sync_success(
+            "atomic-sync",
+            previous_success,
+            previous_success + Duration::hours(24),
+            false,
+        )
+        .expect("initial sync metadata should save");
+        let before = db
+            .account_usage_with_limits("atomic-sync", &limits)
+            .expect("initial usage should load");
+        let sync_before = db
+            .account_usage_sync_state("atomic-sync")
+            .expect("initial sync state should load")
+            .expect("sync state should exist");
+
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_official_sync_metadata
+                 BEFORE UPDATE OF usage_sync_last_success_at ON accounts
+                 WHEN NEW.id = 'atomic-sync'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'forced usage sync metadata failure');
+                 END;",
+            )
+            .expect("failure trigger should install");
+
+        let now = Utc::now();
+        let result = db.commit_official_usage_sync_success(
+            "atomic-sync",
+            "cipher",
+            &usage_calibration(80.0, 70.0, 60.0, 180, 1_440),
+            &limits,
+            AccountUsageSyncSuccessMetadata {
+                now,
+                next_eligible_at: now + Duration::hours(1),
+                mark_expedited: true,
+            },
+        );
+        assert!(
+            result.is_err(),
+            "forced metadata failure must abort the sync"
+        );
+
+        let after = db
+            .account_usage_with_limits("atomic-sync", &limits)
+            .expect("usage should remain readable");
+        assert_cost(after.window_5h, before.window_5h);
+        assert_cost(after.window_week, before.window_week);
+        assert_cost(after.window_month, before.window_month);
+        let sync_after = db
+            .account_usage_sync_state("atomic-sync")
+            .expect("sync state should load")
+            .expect("sync state should exist");
+        assert_eq!(sync_after.last_success_at, sync_before.last_success_at);
+        assert_eq!(sync_after.next_eligible_at, sync_before.next_eligible_at);
+        assert_eq!(sync_after.failure_streak, sync_before.failure_streak);
+        assert_eq!(sync_after.last_expedited_at, sync_before.last_expedited_at);
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn calibrate_account_usage_snapshot_rolls_back_when_second_window_fails() {
+        let dir = temp_data_dir("calibrate-snapshot-week-fail");
+        let db = Database::open(dir.clone()).expect("db should open");
+        let mut acct = account("snap-week");
+        acct.purchase_date = "2026-07-01".into();
+        db.create_account(&acct).expect("account should be created");
+        let limits = snapshot_limits();
+        db.calibrate_account_usage_snapshot(
+            "snap-week",
+            &usage_calibration(10.0, 20.0, 30.0, 100, 200),
+            &limits,
+        )
+        .expect("initial snapshot should save");
+        let before = usage_offset_row(&db, "snap-week");
+        let before_usage = db
+            .account_usage_with_limits("snap-week", &limits)
+            .expect("usage should load");
+
+        assert!(
+            db.calibrate_account_usage_snapshot(
+                "snap-week",
+                &usage_calibration(80.0, 90.0, 40.0, 180, 10_081),
+                &limits
+            )
+            .is_err(),
+            "weekly minutes outside the 7-day window should fail"
+        );
+
+        assert_eq!(usage_offset_row(&db, "snap-week"), before);
+        let after = db
+            .account_usage_with_limits("snap-week", &limits)
+            .expect("usage should reload");
+        assert_cost(after.window_5h, before_usage.window_5h);
+        assert_cost(after.window_week, before_usage.window_week);
+        assert_cost(after.window_month, before_usage.window_month);
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn calibrate_account_usage_snapshot_rolls_back_when_third_window_fails() {
+        let dir = temp_data_dir("calibrate-snapshot-month-fail");
+        let db = Database::open(dir.clone()).expect("db should open");
+        let mut acct = account("snap-month");
+        acct.purchase_date = "2026-07-01".into();
+        db.create_account(&acct).expect("account should be created");
+        let limits = snapshot_limits();
+        db.calibrate_account_usage_snapshot(
+            "snap-month",
+            &usage_calibration(10.0, 20.0, 30.0, 100, 200),
+            &limits,
+        )
+        .expect("initial snapshot should save");
+        let before = usage_offset_row(&db, "snap-month");
+        let before_usage = db
+            .account_usage_with_limits("snap-month", &limits)
+            .expect("usage should load");
+
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_month_calibrate
+                 BEFORE UPDATE OF usage_month_window_cost_offset ON accounts
+                 WHEN NEW.id = 'snap-month'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced month calibrate failure');
+                 END;",
+            )
+            .expect("failure trigger should be installed");
+
+        assert!(
+            db.calibrate_account_usage_snapshot(
+                "snap-month",
+                &usage_calibration(80.0, 90.0, 40.0, 180, 1_440),
+                &limits
+            )
+            .is_err(),
+            "month window trigger should fail the transaction"
+        );
+
+        assert_eq!(usage_offset_row(&db, "snap-month"), before);
+        let after = db
+            .account_usage_with_limits("snap-month", &limits)
+            .expect("usage should reload");
+        assert_cost(after.window_5h, before_usage.window_5h);
+        assert_cost(after.window_week, before_usage.window_week);
+        assert_cost(after.window_month, before_usage.window_month);
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
     #[test]
     fn soonest_reset_is_minimum_of_each_accounts_latest_active_cooldown() {
         let dir = temp_data_dir("soonest-account-reset");
@@ -5012,7 +5665,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
 
         let index_exists: i64 = db
             .conn
@@ -5035,7 +5688,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -5072,11 +5725,52 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
 
         // Replaying the migration converges to the same shape.
         db.migrate().unwrap();
         assert_eq!(probe(&db.conn), (1, 1));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v21_adds_usage_sync_columns_with_safe_defaults() {
+        let dir = temp_data_dir("v21-usage-sync");
+        let db = Database::open(dir.clone()).unwrap();
+        let columns = {
+            let mut stmt = db.conn.prepare("PRAGMA table_info(accounts)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for name in [
+            "usage_sync_last_success_at",
+            "usage_sync_last_attempt_at",
+            "usage_sync_next_eligible_at",
+            "usage_sync_failure_streak",
+            "usage_sync_last_expedited_at",
+        ] {
+            assert!(columns.contains(&name.to_string()), "missing {name}");
+        }
+        assert_eq!(db.schema_version().unwrap(), 21);
+
+        let account = account("sync-defaults");
+        db.create_account(&account).unwrap();
+        let sync = db
+            .account_usage_sync_state("sync-defaults")
+            .unwrap()
+            .unwrap();
+        assert!(sync.last_success_at.is_none());
+        assert!(sync.last_attempt_at.is_none());
+        assert!(sync.next_eligible_at.is_none());
+        assert_eq!(sync.failure_streak, 0);
+        assert!(sync.last_expedited_at.is_none());
+
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 21);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -5118,7 +5812,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("repaired schema should load");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         assert_eq!(notes_after, 1);
         db.list_accounts()
             .expect("account reads must survive a missing notes column on the draft");

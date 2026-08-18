@@ -281,13 +281,26 @@ difference, and the Claude Desktop three-role persistence behavior.
   transitions to `ready + enabled`; `429` also proves validity and records
   cooldown. `401`/`403`, network errors, and `5xx` remain at
   `key_verification`. APIs, DTOs, and logs must never return plaintext keys.
-- Ready managed accounts can
-  `POST /dashboard/api/accounts/{id}/usage/refresh` to read Go usage from the
-  OpenCode console via that account's Chromium profile cookies
-  (`console_usage.rs`). Handle Chrome 127+ 32-byte domain-hash cookie prefixes,
-  shared reads of a locked Cookies DB on Windows, and Solid-serialized /
-  comment-wrapped usage percentages. Key accounts keep manual calibration;
-  refresh failures must surface explicitly.
+- Official Go usage (`go_usage.rs`, `https://opencode.ai/zen/go/v1/usage`) is a
+  calibration baseline coordinated by `usage_sync.rs`. Manual
+  `POST /dashboard/api/accounts/{id}/usage/refresh` and the background
+  reconciler share one fetch + key-CAS + three-window calibration path.
+  Ready+enabled accounts with local activity in the last 24h reconcile about
+  hourly; inactive ones about daily. Disabled / non-ready / empty-key accounts
+  are excluded. Startup must not stampede: global concurrency 1, pacing, and
+  bounded jitter with injectable clock/jitter/fetch seams. Manual refresh has
+  a 60s per-account throttle after any attempt, in-flight dedupe, and
+  Retry-After / `next_allowed_at`. Local max Go usage ≥80% may expedite at most
+  once per 15 minutes. Real inference `429` keeps existing cooldown/selector
+  writes and additionally schedules an official sync ~1–2 minutes later
+  (never inline). Official failures or `status=rate-limited` must never write
+  inference cooldown. After success, schedule around the earliest `resetsAt`
+  (bounded jitter) while respecting active/inactive cadence. Failure backoff:
+  5m → 15m → 1h → 6h; never erase last success or the previous baseline.
+  Sync metadata lives on `accounts` (schema v21). The public Go docs have not
+  listed this path yet. `console_usage.rs` is frozen deprecated compatibility
+  code—do not call or extend; remove only after ≥2 minor releases plus stable
+  real-account evidence. Manual slider/PATCH calibration stays available.
 - Protected lifecycle endpoints are `POST /accounts/managed`,
   `PATCH /accounts/{id}/setup`, `POST /accounts/{id}/setup/verify-key`, and
   `POST /accounts/{id}/usage/refresh`. Browser endpoints are
@@ -820,8 +833,10 @@ most of them; the manual parts need a real desktop.
       login → payment review → key paste. A tester performs real payment only
       when explicitly intended. Console opens `opencode.ai/auth`. Log in once
       for a legacy key account and verify later access to authoritative quota
-      and referral use. For a ready managed account, exercise **Refresh quota**
-      (missing session / locked Cookies DB must error clearly). Cover desktop
+      and referral use. For a ready Key account and a ready managed account,
+      exercise **Refresh quota** against official `/zen/go/v1/usage` (invalid
+      key, 409 after a key change, and network/schema failures must error
+      clearly and leave the previous local calibration). Cover desktop
       and Docker sidecar paths.
 - [ ] On Windows, run the installer once, confirm SmartScreen warning text,
       open the dashboard, add an account, send one request.

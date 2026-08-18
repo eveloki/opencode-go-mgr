@@ -1,3 +1,11 @@
+//! DEPRECATED / FROZEN compatibility code — Profile Cookie/HTML console usage.
+//!
+//! Do not call or extend this module. Official Go usage now goes through
+//! `go_usage.rs` and adaptive sync in `usage_sync.rs`. Remove only after at
+//! least two minor releases plus stable real-account evidence that the
+//! official `/zen/go/v1/usage` path fully supersedes this. Avoid Rust
+//! `#[deprecated]` here because workspace `-D warnings` would break the build.
+
 use anyhow::{Context, Result, bail};
 use chrono::{Duration as ChronoDuration, Utc};
 use reqwest::header::{COOKIE, HeaderValue, LOCATION, USER_AGENT};

@@ -20,6 +20,10 @@ export interface Account {
   last_error: string | null;
   auth_error: string | null;
   notes: string;
+  /** Last successful official Go usage calibration (RFC3339), if any. */
+  usage_sync_last_success_at: string | null;
+  /** When a manual refresh may be attempted again; null when allowed now. */
+  usage_sync_next_allowed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -311,6 +315,13 @@ export interface UsageWindow {
   resets_in_month: string | null;
 }
 
+export interface OfficialUsageRefreshResult {
+  usage: UsageWindow;
+  source: string;
+  last_success_at: string;
+  next_allowed_at: string;
+}
+
 export interface PricingLimits {
   window_5h: number;
   window_week: number;
@@ -405,11 +416,20 @@ export class DashboardAuthError extends Error {
 
 export class DashboardRequestError extends Error {
   readonly status: number;
+  readonly retryAfterSeconds: number | null;
+  readonly nextAllowedAt: string | null;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    retryAfterSeconds: number | null = null,
+    nextAllowedAt: string | null = null,
+  ) {
     super(message);
     this.name = "DashboardRequestError";
     this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+    this.nextAllowedAt = nextAllowedAt;
   }
 }
 
@@ -446,16 +466,25 @@ async function request<T>(
       throw dashboardAuthError(t("登录已失效，请重新登录"));
     }
     let message = `${response.status} ${response.statusText}`;
+    let nextAllowedAt: string | null = null;
     const responseText = await response.text().catch(() => "");
     if (responseText) {
       try {
-        const body = JSON.parse(responseText) as { error?: unknown };
+        const body = JSON.parse(responseText) as {
+          error?: unknown;
+          next_allowed_at?: unknown;
+        };
         if (typeof body.error === "string") message = body.error;
+        if (typeof body.next_allowed_at === "string") nextAllowedAt = body.next_allowed_at;
       } catch {
         message = responseText;
       }
     }
-    throw new DashboardRequestError(message, response.status);
+    const retryAfterHeader = response.headers.get("Retry-After");
+    const retryAfterSeconds = retryAfterHeader && /^\d+$/.test(retryAfterHeader)
+      ? Number(retryAfterHeader)
+      : null;
+    throw new DashboardRequestError(message, response.status, retryAfterSeconds, nextAllowedAt);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -510,8 +539,8 @@ export const tauriApi = {
     method: "PATCH",
     body: jsonBody({ window, percent, resets_in_minutes: resets_in_minutes ?? null }),
   }),
-  refreshManagedAccountUsage: (id: string) =>
-    request<{ usage: UsageWindow; source: string }>(`/accounts/${id}/usage/refresh`, {
+  refreshAccountUsage: (id: string) =>
+    request<OfficialUsageRefreshResult>(`/accounts/${id}/usage/refresh`, {
       method: "POST",
     }),
   resetAccountCooldown: (id: string) =>

@@ -145,7 +145,7 @@
               </n-tooltip>
 
               <n-tooltip
-                v-if="accountIsReady(account) && account.account_type === 'managed'"
+                v-if="accountIsReady(account)"
                 trigger="hover"
               >
                 <template #trigger>
@@ -155,17 +155,17 @@
                     size="small"
                     :aria-label="t('刷新额度')"
                     :loading="usageRefreshLoading[account.id]"
-                    :disabled="usageLoading[account.id] || !!usageLoadErrors[account.id]"
-                    @click="refreshManagedUsage(account.id)"
+                    :disabled="isUsageRefreshBlocked(account) || usageLoading[account.id] || !!usageLoadErrors[account.id]"
+                    @click="refreshAccountUsage(account.id)"
                   >
                     <template #icon><n-icon :component="ReloadOutlined" /></template>
                   </n-button>
                 </template>
-                {{ t("从 OpenCode 控制台刷新额度") }}
+                {{ usageRefreshTooltip(account) }}
               </n-tooltip>
 
               <n-popover
-                v-else-if="accountIsReady(account) && usageEdits[account.id]"
+                v-if="accountIsReady(account) && usageEdits[account.id]"
                 trigger="click"
                 placement="bottom-end"
                 :show-arrow="false"
@@ -364,6 +364,12 @@
               :limits="usageLimits"
               :editing="!!usageEdits[account.id]"
             />
+            <p
+              v-if="!usageLoadErrors[account.id]"
+              class="usage-sync-meta"
+            >
+              {{ usageSyncCaption(account) }}
+            </p>
           </div>
         </n-card>
       </div>
@@ -817,16 +823,83 @@ function updateResetsSecondField(accountId: string, key: UsageKey, value: number
   edit.resets_dirty = true;
 }
 
-async function refreshManagedUsage(accountId: string): Promise<void> {
-  if (usageRefreshLoading.value[accountId] || usageLoading.value[accountId]) return;
+function isUsageRefreshBlocked(account: Account, now = Date.now()): boolean {
+  const next = account.usage_sync_next_allowed_at;
+  if (!next) return false;
+  const ts = Date.parse(next);
+  return Number.isFinite(ts) && ts > now;
+}
+
+function formatUsageSyncTime(value: string | null | undefined): string {
+  if (!value) return t("尚未官方同步");
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts)) return value;
+  return new Date(ts).toLocaleString();
+}
+
+function usageSyncCaption(account: Account, now = Date.now()): string {
+  const last = account.usage_sync_last_success_at
+    ? t("上次官方同步: {time}", { time: formatUsageSyncTime(account.usage_sync_last_success_at) })
+    : t("尚未官方同步");
+  if (!isUsageRefreshBlocked(account, now)) return last;
+  return `${last} · ${t("刷新额度冷却中，请于 {time} 后重试", {
+    time: formatUsageSyncTime(account.usage_sync_next_allowed_at),
+  })}`;
+}
+
+function usageRefreshTooltip(account: Account): string {
+  if (isUsageRefreshBlocked(account)) {
+    return t("刷新额度冷却中，请于 {time} 后重试", {
+      time: formatUsageSyncTime(account.usage_sync_next_allowed_at),
+    });
+  }
+  return t("从 OpenCode 官方用量刷新额度");
+}
+
+function patchAccountUsageSync(
+  accountId: string,
+  patch: Partial<Pick<Account, "usage_sync_last_success_at" | "usage_sync_next_allowed_at">>,
+): void {
+  accounts.value = accounts.value.map((account) =>
+    account.id === accountId ? { ...account, ...patch } : account,
+  );
+}
+
+async function refreshAccountUsage(accountId: string): Promise<void> {
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (!account) return;
+  if (
+    usageRefreshLoading.value[accountId]
+    || usageLoading.value[accountId]
+    || isUsageRefreshBlocked(account)
+  ) {
+    return;
+  }
   usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: true };
   try {
-    const result = await tauriApi.refreshManagedAccountUsage(accountId);
+    const result = await tauriApi.refreshAccountUsage(accountId);
     usageMap.value[accountId] = result.usage;
     syncUsageEdits(accountId, result.usage);
-    message.success(t("额度已从 OpenCode 控制台刷新"));
+    patchAccountUsageSync(accountId, {
+      usage_sync_last_success_at: result.last_success_at,
+      usage_sync_next_allowed_at: result.next_allowed_at,
+    });
+    message.success(t("额度已从 OpenCode 官方用量刷新"));
   } catch (error) {
-    message.error(t("刷新额度失败: {error}", { error: errorDetail(error) }));
+    if (error instanceof DashboardRequestError && error.status === 429) {
+      const nextAllowed = error.nextAllowedAt;
+      if (nextAllowed) {
+        patchAccountUsageSync(accountId, { usage_sync_next_allowed_at: nextAllowed });
+      }
+      const seconds = error.retryAfterSeconds;
+      message.warning(
+        seconds
+          ? t("请稍后再试（约 {seconds} 秒）", { seconds: String(seconds) })
+          : t("刷新额度失败: {error}", { error: errorDetail(error) }),
+      );
+    } else {
+      message.error(t("刷新额度失败: {error}", { error: errorDetail(error) }));
+    }
   } finally {
     usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: false };
   }
@@ -1729,6 +1802,13 @@ onUnmounted(() => {
   margin: 4px 0 0;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
+}
+
+.usage-sync-meta {
+  margin: 8px 0 0;
+  color: var(--ocg-text-3);
+  font-size: var(--ocg-font-size-12);
+  line-height: 1.4;
 }
 
 .usage-load-error {

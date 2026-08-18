@@ -31,7 +31,7 @@
 - Free 模型策略：`AppConfig.free_model_routing` 为 `deny` / `explicit`（默认）/ `prefer`；Zen free 与 Go 使用独立 `cooldown_free_until`。Zen free 额度按出口 IP 共享，429 后整条 free 通道冷却，不换 Key 重试；401/403 仍按账号故障切换。prefer 仅映射 `deepseek-v4-flash`/`mimo-v2.5`，上下文粗估装得下才降级，free 耗尽回落 Go。free 通道成功行记 `cost_state=free`，不计入 Go 额度。
 - Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`；`sonnet`、`opus`、`haiku` 映射保存在 `AppConfig.claude_desktop_models`，由受保护的 `GET/PUT /dashboard/api/claude-desktop/models` 管理。
 - 托管账号（Beta）：`setup_step` 为 `google_account`（UI：登录身份，可跳过）→ `opencode_registration` → `payment` → `key_verification` → `ready`。`PATCH .../setup` 允许前进一格或回退更早步骤，禁止跳步与直接 `ready`。创建草稿可编辑邀请链接并写回 `opencode_invite_url`（`DEFAULT_OPENCODE_INVITE_URL` 为演示默认）。浏览器目标含 Google/GitHub 注册与登录、邀请 URL、控制台 `https://opencode.ai/auth`。
-- 已完成托管账号的额度：`POST /dashboard/api/accounts/{id}/usage/refresh`（`console_usage.rs`）用 Profile Cookie 读控制台 Go 页用量；须处理 Chrome Cookie 域哈希前缀、锁定库共享读、Solid SSR。Key 账号仍手动校准。勿为刷新引入 CDP 自动化。
+- 已完成账号的额度：官方 `https://opencode.ai/zen/go/v1/usage`（`go_usage.rs`）是周期性校准基线；本地 forward_logs 在上次成功校准后仍做实时估算。`usage_sync.rs` 协调手动与后台路径：ready+enabled 且近 24h 有本地活动的账号约每小时对账，无活动约每天；禁用/非 ready/空 Key 不自动刷新。全局并发 1、带抖动与可注入 clock/jitter/fetch 缝；启动不轰鸣。手动 `POST /dashboard/api/accounts/{id}/usage/refresh` 仍可用，服务端每账号 60s 节流（成功/失败都算），并发去重，返回 Retry-After/`next_allowed_at`；失败保留上次基线与 last-success。本地最大 Go 用量 ≥80% 时最多每 15 分钟加速对账一次。真实推理 429 仍写现有 cooldown/selector，并额外调度约 1–2 分钟后的官方对账（不 inline）；官方失败或 `status=rate-limited` 永不写推理冷却。成功后按最早 `resetsAt`（加有界抖动）并尊重活跃/非活跃节奏再调度。失败退避：5m → 15m → 1h → 6h。sync 元数据落在 accounts 表（schema v21）。共享实现含 CAS/三窗口原子校准与全局代理。公开 Go docs 尚未列出该 endpoint。`console_usage.rs` 已冻结弃用，至少两个 minor 且有稳定真号证据后再删。勿为刷新引入 CDP 自动化。
 
 ## 关键文件
 
@@ -39,7 +39,9 @@
 - `crates/ocg-core/src/gateway_keys.rs`：子 Key 生命周期门面（`sub_gateway_keys` CRUD 封装、凭证快照构建/重建、`PRIMARY_KEY_ID` 常量、跨层值唯一闸口）；改 Key 存储或鉴权快照时从这里入手。
 - `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略。
 - `crates/ocg-core/src/dashboard.rs`：当前 Vue 面板使用的 `/dashboard/api`。
-- `crates/ocg-core/src/console_usage.rs`：托管账号从浏览器 Profile 刷新 OpenCode Go 控制台用量。
+- `crates/ocg-core/src/go_usage.rs`：官方 Go usage 客户端（`/zen/go/v1/usage`）；手动与调度刷新共用。
+- `crates/ocg-core/src/usage_sync.rs`：自适应官方用量同步（节流、去重、活跃/非活跃节奏、80% 加速、429/reset 调度、失败退避）。后台循环按 `CoreState` 启停（Gateway start 时 spawn，随 CoreState drop 退出；不是可取消的 per-Gateway task）。失败退避地板不可被阈值/节奏/reset 提前；真实推理 429 的 1–2 分钟调度是刻意覆盖。
+- `crates/ocg-core/src/console_usage.rs`：冻结弃用的 Profile Cookie/HTML 控制台用量实现；勿调用、勿扩展。
 - `crates/ocg-core/src/db.rs`：SQLite schema、迁移、查询。
 - `crates/ocg-core/src/models.rs`：共享 serde 类型和 `AppConfig`（含 `DEFAULT_OPENCODE_INVITE_URL`）。
 - `crates/ocg-core/src/pricing.rs`：OpenCode Go 价格快照、倍率与额度估算。

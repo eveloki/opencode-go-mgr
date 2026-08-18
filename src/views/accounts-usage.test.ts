@@ -187,7 +187,15 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   assert.ok(header.indexOf("<n-popover") < header.indexOf("<n-dropdown"));
   assert.match(header, /class="usage-editor-popover"[\s\S]*?class="usage-resets-row"/);
   assert.match(source, /async function focusUsageEditor\(accountId: string\)[\s\S]*?requestAnimationFrame[\s\S]*?\.n-input-number input[\s\S]*?\.focus\(\)/);
-  assert.match(header, /account\.account_type === 'managed'[\s\S]*?刷新额度/);
+  assert.match(header, /v-if="accountIsReady\(account\)"[\s\S]*?刷新额度/);
+  assert.doesNotMatch(
+    header,
+    /accountIsReady\(account\) && account\.account_type === 'managed'/,
+  );
+  assert.match(source, /async function refreshAccountUsage/);
+  assert.match(source, /tauriApi\.refreshAccountUsage/);
+  assert.match(source, /额度已从 OpenCode 官方用量刷新/);
+  assert.doesNotMatch(source, /refreshManagedUsage|refreshManagedAccountUsage|额度已从 OpenCode 控制台刷新/);
   assert.match(header, /:aria-label="t\('校准用量'\)"/);
   assert.doesNotMatch(usage, /usage-strip-title|\{\{ t\("用量"\) \}\}/);
   assert.match(usage, /class="usage-strip-body" role="group" :aria-label="t\('用量'\)"/);
@@ -209,6 +217,21 @@ test("normalizes manually entered percentages to the supported range and precisi
   assert.equal(normalizeUsagePercent(42.56), 42.6);
   assert.equal(normalizeUsagePercent(101), 100);
   assert.equal(usagePercentFromCost(6, 12), 50);
+});
+
+test("accounts page surfaces official sync last-success and retry state beyond button loading", async () => {
+  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  assert.match(source, /usage_sync_last_success_at/);
+  assert.match(source, /usage_sync_next_allowed_at/);
+  assert.match(source, /isUsageRefreshBlocked/);
+  assert.match(source, /usageSyncCaption/);
+  assert.match(source, /class="usage-sync-meta"/);
+  assert.match(source, /error\.status === 429/);
+  assert.match(source, /请稍后再试（约 \{seconds\} 秒）/);
+  assert.match(source, /上次官方同步: \{time\}/);
+  assert.match(source, /尚未官方同步/);
+  assert.match(source, /刷新额度冷却中，请于 \{time\} 后重试/);
+  assert.match(source, /:disabled="isUsageRefreshBlocked\(account\)/);
 });
 
 test("usage refresh preserves dirty drafts unless a real 429 reset that window", () => {
@@ -377,4 +400,8 @@ test("usage API sends the selected window and percent with PATCH", async () => {
 
   assert.match(update, /method: "PATCH"/);
   assert.match(update, /jsonBody\(\{ window, percent, resets_in_minutes/);
+  assert.match(update, /refreshAccountUsage: \(id: string\) =>/);
+  assert.match(update, /`\/accounts\/\$\{id\}\/usage\/refresh`/);
+  assert.match(update, /method: "POST"/);
+  assert.doesNotMatch(update, /refreshManagedAccountUsage/);
 });

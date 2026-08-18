@@ -524,19 +524,29 @@ can then be recovered only from a backup or by signing in again.
 Each completed account card shows the account name, cooldown state, and the
 5-hour / weekly / monthly usage bars driven by local accounting.
 
-- **Usage baselines (Key accounts).** Type a percentage or drag a bar to set
-  its current real-world usage baseline. After the value is saved, successful
-  request cost recorded by OCG Manager continues to accumulate above that
-  baseline. Reaching 100% is still only a warning; it does not stop the
-  gateway from selecting the account.
-- **Refresh quota (ready managed accounts).** Uses the OpenCode session in
-  that account's browser profile to read official Go usage percentages from
-  the console and write them back as local baselines. Sign in to the console
-  in that profile first; if the browser is holding the cookie database, close
-  it and retry. Failures surface an error and do not silently rewrite quotas.
-  The Linux Docker sidecar uses Chromium's basic password store so its
-  profile remains self-contained; desktop profiles continue to use the
-  browser's configured credential store.
+- **Usage baselines.** Type a percentage or drag a bar to set its current
+  real-world usage baseline. After the value is saved, successful request
+  cost recorded by OCG Manager continues to accumulate above that baseline.
+  Reaching 100% is still only a warning; it does not stop the gateway from
+  selecting the account. Manual calibration stays available for every ready
+  account.
+- **Refresh quota (ready Key and managed accounts).** Official OpenCode usage
+  (`/zen/go/v1/usage`) is a periodic calibration baseline; local forward-log
+  costs on this node remain the immediate estimator after the last successful
+  sync. Ready and enabled accounts with local activity in the last 24 hours are
+  reconciled about hourly; inactive ready accounts about daily. Disabled,
+  unfinished, or empty-key accounts are never auto-refreshed, and opening the
+  Accounts page or starting the app does not by itself trigger a fetch.
+  Clicking **Refresh quota** still runs the same secure path on demand, with a
+  server-side 60-second per-account throttle (Retry-After / next-allowed). The
+  card shows the last successful official sync time and any temporary retry
+  wait—not only a button spinner. Local estimates that reach ≥80% may get an
+  expedited sync at most once per 15 minutes. A real inference `429` still
+  writes the existing cooldown/selector state and additionally schedules an
+  official reconciliation about 1–2 minutes later; official failures or
+  `status=rate-limited` never write inference cooldown. Failures keep the
+  previous baseline and last-success timestamp. The request uses the same
+  global outbound proxy as other dashboard fetches.
 - **Identity and credentials.** The name is the account's required primary
   display label. The login account field is optional; on Key-account creation,
   entering it first copies it into the name until you edit the name yourself.
@@ -614,7 +624,7 @@ The **Settings** view exposes the persistent gateway configuration:
   connection. `Force direct connection` ignores system and environment proxy
   configuration. Proxy URLs cannot contain credentials. The policy covers core
   HTTP requests including model forwarding, account-key tests, model listing,
-  OpenCode Console usage, pricing refreshes, release checks, and signed desktop
+  official OpenCode Go usage API, pricing refreshes, release checks, and signed desktop
   installer downloads; the browser sidecar is outside its scope. **Test connection** uses the unsaved form values
   against the current upstream. Any HTTP status proves network reachability,
   without running model inference or incurring model usage.
@@ -867,10 +877,13 @@ Edge cases in the log:
   recorded, quota cost stays empty, and they do not enter Go quota totals.
 - Pre-snapshot successful rows retain their old value and are marked as a
   legacy estimate; they are never recalculated.
-- A manually saved percentage becomes the baseline for that window. **Refresh
-  quota** on a ready managed account overwrites the baseline with official
-  console percentages. Successful priced costs recorded afterward are added
-  until the next manual change, refresh, or recognized upstream limit reset.
+- A manually saved percentage becomes the baseline for that window. Official
+  refresh (manual **Refresh quota** or adaptive sync) on a ready Key or managed
+  account overwrites the baseline with official OpenCode usage percentages.
+  Successful priced costs recorded afterward accumulate until the next manual
+  calibration or official refresh. A real inference `429` only writes an
+  independent cooldown and affects account selection; it does not rewrite the
+  usage baseline, but it does schedule a later official reconciliation.
 - An `outcome_unknown` row means the upstream may have completed and charged
   the request while the gateway lost the response; the request is not
   retried and its local cost stays unknown.
@@ -889,10 +902,12 @@ next section.
   error, parses the `Resets in …` phrase from the response, writes
   `cooldown_until`, and tries the next available account. The known 5-hour,
   weekly, and monthly limit messages use the reset duration reported by the
-  upstream and reset the matching usage baseline. During cooldown the
-  matching bar remains at 100%; after cooldown it starts at 0% and
-  accumulates new successful local cost. An unrecognized 429 falls back to a
-  five-minute cooldown without clearing any manually maintained usage value.
+  upstream for that cooldown only; they do not rewrite the matching usage
+  baseline. During cooldown the matching bar is forced to 100% in the
+  dashboard; after cooldown, local priced costs continue from the existing
+  baseline until the next manual calibration or official refresh. An
+  unrecognized 429 falls back to a five-minute cooldown without changing
+  any usage baseline.
 - **No account available.** If every enabled account is cooling down, the
   gateway returns `429` with the soonest reset time.
 - **Dashboard display.** While a true circuit breaker is active, the matching

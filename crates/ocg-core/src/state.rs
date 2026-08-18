@@ -126,6 +126,9 @@ pub struct CoreStateInner {
     pub pricing_refresh: tokio::sync::Mutex<()>,
     pub routing: crate::gateway::routing::RoutingRuntime,
     pub browser: crate::browser::BrowserRuntime,
+    /// Official Go usage sync gates (concurrency, dedupe, clock/jitter seams).
+    /// The background loop is started from gateway startup, not construction.
+    pub usage_sync: crate::usage_sync::UsageSyncRuntime,
     pub data_dir: PathBuf,
     pub cipher: Arc<dyn KeyCipher + Send + Sync>,
 }
@@ -212,6 +215,7 @@ impl CoreStateInner {
             pricing_refresh: tokio::sync::Mutex::new(()),
             routing: crate::gateway::routing::RoutingRuntime::new(),
             browser: crate::browser::BrowserRuntime::new(),
+            usage_sync: crate::usage_sync::UsageSyncRuntime::new(),
             data_dir,
             cipher,
         })

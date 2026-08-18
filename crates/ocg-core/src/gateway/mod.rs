@@ -82,6 +82,7 @@ pub async fn start_gateway_on(state: CoreState, addr: SocketAddr) -> Result<Gate
     let local_addr = listener.local_addr()?;
     state.set_dashboard_local_mode(local_addr.ip().is_loopback());
     spawn_forward_log_backfill(state.clone());
+    crate::usage_sync::spawn_usage_sync_loop(state.clone());
     let app = build_router(state);
     let port = local_addr.port();
 

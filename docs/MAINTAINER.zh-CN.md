@@ -240,11 +240,20 @@ Desktop 三个角色模型的持久化行为。
   禁止跳步前进，禁止经 setup API 直接进入 `ready`。Key 实测返回 `2xx` 时进入
   `ready + enabled`；`429` 同样证明 Key 有效并写入冷却；`401`/`403`、网络错误或
   `5xx` 保持 `key_verification`。API、DTO 与日志绝不能返回明文 Key。
-- 已完成的托管账号可通过 `POST /dashboard/api/accounts/{id}/usage/refresh` 从该
-  账号 Chromium Profile 的 Cookie 读取 OpenCode 控制台 Go 页用量并校准本地基线
-  （`console_usage.rs`）。实现须处理 Chrome 127+ Cookie 32 字节域哈希前缀、Windows
-  Cookie 库共享读，以及 Solid 序列化 / SSR comment 包裹的百分比。Key 账号仍用手
-  动校准；刷新失败必须显式报错。
+- 官方 Go usage（`go_usage.rs`，`https://opencode.ai/zen/go/v1/usage`）是校准基
+  线，由 `usage_sync.rs` 协调。手动
+  `POST /dashboard/api/accounts/{id}/usage/refresh` 与后台对账共用同一条
+  fetch + key CAS + 三窗口校准路径。ready+enabled 且近 24h 有本地活动的账号约
+  每小时对账，无活动约每天；禁用 / 非 ready / 空 Key 排除。启动不得轰鸣：全局
+  并发 1、节奏控制、有界抖动，并提供可注入 clock/jitter/fetch 缝。手动刷新在任
+  何尝试后有 60 秒每账号节流、并发去重与 Retry-After / `next_allowed_at`。本地
+  最大 Go 用量 ≥80% 时最多每 15 分钟加速一次。真实推理 `429` 仍写现有
+  cooldown/selector，并额外调度约 1–2 分钟后的官方同步（绝不 inline）。官方失
+  败或 `status=rate-limited` 永不写推理冷却。成功后按最早 `resetsAt`（有界抖动）
+  调度，同时尊重活跃/非活跃节奏。失败退避：5m → 15m → 1h → 6h；永不清除
+  last-success 或上次基线。sync 元数据在 `accounts` 表（schema v21）。公开 Go
+  docs 尚未列出该路径。`console_usage.rs` 已冻结弃用——勿调用、勿扩展；至少两
+  个 minor 且有稳定真号证据后再删。手工滑块 / PATCH 校准仍然可用。
 - 受 Dashboard 鉴权保护的生命周期接口为 `POST /accounts/managed`、
   `PATCH /accounts/{id}/setup`、`POST /accounts/{id}/setup/verify-key` 与
   `POST /accounts/{id}/usage/refresh`；浏览器接口为 `GET /browser/capabilities`、
@@ -665,8 +674,9 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 - [ ] 人工完成（可跳过）登录身份 → 邀请链接 → OpenCode 登录 → 支付前确认页 →
       Key 回填；真实支付只由测试者明确执行。控制台打开 `opencode.ai/auth`。旧
       Key 账号首次打开控制台后登录一次，再验证实际额度和邀请使用情况可回访。
-      已完成托管账号验证 **刷新额度**（缺会话 / Cookie 锁定有明确错误）。分别
-      覆盖桌面和 Docker Sidecar。
+      已完成 Key 账号与托管账号都要验证 **刷新额度**（官方 `/zen/go/v1/usage`：
+      无效 Key、换 Key 后 409、网络/schema 失败须明确报错且保留上次本地校准）。
+      分别覆盖桌面和 Docker Sidecar。
 - [ ] Windows 上本地跑一次安装包，确认 SmartScreen 警告文案，打开面板、添加
       账号、发一条请求。
 - [ ] macOS 上挂载 DMG，确认 **Open Anyway** 流程可用，打开面板、添加账号、

@@ -677,6 +677,9 @@ async fn forward_request_impl(
                     window,
                 )?;
             }
+            // Schedule (never inline) an official usage reconciliation shortly
+            // after a real inference 429. Does not alter cooldown/failover.
+            crate::usage_sync::schedule_after_inference_429(state, &account.id);
             return Ok(ForwardResult {
                 response: error_response(plan.client, &error_message, None),
                 action,
@@ -1952,6 +1955,8 @@ pub async fn forward_get(
                     &sanitized,
                     parse_usage_limit_window(&body),
                 )?;
+                drop(db);
+                crate::usage_sync::schedule_after_inference_429(state, &account.id);
             }
             if status == StatusCode::UNAUTHORIZED {
                 let auth_error = format!(
