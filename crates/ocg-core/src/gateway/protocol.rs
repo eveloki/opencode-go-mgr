@@ -11,7 +11,7 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ApiFormat {
     ChatCompletions,
     Responses,
@@ -295,6 +295,13 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
 /// Returns every model ID with a known preferred upstream protocol.
 pub fn supported_model_ids() -> impl Iterator<Item = &'static str> {
     MODEL_PROTOCOLS.iter().map(|profile| profile.id)
+}
+
+/// Provider adapters use the same probed OpenCode matrix as request planning;
+/// this prevents a mixed-provider selector from probing an unsupported
+/// model/protocol pair merely because that account appears earlier.
+pub(crate) fn opencode_supports_upstream(model: &str, upstream: ApiFormat) -> bool {
+    model_protocol(model).is_some_and(|profile| profile.supported.contains(&upstream))
 }
 
 const ANTHROPIC_THINKING_ENCRYPTED_PREFIX: &str = "ocg-anthropic-thinking-v1:";

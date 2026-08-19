@@ -4,8 +4,10 @@ use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
+use ocg_core::gateway::protocol::ApiFormat;
+use ocg_core::gateway::provider_adapter::{LoopbackTestAuth, install_goat_loopback_route_for_test};
 use ocg_core::models::{Account, AccountUpdate, ForwardLog, ProxyMode, RoutingMode};
-use ocg_core::provider::ZEN_FREE_ACCOUNT_ID;
+use ocg_core::provider::{COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID, ZEN_FREE_ACCOUNT_ID};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -361,6 +363,52 @@ fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str, enabled: b
         .unwrap();
 }
 
+fn create_goat_account(
+    state: &Arc<CoreStateInner>,
+    source_account_id: &str,
+    account_id: &str,
+    key: &str,
+) {
+    let mut account = state
+        .db
+        .lock()
+        .get_account(source_account_id)
+        .unwrap()
+        .expect("source account");
+    account.id = account_id.to_string();
+    account.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
+    account.offering_id = GOAT_OFFERING_ID.to_string();
+    account.name = account_id.to_string();
+    account.key_cipher = state.encrypt_key(key).unwrap();
+    account.cooldown_until = None;
+    account.cooldown_generic_until = None;
+    account.cooldown_5h_until = None;
+    account.cooldown_week_until = None;
+    account.cooldown_month_until = None;
+    account.cooldown_free_until = None;
+    account.auth_error = None;
+    account.created_at = Utc::now();
+    account.updated_at = account.created_at;
+    state.db.lock().create_account(&account).unwrap();
+}
+
+async fn gemini_call(port: u16, model: &str) -> (StatusCode, serde_json::Value) {
+    let response = loopback_client()
+        .post(format!(
+            "http://127.0.0.1:{port}/v1beta/models/{model}:generateContent"
+        ))
+        .header("x-goog-api-key", "gw-test")
+        .json(&serde_json::json!({
+            "contents": [{"role": "user", "parts": [{"text": "ping"}]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.json().await.unwrap();
+    (status, body)
+}
+
 async fn models(port: u16) -> (StatusCode, String) {
     let response = loopback_client()
         .get(format!("http://127.0.0.1:{port}/v1/models"))
@@ -506,6 +554,10 @@ async fn model_discovery_does_not_create_inference_logs() {
             offset: 0,
             status: None,
             account_id: None,
+            provider_id: None,
+            offering_id: None,
+            route_account_id: None,
+            credential_account_id: None,
             model: None,
             key_id: None,
             request_id: None,
@@ -574,6 +626,10 @@ async fn model_discovery_keeps_rate_limit_cooldown_without_logging() {
             offset: 0,
             status: None,
             account_id: None,
+            provider_id: None,
+            offering_id: None,
+            route_account_id: None,
+            credential_account_id: None,
             model: None,
             key_id: None,
             request_id: None,
@@ -818,6 +874,10 @@ async fn application_models_intersects_upstream_models_in_upstream_order() {
                 offset: 0,
                 status: None,
                 account_id: None,
+                provider_id: None,
+                offering_id: None,
+                route_account_id: None,
+                credential_account_id: None,
                 model: None,
                 key_id: None,
                 request_id: None,
@@ -2541,7 +2601,7 @@ async fn upstream_5xx_is_returned_without_same_account_retry_or_fallback() {
 }
 
 #[tokio::test]
-async fn auth_failure_fails_over_without_same_account_replay() {
+async fn auth_403_breaker_fails_over_and_skips_the_key_on_later_requests() {
     let replies = HashMap::from([
         (
             "key-1".to_string(),
@@ -2562,8 +2622,10 @@ async fn auth_failure_fails_over_without_same_account_replay() {
     let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, _) = chat(port).await;
-    assert_eq!(status, 200);
+    for _ in 0..2 {
+        let (status, body) = chat(port).await;
+        assert_eq!(status, 200, "{body}");
+    }
 
     let call_keys = calls
         .lock()
@@ -2571,7 +2633,18 @@ async fn auth_failure_fails_over_without_same_account_replay() {
         .iter()
         .map(|c| c.key.clone())
         .collect::<Vec<_>>();
-    assert_eq!(call_keys, ["key-1", "key-2"].map(str::to_string));
+    assert_eq!(call_keys, ["key-1", "key-2", "key-2"].map(str::to_string));
+    assert!(
+        state
+            .db
+            .lock()
+            .get_account("acct-1")
+            .unwrap()
+            .unwrap()
+            .auth_error
+            .as_deref()
+            .is_some_and(|error| error.contains("403"))
+    );
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -2673,10 +2746,10 @@ async fn all_limited_accounts_return_429_with_soonest_reset() {
 }
 
 #[tokio::test]
-async fn free_429_uses_channel_not_misleading_window_and_survives_account_removal() {
+async fn zen_free_429_is_anonymous_and_cools_the_singleton_egress_route() {
     let replies = HashMap::from([
         (
-            "key-1".to_string(),
+            String::new(),
             VecDeque::from([MockReply {
                 status: 429,
                 // Free endpoints may reuse Go quota wording. The endpoint is
@@ -2705,28 +2778,443 @@ async fn free_429_uses_channel_not_misleading_window_and_survives_account_remova
             .iter()
             .map(|call| call.key.as_str())
             .collect::<Vec<_>>(),
-        ["key-1"],
-        "a Free 429 must never rotate to another key"
+        [""],
+        "Zen Free must not borrow or rotate an account key"
     );
     {
         let db = state.db.lock();
-        let source = db.get_account("acct-1").unwrap().unwrap();
+        let source = db.get_account(ZEN_FREE_ACCOUNT_ID).unwrap().unwrap();
         assert!(source.cooldown_free_until.is_some());
         assert!(source.cooldown_5h_until.is_none());
         assert!(source.cooldown_week_until.is_none());
         assert!(source.cooldown_month_until.is_none());
         assert!(db.free_channel_cooldown_until().unwrap().is_some());
+        assert!(
+            db.get_account("acct-1")
+                .unwrap()
+                .unwrap()
+                .cooldown_until
+                .is_none()
+        );
     }
+    let captured = calls.lock().unwrap()[0].clone();
+    assert!(captured.authorization.is_none());
+    assert!(captured.x_api_key.is_none());
+    assert!(captured.x_goog_api_key.is_none());
 
     set_account_enabled(&state, "acct-1", false);
     let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 1);
 
-    state.db.lock().delete_account("acct-1").unwrap();
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn zen_free_is_anonymous_across_all_client_formats_and_logs_route_identity() {
+    let replies = HashMap::from([(
+        String::new(),
+        VecDeque::from([
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+        ]),
+    )]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        let (status, body) = protocol_call(port, path, "deepseek-v4-flash-free").await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+    let (status, body) = gemini_call(port, "deepseek-v4-flash-free").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let captured = calls.lock().unwrap().clone();
+    assert_eq!(captured.len(), 4);
+    assert!(captured.iter().all(|call| {
+        call.authorization.is_none() && call.x_api_key.is_none() && call.x_goog_api_key.is_none()
+    }));
+    assert!(
+        captured
+            .iter()
+            .all(|call| call.path.ends_with("/v1/chat/completions"))
+    );
+    let logs = state.db.lock().list_forward_logs(10).unwrap();
+    assert_eq!(logs.len(), 4);
+    assert!(logs.iter().all(|log| {
+        log.route_account_id.as_deref() == Some(ZEN_FREE_ACCOUNT_ID)
+            && log.provider_id.as_deref() == Some("opencode-zen-free")
+            && log.offering_id.as_deref() == Some("anonymous-free")
+            && log.credential_account_id.is_none()
+            && log.account_id == ZEN_FREE_ACCOUNT_ID
+    }));
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn zen_free_401_and_403_stop_without_touching_a_normal_credential() {
+    let replies = HashMap::from([
+        (
+            String::new(),
+            VecDeque::from([
+                MockReply {
+                    status: 401,
+                    body: r#"{"error":{"message":"anonymous route disabled"}}"#,
+                },
+                MockReply {
+                    status: 403,
+                    body: r#"{"error":{"message":"anonymous route forbidden"}}"#,
+                },
+            ]),
+        ),
+        (
+            "normal-key".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    for expected in [401_u16, 403] {
+        let (status, body) =
+            protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert!(body.to_string().contains(&expected.to_string()));
+    }
+    let captured = calls.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2);
+    assert!(captured.iter().all(|call| call.key.is_empty()));
+    assert!(
+        state
+            .db
+            .lock()
+            .get_account("acct-1")
+            .unwrap()
+            .unwrap()
+            .auth_error
+            .is_none()
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn prefer_mode_zen_429_falls_through_to_the_next_normal_card() {
+    let replies = HashMap::from([
+        (
+            String::new(),
+            VecDeque::from([MockReply {
+                status: 429,
+                body: LIMITED_BODY,
+            }]),
+        ),
+        (
+            "normal-key".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
+    let mut config = state.config();
+    config.free_model_routing = ocg_core::models::FreeModelRouting::Prefer;
+    state.set_config(config).unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = chat(port).await;
+    assert_eq!(status, 200, "{body}");
+    let captured = calls.lock().unwrap().clone();
+    assert_eq!(
+        captured
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["", "normal-key"]
+    );
+    assert!(captured[0].body.contains("deepseek-v4-flash-free"));
+    assert!(captured[1].body.contains("deepseek-v4-flash"));
+    assert!(!captured[1].body.contains("deepseek-v4-flash-free"));
+    let logs = state.db.lock().list_forward_logs(10).unwrap();
+    assert_eq!(logs.len(), 2);
+    assert!(logs.iter().any(|log| {
+        log.route_account_id.as_deref() == Some(ZEN_FREE_ACCOUNT_ID) && log.http_status == Some(429)
+    }));
+    assert!(logs.iter().any(|log| {
+        log.route_account_id.as_deref() == Some("acct-1") && log.status == "success"
+    }));
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn prefer_mode_round_robin_includes_zen_in_the_global_card_order() {
+    let replies = HashMap::from([
+        (
+            String::new(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+        (
+            "normal-key".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state_with_routing(
+        format!("{mock_base}/zen/go"),
+        &["normal-key"],
+        RoutingMode::RoundRobin,
+        false,
+    );
+    let mut config = state.config();
+    config.free_model_routing = ocg_core::models::FreeModelRouting::Prefer;
+    state.set_config(config).unwrap();
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    for _ in 0..3 {
+        let (status, body) = chat(port).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["", "normal-key", ""]
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contract() {
+    let replies = HashMap::from([(
+        "goat-key".to_string(),
+        VecDeque::from([
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            MockReply {
+                status: 200,
+                body: RESPONSES_SUCCESS_BODY,
+            },
+            MockReply {
+                status: 200,
+                body: MESSAGES_SUCCESS_BODY,
+            },
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+        ]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url.clone(), &["open-key"]);
+    let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
+    create_goat_account(&state, "acct-1", &goat_id, "goat-key");
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(
+        goat_id.clone(),
+        base_url,
+        ["deepseek-v4-flash"],
+        [
+            ApiFormat::ChatCompletions,
+            ApiFormat::Responses,
+            ApiFormat::Messages,
+        ],
+        LoopbackTestAuth::Bearer,
+    )
+    .unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        let (status, body) = protocol_call(port, path, "deepseek-v4-flash").await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+    let (status, body) = gemini_call(port, "deepseek-v4-flash").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let captured = calls.lock().unwrap().clone();
+    assert_eq!(captured.len(), 4);
+    assert!(
+        captured
+            .iter()
+            .all(|call| call.authorization.as_deref() == Some("Bearer goat-key"))
+    );
+    assert!(captured.iter().all(|call| call.x_api_key.is_none()));
+    assert_eq!(
+        captured
+            .iter()
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1/messages",
+            "/v1/chat/completions"
+        ]
+    );
+    let logs = state.db.lock().list_forward_logs(10).unwrap();
+    assert!(logs.iter().all(|log| {
+        log.route_account_id.as_deref() == Some(goat_id.as_str())
+            && log.provider_id.as_deref() == Some(COMMAND_CODE_PROVIDER_ID)
+            && log.offering_id.as_deref() == Some(GOAT_OFFERING_ID)
+            && log.credential_account_id.as_deref() == Some(goat_id.as_str())
+    }));
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn unsupported_goat_model_is_skipped_before_any_upstream_attempt() {
+    let replies = HashMap::from([(
+        "open-key".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url.clone(), &["open-key"]);
+    let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
+    create_goat_account(&state, "acct-1", &goat_id, "goat-key");
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(
+        goat_id,
+        base_url,
+        ["minimax-m2.7"],
+        [ApiFormat::ChatCompletions],
+        LoopbackTestAuth::Bearer,
+    )
+    .unwrap();
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) = chat(port).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["open-key"]
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
+    let replies = HashMap::from([
+        (
+            "goat-key".to_string(),
+            VecDeque::from([MockReply {
+                status: 429,
+                body: LIMITED_BODY,
+            }]),
+        ),
+        (
+            "open-key".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state_with_routing(
+        base_url.clone(),
+        &["open-key"],
+        RoutingMode::StickyGlobal,
+        false,
+    );
+    let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
+    create_goat_account(&state, "acct-1", &goat_id, "goat-key");
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(
+        goat_id.clone(),
+        base_url,
+        ["deepseek-v4-flash"],
+        [ApiFormat::ChatCompletions],
+        LoopbackTestAuth::Bearer,
+    )
+    .unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    for _ in 0..2 {
+        let (status, body) = chat(port).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["goat-key", "open-key", "open-key"]
+    );
+    let goat = state.db.lock().get_account(&goat_id).unwrap().unwrap();
+    let open = state.db.lock().get_account("acct-1").unwrap().unwrap();
+    assert!(goat.cooldown_until.is_some());
+    assert!(open.cooldown_until.is_none());
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -3348,6 +3836,10 @@ async fn forwarded_requests_are_attributed_to_the_authenticating_key() {
             offset: 0,
             status: None,
             account_id: None,
+            provider_id: None,
+            offering_id: None,
+            route_account_id: None,
+            credential_account_id: None,
             model: None,
             key_id: Some(secondary.id.as_str()),
             request_id: None,
@@ -3478,6 +3970,10 @@ async fn gateway_stays_available_while_large_backfill_runs() {
             offset: 0,
             status: None,
             account_id: None,
+            provider_id: None,
+            offering_id: None,
+            route_account_id: None,
+            credential_account_id: None,
             model: None,
             key_id: Some(ocg_core::models::UNATTRIBUTED_KEY_FILTER),
             request_id: None,
@@ -3498,6 +3994,10 @@ async fn gateway_stays_available_while_large_backfill_runs() {
             offset: 0,
             status: None,
             account_id: None,
+            provider_id: None,
+            offering_id: None,
+            route_account_id: None,
+            credential_account_id: None,
             model: Some("deepseek-v4-flash"),
             key_id: None,
             request_id: None,

@@ -3,7 +3,9 @@ use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::models::{AppConfig, ForwardLog, RoutingMode};
-use ocg_core::provider::ZEN_FREE_ACCOUNT_ID;
+use ocg_core::provider::{
+    COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
+};
 use ocg_core::state::CoreStateInner;
 use reqwest::StatusCode;
 use serde_json::json;
@@ -1017,6 +1019,279 @@ async fn loopback_forward_logs_apply_filters_before_pagination() {
     assert_eq!(body["summary"]["prompt_tokens"], 10);
     assert_eq!(body["summary"]["completion_tokens"], 20);
     assert_eq!(body["summary"]["cost"], 0.1);
+
+    gateway::stop_gateway(handle);
+}
+
+#[tokio::test]
+async fn loopback_forward_logs_filter_by_provider_attribution() {
+    let state = state("forward-provider-logs");
+    let insert = |model: &str,
+                  provider_id: &str,
+                  offering_id: &str,
+                  route_account_id: &str,
+                  credential_account_id: &str| {
+        state
+            .db
+            .lock()
+            .log_forward(&ForwardLog {
+                id: 0,
+                timestamp: Utc::now(),
+                model: model.into(),
+                account_id: credential_account_id.into(),
+                account_name: credential_account_id.into(),
+                route_account_id: Some(route_account_id.into()),
+                provider_id: Some(provider_id.into()),
+                offering_id: Some(offering_id.into()),
+                credential_account_id: Some(credential_account_id.into()),
+                client_key_id: None,
+                client_key_name: None,
+                status: "success".into(),
+                http_status: Some(200),
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                cached_tokens: 0,
+                cache_creation_tokens: 0,
+                cost: Some(0.1),
+                raw_cost_usd: None,
+                quota_debit: None,
+                effective_paid_cost_usd: None,
+                pricing_revision_id: None,
+                quota_multiplier: None,
+                local_adjustment_multiplier: None,
+                service_tier: None,
+                cost_state: "legacy_estimate".into(),
+                error_message: None,
+                request_id: None,
+                attempt: None,
+                error_source: None,
+                error_stage: None,
+                duration_ms: None,
+                diagnostic: None,
+            })
+            .unwrap();
+    };
+    insert("go-a", "opencode", "go", "go-a", "go-a");
+    insert("go-b", "opencode", "go", "go-b", "go-b");
+    insert("zen", "opencode", "zen-free", "zen-free", "go-a");
+    // Inserted last so a global LIMIT before filtering would conceal Go rows.
+    insert("goat", "goat", "goat", "goat-a", "goat-a");
+
+    let handle = gateway::start_gateway_on(state, SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let base = format!(
+        "http://127.0.0.1:{}/dashboard/api/logs/forward",
+        handle.port
+    );
+    let client = loopback_client();
+
+    let second_go: serde_json::Value = client
+        .get(format!(
+            "{base}?provider_id=opencode&offering_id=go&limit=1&offset=1"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(second_go["summary"]["total_requests"], 2);
+    assert_eq!(second_go["items"][0]["model"], "go-a");
+
+    let routed_zen: serde_json::Value = client
+        .get(format!("{base}?route_account_id=zen-free"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(routed_zen["summary"]["total_requests"], 1);
+    assert_eq!(routed_zen["items"][0]["credential_account_id"], "go-a");
+
+    let credential_go_a: serde_json::Value = client
+        .get(format!("{base}?credential_account_id=go-a"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(credential_go_a["summary"]["total_requests"], 2);
+    assert_eq!(credential_go_a["items"][0]["model"], "zen");
+
+    let empty_provider: serde_json::Value = client
+        .get(format!("{base}?provider_id=&offering_id=go"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty_provider["summary"]["total_requests"], 2);
+
+    gateway::stop_gateway(handle);
+}
+
+#[tokio::test]
+async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_consistent() {
+    let state = state("multi-provider-dashboard");
+    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
+    let client = loopback_client();
+
+    let catalog: serde_json::Value = client
+        .get(format!("{base}/providers/catalog"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let goat = catalog
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["provider_id"] == COMMAND_CODE_PROVIDER_ID
+                && item["offering_id"] == GOAT_OFFERING_ID
+        })
+        .unwrap();
+    assert_eq!(goat["pricing_availability"], "unconfigured");
+    assert_eq!(goat["usage_availability"], "unconfigured");
+
+    let models: serde_json::Value = client
+        .get(format!("{base}/providers/model-capabilities"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        models
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["provider_id"] == OPENCODE_PROVIDER_ID)
+    );
+
+    let created = client
+        .post(format!("{base}/accounts"))
+        .json(&json!({
+            "provider_id": COMMAND_CODE_PROVIDER_ID,
+            "offering_id": GOAT_OFFERING_ID,
+            "name": "GOAT test",
+            "key": "goat-key"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(created["provider_id"], COMMAND_CODE_PROVIDER_ID);
+    assert_eq!(created["offering_id"], GOAT_OFFERING_ID);
+    assert_eq!(created["credential_kind"], "api_key");
+    assert_eq!(created["quota_scope"], "key");
+    let goat_id = created["id"].as_str().unwrap();
+
+    let invalid = client
+        .post(format!("{base}/accounts"))
+        .json(&json!({
+            "provider_id": COMMAND_CODE_PROVIDER_ID,
+            "offering_id": "go",
+            "name": "bad",
+            "key": "bad"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let binding_change = client
+        .patch(format!("{base}/accounts/{goat_id}"))
+        .json(&json!({ "provider_id": OPENCODE_PROVIDER_ID }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(binding_change.status(), StatusCode::BAD_REQUEST);
+
+    for request in [
+        client.delete(format!("{base}/accounts/{ZEN_FREE_ACCOUNT_ID}")),
+        client.post(format!("{base}/accounts/{ZEN_FREE_ACCOUNT_ID}/test")),
+        client
+            .patch(format!("{base}/accounts/{ZEN_FREE_ACCOUNT_ID}/usage"))
+            .json(&json!({
+                "window": "window_5h", "percent": 50.0
+            })),
+    ] {
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    let before = state.settings_revision();
+    let zen = client
+        .patch(format!("{base}/providers/zen-free"))
+        .json(&json!({
+            "enabled": true,
+            "free_alias_enabled": true,
+            "expected_revision": before
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(zen.status(), StatusCode::OK);
+    let zen: serde_json::Value = zen.json().await.unwrap();
+    let revision = zen["revision"].as_u64().unwrap();
+    assert_eq!(revision, before + 1);
+    assert_eq!(zen["account"]["free_alias_enabled"], true);
+    assert_eq!(
+        state.config().free_model_routing,
+        ocg_core::models::FreeModelRouting::Prefer
+    );
+
+    let stale = client
+        .patch(format!("{base}/providers/zen-free"))
+        .json(&json!({
+            "enabled": false,
+            "free_alias_enabled": false,
+            "expected_revision": before
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let mut legacy = state.config();
+    legacy.free_model_routing = ocg_core::models::FreeModelRouting::Explicit;
+    let legacy = client
+        .post(format!("{base}/settings"))
+        .json(&settings_payload_at(&legacy, revision))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), StatusCode::OK);
+    let listed: serde_json::Value = client
+        .get(format!("{base}/accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let zen_card = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["id"] == ZEN_FREE_ACCOUNT_ID)
+        .unwrap();
+    assert_eq!(zen_card["enabled"], true);
+    assert_eq!(zen_card["free_alias_enabled"], false);
 
     gateway::stop_gateway(handle);
 }

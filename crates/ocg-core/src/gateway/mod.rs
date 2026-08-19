@@ -5,6 +5,7 @@ pub mod handler;
 pub mod limit;
 pub mod protocol;
 pub mod protocol_stream;
+pub mod provider_adapter;
 pub mod routing;
 pub mod selector;
 

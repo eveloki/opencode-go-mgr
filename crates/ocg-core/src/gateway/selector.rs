@@ -1,5 +1,10 @@
 use crate::db::Database;
 use crate::models::{Account, UpstreamChannel};
+use crate::provider::{
+    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CredentialKind, GO_OFFERING_ID,
+    GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
+    validate_account_binding,
+};
 use anyhow::Result;
 use chrono::Utc;
 
@@ -42,7 +47,11 @@ impl AccountSelector {
         let now = Utc::now();
         account.enabled
             && account.setup_step.is_ready()
-            && !account.key_cipher.is_empty()
+            && account_matches_channel(account, channel)
+            && match account.credential_kind {
+                CredentialKind::ApiKey => !account.key_cipher.is_empty(),
+                CredentialKind::None => true,
+            }
             && account.auth_error.is_none()
             && !exclude_ids.iter().any(|excluded| account.id == *excluded)
             && !account.is_cooling_for(channel, now)
@@ -60,6 +69,11 @@ impl AccountSelector {
         let now = Utc::now();
         accounts
             .iter()
+            .filter(|account| {
+                account.id == ZEN_FREE_ACCOUNT_ID
+                    && account.provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID
+                    && account.offering_id == ANONYMOUS_FREE_OFFERING_ID
+            })
             .any(|account| account.cooldown_free_until.is_some_and(|until| until > now))
     }
 
@@ -100,6 +114,29 @@ impl AccountSelector {
                 account.id == account_id && Self::is_available_for(account, channel, exclude_ids)
             })
             .cloned()
+    }
+}
+
+fn account_matches_channel(account: &Account, channel: UpstreamChannel) -> bool {
+    if validate_account_binding(
+        &account.id,
+        &account.provider_id,
+        &account.offering_id,
+        account.credential_kind,
+        account.quota_scope,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    match (account.provider_id.as_str(), account.offering_id.as_str()) {
+        (OPENCODE_PROVIDER_ID, GO_OFFERING_ID) | (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => {
+            channel == UpstreamChannel::Go
+        }
+        (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
+            channel == UpstreamChannel::Free
+        }
+        _ => false,
     }
 }
 
@@ -303,7 +340,12 @@ mod tests {
 
     #[test]
     fn one_free_cooldown_exhausts_the_whole_free_channel() {
-        let mut cooled = account("cooled", false, None);
+        let mut cooled = account(crate::provider::ZEN_FREE_ACCOUNT_ID, false, None);
+        cooled.provider_id = crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID.to_string();
+        cooled.offering_id = crate::provider::ANONYMOUS_FREE_OFFERING_ID.to_string();
+        cooled.credential_kind = crate::provider::CredentialKind::None;
+        cooled.quota_scope = crate::provider::QuotaScope::EgressIp;
+        cooled.key_cipher.clear();
         cooled.cooldown_free_until = Some(Utc::now() + Duration::hours(1));
         let next = account("next", true, None);
         let accounts = vec![cooled, next];

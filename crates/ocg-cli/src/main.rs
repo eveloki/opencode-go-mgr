@@ -6,6 +6,7 @@ use ocg_core::crypto::{KeyCipher, StaticKeyCipher, load_or_create_static_cipher}
 use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::models::{Account, AppConfig};
+use ocg_core::provider::CredentialKind;
 use ocg_core::state::CoreStateInner;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -246,7 +247,11 @@ async fn key_command(
 
     match action {
         KeyAction::List => {
-            let accounts = db.list_accounts()?;
+            let accounts = db
+                .list_accounts()?
+                .into_iter()
+                .filter(|account| account.credential_kind == CredentialKind::ApiKey)
+                .collect::<Vec<_>>();
             if accounts.is_empty() {
                 println!("no keys configured");
                 return Ok(());
@@ -276,6 +281,11 @@ async fn key_command(
             };
             let account = Account {
                 id: id.clone(),
+                provider_id: ocg_core::provider::OPENCODE_PROVIDER_ID.to_string(),
+                offering_id: ocg_core::provider::GO_OFFERING_ID.to_string(),
+                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
+                quota_scope: ocg_core::provider::QuotaScope::Key,
+                free_alias_enabled: false,
                 name,
                 username: username.and_then(|s| {
                     let trimmed = s.trim().to_string();
@@ -419,7 +429,13 @@ async fn status_command(data_dir: PathBuf, cipher: Arc<dyn KeyCipher + Send + Sy
     let state = build_state(data_dir, cipher)?;
     let config: AppConfig = state.config();
     let db = state.db.lock();
-    let accounts = db.list_accounts()?;
+    // Keep the CLI's historical "account" count credential-oriented: the
+    // database-owned Zen Free route is a system card, not a key managed here.
+    let accounts = db
+        .list_accounts()?
+        .into_iter()
+        .filter(|account| account.credential_kind == CredentialKind::ApiKey)
+        .collect::<Vec<_>>();
     let enabled = accounts.iter().filter(|a| a.enabled).count();
 
     println!("data dir: {:?}", state.data_dir());
@@ -505,14 +521,25 @@ async fn ping_keys(
         let db = state.db.lock();
         match id {
             Some(i) => match db.get_account(i)? {
-                Some(a) if a.setup_step.is_ready() && !a.key_cipher.is_empty() => vec![a],
+                Some(a)
+                    if a.credential_kind == CredentialKind::ApiKey
+                        && a.setup_step.is_ready()
+                        && !a.key_cipher.is_empty() =>
+                {
+                    vec![a]
+                }
                 Some(_) => anyhow::bail!("account setup is not complete and cannot be pinged"),
                 None => anyhow::bail!("key not found: {}", i),
             },
             None => db
                 .list_accounts()?
                 .into_iter()
-                .filter(|a| a.enabled && a.setup_step.is_ready() && !a.key_cipher.is_empty())
+                .filter(|a| {
+                    a.credential_kind == CredentialKind::ApiKey
+                        && a.enabled
+                        && a.setup_step.is_ready()
+                        && !a.key_cipher.is_empty()
+                })
                 .collect(),
         }
     };
@@ -548,6 +575,7 @@ mod tests {
     use ocg_core::browser::browser_profile_paths;
     use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
     use ocg_core::models::{AccountSetupStep, AccountType};
+    use ocg_core::provider::CredentialKind;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -739,7 +767,14 @@ mod tests {
         .unwrap();
 
         let state = build_state(dir.clone(), cipher.clone()).unwrap();
-        let accounts = state.db.lock().list_accounts().unwrap();
+        let accounts = state
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .into_iter()
+            .filter(|account| account.credential_kind == CredentialKind::ApiKey)
+            .collect::<Vec<_>>();
         assert_eq!(accounts.len(), 2);
         let main = accounts
             .iter()
@@ -917,7 +952,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let account_id = state.db.lock().list_accounts().unwrap()[0].id.clone();
+        let account_id = state
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.name == "pingable")
+            .unwrap()
+            .id;
 
         ping_keys(&state, None, "deepseek-v4-flash", "ping", 3)
             .await
@@ -945,7 +988,15 @@ mod tests {
         let wrong_cipher: Arc<dyn KeyCipher + Send + Sync> =
             Arc::new(StaticKeyCipher::new("other-secret"));
         let wrong_state = build_state(dir.clone(), wrong_cipher).unwrap();
-        let wrong_id = wrong_state.db.lock().list_accounts().unwrap()[0].id.clone();
+        let wrong_id = wrong_state
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.name == "pingable")
+            .unwrap()
+            .id;
         ping_keys(
             &wrong_state,
             Some(wrong_id.as_str()),

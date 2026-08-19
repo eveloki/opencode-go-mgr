@@ -128,6 +128,13 @@ pub struct RoutingRuntime {
     inner: Mutex<RoutingRuntimeState>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RoutingCandidate {
+    pub account: Account,
+    pub channel: UpstreamChannel,
+    pub resolved_model: String,
+}
+
 impl RoutingRuntime {
     pub fn new() -> Self {
         Self::default()
@@ -170,6 +177,36 @@ impl RoutingRuntime {
         resolved_model: &str,
         exclude_ids: &[&str],
     ) -> Option<Account> {
+        let candidates = accounts
+            .iter()
+            .cloned()
+            .map(|account| RoutingCandidate {
+                account,
+                channel,
+                resolved_model: resolved_model.to_string(),
+            })
+            .collect::<Vec<_>>();
+        self.select_candidate(
+            &candidates,
+            mode,
+            conversation_sticky,
+            conversation_key,
+            exclude_ids,
+        )
+        .map(|candidate| candidate.account)
+    }
+
+    /// Select one already capability-filtered route target. Candidates retain
+    /// database order, while each carries its own provider channel and resolved
+    /// model (for example, a Zen mapped model beside later paid accounts).
+    pub fn select_candidate(
+        &self,
+        candidates: &[RoutingCandidate],
+        mode: RoutingMode,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        exclude_ids: &[&str],
+    ) -> Option<RoutingCandidate> {
         let now = Instant::now();
         let mut state = self.inner.lock();
 
@@ -177,35 +214,34 @@ impl RoutingRuntime {
             && let Some(key) = conversation_key
             && let Some(binding) = state.conversations.get_fresh(key, now)
         {
-            // Sticky locks account + channel + resolved model for the session.
-            if binding.channel == channel && binding.resolved_model == resolved_model {
-                let account_id = binding.account_id.clone();
-                if let Some(account) =
-                    AccountSelector::find_available_for(accounts, channel, &account_id, exclude_ids)
-                {
-                    return Some(account);
-                }
+            // Sticky locks account + provider channel + resolved model for the session.
+            if let Some(candidate) = find_available_candidate(
+                candidates,
+                &binding.account_id,
+                binding.channel,
+                &binding.resolved_model,
+                exclude_ids,
+            ) {
+                return Some(candidate);
             }
         }
 
         let selected = match mode {
-            RoutingMode::StrictPriority => {
-                AccountSelector::first_available_for(accounts, channel, exclude_ids)
-            }
+            RoutingMode::StrictPriority => first_available_candidate(candidates, exclude_ids),
             RoutingMode::StickyGlobal => {
-                select_sticky_global(&mut state, accounts, channel, exclude_ids)
+                select_sticky_global_candidate(&mut state, candidates, exclude_ids)
             }
             RoutingMode::RoundRobin => {
-                select_round_robin(&mut state, accounts, channel, exclude_ids)
+                select_round_robin_candidate(&mut state, candidates, exclude_ids)
             }
         }?;
 
         if conversation_sticky && let Some(key) = conversation_key {
             state.conversations.insert(
                 key.to_string(),
-                selected.id.clone(),
-                channel,
-                resolved_model.to_string(),
+                selected.account.id.clone(),
+                selected.channel,
+                selected.resolved_model.clone(),
                 now,
             );
         }
@@ -267,54 +303,87 @@ impl RoutingRuntime {
     }
 }
 
-fn select_sticky_global(
-    state: &mut RoutingRuntimeState,
-    accounts: &[Account],
-    channel: UpstreamChannel,
+fn candidate_is_available(candidate: &RoutingCandidate, exclude_ids: &[&str]) -> bool {
+    AccountSelector::is_available_for(&candidate.account, candidate.channel, exclude_ids)
+}
+
+fn first_available_candidate(
+    candidates: &[RoutingCandidate],
     exclude_ids: &[&str],
-) -> Option<Account> {
+) -> Option<RoutingCandidate> {
+    candidates
+        .iter()
+        .find(|candidate| candidate_is_available(candidate, exclude_ids))
+        .cloned()
+}
+
+fn find_available_candidate(
+    candidates: &[RoutingCandidate],
+    account_id: &str,
+    channel: UpstreamChannel,
+    resolved_model: &str,
+    exclude_ids: &[&str],
+) -> Option<RoutingCandidate> {
+    candidates
+        .iter()
+        .find(|candidate| {
+            candidate.account.id == account_id
+                && candidate.channel == channel
+                && candidate.resolved_model == resolved_model
+                && candidate_is_available(candidate, exclude_ids)
+        })
+        .cloned()
+}
+
+fn select_sticky_global_candidate(
+    state: &mut RoutingRuntimeState,
+    candidates: &[RoutingCandidate],
+    exclude_ids: &[&str],
+) -> Option<RoutingCandidate> {
     if let Some(current_id) = state.global_account_id.clone() {
-        if let Some(account) =
-            AccountSelector::find_available_for(accounts, channel, &current_id, exclude_ids)
-        {
-            return Some(account);
+        if let Some(candidate) = candidates.iter().find(|candidate| {
+            candidate.account.id == current_id && candidate_is_available(candidate, exclude_ids)
+        }) {
+            return Some(candidate.clone());
         }
-        // Request-local exclude (e.g. transient 403 failover): pick another account for
-        // this request only when the sticky account is still persistently available.
-        let persistently_available =
-            AccountSelector::find_available_for(accounts, channel, &current_id, &[]).is_some();
-        let selected = AccountSelector::first_available_for(accounts, channel, exclude_ids)?;
+        let persistently_available = candidates.iter().any(|candidate| {
+            candidate.account.id == current_id && candidate_is_available(candidate, &[])
+        });
+        let selected = first_available_candidate(candidates, exclude_ids)?;
         if !persistently_available {
-            state.global_account_id = Some(selected.id.clone());
+            state.global_account_id = Some(selected.account.id.clone());
         }
         return Some(selected);
     }
-    let selected = AccountSelector::first_available_for(accounts, channel, exclude_ids)?;
-    state.global_account_id = Some(selected.id.clone());
+    let selected = first_available_candidate(candidates, exclude_ids)?;
+    state.global_account_id = Some(selected.account.id.clone());
     Some(selected)
 }
 
-fn select_round_robin(
+fn select_round_robin_candidate(
     state: &mut RoutingRuntimeState,
-    accounts: &[Account],
-    channel: UpstreamChannel,
+    candidates: &[RoutingCandidate],
     exclude_ids: &[&str],
-) -> Option<Account> {
-    if accounts.is_empty() {
+) -> Option<RoutingCandidate> {
+    if candidates.is_empty() {
         return None;
     }
     let start = state
         .round_robin_after
         .as_ref()
-        .and_then(|after| accounts.iter().position(|account| account.id == *after))
-        .map(|index| (index + 1) % accounts.len())
+        .and_then(|after| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.account.id == *after)
+        })
+        .map(|index| (index + 1) % candidates.len())
         .unwrap_or(0);
-    for offset in 0..accounts.len() {
-        let index = (start + offset) % accounts.len();
-        let account = &accounts[index];
-        if AccountSelector::is_available_for(account, channel, exclude_ids) {
-            state.round_robin_after = Some(account.id.clone());
-            return Some(account.clone());
+    for offset in 0..candidates.len() {
+        let index = (start + offset) % candidates.len();
+        let candidate = &candidates[index];
+        if candidate_is_available(candidate, exclude_ids) {
+            state.round_robin_after = Some(candidate.account.id.clone());
+            return Some(candidate.clone());
         }
     }
     None

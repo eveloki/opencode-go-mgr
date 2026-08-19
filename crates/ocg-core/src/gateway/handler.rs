@@ -5,16 +5,14 @@ use crate::gateway::forwarder::{
     ForwardAction, UpstreamPayloadTooLargeResponse, forward_get, forward_request,
     rate_limited_response,
 };
-use crate::gateway::free_models::{
-    apply_shared_free_exhaustion, decide_route, is_free_model, resolve_upstream_base,
-    rewrite_body_model,
-};
+use crate::gateway::free_models::{decide_route, resolve_upstream_base, rewrite_body_model};
 use crate::gateway::protocol::{
     ApiFormat, ProtocolError, RequestPlan, format_error, prepare_gemini_request, prepare_request,
 };
-use crate::gateway::routing::resolve_conversation_key;
+use crate::gateway::provider_adapter;
+use crate::gateway::routing::{RoutingCandidate, resolve_conversation_key};
 use crate::gateway::selector::AccountSelector;
-use crate::models::UpstreamChannel;
+use crate::models::{Account, UpstreamChannel};
 use crate::models::{
     AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
     ClaudeDesktopModels,
@@ -457,50 +455,25 @@ async fn execute_plan(
     // The client body's model, already extracted by the initial prepare_request.
     let body_model = plan.model.clone();
 
-    let plan = match apply_free_routing_policy(
-        &config,
-        client_format,
-        plan,
-        &client_body,
-        &body_model,
-        &state,
-        conversation_key.as_deref(),
-    ) {
-        Ok(plan) => plan,
-        Err((status, message)) => {
-            return local_failure_response(
-                &state,
-                &trace,
-                client_format,
-                status,
-                &message,
-                "client",
-                "validation",
-                Some(client_body.len()),
-                Some(&client_body),
-            );
-        }
-    };
-
     let mut last_error: Option<String> = None;
     let mut failed_ids: Vec<String> = Vec::new();
     let mut attempt = 0u32;
-    let mut active_plan = plan;
-    let mut free_fallback_used = false;
+    let requested_plan = plan;
 
     loop {
-        if active_plan.channel == UpstreamChannel::Free {
-            let free_cooldown = match state.db.lock().free_channel_cooldown_until() {
-                Ok(cooldown) => cooldown,
+        let (accounts, free_cooldown) = {
+            let db = state.db.lock();
+            let accounts = match db.list_accounts() {
+                Ok(accounts) => accounts,
                 Err(error) => {
-                    let message = format!("failed to read free-channel cooldown: {error}");
+                    let message = format!("failed to select account: {error}");
                     record_plan_failure(
                         &state,
                         &trace,
                         &client_body,
                         attempt.max(1),
                         client_format,
-                        &active_plan,
+                        &requested_plan,
                         "gateway",
                         "account_selection",
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -514,52 +487,70 @@ async fn execute_plan(
                     );
                 }
             };
-            if let Some(until) = free_cooldown {
-                if let Some(outcome) = begin_go_fallback(
+            let free_cooldown = match db.free_channel_cooldown_until() {
+                Ok(cooldown) => cooldown,
+                Err(error) => {
+                    let message = format!("failed to read free-channel cooldown: {error}");
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &message,
+                        None,
+                    );
+                }
+            };
+            (accounts, free_cooldown)
+        };
+        let free_available =
+            free_cooldown.is_none() && !AccountSelector::free_channel_exhausted(&accounts);
+        let route_set = match build_account_route_plans(
+            &accounts,
+            &config,
+            client_format,
+            &requested_plan,
+            &client_body,
+            &body_model,
+            free_available,
+        ) {
+            Ok(route_set) => route_set,
+            Err((status, message)) => {
+                return local_failure_response(
                     &state,
                     &trace,
                     client_format,
-                    &client_body,
-                    &active_plan,
-                    &config,
-                    attempt.max(1),
-                    &mut free_fallback_used,
-                ) {
-                    match outcome {
-                        Ok(go_plan) => {
-                            failed_ids.clear();
-                            active_plan = go_plan;
-                            continue;
-                        }
-                        Err(message) => {
-                            record_plan_failure(
-                                &state,
-                                &trace,
-                                &client_body,
-                                attempt.max(1),
-                                client_format,
-                                &active_plan,
-                                "gateway",
-                                "free_fallback",
-                                StatusCode::BAD_REQUEST,
-                                &message,
-                            );
-                            return protocol_error_response(
-                                client_format,
-                                StatusCode::BAD_REQUEST,
-                                &message,
-                                None,
-                            );
-                        }
-                    }
-                }
+                    status,
+                    &message,
+                    "client",
+                    "validation",
+                    Some(client_body.len()),
+                    Some(&client_body),
+                );
+            }
+        };
+        let excluded = failed_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        let routing_candidates = route_set
+            .routes
+            .iter()
+            .map(|route| route.routing.clone())
+            .collect::<Vec<_>>();
+        let selected = state.routing.select_candidate(
+            &routing_candidates,
+            config.routing_mode,
+            config.conversation_sticky,
+            conversation_key.as_deref(),
+            &excluded,
+        );
+        let Some(selected) = selected else {
+            if route_set.free_only
+                && let Some(until) = free_cooldown
+            {
                 record_plan_failure(
                     &state,
                     &trace,
                     &client_body,
                     attempt.max(1),
                     client_format,
-                    &active_plan,
+                    &requested_plan,
                     "gateway",
                     "account_selection",
                     StatusCode::TOO_MANY_REQUESTS,
@@ -567,128 +558,71 @@ async fn execute_plan(
                 );
                 return rate_limited_response(client_format, until);
             }
-        }
-
-        let account = {
-            let accounts = match state.db.lock().list_accounts() {
-                Ok(accounts) => accounts,
-                Err(e) => {
-                    let message = format!("failed to select account: {e}");
+            let now = chrono::Utc::now();
+            let soonest = route_set
+                .routes
+                .iter()
+                .filter_map(|route| {
+                    route
+                        .routing
+                        .account
+                        .cooldown_ends_at_for(route.routing.channel, now)
+                })
+                .min();
+            return match soonest {
+                Some(until) => {
                     record_plan_failure(
                         &state,
                         &trace,
                         &client_body,
                         attempt.max(1),
                         client_format,
-                        &active_plan,
+                        &requested_plan,
                         "gateway",
                         "account_selection",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "all compatible accounts are rate-limited",
                     );
-                    return protocol_error_response(
-                        client_format,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                        None,
-                    );
+                    rate_limited_response(client_format, until)
                 }
-            };
-            let excluded = failed_ids.iter().map(String::as_str).collect::<Vec<_>>();
-            match state.routing.select_account_for(
-                &accounts,
-                config.routing_mode,
-                config.conversation_sticky,
-                conversation_key.as_deref(),
-                active_plan.channel,
-                &active_plan.model,
-                &excluded,
-            ) {
-                Some(a) => a,
                 None => {
-                    // Prefer mode: free pool exhausted -> fall back to original Go model once.
-                    if let Some(outcome) = begin_go_fallback(
+                    let msg = last_error.clone().unwrap_or_else(|| {
+                        route_set.incompatibility.unwrap_or_else(|| {
+                            "no compatible provider accounts are available".to_string()
+                        })
+                    });
+                    record_plan_failure(
                         &state,
                         &trace,
-                        client_format,
                         &client_body,
-                        &active_plan,
-                        &config,
                         attempt.max(1),
-                        &mut free_fallback_used,
-                    ) {
-                        match outcome {
-                            Ok(go_plan) => {
-                                failed_ids.clear();
-                                active_plan = go_plan;
-                                continue;
-                            }
-                            Err(message) => {
-                                record_plan_failure(
-                                    &state,
-                                    &trace,
-                                    &client_body,
-                                    attempt.max(1),
-                                    client_format,
-                                    &active_plan,
-                                    "gateway",
-                                    "free_fallback",
-                                    StatusCode::BAD_REQUEST,
-                                    &message,
-                                );
-                                return protocol_error_response(
-                                    client_format,
-                                    StatusCode::BAD_REQUEST,
-                                    &message,
-                                    None,
-                                );
-                            }
-                        }
-                    }
-
-                    let soonest = state.db.lock().soonest_cooldown_reset().ok().flatten();
-                    return match soonest {
-                        Some(until) => {
-                            record_plan_failure(
-                                &state,
-                                &trace,
-                                &client_body,
-                                attempt.max(1),
-                                client_format,
-                                &active_plan,
-                                "gateway",
-                                "account_selection",
-                                StatusCode::TOO_MANY_REQUESTS,
-                                "all accounts are rate-limited",
-                            );
-                            rate_limited_response(client_format, until)
-                        }
-                        None => {
-                            let msg =
-                                last_error.unwrap_or_else(|| "no available accounts".to_string());
-                            record_plan_failure(
-                                &state,
-                                &trace,
-                                &client_body,
-                                attempt.max(1),
-                                client_format,
-                                &active_plan,
-                                "gateway",
-                                "account_selection",
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                &msg,
-                            );
-                            protocol_error_response(
-                                client_format,
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                &msg,
-                                None,
-                            )
-                        }
-                    };
+                        client_format,
+                        &requested_plan,
+                        "gateway",
+                        "account_selection",
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &msg,
+                    );
+                    protocol_error_response(
+                        client_format,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &msg,
+                        None,
+                    )
                 }
-            }
+            };
         };
+        let route = route_set
+            .routes
+            .into_iter()
+            .find(|route| {
+                route.routing.account.id == selected.account.id
+                    && route.routing.channel == selected.channel
+                    && route.routing.resolved_model == selected.resolved_model
+            })
+            .expect("selected routing candidate must retain its request plan");
+        let account = route.routing.account;
+        let active_plan = route.plan;
 
         let mut retried_same_account = false;
         loop {
@@ -732,26 +666,22 @@ async fn execute_plan(
                     ForwardAction::RetrySameAccount => return result.response,
                     ForwardAction::ExhaustFreeChannel => {
                         last_error = result.error_message.clone();
-                        if let Some(outcome) = begin_go_fallback(
-                            &state,
-                            &trace,
-                            client_format,
-                            &client_body,
-                            &active_plan,
-                            &config,
-                            attempt,
-                            &mut free_fallback_used,
-                        ) {
-                            match outcome {
-                                Ok(go_plan) => {
-                                    failed_ids.clear();
-                                    active_plan = go_plan;
-                                    break;
-                                }
-                                Err(_) => return result.response,
-                            }
-                        }
-                        return result.response;
+                        failed_ids.push(account.id.clone());
+                        let _ = state.db.lock().log_gateway_diagnostic(
+                            "warn",
+                            "gateway",
+                            &format!(
+                                "Zen Free route {} was exhausted before output; continuing through the global account order: {:?}",
+                                account.name, result.error_message
+                            ),
+                            Some(&trace.request_id),
+                            Some(attempt as i64),
+                            Some("upstream"),
+                            Some("free_fallback"),
+                            Some(trace.elapsed_ms() as i64),
+                            None,
+                        );
+                        break;
                     }
                     ForwardAction::TryNextAccount => {
                         last_error = result.error_message.clone();
@@ -799,80 +729,127 @@ async fn execute_plan(
     }
 }
 
-fn apply_free_routing_policy(
+#[derive(Debug, Clone)]
+struct AccountRoutePlan {
+    routing: RoutingCandidate,
+    plan: RequestPlan,
+}
+
+struct AccountRouteSet {
+    routes: Vec<AccountRoutePlan>,
+    free_only: bool,
+    incompatibility: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_account_route_plans(
+    accounts: &[Account],
     config: &AppConfig,
     client_format: ApiFormat,
-    plan: RequestPlan,
+    initial_plan: &RequestPlan,
     client_body: &Bytes,
     body_model: &str,
-    state: &CoreState,
-    conversation_key: Option<&str>,
-) -> Result<RequestPlan, (StatusCode, String)> {
-    let db = state.db.lock();
-    let accounts = db.list_accounts().map_err(|error| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to list accounts for free-channel routing: {error}"),
-        )
-    })?;
-    let global_free_cooldown = db.free_channel_cooldown_until().map_err(|error| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to read free-channel cooldown: {error}"),
-        )
-    })?;
-    drop(db);
-    let free_available =
-        global_free_cooldown.is_none() && !AccountSelector::free_channel_exhausted(&accounts);
+    free_available: bool,
+) -> Result<AccountRouteSet, (StatusCode, String)> {
+    let decision = decide_route(
+        config.free_model_routing,
+        &initial_plan.model,
+        initial_plan.client,
+        initial_plan.upstream,
+        client_body,
+    )
+    .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    let free_only = decision.channel == UpstreamChannel::Free && !decision.allow_go_fallback;
 
-    // Sticky conversation locks channel + resolved model after the first request.
-    // Prefer-mode sticky onto free is dropped once the IP-shared free pool is cooling.
-    if let Some(key) = conversation_key {
-        if let Some((_account_id, channel, resolved_model)) = state.routing.sticky_binding(key) {
-            let drop_exhausted_prefer_sticky =
-                channel == UpstreamChannel::Free && !free_available && !is_free_model(&plan.model);
-            if !drop_exhausted_prefer_sticky {
-                let original_model = plan.model.clone();
-                return finalize_route_plan(
-                    config,
-                    client_format,
-                    plan,
-                    client_body,
-                    body_model,
-                    &resolved_model,
-                    channel,
-                    original_model,
-                    None,
-                    false,
-                );
-            }
+    let free_plan = if decision.channel == UpstreamChannel::Free && free_available {
+        Some(finalize_route_plan(
+            config,
+            client_format,
+            initial_plan.clone(),
+            client_body,
+            body_model,
+            &decision.model,
+            UpstreamChannel::Free,
+            decision.original_model.clone(),
+            decision.mapped_from.clone(),
+            decision.allow_go_fallback,
+        )?)
+    } else if free_only {
+        // Retain a candidate while cooled so selection can report the durable
+        // egress-IP reset instead of treating Zen as an unknown provider.
+        Some(finalize_route_plan(
+            config,
+            client_format,
+            initial_plan.clone(),
+            client_body,
+            body_model,
+            &decision.model,
+            UpstreamChannel::Free,
+            decision.original_model.clone(),
+            decision.mapped_from.clone(),
+            false,
+        )?)
+    } else {
+        None
+    };
+    let go_plan = if decision.channel == UpstreamChannel::Go || decision.allow_go_fallback {
+        Some(finalize_route_plan(
+            config,
+            client_format,
+            initial_plan.clone(),
+            client_body,
+            body_model,
+            &decision.original_model,
+            UpstreamChannel::Go,
+            decision.original_model.clone(),
+            None,
+            false,
+        )?)
+    } else {
+        None
+    };
+
+    let mut routes = Vec::new();
+    let mut rejected = Vec::new();
+    for account in accounts {
+        let plan = if account.provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+            && account.offering_id == crate::provider::ANONYMOUS_FREE_OFFERING_ID
+        {
+            free_plan.as_ref()
+        } else {
+            go_plan.as_ref()
+        };
+        let Some(plan) = plan else {
+            continue;
+        };
+        match provider_adapter::supports_plan(account, config, plan) {
+            Ok(()) => routes.push(AccountRoutePlan {
+                routing: RoutingCandidate {
+                    account: account.clone(),
+                    channel: plan.channel,
+                    resolved_model: plan.model.clone(),
+                },
+                plan: plan.clone(),
+            }),
+            Err(error) => rejected.push(format!(
+                "{}/{} account `{}`: {error}",
+                account.provider_id, account.offering_id, account.name
+            )),
         }
     }
-
-    let decision = apply_shared_free_exhaustion(
-        decide_route(
-            config.free_model_routing,
-            &plan.model,
-            plan.client,
-            plan.upstream,
-            client_body,
+    let incompatibility = (routes.is_empty() && !rejected.is_empty()).then(|| {
+        format!(
+            "no compatible provider account for model `{}` and {:?}: {}",
+            initial_plan.model,
+            initial_plan.upstream,
+            rejected.join("; ")
         )
-        .map_err(|message| (StatusCode::BAD_REQUEST, message))?,
-        free_available,
-    );
-
-    finalize_route_plan(
-        config,
-        client_format,
-        plan,
-        client_body,
-        body_model,
-        &decision.model,
-        decision.channel,
-        decision.original_model,
-        decision.mapped_from,
-        decision.allow_go_fallback,
-    )
+    });
+    Ok(AccountRouteSet {
+        routes,
+        free_only,
+        incompatibility,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -914,66 +891,6 @@ fn finalize_route_plan(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn begin_go_fallback(
-    state: &CoreState,
-    trace: &RequestTrace,
-    client_format: ApiFormat,
-    client_body: &Bytes,
-    active_plan: &RequestPlan,
-    config: &AppConfig,
-    attempt: u32,
-    free_fallback_used: &mut bool,
-) -> Option<Result<RequestPlan, String>> {
-    if active_plan.channel != UpstreamChannel::Free
-        || !active_plan.allow_go_fallback
-        || *free_fallback_used
-    {
-        return None;
-    }
-    *free_fallback_used = true;
-    Some(
-        rebuild_go_fallback_plan(client_format, client_body, active_plan, config).inspect(
-            |go_plan| {
-                let _ = state.db.lock().log_gateway_diagnostic(
-                    "info",
-                    "gateway",
-                    &format!(
-                        "free channel exhausted; falling back to Go model {} without rotating keys",
-                        go_plan.model
-                    ),
-                    Some(&trace.request_id),
-                    Some(attempt as i64),
-                    Some("gateway"),
-                    Some("free_fallback"),
-                    Some(trace.elapsed_ms() as i64),
-                    None,
-                );
-            },
-        ),
-    )
-}
-
-fn rebuild_go_fallback_plan(
-    client_format: ApiFormat,
-    client_body: &Bytes,
-    free_plan: &RequestPlan,
-    config: &AppConfig,
-) -> Result<RequestPlan, String> {
-    let original = free_plan
-        .original_model
-        .clone()
-        .ok_or_else(|| "missing original model for free-to-Go fallback".to_string())?;
-    let body = rewrite_body_model(client_body, &original)?;
-    let mut plan = prepare_request(client_format, body).map_err(|error| error.message)?;
-    plan.model = original;
-    plan.channel = UpstreamChannel::Go;
-    plan.upstream_base_override = None;
-    plan.original_model = None;
-    plan.allow_go_fallback = false;
-    let _ = config;
-    Ok(plan)
-}
-
 /// Candidate credential values a client may present, in fixed priority
 /// order: the Bearer token, then `x-api-key`, then `x-goog-api-key`. Every
 /// non-empty candidate is an independent credential claim; a wrong value

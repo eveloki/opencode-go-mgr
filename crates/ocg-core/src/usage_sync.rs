@@ -4,6 +4,8 @@
 //! the immediate real-time estimator after the last successful calibration.
 //! Manual and background paths share one secure fetch + key CAS implementation.
 
+pub mod provider_adapter;
+
 use crate::db::{
     AccountUsageCalibrationSnapshot, AccountUsageSyncState, AccountUsageSyncSuccessMetadata,
     Database,
@@ -12,6 +14,7 @@ use crate::go_usage::{GoUsageError, GoUsageSnapshot};
 use crate::models::UsageWindow;
 use crate::pricing::PricingLimits;
 use crate::state::CoreState;
+use crate::usage_sync::provider_adapter::supports_authoritative_auto_sync;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::future::FutureExt;
 use parking_lot::Mutex as ParkingMutex;
@@ -278,6 +281,17 @@ pub fn account_is_auto_sync_candidate(enabled: bool, setup_ready: bool, key_pres
     enabled && setup_ready && key_present
 }
 
+pub fn provider_account_is_auto_sync_candidate(
+    provider_id: &str,
+    offering_id: &str,
+    enabled: bool,
+    setup_ready: bool,
+    key_present: bool,
+) -> bool {
+    supports_authoritative_auto_sync(provider_id, offering_id)
+        && account_is_auto_sync_candidate(enabled, setup_ready, key_present)
+}
+
 pub fn compute_next_after_success(
     now: DateTime<Utc>,
     active: bool,
@@ -395,6 +409,28 @@ pub fn schedule_after_inference_429(state: &CoreState, account_id: &str) {
     let proposal = compute_inference_429_delay(now, jitter);
     {
         let db = state.db.lock();
+        let supported = match db.get_account(account_id) {
+            Ok(Some(account)) => {
+                supports_authoritative_auto_sync(&account.provider_id, &account.offering_id)
+            }
+            Ok(None) => false,
+            Err(error) => {
+                let _ = db.log_gateway(
+                    "warn",
+                    "usage_sync",
+                    &format!(
+                        "failed to resolve provider before post-429 usage sync for {account_id}: {error}"
+                    ),
+                );
+                return;
+            }
+        };
+        if !supported {
+            // GOAT `/alpha/*` usage is experimental/unavailable and must not be
+            // coupled to inference cooldown or eligibility. Zen Free uses its
+            // separate egress-IP/global cooldown path.
+            return;
+        }
         if let Err(error) = db.pull_account_usage_sync_next_eligible(account_id, proposal, false) {
             let _ = db.log_gateway(
                 "warn",
@@ -481,7 +517,9 @@ fn list_auto_candidates(
     let accounts = db.list_accounts()?;
     let mut out = Vec::new();
     for account in accounts {
-        if !account_is_auto_sync_candidate(
+        if !provider_account_is_auto_sync_candidate(
+            &account.provider_id,
+            &account.offering_id,
             account.enabled,
             account.setup_step.is_ready(),
             !account.key_cipher.is_empty(),
@@ -683,6 +721,11 @@ async fn execute_official_usage_refresh(
             }
         }
     };
+    if !supports_authoritative_auto_sync(&account.provider_id, &account.offering_id) {
+        return Err(OfficialUsageRefreshError::NotEligible(
+            "verified official usage refresh is unavailable for this provider offering",
+        ));
+    }
     if !account.setup_step.is_ready() || account.key_cipher.is_empty() {
         return Err(OfficialUsageRefreshError::NotEligible(
             "only ready accounts with a stored key can refresh official Go usage",
@@ -816,6 +859,10 @@ mod tests {
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::Database;
     use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
+    use crate::provider::{
+        COMMAND_CODE_PROVIDER_ID, CreditBalance, GOAT_OFFERING_ID, QUOTA_WINDOW_FIVE_HOURS,
+        QUOTA_WINDOW_MONTH, QUOTA_WINDOW_WEEK, QuotaWindow, ZEN_FREE_ACCOUNT_ID,
+    };
     use crate::state::CoreStateInner;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -928,10 +975,34 @@ mod tests {
 
     #[test]
     fn auto_sync_excludes_disabled_non_ready_empty_key() {
-        assert!(!account_is_auto_sync_candidate(false, true, true));
-        assert!(!account_is_auto_sync_candidate(true, false, true));
-        assert!(!account_is_auto_sync_candidate(true, true, false));
-        assert!(account_is_auto_sync_candidate(true, true, true));
+        let provider = crate::provider::OPENCODE_PROVIDER_ID;
+        let offering = crate::provider::GO_OFFERING_ID;
+        assert!(!provider_account_is_auto_sync_candidate(
+            provider, offering, false, true, true
+        ));
+        assert!(!provider_account_is_auto_sync_candidate(
+            provider, offering, true, false, true
+        ));
+        assert!(!provider_account_is_auto_sync_candidate(
+            provider, offering, true, true, false
+        ));
+        assert!(provider_account_is_auto_sync_candidate(
+            provider, offering, true, true, true
+        ));
+        assert!(!provider_account_is_auto_sync_candidate(
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            crate::provider::GOAT_OFFERING_ID,
+            true,
+            true,
+            true,
+        ));
+        assert!(!provider_account_is_auto_sync_candidate(
+            crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+            crate::provider::ANONYMOUS_FREE_OFFERING_ID,
+            true,
+            true,
+            false,
+        ));
     }
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -1903,6 +1974,137 @@ mod tests {
             Some(now + INFERENCE_429_DELAY_MIN),
             "real inference 429 may intentionally pull earlier than failure backoff"
         );
+
+        state.usage_sync.clear_test_seams();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn goat_key_windows_are_independent_and_usage_failure_is_fail_soft() {
+        let (dir, state) = test_state("goat-independent");
+        let mut first = ready_account(&state, "goat-a", "goat-key-a");
+        first.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
+        first.offering_id = GOAT_OFFERING_ID.to_string();
+        let mut second = ready_account(&state, "goat-b", "goat-key-b");
+        second.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
+        second.offering_id = GOAT_OFFERING_ID.to_string();
+        {
+            let db = state.db.lock();
+            db.create_account(&first).unwrap();
+            db.create_account(&second).unwrap();
+        }
+        let now = fixed("2026-08-18T12:00:00Z");
+        for (account_id, used) in [("goat-a", 1.0), ("goat-b", 9.0)] {
+            for kind in [
+                QUOTA_WINDOW_FIVE_HOURS,
+                QUOTA_WINDOW_WEEK,
+                QUOTA_WINDOW_MONTH,
+            ] {
+                state
+                    .db
+                    .lock()
+                    .upsert_quota_window(&QuotaWindow {
+                        account_id: account_id.to_string(),
+                        window_kind: kind.to_string(),
+                        used,
+                        // The official GOAT contract is not verified, so the
+                        // test exercises key scoping without inventing limits,
+                        // units, or reset semantics.
+                        limit_value: None,
+                        started_at: None,
+                        resets_at: None,
+                        calibration_offset: 0.0,
+                        unit: "unknown".to_string(),
+                        source: "test-fixture".to_string(),
+                        observed_at: Some(now),
+                        updated_at: now,
+                    })
+                    .unwrap();
+            }
+            for (balance_kind, amount) in [("purchased", used * 10.0), ("free", used)] {
+                state
+                    .db
+                    .lock()
+                    .upsert_credit_balance(&CreditBalance {
+                        account_id: account_id.to_string(),
+                        balance_kind: balance_kind.to_string(),
+                        amount,
+                        unit: "unknown".to_string(),
+                        source: "test-fixture".to_string(),
+                        observed_at: Some(now),
+                        updated_at: now,
+                    })
+                    .unwrap();
+            }
+        }
+
+        let first_windows = state.db.lock().list_quota_windows("goat-a").unwrap();
+        let second_windows = state.db.lock().list_quota_windows("goat-b").unwrap();
+        assert_eq!(first_windows.len(), 3);
+        assert_eq!(second_windows.len(), 3);
+        assert!(first_windows.iter().all(|window| window.used == 1.0));
+        assert!(second_windows.iter().all(|window| window.used == 9.0));
+        let first_balances = state.db.lock().list_credit_balances("goat-a").unwrap();
+        let second_balances = state.db.lock().list_credit_balances("goat-b").unwrap();
+        assert_eq!(first_balances[0].amount + first_balances[1].amount, 11.0);
+        assert_eq!(second_balances[0].amount + second_balances[1].amount, 99.0);
+
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let fetches_seen = fetches.clone();
+        state.usage_sync.set_fetch_for_test(move |_cfg, _key| {
+            fetches_seen.fetch_add(1, AtomicOrdering::SeqCst);
+            Box::pin(async { Err(GoUsageError::Network) })
+        });
+        let error = refresh_official_usage(&state, "goat-a", UsageSyncTrigger::Manual)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, OfficialUsageRefreshError::NotEligible(_)));
+        assert_eq!(fetches.load(AtomicOrdering::SeqCst), 0);
+        let sync = state
+            .db
+            .lock()
+            .account_usage_sync_state("goat-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(sync.failure_streak, 0);
+        assert_eq!(sync.last_attempt_at, None);
+        assert_eq!(sync.next_eligible_at, None);
+
+        schedule_after_inference_429(&state, "goat-a");
+        assert_eq!(
+            state
+                .db
+                .lock()
+                .account_usage_sync_state("goat-a")
+                .unwrap()
+                .unwrap()
+                .next_eligible_at,
+            None,
+            "experimental usage must stay independent from inference 429 handling"
+        );
+        let limits = state.pricing_snapshot().limits.clone();
+        let candidates = {
+            let db = state.db.lock();
+            list_auto_candidates(&db, now, &limits).unwrap()
+        };
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.account_id.starts_with("goat-"))
+        );
+
+        let zen_windows = state
+            .db
+            .lock()
+            .list_quota_windows(ZEN_FREE_ACCOUNT_ID)
+            .unwrap();
+        assert_eq!(zen_windows.len(), 1);
+        assert_eq!(
+            zen_windows[0].window_kind,
+            crate::provider::QUOTA_WINDOW_FREE
+        );
+        assert_eq!(zen_windows[0].limit_value, None);
 
         state.usage_sync.clear_test_seams();
         drop(state);

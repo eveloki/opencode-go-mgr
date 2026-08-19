@@ -5,13 +5,608 @@ use reqwest::redirect::{Attempt, Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::time::Duration;
+
+use crate::db::Database;
+use crate::provider::{
+    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    ProviderPricingSnapshot as StoredProviderPricingSnapshot,
+};
 
 pub const SOURCE_URL: &str = "https://opencode.ai/docs/go/";
 const SOURCE_HOST: &str = "opencode.ai";
 const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
 const MONTHLY_LIMIT: f64 = 60.0;
 const ADJUSTMENT_POLICY_VERSION: &str = "local-v4";
+
+/// Evidence level attached to a provider-scoped pricing snapshot.
+///
+/// GOAT remains `unavailable` until a user-approved official contract is
+/// captured. `experimental` is reserved for a captured but not yet promoted
+/// contract; callers must not present it as authoritative pricing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderPricingEvidence {
+    Verified,
+    Experimental,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderPricingCapability {
+    pub provider_id: &'static str,
+    pub offering_id: &'static str,
+    pub evidence: ProviderPricingEvidence,
+    pub experimental: bool,
+    pub source_url: Option<&'static str>,
+    pub manual_refresh_available: bool,
+}
+
+pub fn provider_pricing_capability(
+    provider_id: &str,
+    offering_id: &str,
+) -> Option<ProviderPricingCapability> {
+    match (provider_id, offering_id) {
+        (OPENCODE_PROVIDER_ID, GO_OFFERING_ID) => Some(ProviderPricingCapability {
+            provider_id: OPENCODE_PROVIDER_ID,
+            offering_id: GO_OFFERING_ID,
+            evidence: ProviderPricingEvidence::Verified,
+            experimental: false,
+            source_url: Some(SOURCE_URL),
+            manual_refresh_available: true,
+        }),
+        (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => Some(ProviderPricingCapability {
+            provider_id: COMMAND_CODE_PROVIDER_ID,
+            offering_id: GOAT_OFFERING_ID,
+            evidence: ProviderPricingEvidence::Unavailable,
+            experimental: true,
+            source_url: None,
+            manual_refresh_available: false,
+        }),
+        (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
+            Some(ProviderPricingCapability {
+                provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
+                offering_id: ANONYMOUS_FREE_OFFERING_ID,
+                evidence: ProviderPricingEvidence::Unavailable,
+                experimental: false,
+                source_url: None,
+                manual_refresh_available: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// One immutable provider/model pricing value. Unknown official fields stay
+/// `None`; the manager never manufactures prices or allowances.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ProviderPricingValue {
+    model_id: String,
+    display_name: String,
+    input_per_million: Option<f64>,
+    output_per_million: Option<f64>,
+    cache_read_per_million: Option<f64>,
+    cache_write_per_million: Option<f64>,
+    plan_limit: Option<f64>,
+    model_allowance: Option<f64>,
+    quota_multiplier: Option<f64>,
+    paid_plan_price: Option<f64>,
+    currency: Option<String>,
+    min_input_tokens: Option<i64>,
+    max_input_tokens: Option<i64>,
+    time_window: PricingTimeWindow,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProviderPricingValueWire {
+    model_id: String,
+    display_name: String,
+    input_per_million: Option<f64>,
+    output_per_million: Option<f64>,
+    cache_read_per_million: Option<f64>,
+    cache_write_per_million: Option<f64>,
+    plan_limit: Option<f64>,
+    model_allowance: Option<f64>,
+    #[allow(dead_code)]
+    quota_multiplier: Option<f64>,
+    paid_plan_price: Option<f64>,
+    currency: Option<String>,
+    #[serde(default)]
+    min_input_tokens: Option<i64>,
+    #[serde(default)]
+    max_input_tokens: Option<i64>,
+    #[serde(default)]
+    time_window: PricingTimeWindow,
+}
+
+impl ProviderPricingValue {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        model_id: impl Into<String>,
+        display_name: impl Into<String>,
+        input_per_million: Option<f64>,
+        output_per_million: Option<f64>,
+        cache_read_per_million: Option<f64>,
+        cache_write_per_million: Option<f64>,
+        plan_limit: Option<f64>,
+        model_allowance: Option<f64>,
+        paid_plan_price: Option<f64>,
+        currency: Option<String>,
+        min_input_tokens: Option<i64>,
+        max_input_tokens: Option<i64>,
+        time_window: PricingTimeWindow,
+    ) -> Result<Self> {
+        let model_id = model_id.into();
+        let display_name = display_name.into();
+        if model_id.trim().is_empty() || display_name.trim().is_empty() {
+            bail!("provider pricing model id and display name must be non-empty");
+        }
+        for (name, value) in [
+            ("input price", input_per_million),
+            ("output price", output_per_million),
+            ("cache read price", cache_read_per_million),
+            ("cache write price", cache_write_per_million),
+            ("paid plan price", paid_plan_price),
+        ] {
+            ensure_optional_non_negative_finite(name, value)?;
+        }
+        ensure_optional_positive_finite("plan limit", plan_limit)?;
+        ensure_optional_positive_finite("model allowance", model_allowance)?;
+        if min_input_tokens.is_some_and(|value| value < 0)
+            || max_input_tokens.is_some_and(|value| value < 0)
+            || matches!((min_input_tokens, max_input_tokens), (Some(min), Some(max)) if min > max)
+        {
+            bail!("provider pricing token tier bounds are invalid");
+        }
+        let quota_multiplier = match (plan_limit, model_allowance) {
+            (Some(limit), Some(allowance)) => Some(quota_multiplier(limit, allowance)?),
+            _ => None,
+        };
+        Ok(Self {
+            model_id,
+            display_name,
+            input_per_million,
+            output_per_million,
+            cache_read_per_million,
+            cache_write_per_million,
+            plan_limit,
+            model_allowance,
+            quota_multiplier,
+            paid_plan_price,
+            currency,
+            min_input_tokens,
+            max_input_tokens,
+            time_window,
+        })
+    }
+
+    fn from_wire(wire: ProviderPricingValueWire) -> Result<Self> {
+        // Deliberately ignore the serialized derived value and recompute it.
+        // This prevents an imported snapshot from violating the only valid
+        // multiplier formula.
+        Self::new(
+            wire.model_id,
+            wire.display_name,
+            wire.input_per_million,
+            wire.output_per_million,
+            wire.cache_read_per_million,
+            wire.cache_write_per_million,
+            wire.plan_limit,
+            wire.model_allowance,
+            wire.paid_plan_price,
+            wire.currency,
+            wire.min_input_tokens,
+            wire.max_input_tokens,
+            wire.time_window,
+        )
+    }
+
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    pub fn plan_limit(&self) -> Option<f64> {
+        self.plan_limit
+    }
+
+    pub fn model_allowance(&self) -> Option<f64> {
+        self.model_allowance
+    }
+
+    pub fn quota_multiplier(&self) -> Option<f64> {
+        self.quota_multiplier
+    }
+
+    pub fn paid_plan_price(&self) -> Option<f64> {
+        self.paid_plan_price
+    }
+}
+
+/// Typed, append-only value stored inside `provider_pricing_snapshots`.
+/// Fields are private so a loaded snapshot cannot be mutated in place; a new
+/// official observation receives a new revision.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ProviderScopedPricingSnapshot {
+    provider_id: String,
+    offering_id: String,
+    revision: String,
+    activated_at: String,
+    document_updated_at: Option<String>,
+    source_url: String,
+    content_hash: String,
+    evidence: ProviderPricingEvidence,
+    values: Vec<ProviderPricingValue>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProviderScopedPricingSnapshotWire {
+    provider_id: String,
+    offering_id: String,
+    revision: String,
+    activated_at: String,
+    document_updated_at: Option<String>,
+    source_url: String,
+    content_hash: String,
+    evidence: ProviderPricingEvidence,
+    values: Vec<ProviderPricingValueWire>,
+}
+
+impl ProviderScopedPricingSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        provider_id: impl Into<String>,
+        offering_id: impl Into<String>,
+        revision: impl Into<String>,
+        activated_at: impl Into<String>,
+        document_updated_at: Option<String>,
+        source_url: impl Into<String>,
+        content_hash: impl Into<String>,
+        evidence: ProviderPricingEvidence,
+        values: Vec<ProviderPricingValue>,
+    ) -> Result<Self> {
+        let provider_id = provider_id.into();
+        let offering_id = offering_id.into();
+        let revision = revision.into();
+        let activated_at = activated_at.into();
+        let source_url = source_url.into();
+        let content_hash = content_hash.into();
+        if [
+            provider_id.as_str(),
+            offering_id.as_str(),
+            revision.as_str(),
+            activated_at.as_str(),
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty())
+        {
+            bail!("provider pricing identity and activation fields must be non-empty");
+        }
+        DateTime::parse_from_rfc3339(&activated_at)
+            .context("provider pricing activated_at must be RFC3339")?;
+        if evidence == ProviderPricingEvidence::Verified
+            && (source_url.trim().is_empty() || content_hash.trim().is_empty())
+        {
+            bail!("verified provider pricing requires source URL and content hash");
+        }
+        let mut identities = HashSet::new();
+        for value in &values {
+            let identity = (
+                value.model_id.clone(),
+                value.time_window,
+                value.min_input_tokens,
+                value.max_input_tokens,
+            );
+            if !identities.insert(identity) {
+                bail!("provider pricing contains a duplicate model/tier/time-window value");
+            }
+        }
+        Ok(Self {
+            provider_id,
+            offering_id,
+            revision,
+            activated_at,
+            document_updated_at,
+            source_url,
+            content_hash,
+            evidence,
+            values,
+        })
+    }
+
+    pub fn from_opencode_go(snapshot: &PricingSnapshot) -> Result<Self> {
+        let values = snapshot
+            .models
+            .iter()
+            .map(|model| {
+                ProviderPricingValue::new(
+                    model.model_id.clone(),
+                    model.display_name.clone(),
+                    Some(model.input),
+                    Some(model.output),
+                    Some(model.cache_read),
+                    model.cache_write,
+                    Some(snapshot.limits.window_month),
+                    Some(model.usage),
+                    None,
+                    Some("USD".to_string()),
+                    model.min_input_tokens,
+                    model.max_input_tokens,
+                    model.time_window,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::new(
+            OPENCODE_PROVIDER_ID,
+            GO_OFFERING_ID,
+            snapshot.revision.clone(),
+            snapshot.activated_at.clone(),
+            Some(snapshot.document_updated_at.clone()),
+            snapshot.source_url.clone(),
+            snapshot.content_hash.clone(),
+            ProviderPricingEvidence::Verified,
+            values,
+        )
+    }
+
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    pub fn offering_id(&self) -> &str {
+        &self.offering_id
+    }
+
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    pub fn evidence(&self) -> ProviderPricingEvidence {
+        self.evidence
+    }
+
+    pub fn values(&self) -> &[ProviderPricingValue] {
+        &self.values
+    }
+
+    pub fn to_storage_record(&self) -> Result<StoredProviderPricingSnapshot> {
+        Ok(StoredProviderPricingSnapshot {
+            provider_id: self.provider_id.clone(),
+            offering_id: self.offering_id.clone(),
+            revision: self.revision.clone(),
+            activated_at: self.activated_at.clone(),
+            document_updated_at: self.document_updated_at.clone(),
+            source_url: self.source_url.clone(),
+            content_hash: self.content_hash.clone(),
+            snapshot_json: serde_json::to_string(self)?,
+        })
+    }
+
+    pub fn from_storage_record(record: &StoredProviderPricingSnapshot) -> Result<Self> {
+        if let Ok(wire) =
+            serde_json::from_str::<ProviderScopedPricingSnapshotWire>(&record.snapshot_json)
+        {
+            let values = wire
+                .values
+                .into_iter()
+                .map(ProviderPricingValue::from_wire)
+                .collect::<Result<Vec<_>>>()?;
+            let snapshot = Self::new(
+                wire.provider_id,
+                wire.offering_id,
+                wire.revision,
+                wire.activated_at,
+                wire.document_updated_at,
+                wire.source_url,
+                wire.content_hash,
+                wire.evidence,
+                values,
+            )?;
+            snapshot.ensure_matches_record(record)?;
+            return Ok(snapshot);
+        }
+
+        // v22 migrates old OpenCode Go snapshot JSON into the provider table.
+        // Continue accepting that exact legacy value shape indefinitely.
+        if record.provider_id == OPENCODE_PROVIDER_ID && record.offering_id == GO_OFFERING_ID {
+            let legacy: PricingSnapshot = serde_json::from_str(&record.snapshot_json)
+                .context("invalid provider pricing snapshot JSON")?;
+            let snapshot = Self::from_opencode_go(&legacy)?;
+            snapshot.ensure_matches_record(record)?;
+            return Ok(snapshot);
+        }
+        bail!(
+            "provider pricing snapshot `{}/{}/{}` has an unsupported value schema",
+            record.provider_id,
+            record.offering_id,
+            record.revision
+        )
+    }
+
+    fn ensure_matches_record(&self, record: &StoredProviderPricingSnapshot) -> Result<()> {
+        if self.provider_id != record.provider_id
+            || self.offering_id != record.offering_id
+            || self.revision != record.revision
+            || self.activated_at != record.activated_at
+            || self.document_updated_at != record.document_updated_at
+            || self.source_url != record.source_url
+            || self.content_hash != record.content_hash
+        {
+            bail!("provider pricing metadata does not match its storage record");
+        }
+        Ok(())
+    }
+}
+
+/// Provider-neutral cost accounting. Raw supplier value and account-quota
+/// debit are distinct; paid equivalent stays unknown without an official paid
+/// plan price.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ProviderCostEstimate {
+    pub raw_cost: Option<f64>,
+    pub quota_debit: Option<f64>,
+    pub paid_cost: Option<f64>,
+    pub cost_state: ProviderCostState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCostState {
+    Priced,
+    Unpriced,
+    Free,
+}
+
+impl ProviderCostEstimate {
+    pub fn from_raw(
+        raw_cost: f64,
+        plan_limit: Option<f64>,
+        model_allowance: Option<f64>,
+        paid_plan_price: Option<f64>,
+    ) -> Result<Self> {
+        ensure_non_negative_finite("raw cost", raw_cost)?;
+        ensure_optional_positive_finite("plan limit", plan_limit)?;
+        ensure_optional_positive_finite("model allowance", model_allowance)?;
+        ensure_optional_non_negative_finite("paid plan price", paid_plan_price)?;
+        let quota_debit = match (plan_limit, model_allowance) {
+            (Some(limit), Some(allowance)) => Some(raw_cost * quota_multiplier(limit, allowance)?),
+            _ => None,
+        };
+        let paid_cost = match (quota_debit, paid_plan_price, plan_limit) {
+            (Some(debit), Some(price), Some(limit)) => Some(debit * price / limit),
+            _ => None,
+        };
+        Ok(Self {
+            raw_cost: Some(raw_cost),
+            quota_debit,
+            paid_cost,
+            cost_state: if quota_debit.is_some() {
+                ProviderCostState::Priced
+            } else {
+                ProviderCostState::Unpriced
+            },
+        })
+    }
+
+    /// Zen Free is neither a supplier charge nor an account-quota debit.
+    pub const fn zen_free() -> Self {
+        Self {
+            raw_cost: Some(0.0),
+            quota_debit: Some(0.0),
+            paid_cost: Some(0.0),
+            cost_state: ProviderCostState::Free,
+        }
+    }
+}
+
+/// The only supported conversion from a model's raw usage value into an
+/// account-level quota debit multiplier.
+pub fn quota_multiplier(plan_limit: f64, model_allowance: f64) -> Result<f64> {
+    ensure_positive_finite("plan limit", plan_limit)?;
+    ensure_positive_finite("model allowance", model_allowance)?;
+    Ok(plan_limit / model_allowance)
+}
+
+fn ensure_non_negative_finite(name: &str, value: f64) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        bail!("{name} must be finite and non-negative");
+    }
+    Ok(())
+}
+
+fn ensure_positive_finite(name: &str, value: f64) -> Result<()> {
+    if !value.is_finite() || value <= 0.0 {
+        bail!("{name} must be finite and positive");
+    }
+    Ok(())
+}
+
+fn ensure_optional_non_negative_finite(name: &str, value: Option<f64>) -> Result<()> {
+    if let Some(value) = value {
+        ensure_non_negative_finite(name, value)?;
+    }
+    Ok(())
+}
+
+fn ensure_optional_positive_finite(name: &str, value: Option<f64>) -> Result<()> {
+    if let Some(value) = value {
+        ensure_positive_finite(name, value)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderPricingRefreshError {
+    UnknownOffering,
+    ExperimentalContractUnavailable,
+    NotApplicable,
+    FetchFailed,
+}
+
+impl fmt::Display for ProviderPricingRefreshError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownOffering => f.write_str("unknown provider pricing offering"),
+            Self::ExperimentalContractUnavailable => f.write_str(
+                "experimental GOAT pricing is unavailable because no verified official contract is configured",
+            ),
+            Self::NotApplicable => {
+                f.write_str("this provider offering has no paid pricing snapshot")
+            }
+            Self::FetchFailed => f.write_str("verified provider pricing refresh failed"),
+        }
+    }
+}
+
+impl std::error::Error for ProviderPricingRefreshError {}
+
+/// Explicit manual-only provider refresh entrypoint. There is intentionally no
+/// timer/scheduler hook for pricing.
+pub async fn fetch_provider_pricing_manual(
+    config: &crate::models::AppConfig,
+    provider_id: &str,
+    offering_id: &str,
+) -> std::result::Result<ProviderScopedPricingSnapshot, ProviderPricingRefreshError> {
+    match (provider_id, offering_id) {
+        (OPENCODE_PROVIDER_ID, GO_OFFERING_ID) => {
+            let snapshot = fetch_official_snapshot(config)
+                .await
+                .map_err(|_| ProviderPricingRefreshError::FetchFailed)?;
+            ProviderScopedPricingSnapshot::from_opencode_go(&snapshot)
+                .map_err(|_| ProviderPricingRefreshError::FetchFailed)
+        }
+        (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => {
+            Err(ProviderPricingRefreshError::ExperimentalContractUnavailable)
+        }
+        (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
+            Err(ProviderPricingRefreshError::NotApplicable)
+        }
+        _ => Err(ProviderPricingRefreshError::UnknownOffering),
+    }
+}
+
+pub fn store_provider_pricing_snapshot(
+    db: &Database,
+    snapshot: &ProviderScopedPricingSnapshot,
+) -> Result<()> {
+    db.insert_provider_pricing_snapshot(&snapshot.to_storage_record()?)
+}
+
+pub fn latest_provider_pricing_snapshot(
+    db: &Database,
+    provider_id: &str,
+    offering_id: &str,
+) -> Result<Option<ProviderScopedPricingSnapshot>> {
+    db.latest_provider_pricing_snapshot(provider_id, offering_id)?
+        .as_ref()
+        .map(ProviderScopedPricingSnapshot::from_storage_record)
+        .transpose()
+}
 
 // Audit reference only; the runtime never fetches supplier pricing pages:
 // https://platform.minimaxi.com/docs/guides/pricing-paygo
@@ -77,6 +672,15 @@ pub struct PricingSnapshot {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricingEstimate {
+    /// Raw provider-priced token value before the account plan's quota
+    /// multiplier. This is USD for the verified OpenCode Go table.
+    pub raw_cost_usd: Option<f64>,
+    /// Account/key quota debit. This intentionally remains identical to the
+    /// legacy `cost` field for OpenCode Go.
+    pub quota_debit: Option<f64>,
+    /// User-paid equivalent remains unknown without account-specific official
+    /// plan-price evidence (for example first-month vs recurring pricing).
+    pub effective_paid_cost_usd: Option<f64>,
     pub cost: Option<f64>,
     pub pricing_revision_id: Option<String>,
     pub quota_multiplier: Option<f64>,
@@ -87,6 +691,9 @@ pub struct PricingEstimate {
 impl PricingEstimate {
     fn unpriced(revision: &str) -> Self {
         Self {
+            raw_cost_usd: None,
+            quota_debit: None,
+            effective_paid_cost_usd: None,
             cost: None,
             pricing_revision_id: Some(revision.to_string()),
             quota_multiplier: None,
@@ -97,6 +704,9 @@ impl PricingEstimate {
 
     fn free(revision: &str) -> Self {
         Self {
+            raw_cost_usd: Some(0.0),
+            quota_debit: Some(0.0),
+            effective_paid_cost_usd: Some(0.0),
             cost: None,
             pricing_revision_id: Some(revision.to_string()),
             quota_multiplier: None,
@@ -206,8 +816,12 @@ impl PricingSnapshot {
             / 1_000_000.0;
         let local_adjustment_multiplier = if base > 0.0 { adjusted / base } else { 1.0 };
 
+        let quota_debit = adjusted * price.quota_multiplier;
         PricingEstimate {
-            cost: Some(adjusted * price.quota_multiplier),
+            raw_cost_usd: Some(adjusted),
+            quota_debit: Some(quota_debit),
+            effective_paid_cost_usd: None,
+            cost: Some(quota_debit),
             pricing_revision_id: Some(self.revision.clone()),
             quota_multiplier: Some(price.quota_multiplier),
             local_adjustment_multiplier: Some(local_adjustment_multiplier),
@@ -1102,10 +1716,18 @@ fn collapse_whitespace(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        ProviderCostEstimate, ProviderCostState, ProviderPricingEvidence,
+        ProviderPricingRefreshError, ProviderPricingValue, ProviderScopedPricingSnapshot,
         embedded_seed, ensure_current_adjustment_policy, fetch_official_snapshot,
-        legacy_policy_needs_multiplier_repair, parse_official_html,
+        fetch_provider_pricing_manual, latest_provider_pricing_snapshot,
+        legacy_policy_needs_multiplier_repair, parse_official_html, provider_pricing_capability,
+        quota_multiplier, store_provider_pricing_snapshot,
     };
     use chrono::{DateTime, Utc};
+
+    use crate::db::Database;
+    use crate::models::AppConfig;
+    use crate::provider::{COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID};
 
     #[test]
     fn seed_uses_go_usage_as_quota_multiplier() {
@@ -1122,6 +1744,132 @@ mod tests {
             .unwrap();
         assert_eq!(grok.quota_multiplier, 4.0);
         assert_eq!(glm.quota_multiplier, 1.0);
+    }
+
+    #[test]
+    fn provider_quota_formula_uses_plan_limit_over_model_allowance() {
+        assert_eq!(quota_multiplier(60.0, 15.0).unwrap(), 4.0);
+        assert_eq!(quota_multiplier(60.0, 60.0).unwrap(), 1.0);
+        assert!(quota_multiplier(60.0, 0.0).is_err());
+
+        let estimate =
+            ProviderCostEstimate::from_raw(2.0, Some(60.0), Some(15.0), Some(10.0)).unwrap();
+        assert_eq!(estimate.raw_cost, Some(2.0));
+        assert_eq!(estimate.quota_debit, Some(8.0));
+        assert!((estimate.paid_cost.unwrap() - (4.0 / 3.0)).abs() < 1e-12);
+        assert_eq!(estimate.cost_state, ProviderCostState::Priced);
+
+        let unknown = ProviderCostEstimate::from_raw(2.0, None, None, None).unwrap();
+        assert_eq!(unknown.raw_cost, Some(2.0));
+        assert_eq!(unknown.quota_debit, None);
+        assert_eq!(unknown.paid_cost, None);
+        assert_eq!(unknown.cost_state, ProviderCostState::Unpriced);
+    }
+
+    #[test]
+    fn zen_free_is_zero_in_every_cost_domain() {
+        let estimate = ProviderCostEstimate::zen_free();
+        assert_eq!(estimate.raw_cost, Some(0.0));
+        assert_eq!(estimate.quota_debit, Some(0.0));
+        assert_eq!(estimate.paid_cost, Some(0.0));
+        assert_eq!(estimate.cost_state, ProviderCostState::Free);
+    }
+
+    #[test]
+    fn provider_snapshot_round_trips_legacy_go_shape() {
+        let legacy = embedded_seed();
+        let typed = ProviderScopedPricingSnapshot::from_opencode_go(&legacy).unwrap();
+        let record = typed.to_storage_record().unwrap();
+        let loaded = ProviderScopedPricingSnapshot::from_storage_record(&record).unwrap();
+        assert_eq!(loaded.provider_id(), "opencode");
+        assert_eq!(loaded.offering_id(), "go");
+        assert_eq!(loaded.revision(), legacy.revision);
+        assert_eq!(loaded.evidence(), ProviderPricingEvidence::Verified);
+        assert_eq!(loaded.values().len(), legacy.models.len());
+
+        let legacy_record = crate::provider::ProviderPricingSnapshot {
+            provider_id: "opencode".to_string(),
+            offering_id: "go".to_string(),
+            revision: legacy.revision.clone(),
+            activated_at: legacy.activated_at.clone(),
+            document_updated_at: Some(legacy.document_updated_at.clone()),
+            source_url: legacy.source_url.clone(),
+            content_hash: legacy.content_hash.clone(),
+            snapshot_json: serde_json::to_string(&legacy).unwrap(),
+        };
+        let migrated = ProviderScopedPricingSnapshot::from_storage_record(&legacy_record).unwrap();
+        assert_eq!(migrated.values().len(), legacy.models.len());
+    }
+
+    #[test]
+    fn provider_snapshot_revision_is_append_only_in_v22_store() {
+        let dir =
+            std::env::temp_dir().join(format!("ocg-provider-pricing-{}", uuid::Uuid::new_v4()));
+        let db = Database::open(dir.clone()).unwrap();
+        let value = |name: &str, allowance: f64| {
+            ProviderPricingValue::new(
+                "captured-model",
+                name,
+                None,
+                None,
+                None,
+                None,
+                Some(60.0),
+                Some(allowance),
+                None,
+                None,
+                None,
+                None,
+                super::PricingTimeWindow::Always,
+            )
+            .unwrap()
+        };
+        let snapshot = |name: &str, allowance: f64| {
+            ProviderScopedPricingSnapshot::new(
+                COMMAND_CODE_PROVIDER_ID,
+                GOAT_OFFERING_ID,
+                "capture-1",
+                "2030-01-01T00:00:00Z",
+                None,
+                "",
+                "",
+                ProviderPricingEvidence::Experimental,
+                vec![value(name, allowance)],
+            )
+            .unwrap()
+        };
+        store_provider_pricing_snapshot(&db, &snapshot("first", 15.0)).unwrap();
+        // Same provider/offering/revision is ignored, not overwritten.
+        store_provider_pricing_snapshot(&db, &snapshot("second", 60.0)).unwrap();
+        let loaded =
+            latest_provider_pricing_snapshot(&db, COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID)
+                .unwrap()
+                .unwrap();
+        assert_eq!(loaded.values()[0].display_name(), "first");
+        assert_eq!(loaded.values()[0].quota_multiplier(), Some(4.0));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn goat_manual_pricing_refresh_is_explicitly_unavailable() {
+        let capability =
+            provider_pricing_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+        assert_eq!(capability.evidence, ProviderPricingEvidence::Unavailable);
+        assert!(capability.experimental);
+        assert_eq!(capability.source_url, None);
+        assert!(!capability.manual_refresh_available);
+        let error = fetch_provider_pricing_manual(
+            &AppConfig::default(),
+            COMMAND_CODE_PROVIDER_ID,
+            GOAT_OFFERING_ID,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ProviderPricingRefreshError::ExperimentalContractUnavailable
+        );
     }
 
     #[test]
@@ -1291,6 +2039,9 @@ mod tests {
         for model_id in ["deepseek-v4-flash-free", "mimo-v2.5-free", "big-pickle"] {
             let estimate = embedded_seed().estimate(model_id, 1000, 100, 0, 0, None);
             assert_eq!(estimate.cost, None, "{model_id}");
+            assert_eq!(estimate.raw_cost_usd, Some(0.0), "{model_id}");
+            assert_eq!(estimate.quota_debit, Some(0.0), "{model_id}");
+            assert_eq!(estimate.effective_paid_cost_usd, Some(0.0), "{model_id}");
             assert_eq!(estimate.cost_state, "free", "{model_id}");
             assert_eq!(estimate.quota_multiplier, None, "{model_id}");
         }

@@ -10,6 +10,7 @@ use crate::gateway::protocol::{
     has_complete_usage, has_usage, merge_stream_usage, transform_response,
 };
 use crate::gateway::protocol_stream::StreamConverter;
+use crate::gateway::provider_adapter::{self, UpstreamAuth};
 use crate::gateway::selector::AccountSelector;
 use crate::models::{
     Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
@@ -60,6 +61,10 @@ struct ForwardAttemptContext {
     model: String,
     stream: bool,
     known_secret: Option<String>,
+    route_account_id: Option<String>,
+    provider_id: Option<String>,
+    offering_id: Option<String>,
+    credential_account_id: Option<String>,
     client_key_id: Option<String>,
     client_key_name: Option<String>,
 }
@@ -81,6 +86,10 @@ impl ForwardAttemptContext {
             model: plan.model.clone(),
             stream: plan.stream,
             known_secret: None,
+            route_account_id: None,
+            provider_id: None,
+            offering_id: None,
+            credential_account_id: None,
             client_key_id: None,
             client_key_name: None,
         }
@@ -97,6 +106,17 @@ impl ForwardAttemptContext {
 
     fn set_known_secret(&mut self, known_secret: &str) {
         self.known_secret = Some(known_secret.to_string());
+    }
+
+    fn set_provider_route(
+        &mut self,
+        account: &Account,
+        route: &provider_adapter::ResolvedProviderRoute,
+    ) {
+        self.route_account_id = Some(account.id.clone());
+        self.provider_id = Some(account.provider_id.clone());
+        self.offering_id = Some(account.offering_id.clone());
+        self.credential_account_id = route.credential_account_id.clone();
     }
 
     fn redact_known_secret(&self, text: &str) -> String {
@@ -234,18 +254,13 @@ async fn forward_request_impl(
 ) -> Result<ForwardResult> {
     let mut attempt_context = ForwardAttemptContext::new(trace, client_body.len(), attempt, plan);
     attempt_context.set_client_key(client_key_id, state);
-    let upstream_base = plan
-        .upstream_base_override
-        .as_deref()
-        .unwrap_or(config.upstream_base_url.as_str());
-    ensure_safe_upstream_base_url(upstream_base)?;
-    let key = match state.decrypt_key(&account.key_cipher) {
-        Ok(key) => key,
+    let provider_route = match provider_adapter::resolve_route(account, config, plan) {
+        Ok(route) => route,
         Err(error) => {
-            let message = format!("failed to decrypt account credentials: {error}");
+            let message = format!("provider route is unavailable: {error}");
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "gateway",
-                error_stage: "credential",
+                error_stage: "provider_route",
                 downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                 upstream_status: None,
                 upstream_wait_ms: None,
@@ -272,7 +287,48 @@ async fn forward_request_impl(
             return Ok(account_preflight_failure(plan, message));
         }
     };
-    attempt_context.set_known_secret(&key);
+    attempt_context.set_provider_route(account, &provider_route);
+    ensure_safe_upstream_base_url(&provider_route.base_url)?;
+    let key = if provider_route.auth == UpstreamAuth::None {
+        None
+    } else {
+        match state.decrypt_key(&account.key_cipher) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                let message = format!("failed to decrypt account credentials: {error}");
+                let failure = attempt_context.failure(FailureSpec {
+                    error_source: "gateway",
+                    error_stage: "credential",
+                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    upstream_status: None,
+                    upstream_wait_ms: None,
+                    retry_action: Some("try_next_account"),
+                    upstream_headers: None,
+                    upstream_error: None,
+                    request_body: Some(client_body),
+                });
+                log_forward(
+                    &state.db.lock(),
+                    account,
+                    &plan.model,
+                    "error",
+                    None,
+                    metadata_metrics(
+                        &pricing_snapshot,
+                        plan.service_tier.as_deref(),
+                        "not_applicable",
+                    ),
+                    Some(&message),
+                    &attempt_context,
+                    Some(failure),
+                )?;
+                return Ok(account_preflight_failure(plan, message));
+            }
+        }
+    };
+    if let Some(key) = key.as_deref() {
+        attempt_context.set_known_secret(key);
+    }
     let mut upstream_headers = reqwest::header::HeaderMap::new();
 
     // Forward harmless client headers only. Auth and hop-by-hop/private headers
@@ -298,54 +354,24 @@ async fn forward_request_impl(
             upstream_headers.insert(name.clone(), value.clone());
         }
     }
-    // Match the upstream protocol's authentication header.
+    // Match the provider offering's authentication contract. The client wire
+    // protocol alone is not an authentication decision.
     upstream_headers.insert(
         reqwest::header::CONTENT_TYPE,
         reqwest::header::HeaderValue::from_static("application/json"),
     );
-    if plan.upstream == ApiFormat::Messages {
-        let key_header = match reqwest::header::HeaderValue::from_str(&key) {
-            Ok(value) => value,
-            Err(error) => {
-                let message = format!("account key is not a valid upstream header value: {error}");
-                let failure = attempt_context.failure(FailureSpec {
-                    error_source: "gateway",
-                    error_stage: "credential",
-                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    upstream_status: None,
-                    upstream_wait_ms: None,
-                    retry_action: Some("try_next_account"),
-                    upstream_headers: None,
-                    upstream_error: None,
-                    request_body: Some(client_body),
-                });
-                log_forward(
-                    &state.db.lock(),
-                    account,
-                    &plan.model,
-                    "error",
-                    None,
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
-                    ),
-                    Some(&message),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-                return Ok(account_preflight_failure(plan, message));
-            }
-        };
-        upstream_headers.insert("x-api-key", key_header);
-        if !upstream_headers.contains_key("anthropic-version") {
-            upstream_headers.insert(
-                "anthropic-version",
-                reqwest::header::HeaderValue::from_static("2023-06-01"),
-            );
+    let resolved_auth = match provider_route.auth {
+        UpstreamAuth::OpenCodeProtocolDefault if plan.upstream == ApiFormat::Messages => {
+            UpstreamAuth::XApiKey
         }
-    } else {
-        let authorization = match reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
+        UpstreamAuth::OpenCodeProtocolDefault => UpstreamAuth::Bearer,
+        auth => auth,
+    };
+    if matches!(resolved_auth, UpstreamAuth::Bearer | UpstreamAuth::XApiKey) {
+        let key = key
+            .as_deref()
+            .expect("credential-bearing provider route must decrypt a key");
+        let key_header = match reqwest::header::HeaderValue::from_str(key) {
             Ok(value) => value,
             Err(error) => {
                 let message = format!("account key is not a valid upstream header value: {error}");
@@ -378,18 +404,39 @@ async fn forward_request_impl(
                 return Ok(account_preflight_failure(plan, message));
             }
         };
-        upstream_headers.insert(reqwest::header::AUTHORIZATION, authorization);
+        match resolved_auth {
+            UpstreamAuth::XApiKey => {
+                upstream_headers.insert("x-api-key", key_header);
+            }
+            UpstreamAuth::Bearer => {
+                let authorization =
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
+                        .expect("validated key must remain valid when prefixed as Bearer");
+                upstream_headers.insert(reqwest::header::AUTHORIZATION, authorization);
+            }
+            _ => unreachable!(),
+        }
+    }
+    if plan.upstream == ApiFormat::Messages && !upstream_headers.contains_key("anthropic-version") {
+        upstream_headers.insert(
+            "anthropic-version",
+            reqwest::header::HeaderValue::from_static("2023-06-01"),
+        );
     }
     upstream_headers.insert(
         reqwest::header::ACCEPT_ENCODING,
         reqwest::header::HeaderValue::from_static("identity"),
     );
 
-    let upstream_path = plan
+    let upstream_path = provider_route
         .upstream
         .upstream_path()
         .ok_or_else(|| anyhow::anyhow!("Gemini is a client-only protocol"))?;
-    let url = format!("{}{}", upstream_base.trim_end_matches('/'), upstream_path);
+    let url = format!(
+        "{}{}",
+        provider_route.base_url.trim_end_matches('/'),
+        upstream_path
+    );
 
     let model = plan.model.clone();
     let upstream_req = client
@@ -679,7 +726,9 @@ async fn forward_request_impl(
             }
             // Schedule (never inline) an official usage reconciliation shortly
             // after a real inference 429. Does not alter cooldown/failover.
-            crate::usage_sync::schedule_after_inference_429(state, &account.id);
+            if plan.channel != UpstreamChannel::Free {
+                crate::usage_sync::schedule_after_inference_429(state, &account.id);
+            }
             return Ok(ForwardResult {
                 response: error_response(plan.client, &error_message, None),
                 action,
@@ -735,19 +784,33 @@ async fn forward_request_impl(
 
         // Key-level auth failures may be isolated to this account; fail over.
         if matches!(status.as_u16(), 401 | 403) {
-            let error_message = format!(
-                "upstream auth error {}: {}",
-                status.as_u16(),
-                attempt_context.sanitize_upstream_error(&text)
-            );
+            let anonymous_route = provider_route.auth == UpstreamAuth::None;
+            let error_message = if anonymous_route {
+                format!(
+                    "anonymous provider route was rejected with {}; no credential fallback was attempted: {}",
+                    status.as_u16(),
+                    attempt_context.sanitize_upstream_error(&text)
+                )
+            } else {
+                format!(
+                    "upstream auth error {}: {}",
+                    status.as_u16(),
+                    attempt_context.sanitize_upstream_error(&text)
+                )
+            };
             let sanitized = attempt_context.sanitize_upstream_error(&text);
+            let action = if anonymous_route {
+                ForwardAction::Return
+            } else {
+                ForwardAction::TryNextAccount
+            };
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "upstream",
                 error_stage: "upstream_http",
                 downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
                 upstream_status: Some(status.as_u16()),
                 upstream_wait_ms: Some(upstream_wait_ms),
-                retry_action: Some("try_next_account"),
+                retry_action: Some(retry_action_name(action)),
                 upstream_headers: Some(&error_headers),
                 upstream_error: Some(&text),
                 request_body: Some(client_body),
@@ -769,7 +832,7 @@ async fn forward_request_impl(
                     &attempt_context,
                     Some(failure),
                 )?;
-                if status == StatusCode::UNAUTHORIZED {
+                if !anonymous_route {
                     db.set_account_auth_error_if_key_matches(
                         &account.id,
                         &account.key_cipher,
@@ -779,7 +842,7 @@ async fn forward_request_impl(
             }
             return Ok(ForwardResult {
                 response: error_response(plan.client, &error_message, None),
-                action: ForwardAction::TryNextAccount,
+                action,
                 error_message: Some(error_message),
             });
         }
@@ -816,7 +879,10 @@ async fn forward_request_impl(
                 Some(failure),
             )?;
         }
-        let upstream_error = Some(sanitize_upstream_error_value_with_known_secret(&text, &key));
+        let upstream_error = Some(sanitize_upstream_error_value_with_known_secret(
+            &text,
+            key.as_deref().unwrap_or_default(),
+        ));
         let message = sanitized;
         let body = format_error(plan.client, status, &message, upstream_error.as_ref());
         let mut response = (status, axum::Json(body)).into_response();
@@ -1856,7 +1922,6 @@ pub async fn forward_get(
     upstream_path: &str,
 ) -> Result<Response> {
     ensure_safe_upstream_base_url(&config.upstream_base_url)?;
-    let selector = AccountSelector::new();
     let mut failed_ids = Vec::new();
     let mut last_http_error = None;
     let mut last_transport_error = None;
@@ -1865,7 +1930,10 @@ pub async fn forward_get(
         let account = {
             let db = state.db.lock();
             let excluded = failed_ids.iter().map(String::as_str).collect::<Vec<_>>();
-            selector.select_excluding(&db, &excluded)?
+            db.list_accounts()?.into_iter().find(|account| {
+                provider_adapter::supports_model_discovery(account)
+                    && AccountSelector::is_available_for(account, UpstreamChannel::Go, &excluded)
+            })
         };
         let Some(account) = account else {
             if let Some(until) = state.db.lock().soonest_cooldown_reset()? {
@@ -2232,10 +2300,10 @@ fn log_forward(
         model: model.to_string(),
         account_id: account.id.clone(),
         account_name: account.name.clone(),
-        route_account_id: None,
-        provider_id: None,
-        offering_id: None,
-        credential_account_id: None,
+        route_account_id: context.route_account_id.clone(),
+        provider_id: context.provider_id.clone(),
+        offering_id: context.offering_id.clone(),
+        credential_account_id: context.credential_account_id.clone(),
         client_key_id: context.client_key_id.clone(),
         client_key_name: context.client_key_name.clone(),
         status: status.to_string(),
@@ -2245,9 +2313,9 @@ fn log_forward(
         cached_tokens: metrics.cached_tokens,
         cache_creation_tokens: metrics.cache_creation_tokens,
         cost: (cost_state == "priced").then_some(metrics.cost),
-        raw_cost_usd: None,
-        quota_debit: None,
-        effective_paid_cost_usd: None,
+        raw_cost_usd: metrics.raw_cost_usd,
+        quota_debit: metrics.quota_debit,
+        effective_paid_cost_usd: metrics.effective_paid_cost_usd,
         pricing_revision_id: metrics.pricing_revision_id,
         quota_multiplier: metrics.quota_multiplier,
         local_adjustment_multiplier: metrics.local_adjustment_multiplier,
@@ -2294,9 +2362,9 @@ fn pricing_metrics(
         cached_tokens,
         cache_creation_tokens,
         cost: estimate.cost.unwrap_or(0.0),
-        raw_cost_usd: None,
-        quota_debit: None,
-        effective_paid_cost_usd: None,
+        raw_cost_usd: estimate.raw_cost_usd,
+        quota_debit: estimate.quota_debit,
+        effective_paid_cost_usd: estimate.effective_paid_cost_usd,
         pricing_revision_id: estimate.pricing_revision_id,
         quota_multiplier: estimate.quota_multiplier,
         local_adjustment_multiplier: estimate.local_adjustment_multiplier,
@@ -2524,6 +2592,10 @@ mod stream_usage_tests {
             model: "test-model".into(),
             stream: false,
             known_secret: Some(secret.clone()),
+            route_account_id: None,
+            provider_id: None,
+            offering_id: None,
+            credential_account_id: None,
             client_key_id: None,
             client_key_name: None,
         };

@@ -37,12 +37,33 @@ const MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES: usize = 64 * 1024;
 
 pub fn api_router(state: CoreState) -> Router<CoreState> {
     let protected = Router::new()
-        .route("/accounts", get(list_accounts).post(create_account))
+        .route("/accounts", get(list_accounts).post(create_account_route))
+        .route("/providers", get(provider_catalog))
+        .route("/providers/catalog", get(provider_catalog))
+        .route(
+            "/providers/model-capabilities",
+            get(provider_model_capabilities),
+        )
+        .route("/models/capabilities", get(provider_model_capabilities))
+        .route(
+            "/providers/{provider_id}/{offering_id}/pricing",
+            get(provider_pricing),
+        )
+        .route(
+            "/providers/accounts/{id}/usage",
+            get(provider_account_usage),
+        )
+        .route("/accounts/{id}/provider-usage", get(provider_account_usage))
+        .route("/providers/zen-free", patch(update_zen_free_settings))
         .route("/accounts/managed", post(create_managed_account))
         .route("/accounts/order", put(reorder_accounts))
         .route(
             "/accounts/{id}",
             patch(update_account).delete(delete_account),
+        )
+        .route(
+            "/accounts/{id}/provider-settings",
+            patch(update_zen_free_settings_for_account),
         )
         .route("/accounts/{id}/toggle", post(toggle_account))
         .route("/accounts/{id}/test", post(test_account))
@@ -455,6 +476,11 @@ impl IntoResponse for ApiError {
 #[derive(Debug, Serialize)]
 struct DashboardAccount {
     id: String,
+    provider_id: String,
+    offering_id: String,
+    credential_kind: crate::provider::CredentialKind,
+    quota_scope: crate::provider::QuotaScope,
+    free_alias_enabled: bool,
     name: String,
     username: String,
     password: String,
@@ -508,6 +534,11 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
     };
     DashboardAccount {
         id: account.id,
+        provider_id: account.provider_id,
+        offering_id: account.offering_id,
+        credential_kind: account.credential_kind,
+        quota_scope: account.quota_scope,
+        free_alias_enabled: account.free_alias_enabled,
         name: account.name,
         username: account.username.unwrap_or_default(),
         password: String::new(),
@@ -829,6 +860,214 @@ fn encrypted_optional(
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ProviderCatalogEntry {
+    provider_id: String,
+    offering_id: String,
+    credential_kind: crate::provider::CredentialKind,
+    quota_scope: crate::provider::QuotaScope,
+    singleton: bool,
+    pricing_availability: &'static str,
+    usage_availability: &'static str,
+}
+
+/// Built-in provider/offering pairs only. Command Code GOAT deliberately has
+/// no inferred endpoint, pricing, or usage contract until one is verified.
+async fn provider_catalog() -> Json<Vec<ProviderCatalogEntry>> {
+    Json(
+        crate::provider::BUILTIN_OFFERINGS
+            .iter()
+            .map(|offering| {
+                let is_go = offering.provider_id == crate::provider::OPENCODE_PROVIDER_ID
+                    && offering.offering_id == crate::provider::GO_OFFERING_ID;
+                ProviderCatalogEntry {
+                    provider_id: offering.provider_id.to_string(),
+                    offering_id: offering.offering_id.to_string(),
+                    credential_kind: offering.credential_kind,
+                    quota_scope: offering.quota_scope,
+                    singleton: offering.singleton_account_id.is_some(),
+                    pricing_availability: if is_go { "available" } else { "unconfigured" },
+                    usage_availability: if is_go { "available" } else { "unconfigured" },
+                }
+            })
+            .collect(),
+    )
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderModelCapability {
+    model_id: String,
+    provider_id: String,
+    offering_id: String,
+}
+
+/// The gateway model set is currently backed only by OpenCode Go. Do not
+/// advertise those models as GOAT capabilities merely because GOAT is a
+/// selectable account binding.
+async fn provider_model_capabilities() -> Json<Vec<ProviderModelCapability>> {
+    Json(
+        supported_model_ids()
+            .map(|model_id| ProviderModelCapability {
+                model_id: model_id.to_string(),
+                provider_id: crate::provider::OPENCODE_PROVIDER_ID.to_string(),
+                offering_id: crate::provider::GO_OFFERING_ID.to_string(),
+            })
+            .collect(),
+    )
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderPricingResponse {
+    provider_id: String,
+    offering_id: String,
+    availability: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot: Option<crate::provider::ProviderPricingSnapshot>,
+}
+
+async fn provider_pricing(
+    State(state): State<CoreState>,
+    Path((provider_id, offering_id)): Path<(String, String)>,
+) -> Result<Json<ProviderPricingResponse>, ApiError> {
+    let offering = crate::provider::builtin_offering(&provider_id, &offering_id)
+        .ok_or_else(|| ApiError::not_found("provider offering not found"))?;
+    let is_go = offering.provider_id == crate::provider::OPENCODE_PROVIDER_ID
+        && offering.offering_id == crate::provider::GO_OFFERING_ID;
+    let snapshot = if is_go {
+        state
+            .db
+            .lock()
+            .latest_provider_pricing_snapshot(offering.provider_id, offering.offering_id)
+            .map_err(ApiError::internal)?
+    } else {
+        None
+    };
+    Ok(Json(ProviderPricingResponse {
+        provider_id,
+        offering_id,
+        availability: if is_go { "available" } else { "unconfigured" },
+        snapshot,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderUsageResponse {
+    account_id: String,
+    provider_id: String,
+    offering_id: String,
+    availability: &'static str,
+    quota_windows: Vec<crate::provider::QuotaWindow>,
+    credit_balances: Vec<crate::provider::CreditBalance>,
+    sync_state: Option<crate::db::AccountUsageSyncState>,
+}
+
+async fn provider_account_usage(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+) -> Result<Json<ProviderUsageResponse>, ApiError> {
+    let db = state.db.lock();
+    let account = db
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    let is_go = account.provider_id == crate::provider::OPENCODE_PROVIDER_ID
+        && account.offering_id == crate::provider::GO_OFFERING_ID;
+    Ok(Json(ProviderUsageResponse {
+        account_id: id,
+        provider_id: account.provider_id,
+        offering_id: account.offering_id,
+        availability: if is_go { "available" } else { "unconfigured" },
+        quota_windows: db
+            .list_quota_windows(&account.id)
+            .map_err(ApiError::internal)?,
+        credit_balances: db
+            .list_credit_balances(&account.id)
+            .map_err(ApiError::internal)?,
+        sync_state: db
+            .account_usage_sync_state(&account.id)
+            .map_err(ApiError::internal)?,
+    }))
+}
+
+fn free_model_routing_from_zen(enabled: bool, free_alias_enabled: bool) -> FreeModelRouting {
+    match (enabled, free_alias_enabled) {
+        (false, _) => FreeModelRouting::Deny,
+        (true, false) => FreeModelRouting::Explicit,
+        (true, true) => FreeModelRouting::Prefer,
+    }
+}
+
+fn zen_settings_from_free_model_routing(mode: FreeModelRouting) -> (bool, bool) {
+    match mode {
+        FreeModelRouting::Deny => (false, false),
+        FreeModelRouting::Explicit => (true, false),
+        FreeModelRouting::Prefer => (true, true),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ZenFreeSettingsInput {
+    enabled: bool,
+    free_alias_enabled: bool,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ZenFreeSettingsResponse {
+    account: DashboardAccount,
+    revision: u64,
+}
+
+async fn apply_zen_free_settings(
+    state: &CoreState,
+    input: ZenFreeSettingsInput,
+) -> Result<Json<ZenFreeSettingsResponse>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(state, input.expected_revision)?;
+    {
+        let db = state.db.lock();
+        db.update_zen_free_settings(input.enabled, input.free_alias_enabled)
+            .map_err(ApiError::internal)?;
+    }
+    let mut config = state.config();
+    config.free_model_routing =
+        free_model_routing_from_zen(input.enabled, input.free_alias_enabled);
+    // set_config is the sole revision bump for this cross-surface mutation.
+    state.set_config(config).map_err(ApiError::internal)?;
+    let account = state
+        .db
+        .lock()
+        .get_account(crate::provider::ZEN_FREE_ACCOUNT_ID)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("Zen Free singleton is missing"))?;
+    Ok(Json(ZenFreeSettingsResponse {
+        account: dashboard_account(state, account),
+        revision: state.settings_revision(),
+    }))
+}
+
+async fn update_zen_free_settings(
+    State(state): State<CoreState>,
+    Json(input): Json<ZenFreeSettingsInput>,
+) -> Result<Json<ZenFreeSettingsResponse>, ApiError> {
+    apply_zen_free_settings(&state, input).await
+}
+
+async fn update_zen_free_settings_for_account(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    Json(input): Json<ZenFreeSettingsInput>,
+) -> Result<Json<ZenFreeSettingsResponse>, ApiError> {
+    if id != crate::provider::ZEN_FREE_ACCOUNT_ID {
+        return Err(ApiError::bad_request(
+            "provider settings are only available for the Zen Free singleton",
+        ));
+    }
+    apply_zen_free_settings(&state, input).await
+}
+
 async fn list_accounts(
     State(state): State<CoreState>,
 ) -> Result<Json<Vec<DashboardAccount>>, ApiError> {
@@ -845,15 +1084,60 @@ async fn list_accounts(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+struct DashboardAccountInput {
+    #[serde(flatten)]
+    account: AccountInput,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+async fn create_account_route(
+    State(state): State<CoreState>,
+    Json(input): Json<DashboardAccountInput>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(&state, input.expected_revision)?;
+    let account = create_account_inner(state.clone(), input.account)?;
+    // Account creation is a shared control-plane mutation; keep revision/CAS
+    // meaningful for a following Zen/settings update without changing the
+    // legacy account response shape.
+    state.bump_settings_revision();
+    Ok(account)
+}
+
+#[cfg(test)]
 async fn create_account(
     State(state): State<CoreState>,
     Json(input): Json<AccountInput>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    create_account_inner(state, input)
+}
+
+fn create_account_inner(
+    state: CoreState,
+    input: AccountInput,
 ) -> Result<Json<DashboardAccount>, ApiError> {
     let name = input.name.trim().to_string();
     if name.is_empty() {
         return Err(ApiError::bad_request("name is required"));
     }
-    if input.key.trim().is_empty() {
+    let provider_id = input.provider_id.trim();
+    let offering_id = input.offering_id.trim();
+    let offering =
+        crate::provider::builtin_offering(provider_id, offering_id).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "unknown provider offering `{provider_id}/{offering_id}`"
+            ))
+        })?;
+    if offering.singleton_account_id.is_some() {
+        return Err(ApiError::bad_request(
+            "Zen Free is a built-in singleton and cannot be created through the generic account API",
+        ));
+    }
+    if offering.credential_kind == crate::provider::CredentialKind::ApiKey
+        && input.key.trim().is_empty()
+    {
         return Err(ApiError::bad_request("key is required"));
     }
     let purchase_date = match input.purchase_date {
@@ -870,10 +1154,10 @@ async fn create_account(
     let id = uuid::Uuid::new_v4().to_string();
     let account = Account {
         id: id.clone(),
-        provider_id: crate::provider::default_provider_id(),
-        offering_id: crate::provider::default_offering_id(),
-        credential_kind: crate::provider::default_credential_kind(),
-        quota_scope: crate::provider::default_quota_scope(),
+        provider_id: offering.provider_id.to_string(),
+        offering_id: offering.offering_id.to_string(),
+        credential_kind: offering.credential_kind,
+        quota_scope: offering.quota_scope,
         free_alias_enabled: false,
         name,
         username: clean_optional(input.username),
@@ -1309,17 +1593,97 @@ fn validate_websocket_origin(headers: &HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardAccountUpdate {
+    name: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    key: Option<String>,
+    enabled: Option<bool>,
+    referral_code: Option<String>,
+    #[serde(alias = "recharge_date")]
+    purchase_date: Option<String>,
+    notes: Option<String>,
+    // Binding fields are named explicitly so a generic update fails closed
+    // instead of silently ignoring an attempted provider reassignment.
+    provider_id: Option<String>,
+    offering_id: Option<String>,
+    credential_kind: Option<crate::provider::CredentialKind>,
+    quota_scope: Option<crate::provider::QuotaScope>,
+    free_alias_enabled: Option<bool>,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+impl DashboardAccountUpdate {
+    fn binding_change_requested(&self) -> bool {
+        self.provider_id.is_some()
+            || self.offering_id.is_some()
+            || self.credential_kind.is_some()
+            || self.quota_scope.is_some()
+            || self.free_alias_enabled.is_some()
+    }
+
+    fn into_account_update(self) -> AccountUpdate {
+        AccountUpdate {
+            name: self.name,
+            username: self.username,
+            password: self.password,
+            key: self.key,
+            enabled: self.enabled,
+            referral_code: self.referral_code,
+            purchase_date: self.purchase_date,
+            notes: self.notes,
+        }
+    }
+}
+
+impl From<AccountUpdate> for DashboardAccountUpdate {
+    fn from(update: AccountUpdate) -> Self {
+        Self {
+            name: update.name,
+            username: update.username,
+            password: update.password,
+            key: update.key,
+            enabled: update.enabled,
+            referral_code: update.referral_code,
+            purchase_date: update.purchase_date,
+            notes: update.notes,
+            provider_id: None,
+            offering_id: None,
+            credential_kind: None,
+            quota_scope: None,
+            free_alias_enabled: None,
+            expected_revision: None,
+        }
+    }
+}
+
 async fn update_account(
     State(state): State<CoreState>,
     Path(id): Path<String>,
-    Json(mut update): Json<AccountUpdate>,
+    Json(input): Json<DashboardAccountUpdate>,
 ) -> Result<Json<DashboardAccount>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(&state, input.expected_revision)?;
+    if input.binding_change_requested() {
+        return Err(ApiError::bad_request(
+            "provider binding is immutable; create a new account for another provider offering",
+        ));
+    }
+    let mut update = input.into_account_update();
     let existing = state
         .db
         .lock()
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if existing.is_zen_free() {
+        return Err(ApiError::bad_request(
+            "Zen Free settings must use the dedicated provider-settings endpoint",
+        ));
+    }
     if !existing.setup_step.is_ready()
         && (update.enabled == Some(true)
             || update
@@ -1371,6 +1735,7 @@ async fn update_account(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
+    state.bump_settings_revision();
     Ok(Json(dashboard_account(&state, account)))
 }
 
@@ -1410,6 +1775,11 @@ async fn delete_account(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    if id == crate::provider::ZEN_FREE_ACCOUNT_ID {
+        return Err(ApiError::bad_request(
+            "Zen Free is a built-in singleton and cannot be deleted",
+        ));
+    }
     let browser_operation = state.browser.operation().await;
     state
         .recover_browser_profiles_for_account(&id)
@@ -1465,6 +1835,11 @@ async fn toggle_account(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if account.is_zen_free() {
+        return Err(ApiError::bad_request(
+            "Zen Free settings must use the dedicated provider-settings endpoint",
+        ));
+    }
     let next_enabled = !account.enabled;
     if next_enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
         return Err(ApiError::status(
@@ -1506,6 +1881,9 @@ async fn test_account(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if account.is_zen_free() {
+        return Err(ApiError::bad_request("Zen Free has no credential to test"));
+    }
     if !account.setup_step.is_ready() || account.key_cipher.is_empty() {
         return Err(ApiError::status(
             StatusCode::CONFLICT,
@@ -1863,6 +2241,11 @@ async fn refresh_account_usage_from_official_go(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::usage_sync::OfficialUsageRefreshSuccess>, ApiError> {
+    if id == crate::provider::ZEN_FREE_ACCOUNT_ID {
+        return Err(ApiError::bad_request(
+            "Zen Free usage cannot be refreshed through the OpenCode Go API",
+        ));
+    }
     match crate::usage_sync::refresh_official_usage(
         &state,
         &id,
@@ -1958,6 +2341,11 @@ async fn update_account_usage(
     Path(id): Path<String>,
     Json(update): Json<AccountUsageUpdate>,
 ) -> Result<Json<UsageWindow>, ApiError> {
+    if id == crate::provider::ZEN_FREE_ACCOUNT_ID {
+        return Err(ApiError::bad_request(
+            "Zen Free quota cannot be calibrated through the generic account API",
+        ));
+    }
     let window = match update.window.as_str() {
         "window_5h" => UsageWindowKind::FiveHours,
         "window_week" => UsageWindowKind::Week,
@@ -2037,8 +2425,20 @@ struct SettingsResponse {
 async fn get_settings(State(state): State<CoreState>) -> Json<SettingsResponse> {
     let _settings_update = state.settings_update.lock();
     let auto_start_supported = state.auto_start_supported();
+    let mut config = state.settings_config();
+    // The Zen singleton is the canonical representation of the new routing
+    // surface. Project it back for old settings clients rather than exposing
+    // a stale legacy enum after a provider-settings mutation.
+    if let Ok(Some(zen)) = state
+        .db
+        .lock()
+        .get_account(crate::provider::ZEN_FREE_ACCOUNT_ID)
+    {
+        config.free_model_routing =
+            free_model_routing_from_zen(zen.enabled, zen.free_alias_enabled);
+    }
     Json(SettingsResponse {
-        config: state.settings_config(),
+        config,
         revision: state.settings_revision(),
         auto_start_supported,
         dock_visibility_supported: state.dock_visibility_supported(),
@@ -2432,6 +2832,8 @@ async fn update_settings(
             "Dock visibility is unavailable in this runtime",
         ));
     }
+    let (zen_enabled, zen_free_alias_enabled) =
+        zen_settings_from_free_model_routing(config.free_model_routing);
     state.set_config(config).map_err(ApiError::internal)?;
     let runtime_sync = (|| -> anyhow::Result<()> {
         if auto_start_supported {
@@ -2465,6 +2867,17 @@ async fn update_settings(
             message.push_str(&format!("; failed to restore Dock visibility: {error}"));
         }
         return Err(ApiError::internal(message));
+    }
+    // A legacy settings update is also a Zen route mutation. set_config
+    // performed the one shared revision bump; keep the provider state in sync
+    // without advancing it again.
+    if let Err(error) = state
+        .db
+        .lock()
+        .update_zen_free_settings(zen_enabled, zen_free_alias_enabled)
+    {
+        let _ = state.set_config(previous_config);
+        return Err(ApiError::internal(error));
     }
     Ok(Json(SettingsRevisionResponse {
         revision: state.settings_revision(),
@@ -2862,6 +3275,10 @@ struct ForwardLogQuery {
     offset: Option<i64>,
     status: Option<String>,
     account_id: Option<String>,
+    provider_id: Option<String>,
+    offering_id: Option<String>,
+    route_account_id: Option<String>,
+    credential_account_id: Option<String>,
     model: Option<String>,
     request_id: Option<String>,
     key_id: Option<String>,
@@ -2953,6 +3370,16 @@ async fn forward_logs(
             offset: q.offset.unwrap_or(0),
             status: q.status.as_deref(),
             account_id: q.account_id.as_deref(),
+            provider_id: q.provider_id.as_deref().filter(|value| !value.is_empty()),
+            offering_id: q.offering_id.as_deref().filter(|value| !value.is_empty()),
+            route_account_id: q
+                .route_account_id
+                .as_deref()
+                .filter(|value| !value.is_empty()),
+            credential_account_id: q
+                .credential_account_id
+                .as_deref()
+                .filter(|value| !value.is_empty()),
             model: q.model.as_deref(),
             request_id: q.request_id.as_deref(),
             start_time: start_time.as_deref(),
@@ -3117,14 +3544,14 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountOrderInput, AccountSetupUpdate, AccountUsageUpdate, BrowserTarget, ForwardLogQuery,
-        MAX_ACCOUNT_NOTES_CHARS, MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES,
-        MAX_PRICING_MULTIPLIER, ManagedAccountInput, OpenBrowserInput, PricingMultiplierInput,
-        PricingMultiplierUpdate, PricingRefreshPolicy, ProxyTestRequest, SemverVersion,
-        SettingsUpdateRequest, VerifyManagedKeyInput, advance_account_setup,
-        apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path, create_account,
-        create_managed_account, dashboard_account, dashboard_summary, format_error_chain,
-        is_update_available, load_ready_account_for_official_go_usage,
+        AccountOrderInput, AccountSetupUpdate, AccountUsageUpdate, BrowserTarget,
+        DashboardAccountUpdate, ForwardLogQuery, MAX_ACCOUNT_NOTES_CHARS,
+        MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
+        OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
+        ProxyTestRequest, SemverVersion, SettingsUpdateRequest, VerifyManagedKeyInput,
+        advance_account_setup, apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path,
+        create_account, create_managed_account, dashboard_account, dashboard_summary,
+        format_error_chain, is_update_available, load_ready_account_for_official_go_usage,
         map_official_usage_refresh_error, open_account_browser, parse_semver_version,
         pricing_multiplier_changes, pricing_semantically_equal,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
@@ -3896,10 +4323,10 @@ mod tests {
         let cleared = update_account(
             State(state.clone()),
             AxumPath(created.id.clone()),
-            Json(AccountUpdate {
+            Json(DashboardAccountUpdate::from(AccountUpdate {
                 notes: Some("   ".into()),
                 ..AccountUpdate::default()
-            }),
+            })),
         )
         .await
         .expect("empty notes should clear")
@@ -3910,10 +4337,10 @@ mod tests {
         let error = update_account(
             State(state.clone()),
             AxumPath(created.id.clone()),
-            Json(AccountUpdate {
+            Json(DashboardAccountUpdate::from(AccountUpdate {
                 notes: Some(overlong),
                 ..AccountUpdate::default()
-            }),
+            })),
         )
         .await
         .expect_err("overlong notes should fail");
@@ -4164,7 +4591,7 @@ mod tests {
         let error = update_account(
             State(state.clone()),
             AxumPath("acct-1".into()),
-            Json(AccountUpdate {
+            Json(DashboardAccountUpdate::from(AccountUpdate {
                 name: None,
                 username: None,
                 password: None,
@@ -4173,7 +4600,7 @@ mod tests {
                 referral_code: None,
                 purchase_date: Some("2026-02-30".into()),
                 notes: None,
-            }),
+            })),
         )
         .await
         .expect_err("invalid purchase date should fail");

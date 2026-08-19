@@ -41,6 +41,10 @@ pub struct ForwardLogQueryOptions<'a> {
     pub offset: i64,
     pub status: Option<&'a str>,
     pub account_id: Option<&'a str>,
+    pub provider_id: Option<&'a str>,
+    pub offering_id: Option<&'a str>,
+    pub route_account_id: Option<&'a str>,
+    pub credential_account_id: Option<&'a str>,
     pub model: Option<&'a str>,
     pub request_id: Option<&'a str>,
     pub start_time: Option<&'a str>,
@@ -2449,6 +2453,10 @@ impl Database {
         let (filter, filter_params) = forward_log_filter(
             options.status,
             options.account_id,
+            options.provider_id,
+            options.offering_id,
+            options.route_account_id,
+            options.credential_account_id,
             options.model,
             options.request_id,
             options.start_time,
@@ -3644,6 +3652,10 @@ fn effective_usage(
 fn forward_log_filter(
     status: Option<&str>,
     account_id: Option<&str>,
+    provider_id: Option<&str>,
+    offering_id: Option<&str>,
+    route_account_id: Option<&str>,
+    credential_account_id: Option<&str>,
     model: Option<&str>,
     request_id: Option<&str>,
     start_time: Option<&str>,
@@ -3658,6 +3670,10 @@ fn forward_log_filter(
     let mut clauses: Vec<(String, Option<&str>)> = [
         ("status = ?", status),
         ("account_id = ?", account_id),
+        ("provider_id = ?", provider_id),
+        ("offering_id = ?", offering_id),
+        ("route_account_id = ?", route_account_id),
+        ("credential_account_id = ?", credential_account_id),
         ("model = ?", model),
         ("request_id = ?", request_id),
         ("julianday(timestamp) >= julianday(?)", start_time),
@@ -3881,6 +3897,64 @@ mod tests {
         dir.push(format!("ocg-db-test-{label}-{nanos}"));
         fs::create_dir_all(&dir).expect("test data dir should be created");
         dir
+    }
+
+    fn create_v21_fixture(dir: &Path, include_reserved_account_conflict: bool) {
+        let db = Database::open(dir.to_path_buf()).expect("fixture database should open");
+        db.create_account(&account("rollback-account"))
+            .expect("representative account should save");
+        db.log_forward(&forward_log("rollback-account", "success", 4.25))
+            .expect("representative forward log should save");
+        if !include_reserved_account_conflict {
+            db.conn
+                .execute("DELETE FROM accounts WHERE id = ?1", [ZEN_FREE_ACCOUNT_ID])
+                .expect("reserved v22 account should be removed from a normal v21 fixture");
+        }
+        drop(db);
+
+        let conn = Connection::open(dir.join("data.sqlite")).expect("fixture db should reopen");
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             DROP INDEX IF EXISTS idx_forward_logs_route_account;
+             DROP INDEX IF EXISTS idx_forward_logs_provider_offering;
+             DROP TABLE IF EXISTS provider_usage_sync_state;
+             DROP TABLE IF EXISTS provider_pricing_snapshots;
+             DROP TABLE IF EXISTS credit_balances;
+             DROP TABLE IF EXISTS quota_windows;
+             ALTER TABLE accounts DROP COLUMN free_alias_enabled;
+             ALTER TABLE accounts DROP COLUMN quota_scope;
+             ALTER TABLE accounts DROP COLUMN credential_kind;
+             ALTER TABLE accounts DROP COLUMN offering_id;
+             ALTER TABLE accounts DROP COLUMN provider_id;
+             ALTER TABLE forward_logs DROP COLUMN effective_paid_cost_usd;
+             ALTER TABLE forward_logs DROP COLUMN quota_debit;
+             ALTER TABLE forward_logs DROP COLUMN raw_cost_usd;
+             ALTER TABLE forward_logs DROP COLUMN credential_account_id;
+             ALTER TABLE forward_logs DROP COLUMN offering_id;
+             ALTER TABLE forward_logs DROP COLUMN provider_id;
+             ALTER TABLE forward_logs DROP COLUMN route_account_id;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version (version) VALUES (21);
+             PRAGMA foreign_keys=ON;",
+        )
+        .expect("v21 fixture should be created");
+    }
+
+    fn v21_backup_paths(dir: &Path) -> Vec<PathBuf> {
+        let mut paths = fs::read_dir(dir)
+            .expect("fixture directory should be readable")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(V21_BACKUP_FILE_PREFIX) && name.ends_with(".bak")
+                    })
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
     }
 
     fn account(id: &str) -> Account {
@@ -4874,19 +4948,9 @@ mod tests {
     }
 
     #[test]
-    fn migrations_roll_back_partial_schema_changes() {
-        let dir = temp_data_dir("atomic-migration");
-        let conn = Connection::open(dir.join("data.sqlite")).expect("v3 db should open");
-        conn.execute_batch(
-            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
-             INSERT INTO schema_version (version) VALUES (3);
-             CREATE TABLE accounts (
-                 id TEXT PRIMARY KEY,
-                 usage_5h_anchor_success_cost REAL
-             );",
-        )
-        .expect("conflicting v3 schema should be created");
-        drop(conn);
+    fn v22_migration_failure_rolls_back_to_usable_v21_source() {
+        let dir = temp_data_dir("v22-atomic-migration");
+        create_v21_fixture(&dir, true);
 
         assert!(Database::open(dir.clone()).is_err());
         let conn = Connection::open(dir.join("data.sqlite")).expect("db should reopen");
@@ -4902,19 +4966,47 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert!(
-            !columns
-                .iter()
-                .any(|name| name == "usage_5h_baseline_percent")
+        let preserved_account: (String, String, i64) = conn
+            .query_row(
+                "SELECT name, key_cipher, enabled FROM accounts WHERE id = 'rollback-account'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("source account should remain readable");
+        let preserved_log: (String, String, String, f64) = conn
+            .query_row(
+                "SELECT account_id, model, status, cost FROM forward_logs LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("source forward log should remain readable");
+        assert!(!columns.iter().any(|name| name == "provider_id"));
+        assert_eq!(version, 21);
+        assert_eq!(
+            preserved_account,
+            ("rollback-account".into(), "cipher".into(), 1)
         );
-        assert!(
-            columns
-                .iter()
-                .any(|name| name == "usage_5h_anchor_success_cost")
+        assert_eq!(
+            preserved_log,
+            (
+                "rollback-account".into(),
+                "test".into(),
+                "success".into(),
+                4.25
+            )
         );
-        assert_eq!(version, 3);
 
         drop(conn);
+        let backups_before = v21_backup_paths(&dir);
+        assert_eq!(backups_before.len(), 1);
+        let backup_bytes =
+            fs::read(&backups_before[0]).expect("rollback backup should be readable");
+        assert!(Database::open(dir.clone()).is_err());
+        assert_eq!(v21_backup_paths(&dir), backups_before);
+        assert_eq!(
+            fs::read(&backups_before[0]).expect("rollback backup should remain readable"),
+            backup_bytes
+        );
         fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
 
@@ -5164,6 +5256,10 @@ mod tests {
                 offset: 0,
                 status: None,
                 account_id: None,
+                provider_id: None,
+                offering_id: None,
+                route_account_id: None,
+                credential_account_id: None,
                 model: None,
                 key_id: None,
                 request_id: None,
@@ -6163,6 +6259,10 @@ mod tests {
                 offset: 0,
                 status: None,
                 account_id: None,
+                provider_id: None,
+                offering_id: None,
+                route_account_id: None,
+                credential_account_id: None,
                 model: None,
                 key_id: None,
                 request_id: None,
@@ -6201,6 +6301,10 @@ mod tests {
                 offset: 0,
                 status: None,
                 account_id: None,
+                provider_id: None,
+                offering_id: None,
+                route_account_id: None,
+                credential_account_id: None,
                 model: None,
                 key_id: None,
                 request_id: None,
@@ -6245,6 +6349,10 @@ mod tests {
                 offset: 0,
                 status: None,
                 account_id: None,
+                provider_id: None,
+                offering_id: None,
+                route_account_id: None,
+                credential_account_id: None,
                 model: None,
                 key_id,
                 request_id: None,
@@ -6278,6 +6386,99 @@ mod tests {
                 .any(|key| key.id == "key-a" && key.name == "Key-key-a")
         );
         assert!(keys.iter().any(|key| key.id == "key-b"));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn forward_logs_filter_by_provider_attribution_before_pagination() {
+        let dir = temp_data_dir("forward-provider-filter");
+        let db = Database::open(dir.clone()).unwrap();
+        let insert = |model: &str,
+                      provider_id: &str,
+                      offering_id: &str,
+                      route_account_id: &str,
+                      credential_account_id: &str| {
+            let mut log = forward_log(credential_account_id, "success", 1.0);
+            log.model = model.into();
+            log.provider_id = Some(provider_id.into());
+            log.offering_id = Some(offering_id.into());
+            log.route_account_id = Some(route_account_id.into());
+            log.credential_account_id = Some(credential_account_id.into());
+            db.log_forward(&log).unwrap();
+        };
+
+        insert("go-a", "opencode", "go", "go-a", "go-a");
+        insert("go-b", "opencode", "go", "go-b", "go-b");
+        // A Zen route may deliberately debit an OpenCode credential account.
+        insert("zen", "opencode", "zen-free", "zen-free", "go-a");
+        // These newer rows would hide OpenCode Go rows if filtering happened
+        // after LIMIT/OFFSET.
+        insert("goat-a", "goat", "goat", "goat-a", "goat-a");
+        insert("goat-b", "goat", "goat", "goat-b", "goat-b");
+
+        let query = |limit: i64,
+                     offset: i64,
+                     provider_id: Option<&str>,
+                     offering_id: Option<&str>,
+                     route_account_id: Option<&str>,
+                     credential_account_id: Option<&str>| {
+            db.query_forward_logs(ForwardLogQueryOptions {
+                limit,
+                offset,
+                status: None,
+                account_id: None,
+                provider_id,
+                offering_id,
+                route_account_id,
+                credential_account_id,
+                model: None,
+                key_id: None,
+                request_id: None,
+                start_time: None,
+                end_time: None,
+                sort_by: None,
+                sort_order: None,
+            })
+            .unwrap()
+        };
+
+        let first_go = query(1, 0, Some("opencode"), Some("go"), None, None);
+        assert_eq!(first_go.summary.total_requests, 2);
+        assert_eq!(first_go.items[0].model, "go-b");
+        let second_go = query(1, 1, Some("opencode"), Some("go"), None, None);
+        assert_eq!(second_go.summary.total_requests, 2);
+        assert_eq!(second_go.items[0].model, "go-a");
+
+        let routed_zen = query(10, 0, Some("opencode"), None, Some("zen-free"), None);
+        assert_eq!(routed_zen.summary.total_requests, 1);
+        assert_eq!(routed_zen.items[0].model, "zen");
+        assert_eq!(
+            routed_zen.items[0].credential_account_id.as_deref(),
+            Some("go-a")
+        );
+
+        let credential_go_a = query(10, 0, None, None, None, Some("go-a"));
+        assert_eq!(credential_go_a.summary.total_requests, 2);
+        assert_eq!(
+            credential_go_a
+                .items
+                .iter()
+                .map(|log| log.model.as_str())
+                .collect::<Vec<_>>(),
+            ["zen", "go-a"]
+        );
+
+        let goat = query(10, 0, Some("goat"), None, None, None);
+        assert_eq!(goat.summary.total_requests, 2);
+        assert_eq!(
+            goat.items
+                .iter()
+                .map(|log| log.route_account_id.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("goat-b"), Some("goat-a")]
+        );
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -6615,6 +6816,83 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), 22);
 
         drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v21_to_v22_creates_one_usable_rollback_backup() {
+        let dir = temp_data_dir("v21-v22-backup");
+        create_v21_fixture(&dir, false);
+
+        let db = Database::open(dir.clone()).expect("v21 database should migrate");
+        assert_eq!(db.schema_version().unwrap(), 22);
+        assert!(
+            db.get_account("rollback-account")
+                .expect("migrated account should load")
+                .is_some()
+        );
+        drop(db);
+
+        let backups_before = v21_backup_paths(&dir);
+        assert_eq!(backups_before.len(), 1);
+        let backup_path = &backups_before[0];
+        let backup_name = backup_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("backup should have a UTF-8 filename");
+        let timestamp = backup_name
+            .strip_prefix(V21_BACKUP_FILE_PREFIX)
+            .and_then(|name| name.strip_suffix(".bak"))
+            .expect("backup should use the v22 rollback name");
+        assert_eq!(timestamp.len(), 25);
+        assert!(timestamp.bytes().enumerate().all(|(index, byte)| {
+            (index == 8 && byte == b'T')
+                || (index == 24 && byte == b'Z')
+                || !matches!(index, 8 | 24) && byte.is_ascii_digit()
+        }));
+
+        let backup = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("backup should open read-only");
+        assert_eq!(schema_version_on(&backup).unwrap(), 21);
+        let backed_up_account: (String, String, i64) = backup
+            .query_row(
+                "SELECT name, key_cipher, enabled FROM accounts WHERE id = 'rollback-account'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("backup should retain the representative account");
+        let backed_up_log: (String, String, String, f64) = backup
+            .query_row(
+                "SELECT account_id, model, status, cost FROM forward_logs LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("backup should retain the representative forward log");
+        assert_eq!(
+            backed_up_account,
+            ("rollback-account".into(), "cipher".into(), 1)
+        );
+        assert_eq!(
+            backed_up_log,
+            (
+                "rollback-account".into(),
+                "test".into(),
+                "success".into(),
+                4.25
+            )
+        );
+        drop(backup);
+
+        let backup_bytes = fs::read(backup_path).expect("backup should be readable");
+        let reopened = Database::open(dir.clone()).expect("v22 database should reopen");
+        assert_eq!(reopened.schema_version().unwrap(), 22);
+        drop(reopened);
+        assert_eq!(v21_backup_paths(&dir), backups_before);
+        assert_eq!(
+            fs::read(backup_path).expect("backup should remain readable"),
+            backup_bytes
+        );
+
         fs::remove_dir_all(dir).unwrap();
     }
 
