@@ -81,6 +81,13 @@ export interface AccountUpdate {
   expected_revision?: number;
 }
 
+export interface ManagedAccountInput {
+  name: string;
+  username?: string;
+  notes?: string;
+  expected_revision?: number;
+}
+
 export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 export type FreeModelRouting = "deny" | "explicit" | "prefer";
 export type ProxyMode = "auto" | "manual" | "direct";
@@ -445,7 +452,7 @@ export const tauriApi = {
   getAccounts: () => request<Account[]>("/accounts"),
   createAccount: (input: AccountInput) =>
     request<Account>("/accounts", { method: "POST", body: jsonBody(input) }),
-  createManagedAccount: (input: { name: string; username?: string; notes?: string }) =>
+  createManagedAccount: (input: ManagedAccountInput) =>
     request<Account>("/accounts/managed", { method: "POST", body: jsonBody(input) }),
   updateAccount: (id: string, update: AccountUpdate) =>
     request<Account>(`/accounts/${id}`, { method: "PATCH", body: jsonBody(update) }),
@@ -489,17 +496,32 @@ export const tauriApi = {
     request<OfficialUsageRefreshResult>(`/accounts/${id}/usage/refresh`, {
       method: "POST",
     }),
-  resetAccountCooldown: (id: string) =>
-    request<Account>(`/accounts/${id}/reset-cooldown`, { method: "POST" }),
-  advanceAccountSetup: (id: string, setupStep: AccountSetupStep) =>
+  resetAccountCooldown: (id: string, expectedRevision?: number | null) =>
+    request<Account>(`/accounts/${id}/reset-cooldown`, {
+      method: "POST",
+      ...(expectedRevision === null || expectedRevision === undefined
+        ? {}
+        : { body: jsonBody({ expected_revision: expectedRevision }) }),
+    }),
+  advanceAccountSetup: (id: string, setupStep: AccountSetupStep, expectedRevision?: number | null) =>
     request<Account>(`/accounts/${id}/setup`, {
       method: "PATCH",
-      body: jsonBody({ setup_step: setupStep }),
+      body: jsonBody({
+        setup_step: setupStep,
+        ...(expectedRevision === null || expectedRevision === undefined
+          ? {}
+          : { expected_revision: expectedRevision }),
+      }),
     }),
-  verifyManagedAccountKey: (id: string, key: string) =>
+  verifyManagedAccountKey: (id: string, key: string, expectedRevision?: number | null) =>
     request<Account>(`/accounts/${id}/setup/verify-key`, {
       method: "POST",
-      body: jsonBody({ key }),
+      body: jsonBody({
+        key,
+        ...(expectedRevision === null || expectedRevision === undefined
+          ? {}
+          : { expected_revision: expectedRevision }),
+      }),
     }),
   getBrowserCapabilities: () => request<BrowserCapabilities>("/browser/capabilities"),
   openAccountBrowser: (id: string, target: BrowserTarget) =>
@@ -507,8 +529,13 @@ export const tauriApi = {
       method: "POST",
       body: jsonBody({ target }),
     }),
-  resetAccountBrowserProfile: (id: string) =>
-    request<Account>(`/accounts/${id}/browser-profile`, { method: "DELETE" }),
+  resetAccountBrowserProfile: (id: string, expectedRevision?: number | null) =>
+    request<Account>(`/accounts/${id}/browser-profile`, {
+      method: "DELETE",
+      ...(expectedRevision === null || expectedRevision === undefined
+        ? {}
+        : { body: jsonBody({ expected_revision: expectedRevision }) }),
+    }),
 
   getSettings: () => request<AppConfig>("/settings"),
   testProxy: (input: Pick<AppConfig, "proxy_mode" | "proxy_url" | "upstream_base_url">) =>

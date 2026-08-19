@@ -71,8 +71,8 @@ test("Zen card toggles use the dedicated provider-settings call with the setting
   assert.match(accounts, /free_alias_enabled: patch\.free_alias_enabled \?\? account\.free_alias_enabled/);
   assert.match(accounts, /expected_revision: revision/);
   assert.match(accounts, /settingsRevision\.value = result\.revision/);
-  assert.match(accounts, /error\.status === 409/);
-  assert.match(accounts, /reloadAfterProviderSettingsConflict/);
+  assert.match(accounts, /error\.status !== 409/);
+  assert.match(accounts, /recoverAccountMutationConflict/);
   assert.match(accounts, /message\.warning\(t\("账号设置已被其他操作修改，已重新加载最新状态，请重试"\)\)/);
   // Never a generic account PATCH for the Zen Free singleton.
   assert.doesNotMatch(accounts, /setAccountFreeAlias/);

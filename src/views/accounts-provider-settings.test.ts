@@ -16,10 +16,10 @@ test("zen card toggles use the dedicated provider-settings write with both flags
 test("zen provider settings send the settings revision guard and reload on 409", () => {
   assert.match(accounts, /settingsRevision\.value = settingsResult\.value\.revision/);
   assert.match(accounts, /expected_revision: revision/);
-  assert.match(accounts, /error\.status === 409/);
-  assert.match(accounts, /reloadAfterProviderSettingsConflict\(account\.id\)/);
+  assert.match(accounts, /error\.status !== 409/);
+  assert.match(accounts, /recoverAccountMutationConflict\(error\)/);
   assert.match(accounts, /message\.warning\(t\("账号设置已被其他操作修改，已重新加载最新状态，请重试"\)\)/);
-  assert.match(accounts, /async function reloadAfterProviderSettingsConflict[\s\S]*?tauriApi\.getSettings\(\)/);
+  assert.match(accounts, /async function reloadAfterControlPlaneConflict[\s\S]*?tauriApi\.getSettings\([\s\S]*?tauriApi\.getAccounts\(/);
 });
 
 test("the generic account patch no longer carries the zen free alias", () => {

@@ -90,6 +90,6 @@ test("zen toggles go through provider settings, never the generic account patch"
 
   assert.match(accounts, /providerApi\.updateProviderSettings/);
   assert.match(accounts, /expected_revision: revision/);
-  assert.match(accounts, /error\.status === 409/);
+  assert.match(accounts, /error\.status !== 409/);
   assert.doesNotMatch(accounts, /setAccountFreeAlias/);
 });

@@ -405,7 +405,7 @@ test("editing an account refreshes usage after purchase-date window changes", as
   const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
   const save = source.slice(source.indexOf("async function onFormSave"), source.indexOf("async function pingAccount"));
 
-  const update = save.indexOf("const saved = await tauriApi.updateAccount");
+  const update = save.indexOf("const saved = await runWithFreshSettingsRevision");
   const replace = save.indexOf("replaceAccount(saved);");
   const refresh = save.indexOf("await loadAccountUsage(saved.id);");
   assert.ok(update >= 0 && replace > update && refresh > replace);

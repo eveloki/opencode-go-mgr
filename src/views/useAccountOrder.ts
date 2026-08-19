@@ -6,7 +6,6 @@ import type { Account } from "../api/tauri";
 import { moveItem } from "./account-lifecycle.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
-import { mapWithConcurrency } from "../utils/async.ts";
 
 type AccountDragState = {
   accountId: string;
@@ -29,10 +28,16 @@ export function useAccountOrder(options: {
   accounts: Ref<Account[]>;
   busy: Ref<boolean>;
   revision: Ref<number | null>;
-  loadAccountUsage: (accountId: string) => Promise<void>;
-  removeAccountState: (accountId: string) => void;
+  runWithFreshRevision: <T>(mutation: (revision: number) => Promise<T>) => Promise<T>;
+  reloadAfterRevisionConflict: () => Promise<void>;
 }) {
-  const { accounts, busy, revision, loadAccountUsage, removeAccountState } = options;
+  const {
+    accounts,
+    busy,
+    revision,
+    runWithFreshRevision,
+    reloadAfterRevisionConflict,
+  } = options;
   const message = useMessage();
 
   const orderSaving = ref(false);
@@ -55,10 +60,10 @@ export function useAccountOrder(options: {
     if (sameAccountOrder(previous, accounts.value)) return;
     orderSaving.value = true;
     try {
-      const saved = await tauriApi.reorderAccounts(
-        accounts.value.map(({ id }) => id),
-        revision.value,
-      );
+      const saved = await runWithFreshRevision((freshRevision) => {
+        revision.value = freshRevision;
+        return tauriApi.reorderAccounts(accounts.value.map(({ id }) => id), freshRevision);
+      });
       accounts.value = saved;
       revision.value = saved[0]?.revision ?? revision.value;
       const moved = accounts.value.find(({ id }) => id === movedAccountId);
@@ -72,27 +77,17 @@ export function useAccountOrder(options: {
       message.success(t("账号顺序已更新"));
     } catch (error) {
       if (error instanceof DashboardRequestError && error.status === 409) {
+        accounts.value = previous;
         try {
-          const knownIds = new Set(accounts.value.map(({ id }) => id));
-          const loaded = await tauriApi.getAccounts();
-          const loadedIds = new Set(loaded.map(({ id }) => id));
-          for (const id of knownIds) {
-            if (!loadedIds.has(id)) removeAccountState(id);
-          }
-          accounts.value = loaded;
-          revision.value = loaded[0]?.revision ?? null;
-          await mapWithConcurrency(
-            loaded.filter((account) => (
-              !knownIds.has(account.id)
-              && account.provider_id === "opencode"
-              && account.offering_id === "go"
-            )),
-            4,
-            ({ id }) => loadAccountUsage(id),
-          );
+          await reloadAfterRevisionConflict();
         } catch {
-          accounts.value = previous;
+          // The optimistic preview was already reverted; the error below asks
+          // the user to retry after an explicit refresh if reconciliation fails.
         }
+        const conflict = t("账号设置已被其他操作修改，已重新加载最新状态，请重试");
+        orderAnnouncement.value = conflict;
+        message.warning(conflict);
+        return;
       } else {
         accounts.value = previous;
       }

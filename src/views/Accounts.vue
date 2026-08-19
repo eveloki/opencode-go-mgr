@@ -219,6 +219,9 @@ import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import {
+  withFreshAccountRevision,
+} from "./account-cas.ts";
+import {
   DEFAULT_OPENCODE_INVITE_URL,
   browserViewUrl,
   normalizeOpenCodeInviteUrl,
@@ -291,8 +294,8 @@ const {
   accounts,
   busy,
   revision: settingsRevision,
-  loadAccountUsage,
-  removeAccountState,
+  runWithFreshRevision: runWithFreshSettingsRevision,
+  reloadAfterRevisionConflict: reloadAfterControlPlaneConflict,
 });
 
 const managedWizardAccount = computed(() => (
@@ -399,12 +402,13 @@ function normalizeManagedInviteDraft(): void {
 async function ensureInviteUrlSaved(inviteUrl: string): Promise<void> {
   if (inviteUrl === opencodeInviteUrl.value) return;
   const settings = await tauriApi.getSettings();
+  settingsRevision.value = settings.revision;
   const result = await tauriApi.updateSettings({
     ...settings,
     opencode_invite_url: inviteUrl,
   });
   opencodeInviteUrl.value = inviteUrl;
-  void result;
+  settingsRevision.value = result.revision;
 }
 
 function setManagedCreateVisible(show: boolean): void {
@@ -455,16 +459,18 @@ async function createManagedAccount(): Promise<void> {
   try {
     await ensureInviteUrlSaved(inviteUrl);
     const username = managedDraft.value.username.trim();
-    const created = await tauriApi.createManagedAccount({
+    const created = await runWithFreshSettingsRevision((revision) => tauriApi.createManagedAccount({
       name,
       ...(username ? { username } : {}),
-    });
+      expected_revision: revision,
+    }));
     addAccount(created);
     showManagedCreate.value = false;
     managedWizardAccountId.value = created.id;
     showManagedWizard.value = true;
     message.success(t("注册草稿已创建"));
   } catch (error) {
+    if (await recoverAccountMutationConflict(error)) return;
     message.error(t("创建注册草稿失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
@@ -475,10 +481,13 @@ async function advanceManagedSetup(accountId: string, setupStep: AccountSetupSte
   if (busy.value) return;
   busy.value = true;
   try {
-    const updated = await tauriApi.advanceAccountSetup(accountId, setupStep);
+    const updated = await runWithFreshSettingsRevision((revision) => (
+      tauriApi.advanceAccountSetup(accountId, setupStep, revision)
+    ));
     replaceAccount(updated);
     message.success(t("注册进度已保存"));
   } catch (error) {
+    if (await recoverAccountMutationConflict(error)) return;
     await recoverManagedSetupConflict(accountId, error);
     message.error(t("保存注册进度失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
@@ -490,7 +499,9 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   try {
-    const updated = await tauriApi.verifyManagedAccountKey(accountId, key);
+    const updated = await runWithFreshSettingsRevision((revision) => (
+      tauriApi.verifyManagedAccountKey(accountId, key, revision)
+    ));
     replaceAccount(updated);
     if (accountIsReady(updated)) {
       showManagedWizard.value = false;
@@ -500,6 +511,7 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
         : t("Key 验证成功，账号已启用"));
     }
   } catch (error) {
+    if (await recoverAccountMutationConflict(error)) return;
     await recoverManagedSetupConflict(accountId, error);
     message.error(t("Key 验证失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
@@ -544,7 +556,9 @@ async function openAccountBrowser(accountId: string, target: BrowserTarget): Pro
 
 async function resetBrowserProfile(accountId: string): Promise<void> {
   try {
-    const updated = await tauriApi.resetAccountBrowserProfile(accountId);
+    const updated = await runWithFreshSettingsRevision((revision) => (
+      tauriApi.resetAccountBrowserProfile(accountId, revision)
+    ));
     replaceAccount(updated);
     if (!accountIsReady(updated)) {
       delete usageMap.value[accountId];
@@ -552,6 +566,7 @@ async function resetBrowserProfile(accountId: string): Promise<void> {
     }
     message.success(t("官网登录状态已重置"));
   } catch (error) {
+    if (await recoverAccountMutationConflict(error)) return;
     message.error(t("重置官网登录状态失败: {error}", { error: dashboardErrorDetail(error) }));
   }
 }
@@ -675,7 +690,8 @@ async function onFormSave(payload: {
   purchase_date?: string;
   notes: string;
 }) {
-  if (editingAccount.value) {
+  const editing = editingAccount.value;
+  if (editing) {
     const update: AccountUpdate = {
       name: payload.name,
       username: payload.username,
@@ -685,11 +701,10 @@ async function onFormSave(payload: {
     if (payload.key !== undefined) update.key = payload.key;
     busy.value = true;
     try {
-      const revision = await ensureSettingsRevision();
-      const saved = await tauriApi.updateAccount(editingAccount.value.id, {
+      const saved = await runWithFreshSettingsRevision((revision) => tauriApi.updateAccount(editing.id, {
         ...update,
-        ...(revision === null ? {} : { expected_revision: revision }),
-      });
+        expected_revision: revision,
+      }));
       replaceAccount(saved);
       // purchase_date defines the monthly usage window and changing it clears
       // the persisted calibration offset, so the local usage snapshot must be
@@ -698,6 +713,7 @@ async function onFormSave(payload: {
       message.success(t("账号已更新"));
       showModal.value = false;
     } catch (e) {
+      if (await recoverAccountMutationConflict(e)) return;
       message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
     } finally {
       busy.value = false;
@@ -714,11 +730,10 @@ async function onFormSave(payload: {
     };
     busy.value = true;
     try {
-      const revision = await ensureSettingsRevision();
-      const created = await tauriApi.createAccount({
+      const created = await runWithFreshSettingsRevision((revision) => tauriApi.createAccount({
         ...input,
-        ...(revision === null ? {} : { expected_revision: revision }),
-      });
+        expected_revision: revision,
+      }));
       message.success(t("账号已添加"));
       addAccount(created);
       settingsRevision.value = created.revision ?? settingsRevision.value;
@@ -727,6 +742,7 @@ async function onFormSave(payload: {
       }
       showModal.value = false;
     } catch (e) {
+      if (await recoverAccountMutationConflict(e)) return;
       message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
     } finally {
       busy.value = false;
@@ -762,10 +778,10 @@ async function toggleAccount(id: string) {
     return;
   }
   try {
-    const revision = await ensureSettingsRevision();
-    const updated = await tauriApi.toggleAccount(id, revision);
+    const updated = await runWithFreshSettingsRevision((revision) => tauriApi.toggleAccount(id, revision));
     replaceAccount(updated);
   } catch (e) {
+    if (await recoverAccountMutationConflict(e)) return;
     message.error(t("切换失败: {error}", { error: dashboardErrorDetail(e) }));
   }
 }
@@ -785,15 +801,52 @@ async function toggleFreeAlias(id: string) {
   }
 }
 
-async function ensureSettingsRevision(): Promise<number | null> {
-  if (settingsRevision.value !== null) return settingsRevision.value;
-  try {
-    const settings = await tauriApi.getSettings();
-    settingsRevision.value = settings.revision;
-  } catch {
-    settingsRevision.value = null;
+async function runWithFreshSettingsRevision<T>(
+  mutation: (revision: number) => Promise<T>,
+): Promise<T> {
+  return withFreshAccountRevision(async () => {
+    try {
+      const settings = await tauriApi.getSettings();
+      settingsRevision.value = settings.revision;
+      return settings.revision;
+    } catch {
+      settingsRevision.value = null;
+      return null;
+    }
+  }, mutation);
+}
+
+async function reloadAfterControlPlaneConflict(): Promise<void> {
+  const knownIds = new Set(accounts.value.map(({ id }) => id));
+  const [settingsResult, accountsResult] = await Promise.allSettled([
+    tauriApi.getSettings(),
+    tauriApi.getAccounts(),
+  ]);
+  settingsRevision.value = settingsResult.status === "fulfilled"
+    ? settingsResult.value.revision
+    : null;
+  if (accountsResult.status !== "fulfilled") return;
+
+  const loaded = accountsResult.value;
+  const loadedIds = new Set(loaded.map(({ id }) => id));
+  for (const id of knownIds) {
+    if (!loadedIds.has(id)) removeAccountState(id);
   }
-  return settingsRevision.value;
+  accounts.value = loaded;
+  if (editingAccount.value) {
+    editingAccount.value = loaded.find(({ id }) => id === editingAccount.value?.id) ?? null;
+  }
+  if (managedWizardAccountId.value && !loadedIds.has(managedWizardAccountId.value)) {
+    showManagedWizard.value = false;
+    managedWizardAccountId.value = null;
+  }
+}
+
+async function recoverAccountMutationConflict(error: unknown): Promise<boolean> {
+  if (!(error instanceof DashboardRequestError) || error.status !== 409) return false;
+  await reloadAfterControlPlaneConflict();
+  message.warning(t("账号设置已被其他操作修改，已重新加载最新状态，请重试"));
+  return true;
 }
 
 /**
@@ -811,20 +864,16 @@ async function saveZenProviderSettings(
   if (providerSettingsSaving.value[account.id]) return;
   providerSettingsSaving.value[account.id] = true;
   try {
-    const revision = await ensureSettingsRevision();
-    const result = await providerApi.updateProviderSettings(account.id, {
+    const result = await runWithFreshSettingsRevision((revision) => providerApi.updateProviderSettings(account.id, {
       enabled: patch.enabled ?? account.enabled,
       free_alias_enabled: patch.free_alias_enabled ?? account.free_alias_enabled,
-      ...(revision === null ? {} : { expected_revision: revision }),
-    });
+      expected_revision: revision,
+    }));
     settingsRevision.value = result.revision;
     replaceAccount(result.account);
     if (successMessage) message.success(successMessage);
   } catch (error) {
-    if (error instanceof DashboardRequestError && error.status === 409) {
-      await reloadAfterProviderSettingsConflict(account.id);
-      message.warning(t("账号设置已被其他操作修改，已重新加载最新状态，请重试"));
-    } else {
+    if (!(await recoverAccountMutationConflict(error))) {
       message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
     }
   } finally {
@@ -832,24 +881,9 @@ async function saveZenProviderSettings(
   }
 }
 
-async function reloadAfterProviderSettingsConflict(id: string): Promise<void> {
-  try {
-    const settings = await tauriApi.getSettings();
-    settingsRevision.value = settings.revision;
-  } catch {
-    settingsRevision.value = null;
-  }
-  try {
-    await refreshAccountState(id);
-  } catch {
-    // The conflict notice stays authoritative; the next explicit refresh retries.
-  }
-}
-
 async function deleteAccount(id: string) {
   try {
-    const revision = await ensureSettingsRevision();
-    await tauriApi.deleteAccount(id, revision);
+    await runWithFreshSettingsRevision((revision) => tauriApi.deleteAccount(id, revision));
     // DELETE returns the new revision in a response header; the shared JSON
     // transport intentionally stays body-only, so reload it before the next
     // mutation instead of guessing the counter.
@@ -857,16 +891,20 @@ async function deleteAccount(id: string) {
     message.success(t("账号已删除"));
     removeAccountState(id);
   } catch (e) {
+    if (await recoverAccountMutationConflict(e)) return;
     message.error(t("删除失败: {error}", { error: dashboardErrorDetail(e) }));
   }
 }
 
 async function resetCooldown(id: string) {
   try {
-    const updated = await tauriApi.resetAccountCooldown(id);
+    const updated = await runWithFreshSettingsRevision((revision) => (
+      tauriApi.resetAccountCooldown(id, revision)
+    ));
     replaceAccount(updated);
     message.success(t("已重置冷却"));
   } catch (e) {
+    if (await recoverAccountMutationConflict(e)) return;
     message.error(t("重置失败: {error}", { error: dashboardErrorDetail(e) }));
   }
 }
