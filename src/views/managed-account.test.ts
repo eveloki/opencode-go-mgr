@@ -56,8 +56,9 @@ test("remote browser view URL preserves dashboard location and carries the opaqu
 });
 
 test("managed account UI isolates pending controls and renders noVNC in a dedicated view", async () => {
-  const [accounts, chooser, wizard, browser, app] = await Promise.all([
+  const [accounts, card, chooser, wizard, browser, app] = await Promise.all([
     readSource(new URL("./Accounts.vue", import.meta.url)),
+    readSource(new URL("../components/AccountCard.vue", import.meta.url)),
     readSource(new URL("../components/AccountAddModal.vue", import.meta.url)),
     readSource(new URL("../components/ManagedAccountWizard.vue", import.meta.url)),
     readSource(new URL("./BrowserSession.vue", import.meta.url)),
@@ -77,9 +78,9 @@ test("managed account UI isolates pending controls and renders noVNC in a dedica
   assert.match(wizard, /注册新账号：\{name\}/);
   assert.match(wizard, /n-tag[\s\S]*?Beta/);
   assert.doesNotMatch(wizard, /托管注册与独立浏览器 Profile 为 Beta 功能/);
-  assert.match(accounts, /v-if="accountIsReady\(account\)"[\s\S]*?@click="pingAccount/);
-  assert.match(accounts, /v-if="accountIsReady\(account\)"[\s\S]*?<n-switch/);
-  assert.match(accounts, /loaded\.filter\(accountIsReady\)/);
+  assert.match(card, /v-if="!isZen && accountIsReady\(account\)"[\s\S]*?@click="emit\('ping'\)/);
+  assert.match(card, /v-if="accountIsReady\(account\)"[\s\S]*?<n-switch/);
+  assert.match(accounts, /loaded\.filter\(\(account\) => accountIsReady\(account\) && !isZenFreeAccount\(account\)\)/);
   assert.match(accounts, /window\.open\("", "_blank"\)[\s\S]*?remoteTab\.location\.replace/);
   assert.match(wizard, /google_account[\s\S]*?opencode_registration[\s\S]*?payment[\s\S]*?key_verification/);
   assert.doesNotMatch(wizard, /重新打开页面/);
@@ -113,7 +114,7 @@ test("managed account UI isolates pending controls and renders noVNC in a dedica
   assert.doesNotMatch(browser, /detail\.clean/);
   const initialization = accounts.slice(
     accounts.indexOf("async function initializeAccounts"),
-    accounts.indexOf("async function retryQuotaLimits"),
+    accounts.indexOf("async function onFormSave"),
   );
   assert.ok(initialization.indexOf("loadRegistrationOptions()") < initialization.indexOf("await loadQuotaLimits()"));
   assert.ok(initialization.indexOf("await loadAccounts()") < initialization.indexOf("await registrationOptions"));

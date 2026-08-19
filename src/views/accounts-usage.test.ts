@@ -8,7 +8,12 @@ import {
   mergeUsageEdit,
   normalizeUsagePercent,
   resetTimeForWindow,
+  resetsFieldsToMinutes,
+  resetsFirstFieldMax,
+  resetsFirstFieldValue,
   resetsInMinutesForSave,
+  resetsSecondFieldMax,
+  resetsSecondFieldValue,
   usagePercentFromCost,
   usageProgressPercentage,
   usageProgressStatus,
@@ -146,11 +151,12 @@ test("shows a live reset countdown below a quota progress bar during cooldown", 
 });
 
 test("shows a distinct account authentication breaker instead of disguising it as cooldown", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  const display = await readFile(new URL("./account-display.ts", import.meta.url), "utf8");
   const dashboard = await readFile(new URL("./Dashboard.vue", import.meta.url), "utf8");
-  assert.match(source, /account\.auth_error \|\| accountIsCooling\(account\)/);
-  assert.match(source, /account\.enabled[\s\S]*t\("认证失效（401 熔断）"\)[\s\S]*t\("已禁用"\)/);
-  assert.match(source, /if \(account\.auth_error\) return "error"/);
+  assert.match(card, /account\.auth_error \|\| isCooling\(account, now\)/);
+  assert.match(display, /account\.enabled[\s\S]*t\("认证失效（401 熔断）"\)[\s\S]*t\("已禁用"\)/);
+  assert.match(display, /if \(account\.auth_error\) return "error"/);
   assert.match(dashboard, /account\.auth_error \? 'auth-error'/);
   assert.match(dashboard, /\.account-status\.auth-error \{ color: var\(--ocg-error\); \}/);
 });
@@ -167,49 +173,54 @@ test("maps each usage window to its cooldown reset deadline", () => {
 });
 
 test("keeps account cards compact with metadata tags and popover calibration", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  const editor = await readFile(new URL("../components/AccountUsageEditor.vue", import.meta.url), "utf8");
+  const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+  const display = await readFile(new URL("./account-display.ts", import.meta.url), "utf8");
   const strip = await readFile(new URL("../components/UsageStrip.vue", import.meta.url), "utf8");
-  const header = source.slice(
-    source.indexOf("<template #header>"),
-    source.indexOf('<div v-if="!accountIsReady(account)"'),
+  const header = card.slice(
+    card.indexOf("<template #header>"),
+    card.indexOf('<div v-if="!accountIsReady(account)"'),
   );
-  const usage = strip.slice(
+  const stripBody = strip.slice(
     strip.indexOf('class="usage-strip-body" role="group"'),
     strip.indexOf("</template>"),
   );
 
-  assert.ok(header.indexOf("accountStatusLabel(account)") < header.indexOf('t("购买于 {date}"'));
-  assert.match(header, /<n-tag v-if="accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
-  assert.match(header, /<n-tag v-if="accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
-  assert.match(header, /<n-popover[\s\S]*?trigger="click"[\s\S]*?placement="bottom-end"[\s\S]*?:width="320"[\s\S]*?@update:show="\(show: boolean\) => show && focusUsageEditor\(account\.id\)"[\s\S]*?class="usage-editor-popover"/);
-  assert.doesNotMatch(header, /:flip="false"/);
-  assert.ok(header.indexOf("@update:value=\"toggleAccount(account.id)\"") < header.indexOf("<n-popover"));
-  assert.ok(header.indexOf("<n-popover") < header.indexOf("<n-dropdown"));
-  assert.match(header, /class="usage-editor-popover"[\s\S]*?class="usage-resets-row"/);
-  assert.match(source, /async function focusUsageEditor\(accountId: string\)[\s\S]*?requestAnimationFrame[\s\S]*?\.n-input-number input[\s\S]*?\.focus\(\)/);
-  assert.match(header, /v-if="accountIsReady\(account\)"[\s\S]*?刷新额度/);
+  assert.ok(header.indexOf("accountStatusLabel(account, now)") < header.indexOf('t("购买于 {date}"'));
+  assert.match(header, /<n-tag v-if="!isZen && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
+  assert.match(header, /<n-tag v-if="!isZen && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
+  assert.match(card, /<n-popover[\s\S]*?trigger="click"[\s\S]*?placement="bottom-end"[\s\S]*?:width="320"[\s\S]*?@update:show="\(show: boolean\) => show && emit\('usage-editor-open'\)"/);
+  assert.match(editor, /class="usage-editor-popover"/);
+  assert.doesNotMatch(card, /:flip="false"/);
+  assert.ok(header.indexOf("@update:value=\"emit('toggle')\"") < card.indexOf("<n-popover"));
+  assert.ok(card.indexOf("<n-popover") < card.indexOf("<n-dropdown"));
+  assert.match(editor, /class="usage-editor-popover"[\s\S]*?class="usage-resets-row"/);
+  assert.match(usage, /async function focusUsageEditor\(accountId: string\)[\s\S]*?requestAnimationFrame[\s\S]*?\.n-input-number input[\s\S]*?\.focus\(\)/);
+  assert.match(card, /v-if="!isZen && accountIsReady\(account\)"[\s\S]*?刷新额度/);
   assert.doesNotMatch(
-    header,
+    card,
     /accountIsReady\(account\) && account\.account_type === 'managed'/,
   );
-  assert.match(source, /async function refreshAccountUsage/);
-  assert.match(source, /tauriApi\.refreshAccountUsage/);
-  assert.match(source, /额度已从 OpenCode 官方用量刷新/);
-  assert.doesNotMatch(source, /refreshManagedUsage|refreshManagedAccountUsage|额度已从 OpenCode 控制台刷新/);
-  assert.match(header, /:aria-label="t\('校准用量'\)"/);
-  assert.doesNotMatch(usage, /usage-strip-title|\{\{ t\("用量"\) \}\}/);
-  assert.match(usage, /class="usage-strip-body" role="group" :aria-label="t\('用量'\)"/);
-  assert.match(usage, /<n-progress[\s\S]*?:percentage="usageProgressPercentage\(/);
-  assert.doesNotMatch(usage, /<n-input-number|<n-slider|class="usage-resets-row"/);
+  assert.match(usage, /async function refreshAccountUsage/);
+  assert.match(usage, /tauriApi\.refreshAccountUsage/);
+  assert.match(usage, /额度已从 OpenCode 官方用量刷新/);
+  assert.doesNotMatch(usage, /refreshManagedUsage|refreshManagedAccountUsage|额度已从 OpenCode 控制台刷新/);
+  assert.match(card, /:aria-label="t\('校准用量'\)"/);
+  assert.doesNotMatch(stripBody, /usage-strip-title|\{\{ t\("用量"\) \}\}/);
+  assert.match(stripBody, /class="usage-strip-body" role="group" :aria-label="t\('用量'\)"/);
+  assert.match(stripBody, /<n-progress[\s\S]*?:percentage="usageProgressPercentage\(/);
+  assert.doesNotMatch(stripBody, /<n-input-number|<n-slider|class="usage-resets-row"/);
   assert.match(
     strip,
     /\.usage-strip\s*\{\s*min-width:\s*0;\s*\}\s*\.usage-strip-body\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/,
   );
   assert.match(strip, /@media \(max-width: 900px\) \{\s*\.usage-strip-body\s*\{\s*grid-template-columns: 1fr;/);
-  assert.doesNotMatch(source, /class="account-lifecycle"|\.account-lifecycle\s*\{/);
-  assert.match(source, /key: "edit", label: t\("编辑账号"\)/);
-  assert.match(source, /v-if="quotaLimitsError"[\s\S]*?@click="retryQuotaLimits"/);
-  assert.equal(source.match(/v-if="quotaLimitsError"/g)?.length, 1);
+  assert.doesNotMatch(card, /class="account-lifecycle"|\.account-lifecycle\s*\{/);
+  assert.match(display, /key: "edit", label: t\("编辑账号"\)/);
+  assert.match(accounts, /v-if="quotaLimitsError"[\s\S]*?@click="retryQuotaLimits"/);
+  assert.equal(accounts.match(/v-if="quotaLimitsError"/g)?.length, 1);
 });
 
 test("normalizes manually entered percentages to the supported range and precision", () => {
@@ -220,18 +231,20 @@ test("normalizes manually entered percentages to the supported range and precisi
 });
 
 test("accounts page surfaces official sync last-success and retry state beyond button loading", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
-  assert.match(source, /usage_sync_last_success_at/);
-  assert.match(source, /usage_sync_next_allowed_at/);
-  assert.match(source, /isUsageRefreshBlocked/);
-  assert.match(source, /usageSyncCaption/);
-  assert.match(source, /class="usage-sync-meta"/);
-  assert.match(source, /error\.status === 429/);
-  assert.match(source, /请稍后再试（约 \{seconds\} 秒）/);
-  assert.match(source, /上次官方同步: \{time\}/);
-  assert.match(source, /尚未官方同步/);
-  assert.match(source, /刷新额度冷却中，请于 \{time\} 后重试/);
-  assert.match(source, /:disabled="isUsageRefreshBlocked\(account\)/);
+  const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+  const display = await readFile(new URL("./account-display.ts", import.meta.url), "utf8");
+  assert.match(usage, /usage_sync_last_success_at/);
+  assert.match(usage, /usage_sync_next_allowed_at/);
+  assert.match(display, /isUsageRefreshBlocked/);
+  assert.match(display, /usageSyncCaption/);
+  assert.match(card, /class="usage-sync-meta"/);
+  assert.match(usage, /error\.status === 429/);
+  assert.match(usage, /请稍后再试（约 \{seconds\} 秒）/);
+  assert.match(display, /上次官方同步: \{time\}/);
+  assert.match(display, /尚未官方同步/);
+  assert.match(display, /刷新额度冷却中，请于 \{time\} 后重试/);
+  assert.match(card, /:disabled="isUsageRefreshBlocked\(account, now\)/);
 });
 
 test("usage refresh preserves dirty drafts unless a real 429 reset that window", () => {
@@ -314,23 +327,50 @@ test("percent-only usage saves keep counting down from the backend deadline", ()
 });
 
 test("reset editor derives untouched fields from the live absolute deadline", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
-  const fields = source.slice(source.indexOf("function resetsFirstField"), source.indexOf("function fieldsToMinutes"));
+  const helpers = await readFile(new URL("./accounts-usage.ts", import.meta.url), "utf8");
+  const fields = helpers.slice(
+    helpers.indexOf("export function resetsFirstFieldValue"),
+    helpers.indexOf("export function resetsFieldsToMinutes"),
+  );
 
-  assert.equal(fields.match(/resetsInMinutesForSave\(edit, key, now\.value\)/g)?.length, 2);
+  assert.equal(fields.match(/resetsInMinutesForSave\(edit, key, now\)/g)?.length, 2);
+});
+
+test("reset editor splits minutes into hour/minute or day/hour field pairs", () => {
+  assert.equal(resetsFirstFieldMax("window_5h"), 5);
+  assert.equal(resetsSecondFieldMax("window_5h"), 59);
+  assert.equal(resetsFirstFieldMax("window_week"), 7);
+  assert.equal(resetsSecondFieldMax("window_week"), 23);
+  assert.equal(resetsFirstFieldMax("window_month"), 0);
+  assert.equal(resetsSecondFieldMax("window_month"), 0);
+
+  assert.equal(resetsFieldsToMinutes(1, 30, "window_5h"), 90);
+  assert.equal(resetsFieldsToMinutes(1, 2, "window_week"), 1 * 24 * 60 + 2 * 60);
+  assert.equal(resetsFieldsToMinutes(3, 4, "window_month"), 0);
+
+  const dirty = { resets_in_minutes_draft: 90, resets_at_saved: null, resets_dirty: true };
+  assert.equal(resetsFirstFieldValue(dirty, "window_5h"), 1);
+  assert.equal(resetsSecondFieldValue(dirty, "window_5h"), 30);
+  const weekly = { ...dirty, resets_in_minutes_draft: 1 * 24 * 60 + 2 * 60 };
+  assert.equal(resetsFirstFieldValue(weekly, "window_week"), 1);
+  assert.equal(resetsSecondFieldValue(weekly, "window_week"), 2);
+  assert.equal(resetsFirstFieldValue(undefined, "window_5h"), 0);
+  assert.equal(resetsSecondFieldValue(undefined, "window_week"), 0);
+  assert.equal(resetsFirstFieldValue(dirty, "window_month"), 0);
 });
 
 test("calibration shortcut is disabled when every usage window is cooling", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
 
-  assert.match(source, /:disabled="!hasAvailableUsageEditor\(account\)"/);
-  assert.match(source, /usageLoading\.value\[account\.id\] \|\| usageLoadErrors\.value\[account\.id\]/);
-  assert.match(source, /usageLimits\.value\.some\(\(\{ key \}\) => !accountUsageLimitReached\(account, key\)\)/);
+  assert.match(card, /:disabled="!usageEditorAvailable"/);
+  assert.match(usage, /usageLoading\.value\[account\.id\] \|\| usageLoadErrors\.value\[account\.id\]/);
+  assert.match(usage, /usageLimits\.value\.some\(\(\{ key \}\) => !accountUsageLimitReached\(account, key\)\)/);
 });
 
 test("usage refresh initializes windows missing after an earlier quota load failure", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
-  const sync = source.slice(source.indexOf("function syncUsageEdits"), source.indexOf("function updateUsageDraft"));
+  const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+  const sync = usage.slice(usage.indexOf("function syncUsageEdits"), usage.indexOf("function updateUsageDraft"));
 
   assert.match(
     sync,
@@ -349,15 +389,15 @@ test("bounded concurrency rejects invalid limits instead of dropping work", asyn
 });
 
 test("accounts render before per-account usage and expose failed loads for retry", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
-  const load = source.slice(source.indexOf("async function loadAccounts"), source.indexOf("async function onFormSave"));
+  const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+  const load = accounts.slice(accounts.indexOf("async function loadAccounts"), accounts.indexOf("async function onFormSave"));
 
-  assert.ok(load.indexOf("accounts.value = loaded") < load.indexOf("getAccountUsage"));
-  assert.match(load, /loadAccountUsage\(account\.id\)/);
-  assert.match(load, /usageLoadErrors\.value\[accountId\] = errorDetail\(error\)/);
-  assert.match(source, /v-if="accountListLoading"[\s\S]*?v-else-if="accountListError"[\s\S]*?@click="loadAccounts"/);
+  assert.ok(load.indexOf("accounts.value = loaded") < load.indexOf("loadAccountUsage(account.id)"));
+  assert.match(usage, /usageLoadErrors\.value\[accountId\] = dashboardErrorDetail\(error\)/);
+  assert.match(accounts, /v-if="accountListLoading"[\s\S]*?v-else-if="accountListError"[\s\S]*?@click="loadAccounts"/);
 
-  const ping = source.slice(source.indexOf("async function pingAccount"), source.indexOf("async function toggleAccount"));
+  const ping = accounts.slice(accounts.indexOf("async function pingAccount"), accounts.indexOf("async function toggleAccount"));
   assert.match(ping, /try \{\s+await refreshAccountState\(id\);\s+\} catch \(e\) \{/);
 });
 
@@ -372,26 +412,27 @@ test("editing an account refreshes usage after purchase-date window changes", as
 });
 
 test("manual editor writes on commit events instead of each value update", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const editor = await readFile(new URL("../components/AccountUsageEditor.vue", import.meta.url), "utf8");
+  const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
 
-  assert.match(source, /@update:value="updateUsageDraft\(account\.id, limit\.key, \$event\)"/);
-  assert.match(source, /@dragend="saveUsage\(account\.id, limit\.key\)"/);
-  assert.match(source, /@blur="saveUsage\(account\.id, limit\.key\)"/);
-  assert.match(source, /@keydown\.enter\.prevent="saveUsage\(account\.id, limit\.key\)"/);
-  assert.match(source, /if \(!edit \|\| edit\.saving\) return;/);
-  assert.equal(source.match(/edit\.resets_dirty = true;/g)?.length, 2);
-  assert.match(source, /const resetsInMin = resetsInMinutesForSave\(edit, key\)/);
-  assert.match(source, /message\.error\(t\("用量保存失败: \{error\}"/);
+  assert.match(editor, /@update:value="emit\('update-draft', limit\.key, \$event\)"/);
+  assert.match(editor, /@dragend="emit\('save', limit\.key\)"/);
+  assert.match(editor, /@blur="emit\('save', limit\.key\)"/);
+  assert.match(editor, /@keydown\.enter\.prevent="emit\('save', limit\.key\)"/);
+  assert.match(usage, /if \(!edit \|\| edit\.saving\) return;/);
+  assert.equal(usage.match(/edit\.resets_dirty = true;/g)?.length, 2);
+  assert.match(usage, /const resetsInMin = resetsInMinutesForSave\(edit, key\)/);
+  assert.match(usage, /message\.error\(t\("用量保存失败: \{error\}"/);
 });
 
 test("account drag keeps receiving touch pointers after keyed cards move", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const order = await readFile(new URL("./useAccountOrder.ts", import.meta.url), "utf8");
 
-  assert.match(source, /window\.addEventListener\("pointermove", previewAccountDrag, \{ passive: false \}\)/);
-  assert.match(source, /window\.addEventListener\("pointerup", finishAccountDrag\)/);
-  assert.match(source, /window\.addEventListener\("pointercancel", cancelAccountDrag\)/);
-  assert.match(source, /window\.removeEventListener\("pointermove", previewAccountDrag\)/);
-  assert.doesNotMatch(source, /@lostpointercapture|@pointermove="previewAccountDrag"/);
+  assert.match(order, /window\.addEventListener\("pointermove", previewAccountDrag, \{ passive: false \}\)/);
+  assert.match(order, /window\.addEventListener\("pointerup", finishAccountDrag\)/);
+  assert.match(order, /window\.addEventListener\("pointercancel", cancelAccountDrag\)/);
+  assert.match(order, /window\.removeEventListener\("pointermove", previewAccountDrag\)/);
+  assert.doesNotMatch(order, /@lostpointercapture|@pointermove="previewAccountDrag"/);
 });
 
 test("usage API sends the selected window and percent with PATCH", async () => {

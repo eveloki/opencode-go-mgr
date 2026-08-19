@@ -50,328 +50,38 @@
       </n-empty>
 
       <div v-if="!accountListLoading && !accountListError && accounts.length > 0" class="account-list">
-        <n-card
+        <AccountCard
           v-for="account in accounts"
           :key="account.id"
-          :data-account-id="account.id"
-          size="small"
-          class="account-card"
-          :class="{
-            'account-card--cooling': accountIsCooling(account),
-            'account-card--pending': !accountIsReady(account),
-            'account-card--dragging': draggingAccountId === account.id,
-          }"
-        >
-          <template #header>
-            <div class="account-title">
-              <n-tooltip trigger="hover">
-                <template #trigger>
-                  <n-button
-                    circle
-                    quaternary
-                    size="small"
-                    class="account-order-handle"
-                    :class="{ 'account-order-handle--dragging': draggingAccountId === account.id }"
-                    :disabled="orderSaving || busy || accounts.length < 2"
-                    :aria-label="t('拖动调整账号 {name} 的优先级', { name: account.name })"
-                    aria-describedby="account-order-instructions"
-                    @click.prevent
-                    @keydown="handleOrderKeydown($event, account.id)"
-                    @pointerdown="startAccountDrag($event, account.id)"
-                  >
-                    <template #icon><n-icon :component="HolderOutlined" /></template>
-                  </n-button>
-                </template>
-                {{ t("拖动调整账号 {name} 的优先级", { name: account.name }) }}
-              </n-tooltip>
-              <div class="account-heading">
-                <div class="account-name-row">
-                  <span class="account-name">{{ account.name }}</span>
-                  <n-tag v-if="account.account_type === 'managed'" type="info" size="small" :bordered="false">
-                    {{ t("托管注册") }}
-                  </n-tag>
-                  <n-tooltip v-if="account.auth_error || accountIsCooling(account)">
-                    <template #trigger>
-                      <n-tag :type="accountStatusTagType(account)" size="small">
-                        {{ accountStatusLabel(account) }}
-                      </n-tag>
-                    </template>
-                    {{ account.auth_error || cooldownDetails(account) }}
-                  </n-tooltip>
-                  <n-tag v-else :type="accountStatusTagType(account)" size="small">
-                    {{ accountStatusLabel(account) }}
-                  </n-tag>
-                  <n-tag v-if="accountIsReady(account)" size="small" :bordered="false">
-                    {{ t("购买于 {date}", { date: account.purchase_date }) }}
-                  </n-tag>
-                  <n-tag v-if="accountIsReady(account)" size="small" :bordered="false">
-                    {{ t("到期于 {date}", { date: account.expires_on }) }}
-                  </n-tag>
-                  <n-tag v-if="accountIsReady(account)" :type="accountExpiryTagType(account)" size="small" :bordered="false">
-                    {{ accountExpiryLabel(account) }}
-                  </n-tag>
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <template #header-extra>
-            <n-space align="center" :size="8">
-              <n-tooltip v-if="accountIsReady(account)" trigger="hover">
-                <template #trigger>
-                  <n-button
-                    circle
-                    quaternary
-                    size="small"
-                    :aria-label="t('测试账号 {name}', { name: account.name })"
-                    :loading="pinging[account.id]"
-                    @click="pingAccount(account.id)"
-                  >
-                    <template #icon><n-icon :component="ThunderboltOutlined" /></template>
-                  </n-button>
-                </template>
-                {{ t("测试连接") }}
-              </n-tooltip>
-
-              <n-tooltip v-if="accountIsReady(account)" trigger="hover">
-                <template #trigger>
-                  <n-switch
-                    :value="account.enabled"
-                    :aria-label="account.enabled ? t('禁用账号 {name}', { name: account.name }) : t('启用账号 {name}', { name: account.name })"
-                    @update:value="toggleAccount(account.id)"
-                  />
-                </template>
-                {{ account.enabled ? t("禁用账号 {name}", { name: account.name }) : t("启用账号 {name}", { name: account.name }) }}
-              </n-tooltip>
-
-              <n-tooltip
-                v-if="accountIsReady(account)"
-                trigger="hover"
-              >
-                <template #trigger>
-                  <n-button
-                    circle
-                    quaternary
-                    size="small"
-                    :aria-label="t('刷新额度')"
-                    :loading="usageRefreshLoading[account.id]"
-                    :disabled="isUsageRefreshBlocked(account) || usageLoading[account.id] || !!usageLoadErrors[account.id]"
-                    @click="refreshAccountUsage(account.id)"
-                  >
-                    <template #icon><n-icon :component="ReloadOutlined" /></template>
-                  </n-button>
-                </template>
-                {{ usageRefreshTooltip(account) }}
-              </n-tooltip>
-
-              <n-popover
-                v-if="accountIsReady(account) && usageEdits[account.id]"
-                trigger="click"
-                placement="bottom-end"
-                :show-arrow="false"
-                :width="320"
-                style="max-width: calc(100vw - 64px)"
-                @update:show="(show: boolean) => show && focusUsageEditor(account.id)"
-              >
-                <template #trigger>
-                  <n-tooltip trigger="hover">
-                    <template #trigger>
-                      <n-button
-                        circle
-                        quaternary
-                        size="small"
-                        :aria-label="t('校准用量')"
-                        :disabled="!hasAvailableUsageEditor(account)"
-                      >
-                        <template #icon><n-icon :component="EditOutlined" /></template>
-                      </n-button>
-                    </template>
-                    {{ t("校准用量") }}
-                  </n-tooltip>
-                </template>
-
-                <div
-                  class="usage-editor-popover"
-                  :data-usage-editor-account-id="account.id"
-                >
-                  <p class="usage-editor-caption">
-                    {{ t("手动上报用量百分比，仅用于校准额度显示") }}
-                  </p>
-                  <template v-for="limit in usageLimits" :key="limit.key">
-                    <div
-                      v-if="!accountUsageLimitReached(account, limit.key)"
-                      class="usage-editor-row"
-                    >
-                      <div class="usage-editor-label">
-                        <span>{{ limit.label }}</span>
-                        <span class="usage-editor-value">
-                          {{ formatCost(usageCost(account.id, limit.key)) }} /
-                          {{ formatCost(limit.limit) }} ·
-                          {{ usageEdits[account.id][limit.key].draft }}%
-                        </span>
-                      </div>
-                      <div class="usage-editor">
-                        <n-input-number
-                          :value="usageEdits[account.id][limit.key].draft"
-                          :min="0"
-                          :max="100"
-                          :step="0.1"
-                          :precision="1"
-                          size="tiny"
-                          :show-button="false"
-                          :disabled="usageLoading[account.id] || usageEdits[account.id][limit.key].saving"
-                          :status="usageEdits[account.id][limit.key].error ? 'error' : undefined"
-                          :input-props="{
-                            'aria-label': t('{name} {period} 当前用量百分比', {
-                              name: account.name,
-                              period: limit.label,
-                            }),
-                          }"
-                          @update:value="updateUsageDraft(account.id, limit.key, $event)"
-                          @blur="saveUsage(account.id, limit.key)"
-                          @keydown.enter.prevent="saveUsage(account.id, limit.key)"
-                        >
-                          <template #suffix>%</template>
-                        </n-input-number>
-                        <n-slider
-                          v-usage-slider-label="t('{name} {period} 当前用量百分比', {
-                            name: account.name,
-                            period: limit.label,
-                          })"
-                          :value="usageEdits[account.id][limit.key].draft"
-                          :min="0"
-                          :max="100"
-                          :step="0.1"
-                          :disabled="usageLoading[account.id] || usageEdits[account.id][limit.key].saving"
-                          @update:value="updateUsageDraft(account.id, limit.key, $event)"
-                          @dragend="saveUsage(account.id, limit.key)"
-                          @focusout="saveUsage(account.id, limit.key)"
-                        />
-                      </div>
-                      <div class="usage-resets-row">
-                        <template v-if="WINDOW_FULL_MINUTES[limit.key] !== null">
-                          <span class="usage-resets-hint">{{ t("距上游重置还剩") }}</span>
-                          <n-input-number
-                            :value="resetsFirstField(account.id, limit.key)"
-                            :min="0"
-                            :max="resetsFirstMax(limit.key)"
-                            :step="1"
-                            size="tiny"
-                            :show-button="false"
-                            :disabled="usageLoading[account.id] || usageEdits[account.id][limit.key].saving"
-                            :input-props="{
-                              'aria-label': t('{name} {period} 距上游重置还剩{unit}', {
-                                name: account.name,
-                                period: limit.label,
-                                unit: resetsFirstLabel(limit.key),
-                              }),
-                            }"
-                            @update:value="updateResetsFirstField(account.id, limit.key, $event)"
-                            @blur="saveUsage(account.id, limit.key)"
-                            @keydown.enter.prevent="saveUsage(account.id, limit.key)"
-                          >
-                            <template #suffix>{{ resetsFirstLabel(limit.key) }}</template>
-                          </n-input-number>
-                          <n-input-number
-                            :value="resetsSecondField(account.id, limit.key)"
-                            :min="0"
-                            :max="resetsSecondMax(limit.key)"
-                            :step="1"
-                            size="tiny"
-                            :show-button="false"
-                            :disabled="usageLoading[account.id] || usageEdits[account.id][limit.key].saving"
-                            :input-props="{
-                              'aria-label': t('{name} {period} 距上游重置还剩{unit}', {
-                                name: account.name,
-                                period: limit.label,
-                                unit: resetsSecondLabel(limit.key),
-                              }),
-                            }"
-                            @update:value="updateResetsSecondField(account.id, limit.key, $event)"
-                            @blur="saveUsage(account.id, limit.key)"
-                            @keydown.enter.prevent="saveUsage(account.id, limit.key)"
-                          >
-                            <template #suffix>{{ resetsSecondLabel(limit.key) }}</template>
-                          </n-input-number>
-                        </template>
-                        <span v-else class="usage-resets-hint">
-                          {{ t("到期于 {date}", { date: account.expires_on }) }}
-                        </span>
-                      </div>
-                      <span
-                        v-if="usageEdits[account.id][limit.key].error"
-                        class="usage-save-error"
-                        role="alert"
-                      >
-                        {{ t("用量保存失败: {error}", {
-                          error: usageEdits[account.id][limit.key].error || "",
-                        }) }}
-                      </span>
-                    </div>
-                  </template>
-                </div>
-              </n-popover>
-
-              <n-dropdown
-                :options="accountMenuOptions(account)"
-                trigger="click"
-                placement="bottom-end"
-                @select="(key: string | number) => handleMenuSelect(key, account.id)"
-              >
-                <n-tooltip trigger="hover">
-                  <template #trigger>
-                    <n-button
-                      circle
-                      quaternary
-                      size="small"
-                      :aria-label="t('更多操作')"
-                    >
-                      <template #icon><n-icon :component="MoreOutlined" /></template>
-                    </n-button>
-                  </template>
-                  {{ t("更多操作") }}
-                </n-tooltip>
-              </n-dropdown>
-            </n-space>
-          </template>
-
-          <div v-if="!accountIsReady(account)" class="managed-pending">
-            <div>
-              <strong>{{ managedStepLabel(account.setup_step) }}</strong>
-              <p>{{ t("注册进度已保存。继续后仍会使用该账号自己的浏览器 Profile。") }}</p>
-            </div>
-            <n-button type="primary" secondary @click="openManagedWizard(account.id)">
-              {{ t("继续注册") }}
-            </n-button>
-          </div>
-          <div v-else-if="!quotaLimitsError">
-            <div v-if="usageLoadErrors[account.id]" class="usage-load-error" role="alert">
-              <span>{{ t("用量加载失败") }}</span>
-              <n-button
-                text
-                size="tiny"
-                type="primary"
-                :loading="usageLoading[account.id]"
-                @click="loadAccountUsage(account.id)"
-              >
-                {{ t("重试") }}
-              </n-button>
-            </div>
-            <UsageStrip
-              v-else
-              :account="account"
-              :usage="getUsage(account.id)"
-              :limits="usageLimits"
-              :editing="!!usageEdits[account.id]"
-            />
-            <p
-              v-if="!usageLoadErrors[account.id]"
-              class="usage-sync-meta"
-            >
-              {{ usageSyncCaption(account) }}
-            </p>
-          </div>
-        </n-card>
+          :account="account"
+          :usage="getUsage(account.id)"
+          :limits="usageLimits"
+          :edits="usageEdits[account.id]"
+          :now="now"
+          :order-handle-disabled="orderSaving || busy || accounts.length < 2"
+          :dragging="draggingAccountId === account.id"
+          :pinging="!!pinging[account.id]"
+          :usage-loading="!!usageLoading[account.id]"
+          :usage-load-error="usageLoadErrors[account.id] ?? null"
+          :usage-refresh-loading="!!usageRefreshLoading[account.id]"
+          :free-alias-saving="!!freeAliasSaving[account.id]"
+          :quota-limits-failed="!!quotaLimitsError"
+          :menu-options="accountMenuOptions(account, now)"
+          @order-keydown="handleOrderKeydown($event, account.id)"
+          @order-drag-start="startAccountDrag($event, account.id)"
+          @ping="pingAccount(account.id)"
+          @toggle="toggleAccount(account.id)"
+          @toggle-free-alias="toggleFreeAlias(account.id)"
+          @refresh-usage="refreshAccountUsage(account.id)"
+          @reload-usage="loadAccountUsage(account.id)"
+          @open-wizard="openManagedWizard(account.id)"
+          @menu-select="handleMenuSelect($event, account.id)"
+          @usage-editor-open="focusUsageEditor(account.id)"
+          @usage-update-draft="(key, value) => updateUsageDraft(account.id, key, value)"
+          @usage-update-resets-first="(key, value) => updateResetsFirstField(account.id, key, value)"
+          @usage-update-resets-second="(key, value) => updateResetsSecondField(account.id, key, value)"
+          @usage-save="(key) => saveUsage(account.id, key)"
+        />
       </div>
 
       <span class="sr-only" aria-live="polite" aria-atomic="true">{{ orderAnnouncement }}</span>
@@ -390,7 +100,7 @@
     <AccountFormModal
       v-model:show="showModal"
       :account="editingAccount"
-      :is-cooling="editingAccount ? accountIsCooling(editingAccount) : false"
+      :is-cooling="editingAccount ? isCooling(editingAccount, now) : false"
       :busy="busy"
       @save="onFormSave"
       @reset-cooldown="resetCooldown(editingAccount!.id)"
@@ -473,38 +183,23 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
 import {
   NAlert,
   NButton,
-  NCard,
-  NDropdown,
   NEmpty,
   NForm,
   NFormItem,
   NH3,
   NIcon,
   NInput,
-  NInputNumber,
   NModal,
-  NPopover,
   NSpin,
-  NSlider,
   NSpace,
-  NSwitch,
-  NTag,
-  NTooltip,
   useDialog,
   useMessage,
 } from "naive-ui";
-import {
-  EditOutlined,
-  HolderOutlined,
-  MoreOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-  ThunderboltOutlined,
-} from "@vicons/antd";
+import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, tauriApi } from "../api/tauri";
 import type {
   Account,
@@ -513,27 +208,14 @@ import type {
   AccountUpdate,
   BrowserCapabilities,
   BrowserTarget,
-  PricingLimits,
-  UsageWindow,
 } from "../api/tauri";
-import {
-  defaultResetsInMinutes,
-  isCooling,
-  isFreeCooling,
-  isUsageLimitReached,
-  isWindowCooling,
-  mergeUsageEdit,
-  normalizeUsagePercent,
-  resetsInMinutesForSave,
-  usagePercentFromCost,
-  WINDOW_FULL_MINUTES,
-  windowResetsAt,
-} from "./accounts-usage";
-import type { UsageEditState, UsageKey } from "./accounts-usage";
-import { daysUntilDate, expiryTagType, moveItem } from "./account-lifecycle";
+import { isCooling } from "./accounts-usage.ts";
+import { accountIsReady, accountMenuOptions } from "./account-display.ts";
+import { isZenFreeAccount } from "./account-providers.ts";
+import { useAccountUsage } from "./useAccountUsage.ts";
+import { useAccountOrder } from "./useAccountOrder.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
-import { formatCost } from "../utils/format.ts";
-import { userFacingError } from "../utils/errors.ts";
+import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import {
   DEFAULT_OPENCODE_INVITE_URL,
@@ -541,60 +223,17 @@ import {
   normalizeOpenCodeInviteUrl,
 } from "./managed-account";
 import AccountAddModal from "../components/AccountAddModal.vue";
+import AccountCard from "../components/AccountCard.vue";
 import AccountFormModal from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
-import UsageStrip from "../components/UsageStrip.vue";
-
-type AccountMenuOption = {
-  key: string | number;
-  label?: string;
-  accountId: string;
-  accountName: string;
-};
-
-type AccountUsageEdits = Record<UsageKey, UsageEditState>;
-
-type AccountDragState = {
-  accountId: string;
-  handle: HTMLElement;
-  moved: boolean;
-  pointerId: number;
-  previous: Account[];
-};
-
-function setUsageSliderLabel(el: HTMLElement, label: string) {
-  el.querySelector<HTMLElement>("[role='slider']")?.setAttribute("aria-label", label);
-}
-
-const vUsageSliderLabel = {
-  mounted: (el: HTMLElement, { value }: { value: string }) => setUsageSliderLabel(el, value),
-  updated: (el: HTMLElement, { value }: { value: string }) => setUsageSliderLabel(el, value),
-};
-
-const quotaLimits = ref<PricingLimits | null>(null);
-const quotaLimitsLoading = ref(false);
-const quotaLimitsError = ref("");
-const usageLimits = computed<Array<{ key: UsageKey; label: string; limit: number }>>(() => {
-  const limits = quotaLimits.value;
-  if (!limits) return [];
-  return [
-    { key: "window_5h", label: t("5小时"), limit: limits.window_5h },
-    { key: "window_week", label: t("本周"), limit: limits.window_week },
-    { key: "window_month", label: t("本月"), limit: limits.window_month },
-  ];
-});
 
 const dialog = useDialog();
 const message = useMessage();
 const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
-const usageMap = ref<Record<string, UsageWindow>>({});
-const usageEdits = ref<Record<string, AccountUsageEdits>>({});
-const usageLoading = ref<Record<string, boolean>>({});
-const usageLoadErrors = ref<Record<string, string | null>>({});
-const usageRefreshLoading = ref<Record<string, boolean>>({});
 const pinging = ref<Record<string, boolean>>({});
+const freeAliasSaving = ref<Record<string, boolean>>({});
 const showModal = ref(false);
 const showAddModal = ref(false);
 const showManagedCreate = ref(false);
@@ -613,11 +252,43 @@ const browserCapabilities = ref<BrowserCapabilities>({
 });
 const openingBrowserTarget = ref<BrowserTarget | null>(null);
 const busy = ref(false);
-const orderSaving = ref(false);
-const draggingAccountId = ref<string | null>(null);
-const orderAnnouncement = ref("");
 const now = ref(Date.now());
-let accountDrag: AccountDragState | null = null;
+
+const {
+  quotaLimits,
+  quotaLimitsLoading,
+  quotaLimitsError,
+  usageLimits,
+  usageMap,
+  usageEdits,
+  usageLoading,
+  usageLoadErrors,
+  usageRefreshLoading,
+  getUsage,
+  focusUsageEditor,
+  updateUsageDraft,
+  updateResetsFirstField,
+  updateResetsSecondField,
+  saveUsage,
+  refreshAccountUsage,
+  loadQuotaLimits,
+  loadAccountUsage,
+  retryQuotaLimits,
+} = useAccountUsage(accounts, now);
+
+const {
+  orderSaving,
+  draggingAccountId,
+  orderAnnouncement,
+  startAccountDrag,
+  handleOrderKeydown,
+  revertActiveDrag,
+} = useAccountOrder({
+  accounts,
+  busy,
+  loadAccountUsage,
+  removeAccountState,
+});
 
 const managedWizardAccount = computed(() => (
   accounts.value.find(({ id }) => id === managedWizardAccountId.value) ?? null
@@ -656,418 +327,6 @@ const canCreateManagedDraft = computed(() => (
   && Boolean(managedInvitePreview.value.normalized)
   && !managedInvitePreview.value.status
 ));
-
-function errorDetail(error: unknown): string {
-  return userFacingError(error, t("无法连接到本地服务，请确认程序正在运行后重试"));
-}
-
-function blankUsage(accountId: string): UsageWindow {
-  return {
-    account_id: accountId,
-    window_5h: 0,
-    window_week: 0,
-    window_month: 0,
-    resets_in_5h: null,
-    resets_in_week: null,
-    resets_in_month: null,
-  };
-}
-
-function getUsage(accountId: string): UsageWindow {
-  return usageMap.value[accountId] || blankUsage(accountId);
-}
-
-function usageCost(accountId: string, key: UsageKey): number {
-  return getUsage(accountId)[key];
-}
-
-function usageLimit(key: UsageKey): number {
-  return usageLimits.value.find((limit) => limit.key === key)?.limit ?? 0;
-}
-
-function accountUsageLimitReached(account: Account, key: UsageKey): boolean {
-  return isUsageLimitReached(account, key, now.value);
-}
-
-function hasAvailableUsageEditor(account: Account): boolean {
-  if (usageLoading.value[account.id] || usageLoadErrors.value[account.id]) return false;
-  return usageLimits.value.some(({ key }) => !accountUsageLimitReached(account, key));
-}
-
-async function focusUsageEditor(accountId: string) {
-  await nextTick();
-  requestAnimationFrame(() => {
-    const editor = Array.from(
-      document.querySelectorAll<HTMLElement>(".usage-editor-popover"),
-    ).find((element) => element.dataset.usageEditorAccountId === accountId);
-    editor?.querySelector<HTMLInputElement>(".n-input-number input")?.focus();
-  });
-}
-
-function usageEditsFromWindow(usage: UsageWindow): AccountUsageEdits {
-  return Object.fromEntries(usageLimits.value.map(({ key, limit }) => {
-    const percent = usagePercentFromCost(usage[key], limit);
-    const resetsInMin = defaultResetsInMinutes(usage, key, now.value);
-    return [key, {
-      draft: percent,
-      saved: percent,
-      saving: false,
-      error: null,
-      resets_in_minutes_draft: resetsInMin,
-      resets_at_saved: windowResetsAt(usage, key),
-      resets_dirty: false,
-    }];
-  })) as AccountUsageEdits;
-}
-
-function syncUsageEdits(accountId: string, usage: UsageWindow) {
-  const existing = usageEdits.value[accountId];
-  if (!existing) {
-    usageEdits.value[accountId] = usageEditsFromWindow(usage);
-    return;
-  }
-  const account = accounts.value.find(({ id }) => id === accountId);
-  for (const { key, limit } of usageLimits.value) {
-    const saved = usagePercentFromCost(usage[key], limit);
-    const edit = existing[key];
-    const wasActuallyReset = account && isUsageLimitReached(account, key, now.value);
-    if (!edit) {
-      const created = mergeUsageEdit(undefined, saved, Boolean(wasActuallyReset));
-      created.resets_in_minutes_draft = defaultResetsInMinutes(usage, key, now.value);
-      created.resets_at_saved = windowResetsAt(usage, key);
-      existing[key] = created;
-      continue;
-    }
-    Object.assign(edit, mergeUsageEdit(edit, saved, Boolean(wasActuallyReset)));
-    edit.resets_at_saved = windowResetsAt(usage, key);
-    if (wasActuallyReset || (!edit.saving && !edit.resets_dirty)) {
-      edit.resets_in_minutes_draft = defaultResetsInMinutes(usage, key, now.value);
-      edit.resets_dirty = false;
-    }
-  }
-}
-
-function updateUsageDraft(accountId: string, key: UsageKey, value: number | null) {
-  const edit = usageEdits.value[accountId]?.[key];
-  if (!edit || edit.saving || value === null) return;
-  edit.draft = normalizeUsagePercent(value);
-}
-
-// ponytail: 用户要求直接编辑"天+小时"或"小时+分钟"，而不是分钟总数。
-// 5h 窗口（<1天）显示 [小时][分钟]；周窗口（≥1天）显示 [天][小时]。
-function resetsFirstLabel(key: UsageKey): string {
-  return key === "window_5h" ? t("小时") : t("天");
-}
-
-function resetsSecondLabel(key: UsageKey): string {
-  return key === "window_5h" ? t("分钟") : t("小时");
-}
-
-function resetsFirstMax(key: UsageKey): number {
-  if (key === "window_5h") return 5;
-  if (key === "window_week") return 7;
-  return 0;
-}
-
-function resetsSecondMax(key: UsageKey): number {
-  if (key === "window_5h") return 59;
-  if (key === "window_week") return 23;
-  return 0;
-}
-
-function resetsFirstField(accountId: string, key: UsageKey): number {
-  const edit = usageEdits.value[accountId]?.[key];
-  if (!edit) return 0;
-  const m = resetsInMinutesForSave(edit, key, now.value);
-  if (m === null) return 0;
-  if (key === "window_5h") return Math.floor(m / 60);
-  if (key === "window_week") return Math.floor(m / (24 * 60));
-  return 0;
-}
-
-function resetsSecondField(accountId: string, key: UsageKey): number {
-  const edit = usageEdits.value[accountId]?.[key];
-  if (!edit) return 0;
-  const m = resetsInMinutesForSave(edit, key, now.value);
-  if (m === null) return 0;
-  if (key === "window_5h") return m % 60;
-  if (key === "window_week") return Math.floor((m % (24 * 60)) / 60);
-  return 0;
-}
-
-function fieldsToMinutes(first: number, second: number, key: UsageKey): number {
-  if (key === "window_5h") return first * 60 + second;
-  if (key === "window_week") return first * 24 * 60 + second * 60;
-  return 0;
-}
-
-function updateResetsFirstField(accountId: string, key: UsageKey, value: number | null) {
-  const edit = usageEdits.value[accountId]?.[key];
-  if (!edit || edit.saving) return;
-  if (WINDOW_FULL_MINUTES[key] === null) return;
-  const v = value === null ? 0 : Math.max(0, Math.round(value));
-  const second = resetsSecondField(accountId, key);
-  const max = WINDOW_FULL_MINUTES[key] ?? 10080;
-  edit.resets_in_minutes_draft = Math.min(max, fieldsToMinutes(v, second, key));
-  edit.resets_dirty = true;
-}
-
-function updateResetsSecondField(accountId: string, key: UsageKey, value: number | null) {
-  const edit = usageEdits.value[accountId]?.[key];
-  if (!edit || edit.saving) return;
-  if (WINDOW_FULL_MINUTES[key] === null) return;
-  const v = value === null ? 0 : Math.max(0, Math.round(value));
-  const first = resetsFirstField(accountId, key);
-  const max = WINDOW_FULL_MINUTES[key] ?? 10080;
-  edit.resets_in_minutes_draft = Math.min(max, fieldsToMinutes(first, v, key));
-  edit.resets_dirty = true;
-}
-
-function isUsageRefreshBlocked(account: Account, now = Date.now()): boolean {
-  const next = account.usage_sync_next_allowed_at;
-  if (!next) return false;
-  const ts = Date.parse(next);
-  return Number.isFinite(ts) && ts > now;
-}
-
-function formatUsageSyncTime(value: string | null | undefined): string {
-  if (!value) return t("尚未官方同步");
-  const ts = Date.parse(value);
-  if (!Number.isFinite(ts)) return value;
-  return new Date(ts).toLocaleString();
-}
-
-function usageSyncCaption(account: Account, now = Date.now()): string {
-  const last = account.usage_sync_last_success_at
-    ? t("上次官方同步: {time}", { time: formatUsageSyncTime(account.usage_sync_last_success_at) })
-    : t("尚未官方同步");
-  if (!isUsageRefreshBlocked(account, now)) return last;
-  return `${last} · ${t("刷新额度冷却中，请于 {time} 后重试", {
-    time: formatUsageSyncTime(account.usage_sync_next_allowed_at),
-  })}`;
-}
-
-function usageRefreshTooltip(account: Account): string {
-  if (isUsageRefreshBlocked(account)) {
-    return t("刷新额度冷却中，请于 {time} 后重试", {
-      time: formatUsageSyncTime(account.usage_sync_next_allowed_at),
-    });
-  }
-  return t("从 OpenCode 官方用量刷新额度");
-}
-
-function patchAccountUsageSync(
-  accountId: string,
-  patch: Partial<Pick<Account, "usage_sync_last_success_at" | "usage_sync_next_allowed_at">>,
-): void {
-  accounts.value = accounts.value.map((account) =>
-    account.id === accountId ? { ...account, ...patch } : account,
-  );
-}
-
-async function refreshAccountUsage(accountId: string): Promise<void> {
-  const account = accounts.value.find((item) => item.id === accountId);
-  if (!account) return;
-  if (
-    usageRefreshLoading.value[accountId]
-    || usageLoading.value[accountId]
-    || isUsageRefreshBlocked(account)
-  ) {
-    return;
-  }
-  usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: true };
-  try {
-    const result = await tauriApi.refreshAccountUsage(accountId);
-    usageMap.value[accountId] = result.usage;
-    syncUsageEdits(accountId, result.usage);
-    patchAccountUsageSync(accountId, {
-      usage_sync_last_success_at: result.last_success_at,
-      usage_sync_next_allowed_at: result.next_allowed_at,
-    });
-    message.success(t("额度已从 OpenCode 官方用量刷新"));
-  } catch (error) {
-    if (error instanceof DashboardRequestError && error.status === 429) {
-      const nextAllowed = error.nextAllowedAt;
-      if (nextAllowed) {
-        patchAccountUsageSync(accountId, { usage_sync_next_allowed_at: nextAllowed });
-      }
-      const seconds = error.retryAfterSeconds;
-      message.warning(
-        seconds
-          ? t("请稍后再试（约 {seconds} 秒）", { seconds: String(seconds) })
-          : t("刷新额度失败: {error}", { error: errorDetail(error) }),
-      );
-    } else {
-      message.error(t("刷新额度失败: {error}", { error: errorDetail(error) }));
-    }
-  } finally {
-    usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: false };
-  }
-}
-
-async function saveUsage(accountId: string, key: UsageKey) {
-  const edit = usageEdits.value[accountId]?.[key];
-  if (!edit || edit.saving) return;
-  const percent = normalizeUsagePercent(edit.draft);
-  edit.draft = percent;
-  const resetsChanged = edit.resets_dirty;
-  if (percent === edit.saved && !resetsChanged && !edit.error) return;
-  edit.saving = true;
-  edit.error = null;
-  const resetsInMin = resetsInMinutesForSave(edit, key);
-  try {
-    const usage = await tauriApi.updateAccountUsage(
-      accountId,
-      key,
-      percent,
-      resetsInMin,
-    );
-    usageMap.value[accountId] = {
-      ...getUsage(accountId),
-      [key]: usage[key],
-      ...(key === "window_5h" ? { resets_in_5h: usage.resets_in_5h } : {}),
-      ...(key === "window_week" ? { resets_in_week: usage.resets_in_week } : {}),
-      ...(key === "window_month" ? { resets_in_month: usage.resets_in_month } : {}),
-    };
-    const saved = usagePercentFromCost(usage[key], usageLimit(key));
-    edit.draft = saved;
-    edit.saved = saved;
-    edit.resets_at_saved = windowResetsAt(usage, key);
-    edit.resets_in_minutes_draft = defaultResetsInMinutes(usage, key);
-    edit.resets_dirty = false;
-  } catch (error) {
-    edit.error = errorDetail(error);
-    message.error(t("用量保存失败: {error}", { error: edit.error }));
-  } finally {
-    edit.saving = false;
-  }
-}
-
-function accountIsCooling(account: Account): boolean {
-  return isCooling(account, now.value);
-}
-
-function accountIsReady(account: Account): boolean {
-  return account.setup_step === "ready";
-}
-
-function managedStepLabel(step: AccountSetupStep): string {
-  switch (step) {
-    case "google_account": return t("待完成：登录身份");
-    case "opencode_registration": return t("待完成：邀请注册");
-    case "payment": return t("待完成：支付");
-    case "key_verification": return t("待完成：验证 Key");
-    case "ready": return t("注册完成");
-  }
-}
-
-function formatRemaining(account: Account): string {
-  if (!account.cooldown_until) return "";
-  const ms = new Date(account.cooldown_until).getTime() - now.value;
-  if (ms <= 0) return t("{seconds}秒", { seconds: 0 });
-  const seconds = Math.ceil(ms / 1000);
-  if (seconds < 60) return t("{seconds}秒", { seconds });
-  const min = Math.floor(ms / 60000);
-  if (min < 60) return t("{minutes}分钟", { minutes: min });
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return t("{hours}小时{minutes}分钟", { hours: hr, minutes: min % 60 });
-  const day = Math.floor(hr / 24);
-  return t("{days}天{hours}小时", { days: day, hours: hr % 24 });
-}
-
-function cooldownDetails(account: Account): string {
-  const active = usageLimits.value
-    .filter((limit) => isWindowCooling(account, limit.key, now.value))
-    .map((limit) => limit.label);
-  if (
-    account.cooldown_generic_until
-    && Date.parse(account.cooldown_generic_until) > now.value
-  ) {
-    active.unshift(t("冷却中"));
-  }
-  if (isFreeCooling(account, now.value)) {
-    active.push(t("Free"));
-  }
-  return active.length > 0 ? active.join(" · ") : t("冷却中");
-}
-
-function accountExpiryDays(account: Account): number {
-  return daysUntilDate(account.expires_on, now.value);
-}
-
-function accountExpiryTagType(account: Account) {
-  return expiryTagType(accountExpiryDays(account));
-}
-
-function accountExpiryLabel(account: Account): string {
-  const days = accountExpiryDays(account);
-  if (days === 1) return t("剩 1 天");
-  if (days > 0) return t("剩 {days} 天", { days });
-  if (days === 0) return t("今天到期");
-  if (days === -1) return t("已到期 1 天");
-  return t("已到期 {days} 天", { days: Number.isFinite(days) ? Math.abs(days) : 0 });
-}
-
-function accountStatusLabel(account: Account): string {
-  if (!accountIsReady(account)) return t("注册中");
-  if (account.auth_error) {
-    return account.enabled
-      ? t("认证失效（401 熔断）")
-      : `${t("已禁用")} · ${t("认证失效（401 熔断）")}`;
-  }
-  if (!account.enabled) return t("已禁用");
-  if (accountIsCooling(account)) return t("冷却中·剩 {time}", { time: formatRemaining(account) });
-  return t("可用");
-}
-
-function accountStatusTagType(account: Account): "success" | "warning" | "error" | "default" {
-  if (!accountIsReady(account)) return "warning";
-  if (account.auth_error) return "error";
-  if (!account.enabled) return "default";
-  if (accountIsCooling(account)) return "warning";
-  return "success";
-}
-
-function accountMenuOptions(account: Account): AccountMenuOption[] {
-  const options: AccountMenuOption[] = [];
-  if (accountIsReady(account)) {
-    options.push({
-      key: "open-console",
-      label: t("打开 OpenCode 官网"),
-      accountId: account.id,
-      accountName: account.name,
-    });
-    options.push({ key: "edit", label: t("编辑账号"), accountId: account.id, accountName: account.name });
-  } else {
-    options.push({
-      key: "continue-setup",
-      label: t("继续注册"),
-      accountId: account.id,
-      accountName: account.name,
-    });
-  }
-  if (accountIsReady(account) && accountIsCooling(account)) {
-    options.push({
-      key: "reset",
-      label: t("重置冷却"),
-      accountId: account.id,
-      accountName: account.name,
-    });
-  }
-  options.push({
-    key: "reset-profile",
-    label: t("重置官网登录状态"),
-    accountId: account.id,
-    accountName: account.name,
-  });
-  options.push({
-    key: "delete",
-    label: t("删除账号"),
-    accountId: account.id,
-    accountName: account.name,
-  });
-  return options;
-}
 
 function handleMenuSelect(key: string | number, accountId: string) {
   if (key === "open-console") {
@@ -1201,7 +460,7 @@ async function createManagedAccount(): Promise<void> {
     showManagedWizard.value = true;
     message.success(t("注册草稿已创建"));
   } catch (error) {
-    message.error(t("创建注册草稿失败: {error}", { error: errorDetail(error) }));
+    message.error(t("创建注册草稿失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
   }
@@ -1216,7 +475,7 @@ async function advanceManagedSetup(accountId: string, setupStep: AccountSetupSte
     message.success(t("注册进度已保存"));
   } catch (error) {
     await recoverManagedSetupConflict(accountId, error);
-    message.error(t("保存注册进度失败: {error}", { error: errorDetail(error) }));
+    message.error(t("保存注册进度失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
   }
@@ -1231,13 +490,13 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
     if (accountIsReady(updated)) {
       showManagedWizard.value = false;
       await loadAccountUsage(updated.id);
-      message.success(accountIsCooling(updated)
+      message.success(isCooling(updated, now.value)
         ? t("Key 有效，账号已启用并按上游响应进入冷却")
         : t("Key 验证成功，账号已启用"));
     }
   } catch (error) {
     await recoverManagedSetupConflict(accountId, error);
-    message.error(t("Key 验证失败: {error}", { error: errorDetail(error) }));
+    message.error(t("Key 验证失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
     busy.value = false;
   }
@@ -1272,7 +531,7 @@ async function openAccountBrowser(accountId: string, target: BrowserTarget): Pro
     }
   } catch (error) {
     remoteTab?.close();
-    message.error(t("打开浏览器失败: {error}", { error: errorDetail(error) }));
+    message.error(t("打开浏览器失败: {error}", { error: dashboardErrorDetail(error) }));
   } finally {
     openingBrowserTarget.value = null;
   }
@@ -1288,141 +547,8 @@ async function resetBrowserProfile(accountId: string): Promise<void> {
     }
     message.success(t("官网登录状态已重置"));
   } catch (error) {
-    message.error(t("重置官网登录状态失败: {error}", { error: errorDetail(error) }));
+    message.error(t("重置官网登录状态失败: {error}", { error: dashboardErrorDetail(error) }));
   }
-}
-
-function sameAccountOrder(left: readonly Account[], right: readonly Account[]): boolean {
-  return left.length === right.length && left.every((account, index) => account.id === right[index]?.id);
-}
-
-function clearAccountDrag(state: AccountDragState): void {
-  window.removeEventListener("pointermove", previewAccountDrag);
-  window.removeEventListener("pointerup", finishAccountDrag);
-  window.removeEventListener("pointercancel", cancelAccountDrag);
-  accountDrag = null;
-  draggingAccountId.value = null;
-  if (state.handle.hasPointerCapture(state.pointerId)) {
-    state.handle.releasePointerCapture(state.pointerId);
-  }
-}
-
-async function persistAccountOrder(previous: Account[], movedAccountId: string): Promise<void> {
-  if (sameAccountOrder(previous, accounts.value)) return;
-  orderSaving.value = true;
-  try {
-    const saved = await tauriApi.reorderAccounts(accounts.value.map(({ id }) => id));
-    applyLoadedAccounts(saved);
-    const moved = accounts.value.find(({ id }) => id === movedAccountId);
-    const position = accounts.value.findIndex(({ id }) => id === movedAccountId) + 1;
-    if (moved && position > 0) {
-      orderAnnouncement.value = t("账号 {name} 已移至第 {position} 位", {
-        name: moved.name,
-        position,
-      });
-    }
-    message.success(t("账号顺序已更新"));
-  } catch (error) {
-    if (error instanceof DashboardRequestError && error.status === 409) {
-      try {
-        const knownIds = new Set(accounts.value.map(({ id }) => id));
-        const loaded = await tauriApi.getAccounts();
-        const loadedIds = new Set(loaded.map(({ id }) => id));
-        for (const id of knownIds) {
-          if (!loadedIds.has(id)) removeAccountState(id);
-        }
-        applyLoadedAccounts(loaded);
-        await mapWithConcurrency(
-          loaded.filter(({ id }) => !knownIds.has(id)),
-          4,
-          ({ id }) => loadAccountUsage(id),
-        );
-      } catch {
-        accounts.value = previous;
-      }
-    } else {
-      accounts.value = previous;
-    }
-    const failure = t("保存账号顺序失败: {error}", { error: errorDetail(error) });
-    orderAnnouncement.value = failure;
-    message.error(failure);
-  } finally {
-    orderSaving.value = false;
-  }
-}
-
-function startAccountDrag(event: PointerEvent, accountId: string): void {
-  if (
-    orderSaving.value
-    || busy.value
-    || accounts.value.length < 2
-    || accountDrag !== null
-    || !event.isPrimary
-    || (event.pointerType === "mouse" && event.button !== 0)
-  ) return;
-  const handle = event.currentTarget as HTMLElement;
-  event.preventDefault();
-  handle.setPointerCapture(event.pointerId);
-  accountDrag = {
-    accountId,
-    handle,
-    moved: false,
-    pointerId: event.pointerId,
-    previous: [...accounts.value],
-  };
-  draggingAccountId.value = accountId;
-  window.addEventListener("pointermove", previewAccountDrag, { passive: false });
-  window.addEventListener("pointerup", finishAccountDrag);
-  window.addEventListener("pointercancel", cancelAccountDrag);
-}
-
-function previewAccountDrag(event: PointerEvent): void {
-  const state = accountDrag;
-  if (!state || state.pointerId !== event.pointerId) return;
-  event.preventDefault();
-  const target = document
-    .elementFromPoint(event.clientX, event.clientY)
-    ?.closest<HTMLElement>(".account-card[data-account-id]");
-  const targetId = target?.dataset.accountId;
-  if (!targetId || targetId === state.accountId) return;
-  const fromIndex = accounts.value.findIndex(({ id }) => id === state.accountId);
-  const toIndex = accounts.value.findIndex(({ id }) => id === targetId);
-  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
-  accounts.value = moveItem(accounts.value, fromIndex, toIndex);
-  state.moved = true;
-}
-
-async function finishAccountDrag(event: PointerEvent): Promise<void> {
-  const state = accountDrag;
-  if (!state || state.pointerId !== event.pointerId) return;
-  event.preventDefault();
-  clearAccountDrag(state);
-  if (!state.moved || sameAccountOrder(state.previous, accounts.value)) return;
-  await persistAccountOrder(state.previous, state.accountId);
-}
-
-function cancelAccountDrag(event: PointerEvent): void {
-  const state = accountDrag;
-  if (!state || state.pointerId !== event.pointerId) return;
-  event.preventDefault();
-  accounts.value = state.previous;
-  clearAccountDrag(state);
-}
-
-async function handleOrderKeydown(event: KeyboardEvent, accountId: string): Promise<void> {
-  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-  event.preventDefault();
-  if (orderSaving.value || busy.value || accounts.value.length < 2) return;
-  const fromIndex = accounts.value.findIndex(({ id }) => id === accountId);
-  const toIndex = fromIndex + (event.key === "ArrowUp" ? -1 : 1);
-  if (fromIndex < 0 || toIndex < 0 || toIndex >= accounts.value.length) return;
-  const previous = [...accounts.value];
-  accounts.value = moveItem(accounts.value, fromIndex, toIndex);
-  await persistAccountOrder(previous, accountId);
-}
-
-function applyLoadedAccounts(loaded: Account[]): void {
-  accounts.value = loaded;
 }
 
 function replaceAccount(account: Account): void {
@@ -1441,18 +567,19 @@ function removeAccountState(id: string): void {
   delete usageLoading.value[id];
   delete usageLoadErrors.value[id];
   delete pinging.value[id];
+  delete freeAliasSaving.value[id];
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
   const loaded = await tauriApi.getAccounts();
-  applyLoadedAccounts(loaded);
+  accounts.value = loaded;
   const account = loaded.find((item) => item.id === id);
   if (!account) {
     removeAccountState(id);
     message.warning(t("未找到该账号，已为你刷新列表"));
     return null;
   }
-  if (accountIsReady(account)) {
+  if (accountIsReady(account) && !isZenFreeAccount(account)) {
     await loadAccountUsage(id);
   } else {
     delete usageMap.value[id];
@@ -1480,34 +607,19 @@ async function loadAccounts() {
   try {
     const loaded = await tauriApi.getAccounts();
     accounts.value = loaded;
-    // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端
+    // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
     if (quotaLimits.value) {
       await mapWithConcurrency(
-        loaded.filter(accountIsReady),
+        loaded.filter((account) => accountIsReady(account) && !isZenFreeAccount(account)),
         4,
         (account) => loadAccountUsage(account.id),
       );
     }
   } catch (e) {
-    accountListError.value = errorDetail(e);
+    accountListError.value = dashboardErrorDetail(e);
     message.error(t("加载账号失败: {error}", { error: accountListError.value }));
   } finally {
     accountListLoading.value = false;
-  }
-}
-
-async function loadQuotaLimits(): Promise<boolean> {
-  quotaLimitsLoading.value = true;
-  quotaLimitsError.value = "";
-  try {
-    quotaLimits.value = (await tauriApi.getPricing()).limits;
-    return true;
-  } catch (error) {
-    quotaLimits.value = null;
-    quotaLimitsError.value = errorDetail(error);
-    return false;
-  } finally {
-    quotaLimitsLoading.value = false;
   }
 }
 
@@ -1526,7 +638,7 @@ async function loadRegistrationOptions(): Promise<void> {
   } else {
     browserCapabilities.value = {
       mode: "unsupported",
-      reason: t("浏览器能力检测失败: {error}", { error: errorDetail(browserResult.reason) }),
+      reason: t("浏览器能力检测失败: {error}", { error: dashboardErrorDetail(browserResult.reason) }),
     };
   }
 }
@@ -1538,26 +650,15 @@ async function initializeAccounts() {
   await registrationOptions;
 }
 
-async function retryQuotaLimits() {
-  if (!await loadQuotaLimits()) return;
-  await mapWithConcurrency(accounts.value.filter(accountIsReady), 4, (account) => loadAccountUsage(account.id));
-}
-
-async function loadAccountUsage(accountId: string) {
-  usageLoading.value[accountId] = true;
-  usageLoadErrors.value[accountId] = null;
-  try {
-    const usage = await tauriApi.getAccountUsage(accountId);
-    usageMap.value[accountId] = usage;
-    syncUsageEdits(accountId, usage);
-  } catch (error) {
-    usageLoadErrors.value[accountId] = errorDetail(error);
-  } finally {
-    usageLoading.value[accountId] = false;
-  }
-}
-
-async function onFormSave(payload: { name: string; username: string; key?: string; purchase_date?: string; notes: string }) {
+async function onFormSave(payload: {
+  name: string;
+  username: string;
+  key?: string;
+  provider_id?: string;
+  offering_id?: string;
+  purchase_date?: string;
+  notes: string;
+}) {
   if (editingAccount.value) {
     const update: AccountUpdate = {
       name: payload.name,
@@ -1577,7 +678,7 @@ async function onFormSave(payload: { name: string; username: string; key?: strin
       message.success(t("账号已更新"));
       showModal.value = false;
     } catch (e) {
-      message.error(t("保存失败: {error}", { error: errorDetail(e) }));
+      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
     } finally {
       busy.value = false;
     }
@@ -1586,6 +687,8 @@ async function onFormSave(payload: { name: string; username: string; key?: strin
       name: payload.name,
       username: payload.username,
       key: payload.key || "",
+      provider_id: payload.provider_id,
+      offering_id: payload.offering_id,
       purchase_date: payload.purchase_date,
       notes: payload.notes,
     };
@@ -1594,10 +697,12 @@ async function onFormSave(payload: { name: string; username: string; key?: strin
       const created = await tauriApi.createAccount(input);
       message.success(t("账号已添加"));
       addAccount(created);
-      await loadAccountUsage(created.id);
+      if (!isZenFreeAccount(created)) {
+        await loadAccountUsage(created.id);
+      }
       showModal.value = false;
     } catch (e) {
-      message.error(t("保存失败: {error}", { error: errorDetail(e) }));
+      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
     } finally {
       busy.value = false;
     }
@@ -1612,13 +717,13 @@ async function pingAccount(id: string) {
   } catch (e) {
     message.error(e instanceof DashboardRequestError && e.status === 429
       ? t("账号达到额度或限流，已进入冷却")
-      : t("Ping 失败: {error}", { error: errorDetail(e) }));
+      : t("Ping 失败: {error}", { error: dashboardErrorDetail(e) }));
   } finally {
     pinging.value[id] = false;
     try {
       await refreshAccountState(id);
     } catch (e) {
-      message.error(t("加载账号失败: {error}", { error: errorDetail(e) }));
+      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(e) }));
     }
   }
 }
@@ -1628,7 +733,22 @@ async function toggleAccount(id: string) {
     const updated = await tauriApi.toggleAccount(id);
     replaceAccount(updated);
   } catch (e) {
-    message.error(t("切换失败: {error}", { error: errorDetail(e) }));
+    message.error(t("切换失败: {error}", { error: dashboardErrorDetail(e) }));
+  }
+}
+
+async function toggleFreeAlias(id: string) {
+  const account = accounts.value.find((item) => item.id === id);
+  if (!account || !isZenFreeAccount(account) || freeAliasSaving.value[id]) return;
+  freeAliasSaving.value[id] = true;
+  try {
+    const updated = await tauriApi.setAccountFreeAlias(id, !account.free_alias_enabled);
+    replaceAccount(updated);
+    message.success(t("Free 别名设置已保存"));
+  } catch (e) {
+    message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
+  } finally {
+    freeAliasSaving.value[id] = false;
   }
 }
 
@@ -1638,7 +758,7 @@ async function deleteAccount(id: string) {
     message.success(t("账号已删除"));
     removeAccountState(id);
   } catch (e) {
-    message.error(t("删除失败: {error}", { error: errorDetail(e) }));
+    message.error(t("删除失败: {error}", { error: dashboardErrorDetail(e) }));
   }
 }
 
@@ -1648,7 +768,7 @@ async function resetCooldown(id: string) {
     replaceAccount(updated);
     message.success(t("已重置冷却"));
   } catch (e) {
-    message.error(t("重置失败: {error}", { error: errorDetail(e) }));
+    message.error(t("重置失败: {error}", { error: dashboardErrorDetail(e) }));
   }
 }
 
@@ -1685,10 +805,7 @@ onActivated(() => {
 onDeactivated(stopClock);
 onUnmounted(() => {
   stopClock();
-  if (accountDrag) {
-    accounts.value = accountDrag.previous;
-    clearAccountDrag(accountDrag);
-  }
+  revertActiveDrag();
 });
 </script>
 
@@ -1716,215 +833,5 @@ onUnmounted(() => {
   min-height: 160px;
   display: grid;
   place-items: center;
-}
-
-.account-card {
-  border-radius: 14px;
-  box-shadow: var(--ocg-shadow-sm);
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
-}
-
-.account-card--cooling {
-  border-color: color-mix(in srgb, var(--ocg-error) 45%, transparent);
-}
-
-.account-card--pending {
-  border-color: color-mix(in srgb, var(--ocg-primary) 32%, var(--ocg-divider));
-}
-
-.account-card--dragging {
-  border-color: var(--ocg-primary);
-  box-shadow: 0 10px 28px color-mix(in srgb, var(--ocg-primary) 18%, transparent);
-  opacity: 0.72;
-}
-
-.account-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  width: 100%;
-}
-
-.account-order-handle {
-  flex: 0 0 auto;
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-}
-
-.account-order-handle--dragging {
-  cursor: grabbing;
-}
-
-.account-heading {
-  display: flex;
-  align-items: center;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.account-name-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 6px;
-  min-width: 0;
-}
-
-.account-name {
-  overflow: hidden;
-  color: var(--ocg-ink);
-  font-size: var(--ocg-font-md);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-name-row :deep(.n-tag) {
-  flex: 0 0 auto;
-}
-
-.managed-pending {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 2px 2px;
-}
-
-.managed-pending strong {
-  color: var(--ocg-ink);
-  font-size: var(--ocg-font-md);
-}
-
-.managed-pending p {
-  margin: 4px 0 0;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-sm);
-}
-
-.usage-sync-meta {
-  margin: 8px 0 0;
-  color: var(--ocg-text-3);
-  font-size: var(--ocg-font-size-12);
-  line-height: 1.4;
-}
-
-.usage-load-error {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 42px;
-  color: var(--ocg-error);
-  font-size: var(--ocg-font-sm);
-}
-
-.usage-editor-popover {
-  display: grid;
-  width: 100%;
-  gap: 12px;
-}
-
-.usage-editor-caption {
-  margin: 0;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-sm);
-  line-height: 1.5;
-}
-
-.usage-editor-row {
-  display: grid;
-  gap: 8px;
-}
-
-.usage-editor-row + .usage-editor-row {
-  padding-top: 12px;
-  border-top: 1px solid var(--ocg-divider);
-}
-
-.usage-editor-label {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--ocg-ink);
-  font-size: var(--ocg-font-sm);
-  font-weight: 600;
-}
-
-.usage-editor-value {
-  color: var(--ocg-muted);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: var(--ocg-font-xs);
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.usage-editor {
-  display: grid;
-  grid-template-columns: 78px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-}
-
-.usage-editor :deep(.n-input-number) {
-  width: 78px;
-}
-
-.usage-resets-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--ocg-font-xs);
-  color: var(--ocg-muted);
-}
-
-.usage-resets-row :deep(.n-input-number) {
-  width: 72px;
-}
-
-.usage-resets-hint {
-  white-space: nowrap;
-}
-
-.usage-save-error {
-  color: var(--ocg-error);
-  font-size: var(--ocg-font-xs);
-}
-
-@media (max-width: 900px) {
-  .account-card :deep(.n-card-header) {
-    align-items: flex-start;
-  }
-
-  .account-card :deep(.n-card-header__extra) {
-    margin-left: 8px;
-  }
-}
-
-@media (max-width: 640px) {
-  .managed-pending {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .account-card :deep(.n-card-header) {
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .account-card :deep(.n-card-header__main),
-  .account-card :deep(.n-card-header__extra) {
-    width: 100%;
-  }
-
-  .account-card :deep(.n-card-header__extra) {
-    display: flex;
-    justify-content: flex-end;
-    margin-left: 0;
-  }
 }
 </style>

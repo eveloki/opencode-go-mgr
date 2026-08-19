@@ -162,3 +162,49 @@ export function usageProgressPercentage(
 ): number {
   return isUsageLimitReached(account, key, now) ? 100 : normalizeUsagePercent(percent);
 }
+
+// 用户直接编辑"天+小时"或"小时+分钟"，而不是分钟总数。
+// 5h 窗口（<1天）显示 [小时][分钟]；周窗口（≥1天）显示 [天][小时]。
+export function resetsFirstFieldMax(key: UsageKey): number {
+  if (key === "window_5h") return 5;
+  if (key === "window_week") return 7;
+  return 0;
+}
+
+export function resetsSecondFieldMax(key: UsageKey): number {
+  if (key === "window_5h") return 59;
+  if (key === "window_week") return 23;
+  return 0;
+}
+
+export function resetsFirstFieldValue(
+  edit: Pick<UsageEditState, "resets_in_minutes_draft" | "resets_at_saved" | "resets_dirty"> | undefined,
+  key: UsageKey,
+  now = Date.now(),
+): number {
+  if (!edit) return 0;
+  const m = resetsInMinutesForSave(edit, key, now);
+  if (m === null) return 0;
+  if (key === "window_5h") return Math.floor(m / 60);
+  if (key === "window_week") return Math.floor(m / (24 * 60));
+  return 0;
+}
+
+export function resetsSecondFieldValue(
+  edit: Pick<UsageEditState, "resets_in_minutes_draft" | "resets_at_saved" | "resets_dirty"> | undefined,
+  key: UsageKey,
+  now = Date.now(),
+): number {
+  if (!edit) return 0;
+  const m = resetsInMinutesForSave(edit, key, now);
+  if (m === null) return 0;
+  if (key === "window_5h") return m % 60;
+  if (key === "window_week") return Math.floor((m % (24 * 60)) / 60);
+  return 0;
+}
+
+export function resetsFieldsToMinutes(first: number, second: number, key: UsageKey): number {
+  if (key === "window_5h") return first * 60 + second;
+  if (key === "window_week") return first * 24 * 60 + second * 60;
+  return 0;
+}

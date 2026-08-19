@@ -15,6 +15,13 @@
       label-placement="top"
     >
       <div class="modal-grid">
+        <n-form-item path="providerId" :label="t('服务商')">
+          <n-select
+            v-model:value="form.providerId"
+            :options="providerOptions"
+            :disabled="isEdit"
+          />
+        </n-form-item>
         <n-form-item path="username" :label="t('账号')">
           <n-input
             :value="form.username"
@@ -94,16 +101,20 @@ import {
   NFormItem,
   NInput,
   NModal,
+  NSelect,
   NSpace,
 } from "naive-ui";
 import type { Account } from "../api/tauri";
 import { t } from "../i18n/index.ts";
 import { localDateString } from "../views/account-lifecycle";
+import { PROVIDER_OFFERINGS } from "../views/account-providers.ts";
 
 type AccountFormPayload = {
   name: string;
   username: string;
   key?: string;
+  provider_id?: string;
+  offering_id?: string;
   purchase_date?: string;
   notes: string;
 };
@@ -112,6 +123,7 @@ type AccountDraft = {
   name: string;
   username: string;
   key: string;
+  providerId: string;
   purchaseDate: number | null;
   notes: string;
 };
@@ -139,6 +151,10 @@ const nameWasEdited = ref(false);
 
 const isEdit = computed(() => !!props.account);
 const title = computed(() => (isEdit.value ? t("编辑账号") : t("导入已有 Key")));
+const providerOptions = computed(() => PROVIDER_OFFERINGS.map((offering) => ({
+  value: offering.provider_id,
+  label: offering.label,
+})));
 
 const rules = computed<FormRules>(() => {
   const base: FormRules = {
@@ -201,6 +217,7 @@ function blankAccountDraft(): AccountDraft {
     name: "",
     username: "",
     key: "",
+    providerId: PROVIDER_OFFERINGS[0].provider_id,
     purchaseDate: timestampFromLocalDate(localDateString()) ?? Date.now(),
     notes: "",
   };
@@ -211,6 +228,7 @@ function draftFromAccount(account: Account): AccountDraft {
     name: account.name,
     username: account.username,
     key: "",
+    providerId: account.provider_id || PROVIDER_OFFERINGS[0].provider_id,
     purchaseDate: timestampFromLocalDate(account.purchase_date)
       ?? timestampFromLocalDate(localDateString())
       ?? Date.now(),
@@ -254,6 +272,12 @@ async function handleSave() {
     }
   } else {
     payload.key = form.value.key.trim();
+    // Provider is fixed once the account exists; only creation sends the pair.
+    const offering = PROVIDER_OFFERINGS.find(
+      (item) => item.provider_id === form.value.providerId,
+    ) ?? PROVIDER_OFFERINGS[0];
+    payload.provider_id = offering.provider_id;
+    payload.offering_id = offering.offering_id;
   }
   emit("save", payload);
 }

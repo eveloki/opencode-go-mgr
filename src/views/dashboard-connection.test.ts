@@ -1172,15 +1172,15 @@ test("settings expose the downstream display root and bounded request timeouts",
 });
 
 test("accounts derive quota limits from the active pricing snapshot", async () => {
-  const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
-  assert.match(accounts, /quotaLimits = ref<PricingLimits \| null>\(null\)/);
-  assert.match(accounts, /quotaLimits\.value = \(await tauriApi\.getPricing\(\)\)\.limits/);
-  assert.doesNotMatch(accounts, /window_5h:\s*12|window_week:\s*30|window_month:\s*60/);
+  const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+  assert.match(usage, /quotaLimits = ref<PricingLimits \| null>\(null\)/);
+  assert.match(usage, /quotaLimits\.value = \(await tauriApi\.getPricing\(\)\)\.limits/);
+  assert.doesNotMatch(usage, /window_5h:\s*12|window_week:\s*30|window_month:\s*60/);
 });
 
 test("accounts keep one enabled control instead of a duplicate status badge", async () => {
-  const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
-  const template = accounts.slice(accounts.indexOf("<template>"), accounts.indexOf("<script setup"));
+  const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  const template = card.slice(card.indexOf("<template>"), card.indexOf("<script setup"));
 
   assert.match(template, /:value="account\.enabled"/);
   assert.doesNotMatch(template, /account\.enabled \? t\("已启用"\) : t\("已禁用"\)/);

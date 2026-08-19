@@ -153,6 +153,11 @@ export const managedAccountEnUSMessages = {
   "邀请链接必须使用 HTTPS": "The invite URL must use HTTPS",
   "邀请链接不能包含用户名或密码": "The invite URL cannot contain a username or password",
   "邀请链接域名必须是 opencode.ai 或 console.opencode.ai": "The invite URL host must be opencode.ai or console.opencode.ai",
+  "服务商": "Provider",
+  "免费通道": "Free channel",
+  "启用 {name} 的 Free 别名": "Enable the Free alias for {name}",
+  "禁用 {name} 的 Free 别名": "Disable the Free alias for {name}",
+  "Free 别名设置已保存": "Free alias setting saved",
 } as const;
 
 export const managedAccountZhTWMessages: Record<keyof typeof managedAccountEnUSMessages, string> = {
@@ -308,4 +313,9 @@ export const managedAccountZhTWMessages: Record<keyof typeof managedAccountEnUSM
   "邀请链接必须使用 HTTPS": "邀請連結必須使用 HTTPS",
   "邀请链接不能包含用户名或密码": "邀請連結不能包含使用者名稱或密碼",
   "邀请链接域名必须是 opencode.ai 或 console.opencode.ai": "邀請連結網域必須是 opencode.ai 或 console.opencode.ai",
+  "服务商": "服務商",
+  "免费通道": "免費通道",
+  "启用 {name} 的 Free 别名": "啟用 {name} 的 Free 別名",
+  "禁用 {name} 的 Free 别名": "停用 {name} 的 Free 別名",
+  "Free 别名设置已保存": "Free 別名設定已儲存",
 };
