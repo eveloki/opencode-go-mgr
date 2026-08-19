@@ -31,6 +31,8 @@ const TURN_MAX_TOKENS: u32 = 80;
 const OFFICIAL_PREFERRED: &[(&str, Endpoint)] = &[
     ("grok-4.5", Endpoint::Responses),
     ("gpt-5.6-luna", Endpoint::Responses),
+    ("muse-spark-1.2", Endpoint::Responses),
+    ("muse-spark-1.2-contributor", Endpoint::Responses),
     ("glm-5.3", Endpoint::Chat),
     ("glm-5.2", Endpoint::Chat),
     ("glm-5.1", Endpoint::Chat),

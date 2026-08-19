@@ -420,6 +420,8 @@ actually carry. The passthrough / conversion matrix is under
 | --- | ---: | ---: | --- | --- | :---: | --- |
 | `grok-4.5` | 500K | 500K | text, image | always | ✓ | low / medium / high (default high) |
 | `gpt-5.6-luna` | 1.05M | 128K | text, image | ✓ | ✓ | low / medium / high / max (default medium) |
+| `muse-spark-1.2` | 1M | 128K | text, image | ✓ | ✓ | low / medium / high (default high) |
+| `muse-spark-1.2-contributor` | 1M | 128K | text, image | ✓ | ✓ | low / medium / high (default high) |
 | `glm-5.3` | 1M | 128K | text | ✓ | ✓ | low / high / max (default max) |
 | `glm-5.2` | 1M | 128K | text | ✓ | ✓ | high / max (default max) |
 | `glm-5.1` | 198K | 32K | text | ✓ | ✓ | — |
@@ -726,13 +728,18 @@ Chat; `glm-5.3` is Chat-only.
 | Preferred upstream | Models |
 | --- | --- |
 | OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
-| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna` |
+| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor` |
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
 Passthrough matrix (live test-account probe, 2026-08-14). ✓ = client protocol
 is forwarded as-is; empty = converted to the model's preferred protocol.
 Source of truth: `MODEL_PROTOCOLS` in
 `crates/ocg-core/src/gateway/protocol.rs`.
+
+`reasoning.effort` aliases (applied before forwarding or conversion):
+`muse-spark-1.2` and `muse-spark-1.2-contributor` map `max` → `xhigh`
+(upstream rejects `max`). Other models pass `reasoning.effort` through
+unchanged.
 
 | Model | Preferred | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |
@@ -742,6 +749,8 @@ Source of truth: `MODEL_PROTOCOLS` in
 | `glm-5.1` | Chat | ✓ | ✓ | ✓ |
 | `glm-5` | Chat | ✓ | ✓ | ✓ |
 | `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `muse-spark-1.2` | Responses | | ✓ | |
+| `muse-spark-1.2-contributor` | Responses | | ✓ | |
 | `kimi-k3` | Chat | ✓ | | ✓ |
 | `kimi-k2.7-code` | Chat | ✓ | | |
 | `kimi-k2.6` | Chat | ✓ | | |

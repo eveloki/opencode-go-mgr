@@ -382,6 +382,24 @@ pub fn embedded_seed() -> PricingSnapshot {
             15.0,
             PricingTimeWindow::Peak,
         ),
+        seed_model(
+            "muse-spark-1.2",
+            "Muse Spark 1.2",
+            0.10,
+            0.20,
+            0.002,
+            None,
+            60.0,
+        ),
+        seed_model(
+            "muse-spark-1.2-contributor",
+            "Muse Spark 1.2 Contributor",
+            0.10,
+            0.20,
+            0.002,
+            None,
+            60.0,
+        ),
         seed_model("hy3", "Hy3", 0.14, 0.58, 0.035, None, 60.0),
     ];
     apply_official_pricing_policy(&mut models, MONTHLY_LIMIT);
