@@ -1884,6 +1884,14 @@ async fn test_account(
     if account.is_zen_free() {
         return Err(ApiError::bad_request("Zen Free has no credential to test"));
     }
+    if account.provider_id != crate::provider::OPENCODE_PROVIDER_ID
+        || account.offering_id != crate::provider::GO_OFFERING_ID
+    {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "provider account testing is unavailable until its upstream contract is configured",
+        ));
+    }
     if !account.setup_step.is_ready() || account.key_cipher.is_empty() {
         return Err(ApiError::status(
             StatusCode::CONFLICT,
@@ -2218,6 +2226,7 @@ async fn account_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<Json<UsageWindow>, ApiError> {
+    ensure_legacy_go_account(&state, &id)?;
     let limits = state.pricing_snapshot().limits.clone();
     state
         .db
@@ -2341,11 +2350,7 @@ async fn update_account_usage(
     Path(id): Path<String>,
     Json(update): Json<AccountUsageUpdate>,
 ) -> Result<Json<UsageWindow>, ApiError> {
-    if id == crate::provider::ZEN_FREE_ACCOUNT_ID {
-        return Err(ApiError::bad_request(
-            "Zen Free quota cannot be calibrated through the generic account API",
-        ));
-    }
+    ensure_legacy_go_account(&state, &id)?;
     let window = match update.window.as_str() {
         "window_5h" => UsageWindowKind::FiveHours,
         "window_week" => UsageWindowKind::Week,
@@ -2393,6 +2398,23 @@ async fn update_account_usage(
     db.account_usage_with_limits(&id, &limits)
         .map(Json)
         .map_err(ApiError::internal)
+}
+
+fn ensure_legacy_go_account(state: &CoreState, id: &str) -> Result<(), ApiError> {
+    let account = state
+        .db
+        .lock()
+        .get_account(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    if account.provider_id != crate::provider::OPENCODE_PROVIDER_ID
+        || account.offering_id != crate::provider::GO_OFFERING_ID
+    {
+        return Err(ApiError::bad_request(
+            "legacy usage windows are only available for OpenCode Go accounts",
+        ));
+    }
+    Ok(())
 }
 
 async fn reset_account_cooldown(

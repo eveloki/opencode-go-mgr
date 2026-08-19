@@ -1197,6 +1197,24 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
     assert_eq!(created["credential_kind"], "api_key");
     assert_eq!(created["quota_scope"], "key");
     let goat_id = created["id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{base}/accounts/{goat_id}/test"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/accounts/{goat_id}/usage"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
 
     let invalid = client
         .post(format!("{base}/accounts"))

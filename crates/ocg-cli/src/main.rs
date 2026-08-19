@@ -523,6 +523,8 @@ async fn ping_keys(
             Some(i) => match db.get_account(i)? {
                 Some(a)
                     if a.credential_kind == CredentialKind::ApiKey
+                        && a.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
+                        && a.offering_id == ocg_core::provider::GO_OFFERING_ID
                         && a.setup_step.is_ready()
                         && !a.key_cipher.is_empty() =>
                 {
@@ -536,6 +538,8 @@ async fn ping_keys(
                 .into_iter()
                 .filter(|a| {
                     a.credential_kind == CredentialKind::ApiKey
+                        && a.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
+                        && a.offering_id == ocg_core::provider::GO_OFFERING_ID
                         && a.enabled
                         && a.setup_step.is_ready()
                         && !a.key_cipher.is_empty()
