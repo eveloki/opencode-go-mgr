@@ -67,8 +67,8 @@ test("Zen card toggles use the dedicated provider-settings call with the setting
   const api = readFileSync(new URL("../api/tauri.ts", import.meta.url), "utf8");
 
   assert.match(accounts, /providerApi\.updateProviderSettings\(account\.id, \{/);
-  assert.match(accounts, /enabled: patch\.enabled \?\? account\.enabled/);
-  assert.match(accounts, /free_alias_enabled: patch\.free_alias_enabled \?\? account\.free_alias_enabled/);
+  assert.match(accounts, /const enabled = patch\.enabled \?\? account\.enabled/);
+  assert.match(accounts, /free_alias_enabled: enabled && \(patch\.free_alias_enabled \?\? account\.free_alias_enabled\)/);
   assert.match(accounts, /expected_revision: revision/);
   assert.match(accounts, /settingsRevision\.value = result\.revision/);
   assert.match(accounts, /error\.status !== 409/);

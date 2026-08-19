@@ -107,7 +107,7 @@
           {{ account.enabled ? t("禁用账号 {name}", { name: account.name }) : t("启用账号 {name}", { name: account.name }) }}
         </n-tooltip>
 
-        <n-tooltip v-if="isZen && accountIsReady(account)" trigger="hover">
+        <n-tooltip v-if="isZen && accountIsReady(account) && account.enabled" trigger="hover">
           <template #trigger>
             <n-switch
               :value="account.free_alias_enabled"

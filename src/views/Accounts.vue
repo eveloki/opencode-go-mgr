@@ -213,6 +213,7 @@ import type {
 import { isCooling } from "./accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "./account-display.ts";
 import { isZenFreeAccount } from "./account-providers.ts";
+import { toggleZenFreeAlias, toggleZenFreeEnabled } from "./zen-free-settings.ts";
 import { useAccountUsage } from "./useAccountUsage.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
@@ -774,7 +775,7 @@ async function toggleAccount(id: string) {
   // The Zen Free singleton only accepts the dedicated provider-settings write;
   // never fall back to the generic account PATCH/toggle for it.
   if (account && isZenFreeAccount(account)) {
-    await saveZenProviderSettings(account, { enabled: !account.enabled });
+    await saveZenProviderSettings(account, toggleZenFreeEnabled(account));
     return;
   }
   try {
@@ -788,12 +789,12 @@ async function toggleAccount(id: string) {
 
 async function toggleFreeAlias(id: string) {
   const account = accounts.value.find((item) => item.id === id);
-  if (!account || !isZenFreeAccount(account) || freeAliasSaving.value[id]) return;
+  if (!account || !account.enabled || !isZenFreeAccount(account) || freeAliasSaving.value[id]) return;
   freeAliasSaving.value[id] = true;
   try {
     await saveZenProviderSettings(
       account,
-      { free_alias_enabled: !account.free_alias_enabled },
+      toggleZenFreeAlias(account),
       t("Free 别名设置已保存"),
     );
   } finally {
@@ -864,9 +865,10 @@ async function saveZenProviderSettings(
   if (providerSettingsSaving.value[account.id]) return;
   providerSettingsSaving.value[account.id] = true;
   try {
+    const enabled = patch.enabled ?? account.enabled;
     const result = await runWithFreshSettingsRevision((revision) => providerApi.updateProviderSettings(account.id, {
-      enabled: patch.enabled ?? account.enabled,
-      free_alias_enabled: patch.free_alias_enabled ?? account.free_alias_enabled,
+      enabled,
+      free_alias_enabled: enabled && (patch.free_alias_enabled ?? account.free_alias_enabled),
       expected_revision: revision,
     }));
     settingsRevision.value = result.revision;

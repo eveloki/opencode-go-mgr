@@ -5,12 +5,12 @@ import test from "node:test";
 const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
 const api = readFileSync(new URL("../api/tauri.ts", import.meta.url), "utf8");
 
-test("zen card toggles use the dedicated provider-settings write with both flags preserved", () => {
+test("zen card toggles use the dedicated provider-settings write and preserve valid state", () => {
   assert.match(accounts, /providerApi\.updateProviderSettings\(account\.id, \{/);
-  assert.match(accounts, /enabled: patch\.enabled \?\? account\.enabled/);
-  assert.match(accounts, /free_alias_enabled: patch\.free_alias_enabled \?\? account\.free_alias_enabled/);
-  assert.match(accounts, /async function toggleAccount\(id: string\) \{[\s\S]*?isZenFreeAccount\(account\)[\s\S]*?saveZenProviderSettings\(account, \{ enabled: !account\.enabled \}\)/);
-  assert.match(accounts, /saveZenProviderSettings\(\s*account,\s*\{ free_alias_enabled: !account\.free_alias_enabled \}/);
+  assert.match(accounts, /free_alias_enabled: enabled && \(patch\.free_alias_enabled \?\? account\.free_alias_enabled\)/);
+  assert.match(accounts, /toggleZenFreeEnabled\(account\)/);
+  assert.match(accounts, /toggleZenFreeAlias\(account\)/);
+  assert.match(accounts, /!account\.enabled \|\| !isZenFreeAccount\(account\)/);
 });
 
 test("zen provider settings send the settings revision guard and reload on 409", () => {
