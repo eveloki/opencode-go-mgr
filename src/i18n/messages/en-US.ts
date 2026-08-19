@@ -613,6 +613,15 @@ export const enUSMessages = {
   "加载 Key 筛选失败: {error}": "Failed to load the Key filter: {error}",
 
   "账号设置已被其他操作修改，已重新加载最新状态，请重试": "Account settings were changed elsewhere. The latest state was reloaded; try again.",
+
+  "服务商与费用": "Provider & cost",
+  "服务方案": "Offering",
+  "路由账号": "Routed account",
+  "凭证账号": "Credential account",
+  "原始供应商成本": "Raw supplier cost",
+  "额度扣减": "Quota debit",
+  "有效付费成本": "Effective paid cost",
+  "未知": "Unknown",
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

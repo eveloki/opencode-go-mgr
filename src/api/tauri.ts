@@ -234,6 +234,14 @@ export interface ForwardLog {
   account_name: string;
   client_key_id?: string | null;
   client_key_name?: string | null;
+  /** Routing/provider attribution; all null for rows predating provider-aware logging. */
+  route_account_id?: string | null;
+  provider_id?: string | null;
+  offering_id?: string | null;
+  credential_account_id?: string | null;
+  raw_cost_usd?: number | null;
+  quota_debit?: number | null;
+  effective_paid_cost_usd?: number | null;
   status: string;
   http_status: number | null;
   prompt_tokens: number;
@@ -276,6 +284,10 @@ export interface ForwardLogQuery {
   model?: string | null;
   request_id?: string | null;
   key_id?: string | null;
+  provider_id?: string | null;
+  offering_id?: string | null;
+  route_account_id?: string | null;
+  credential_account_id?: string | null;
   start_time?: string | null;
   end_time?: string | null;
   sort_by?: string | null;
@@ -551,19 +563,24 @@ export const tauriApi = {
     return request<GatewayLog[]>(`/logs/gateway?${params}`);
   },
   getForwardLogs: (query: ForwardLogQuery = {}) => {
-    const params = new URLSearchParams({
-      limit: String(query.limit ?? 20),
-      offset: String(query.offset ?? 0),
-    });
+    // Filters are set before pagination params so the exact-match filters lead
+    // the query string; the backend applies them before paging anyway.
+    const params = new URLSearchParams();
     if (query.status) params.set("status", query.status);
     if (query.account_id) params.set("account_id", query.account_id);
     if (query.model) params.set("model", query.model);
     if (query.request_id) params.set("request_id", query.request_id);
     if (query.key_id) params.set("key_id", query.key_id);
+    if (query.provider_id) params.set("provider_id", query.provider_id);
+    if (query.offering_id) params.set("offering_id", query.offering_id);
+    if (query.route_account_id) params.set("route_account_id", query.route_account_id);
+    if (query.credential_account_id) params.set("credential_account_id", query.credential_account_id);
     if (query.start_time) params.set("start_time", query.start_time);
     if (query.end_time) params.set("end_time", query.end_time);
     if (query.sort_by) params.set("sort_by", query.sort_by);
     if (query.sort_order) params.set("sort_order", query.sort_order);
+    params.set("limit", String(query.limit ?? 20));
+    params.set("offset", String(query.offset ?? 0));
     return request<ForwardLogPage>(`/logs/forward?${params}`);
   },
   getForwardLogModels: () => request<string[]>("/logs/forward/models"),

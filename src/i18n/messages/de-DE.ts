@@ -615,4 +615,13 @@ export const deDEMessages = {
   "加载 Key 筛选失败: {error}": "Key-Filter konnte nicht geladen werden: {error}",
 
   "账号设置已被其他操作修改，已重新加载最新状态，请重试": "Die Kontoeinstellungen wurden von einer anderen Aktion geändert. Der neueste Stand wurde neu geladen; bitte erneut versuchen",
+
+  "服务商与费用": "Anbieter & Kosten",
+  "服务方案": "Angebot",
+  "路由账号": "Geroutetes Konto",
+  "凭证账号": "Zugangsdaten-Konto",
+  "原始供应商成本": "Rohkosten des Anbieters",
+  "额度扣减": "Kontingentabzug",
+  "有效付费成本": "Effektive bezahlte Kosten",
+  "未知": "Unbekannt",
 } satisfies Messages;

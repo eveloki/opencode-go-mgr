@@ -615,4 +615,13 @@ export const frFRMessages = {
   "加载 Key 筛选失败: {error}": "Échec du chargement du filtre de Key : {error}",
 
   "账号设置已被其他操作修改，已重新加载最新状态，请重试": "Les paramètres du compte ont été modifiés par une autre opération. L'état le plus récent a été rechargé ; réessayez",
+
+  "服务商与费用": "Fournisseur et coût",
+  "服务方案": "Offre",
+  "路由账号": "Compte routé",
+  "凭证账号": "Compte d'identifiants",
+  "原始供应商成本": "Coût fournisseur brut",
+  "额度扣减": "Débit de quota",
+  "有效付费成本": "Coût payé effectif",
+  "未知": "Inconnu",
 } satisfies Messages;

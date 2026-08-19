@@ -393,7 +393,7 @@ test("forward logs can be filtered by client key including the unattributed opti
   assert.match(source, /key_id: keyFilter\.value/);
   // Filter changes participate in pagination reset + query state sync.
   const forwardFilterWatch = source.slice(
-    source.indexOf("[statusFilter, accountFilter"),
+    source.indexOf("watch(\n  [", source.indexOf("watch(activeTab")),
     source.indexOf("watch(requestIdFilter"),
   );
   assert.match(forwardFilterWatch, /keyFilter/);

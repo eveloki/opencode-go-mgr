@@ -615,4 +615,13 @@ export const ptBRMessages = {
   "加载 Key 筛选失败: {error}": "Falha ao carregar o filtro de Key: {error}",
 
   "账号设置已被其他操作修改，已重新加载最新状态，请重试": "As configurações da conta foram alteradas por outra operação. O estado mais recente foi recarregado; tente novamente",
+
+  "服务商与费用": "Provedor e custo",
+  "服务方案": "Oferta",
+  "路由账号": "Conta roteada",
+  "凭证账号": "Conta de credencial",
+  "原始供应商成本": "Custo bruto do fornecedor",
+  "额度扣减": "Débito de cota",
+  "有效付费成本": "Custo pago efetivo",
+  "未知": "Desconhecido",
 } satisfies Messages;

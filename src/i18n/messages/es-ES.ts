@@ -614,4 +614,13 @@ export const esESMessages = {
   "加载 Key 筛选失败: {error}": "Error al cargar el filtro de Key: {error}",
 
   "账号设置已被其他操作修改，已重新加载最新状态，请重试": "La configuración de la cuenta fue modificada por otra operación. Se recargó el estado más reciente; inténtalo de nuevo",
+
+  "服务商与费用": "Proveedor y costo",
+  "服务方案": "Oferta",
+  "路由账号": "Cuenta enrutada",
+  "凭证账号": "Cuenta de credencial",
+  "原始供应商成本": "Costo bruto del proveedor",
+  "额度扣减": "Débito de cuota",
+  "有效付费成本": "Costo pagado efectivo",
+  "未知": "Desconocido",
 } satisfies Messages;

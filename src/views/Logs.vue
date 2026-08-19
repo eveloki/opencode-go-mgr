@@ -104,6 +104,42 @@
               :consistent-menu-width="false"
             />
           </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("服务商") }}</span>
+            <n-select
+              v-model:value="providerFilter"
+              :options="providerOptions"
+              :placeholder="t('服务商')"
+              :consistent-menu-width="false"
+            />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("服务方案") }}</span>
+            <n-select
+              v-model:value="offeringFilter"
+              :options="offeringOptions"
+              :placeholder="t('服务方案')"
+              :consistent-menu-width="false"
+            />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("路由账号") }}</span>
+            <n-select
+              v-model:value="routeAccountFilter"
+              :options="routeAccountOptions"
+              :placeholder="t('路由账号')"
+              :consistent-menu-width="false"
+            />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("凭证账号") }}</span>
+            <n-select
+              v-model:value="credentialAccountFilter"
+              :options="credentialAccountOptions"
+              :placeholder="t('凭证账号')"
+              :consistent-menu-width="false"
+            />
+          </div>
           <div class="filter-field time-range-field">
             <span class="filter-label">{{ t("时间范围") }}</span>
             <n-popover
@@ -255,6 +291,7 @@ import { locale } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
 import type { TimePreset } from "./log-time-range.ts";
+import { providerOfferingLabel } from "./account-providers.ts";
 
 type LogTab = "gateway" | "forward";
 type SortBy = "timestamp" | "attempt" | "prompt_tokens" | "completion_tokens" | "cached_tokens" | "cost";
@@ -284,6 +321,10 @@ const statusFilter = ref<string>(query.get("status") ?? "");
 const accountFilter = ref<string>(query.get("account") ?? "");
 const modelFilter = ref<string>(query.get("model") ?? "");
 const keyFilter = ref<string>(query.get("key") ?? "");
+const providerFilter = ref<string>(query.get("provider") ?? "");
+const offeringFilter = ref<string>(query.get("offering") ?? "");
+const routeAccountFilter = ref<string>(query.get("route_account") ?? "");
+const credentialAccountFilter = ref<string>(query.get("credential_account") ?? "");
 const requestIdFilter = ref<string>(query.get("request_id") ?? "");
 const querySort = query.get("sort");
 const queryOrder = query.get("order");
@@ -393,11 +434,37 @@ const sortOptions = computed(() => [
   { label: t("缓存"), value: "cached_tokens" },
   { label: t("额度消耗（估算）"), value: "cost" },
 ]);
+// Provider/offering options come from the loaded accounts' provider pairs;
+// route/credential account options reuse the same account list. All four are
+// sent as exact remote query params — rows are never filtered client-side.
+const providerOptions = computed(() => [
+  allOption.value,
+  ...[...new Set(accounts.value.map((account) => account.provider_id).filter(Boolean))]
+    .map((providerId) => ({ label: providerId, value: providerId })),
+]);
+const offeringOptions = computed(() => [
+  allOption.value,
+  ...[...new Map(accounts.value
+    .filter((account) => account.provider_id && account.offering_id)
+    .map((account) => [
+      account.offering_id,
+      {
+        label: providerOfferingLabel(account),
+        value: account.offering_id,
+      },
+    ])).values()],
+]);
+const routeAccountOptions = computed(() => accountOptions.value);
+const credentialAccountOptions = computed(() => accountOptions.value);
 const hasFilters = computed(() =>
   !!statusFilter.value
   || !!accountFilter.value
   || !!modelFilter.value
   || !!keyFilter.value
+  || !!providerFilter.value
+  || !!offeringFilter.value
+  || !!routeAccountFilter.value
+  || !!credentialAccountFilter.value
   || !!requestIdFilter.value
   || !!timeRange.value,
 );
@@ -528,7 +595,36 @@ function renderForwardDetail(row: ForwardLog) {
     : null;
   return h("div", { class: "diagnostic-detail" }, [
     requestBlock,
+    renderProviderCost(row),
     renderDiagnostic(row),
+  ]);
+}
+
+// Provider attribution and the three cost figures are nullable server-side;
+// null means "unknown" and must never render as a $0 amount.
+function renderProviderCost(row: ForwardLog) {
+  const costValue = (value: number | null | undefined) => (
+    value === null || value === undefined ? t("未知") : formatCost(value, 5)
+  );
+  const accountLabel = (id: string | null | undefined) => {
+    if (!id) return t("未知");
+    return accounts.value.find((account) => account.id === id)?.name ?? id;
+  };
+  const items: Array<[string, string]> = [
+    [t("服务商"), row.provider_id ?? t("未知")],
+    [t("服务方案"), row.offering_id ?? t("未知")],
+    [t("路由账号"), accountLabel(row.route_account_id)],
+    [t("凭证账号"), accountLabel(row.credential_account_id)],
+    [t("原始供应商成本"), costValue(row.raw_cost_usd)],
+    [t("额度扣减"), costValue(row.quota_debit)],
+    [t("有效付费成本"), costValue(row.effective_paid_cost_usd)],
+  ];
+  return h("section", [
+    h("h4", t("服务商与费用")),
+    h("dl", { class: "diagnostic-meta" }, items.flatMap(([label, value]) => [
+      h("dt", label),
+      h("dd", value),
+    ])),
   ]);
 }
 
@@ -644,6 +740,10 @@ function clearFilters() {
   accountFilter.value = "";
   modelFilter.value = "";
   keyFilter.value = "";
+  providerFilter.value = "";
+  offeringFilter.value = "";
+  routeAccountFilter.value = "";
+  credentialAccountFilter.value = "";
   requestIdFilter.value = "";
   activePreset.value = "all";
   timeRange.value = null;
@@ -666,6 +766,14 @@ function syncQueryState() {
   else url.searchParams.delete("model");
   if (keyFilter.value) url.searchParams.set("key", keyFilter.value);
   else url.searchParams.delete("key");
+  if (providerFilter.value) url.searchParams.set("provider", providerFilter.value);
+  else url.searchParams.delete("provider");
+  if (offeringFilter.value) url.searchParams.set("offering", offeringFilter.value);
+  else url.searchParams.delete("offering");
+  if (routeAccountFilter.value) url.searchParams.set("route_account", routeAccountFilter.value);
+  else url.searchParams.delete("route_account");
+  if (credentialAccountFilter.value) url.searchParams.set("credential_account", credentialAccountFilter.value);
+  else url.searchParams.delete("credential_account");
   if (requestIdFilter.value) url.searchParams.set("request_id", requestIdFilter.value);
   else url.searchParams.delete("request_id");
   if (activePreset.value === "custom" && timeRange.value) {
@@ -721,6 +829,10 @@ async function loadForwardLogs() {
       account_id: accountFilter.value,
       model: modelFilter.value,
       key_id: keyFilter.value,
+      provider_id: providerFilter.value,
+      offering_id: offeringFilter.value,
+      route_account_id: routeAccountFilter.value,
+      credential_account_id: credentialAccountFilter.value,
       request_id: requestIdFilter.value,
       start_time: requestRange ? toIsoString(requestRange[0]) : null,
       end_time: requestRange ? toIsoString(requestRange[1]) : null,
@@ -780,7 +892,7 @@ function changeGatewayPage(page: number) {
 
 watch(activeTab, syncQueryState);
 watch(
-  [statusFilter, accountFilter, modelFilter, keyFilter, timeRange, activePreset, sortBy, sortOrder],
+  [statusFilter, accountFilter, modelFilter, keyFilter, providerFilter, offeringFilter, routeAccountFilter, credentialAccountFilter, timeRange, activePreset, sortBy, sortOrder],
   () => {
     forwardPage.value = 1;
     syncQueryState();
