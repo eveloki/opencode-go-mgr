@@ -799,6 +799,7 @@ impl ForwardMetrics {
         &mut self,
         provider_id: Option<&str>,
         offering_id: Option<&str>,
+        successful: bool,
     ) {
         let Some(provider_id) = provider_id else {
             return;
@@ -817,7 +818,7 @@ impl ForwardMetrics {
 
         if provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
             && offering_id == Some(crate::provider::ANONYMOUS_FREE_OFFERING_ID)
-            && has_cost_outcome
+            && (successful || has_cost_outcome)
         {
             self.raw_cost_usd = Some(0.0);
             self.quota_debit = Some(0.0);

@@ -1098,16 +1098,19 @@ async fn apply_zen_free_settings(
 ) -> Result<Json<ZenFreeSettingsResponse>, ApiError> {
     let _settings_update = state.settings_update.lock();
     check_key_revision(state, input.expected_revision)?;
-    {
-        let db = state.db.lock();
-        db.update_zen_free_settings(input.enabled, input.free_alias_enabled)
-            .map_err(ApiError::internal)?;
+    if input.free_alias_enabled && !input.enabled {
+        return Err(ApiError::bad_request(
+            "free aliases cannot be enabled while Zen Free is disabled",
+        ));
     }
     let mut config = state.config();
     config.free_model_routing =
         free_model_routing_from_zen(input.enabled, input.free_alias_enabled);
-    // set_config is the sole revision bump for this cross-surface mutation.
-    state.set_config(config).map_err(ApiError::internal)?;
+    // The state facade commits the database-owned row and legacy AppConfig
+    // projection atomically, then performs the sole shared revision bump.
+    state
+        .set_config_and_zen_free_settings(config, input.enabled, input.free_alias_enabled)
+        .map_err(ApiError::internal)?;
     let account = state
         .db
         .lock()
@@ -1494,21 +1497,35 @@ async fn open_account_browser(
 async fn reset_account_browser_profile(
     State(state): State<CoreState>,
     Path(id): Path<String>,
+    expectation: Option<Json<AccountRevisionExpectation>>,
 ) -> Result<Json<DashboardAccount>, ApiError> {
+    let expected_revision = expectation.and_then(|Json(body)| body.expected_revision);
+    {
+        let _settings_update = state.settings_update.lock();
+        check_key_revision(&state, expected_revision)?;
+        state
+            .recover_browser_profiles_for_account(&id)
+            .map_err(ApiError::internal)?;
+        state
+            .db
+            .lock()
+            .get_account(&id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("account not found"))?;
+    }
     let browser_operation = state.browser.operation().await;
-    state
-        .recover_browser_profiles_for_account(&id)
-        .map_err(ApiError::internal)?;
+    browser_operation
+        .stop_account(&id)
+        .await
+        .map_err(|error| ApiError::status(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(&state, expected_revision)?;
     let account = state
         .db
         .lock()
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
-    browser_operation
-        .stop_account(&id)
-        .await
-        .map_err(|error| ApiError::status(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
     let staged = StagedBrowserProfiles::stage(
         &state.data_dir(),
         &id,
@@ -1527,6 +1544,7 @@ async fn reset_account_browser_profile(
         }
     }
     staged.purge().map_err(ApiError::internal)?;
+    state.bump_settings_revision();
     let account = state
         .db
         .lock()
@@ -2135,43 +2153,41 @@ async fn verify_managed_account_key(
     Path(id): Path<String>,
     Json(input): Json<VerifyManagedKeyInput>,
 ) -> Result<Json<DashboardAccount>, ApiError> {
-    {
-        let _settings_update = state.settings_update.lock();
-        check_key_revision(&state, input.expected_revision)?;
-    }
-    let account = state
-        .db
-        .lock()
-        .get_account(&id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::not_found("account not found"))?;
-    if account.account_type != AccountType::Managed
-        || account.setup_step != AccountSetupStep::KeyVerification
-    {
-        return Err(ApiError::status(
-            StatusCode::CONFLICT,
-            "managed account is not waiting for key verification",
-        ));
-    }
-    let key = input.key.trim();
+    let key = input.key.trim().to_string();
     if key.is_empty() {
         return Err(ApiError::bad_request("key is required"));
     }
     if key.len() > 4096 {
         return Err(ApiError::bad_request("key is too long"));
     }
-    let key_cipher = state.encrypt_key(key).map_err(ApiError::internal)?;
-    if !state
-        .db
-        .lock()
-        .save_managed_key_for_verification(&id, &key_cipher)
-        .map_err(ApiError::internal)?
-    {
-        return Err(ApiError::status(
-            StatusCode::CONFLICT,
-            "account setup changed; reload and try again",
-        ));
-    }
+    let key_cipher = state.encrypt_key(&key).map_err(ApiError::internal)?;
+    let account = {
+        let _settings_update = state.settings_update.lock();
+        check_key_revision(&state, input.expected_revision)?;
+        let db = state.db.lock();
+        let account = db
+            .get_account(&id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("account not found"))?;
+        if account.account_type != AccountType::Managed
+            || account.setup_step != AccountSetupStep::KeyVerification
+        {
+            return Err(ApiError::status(
+                StatusCode::CONFLICT,
+                "managed account is not waiting for key verification",
+            ));
+        }
+        if !db
+            .save_managed_key_for_verification(&id, &key_cipher)
+            .map_err(ApiError::internal)?
+        {
+            return Err(ApiError::status(
+                StatusCode::CONFLICT,
+                "account setup changed; reload and try again",
+            ));
+        }
+        account
+    };
 
     let (config, client) = state.upstream_context();
     validate_upstream_url(&config.upstream_base_url)?;
@@ -2180,7 +2196,7 @@ async fn verify_managed_account_key(
             "{}/v1/chat/completions",
             config.upstream_base_url.trim_end_matches('/')
         ))
-        .bearer_auth(key)
+        .bearer_auth(&key)
         .json(&account_ping_payload())
         .timeout(std::time::Duration::from_secs(
             config.non_stream_timeout_secs,
@@ -2212,7 +2228,7 @@ async fn verify_managed_account_key(
         })?;
 
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        let sanitized = sanitize_upstream_error_value_with_known_secret(&body, key).to_string();
+        let sanitized = sanitize_upstream_error_value_with_known_secret(&body, &key).to_string();
         let auth_error = format!(
             "upstream auth error {}: {}",
             status.as_u16(),
@@ -2239,7 +2255,7 @@ async fn verify_managed_account_key(
     }
 
     if status != StatusCode::TOO_MANY_REQUESTS && !status.is_success() {
-        let sanitized = sanitize_upstream_error_value_with_known_secret(&body, key).to_string();
+        let sanitized = sanitize_upstream_error_value_with_known_secret(&body, &key).to_string();
         return Err(ApiError::bad_request(format!(
             "Key verification failed: upstream returned {}: {}",
             status,
@@ -2254,7 +2270,7 @@ async fn verify_managed_account_key(
         if status == StatusCode::TOO_MANY_REQUESTS {
             let cooldown = parse_reset(&body).unwrap_or_else(|| Duration::minutes(5));
             let sanitized_body =
-                sanitize_upstream_error_value_with_known_secret(&body, key).to_string();
+                sanitize_upstream_error_value_with_known_secret(&body, &key).to_string();
             if !db
                 .set_account_rate_limit_if_key_matches(
                     &id,
@@ -2548,7 +2564,13 @@ fn ensure_legacy_go_account(state: &CoreState, id: &str) -> Result<(), ApiError>
 async fn reset_account_cooldown(
     State(state): State<CoreState>,
     Path(id): Path<String>,
+    expectation: Option<Json<AccountRevisionExpectation>>,
 ) -> Result<Json<DashboardAccount>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(
+        &state,
+        expectation.and_then(|Json(body)| body.expected_revision),
+    )?;
     let account = state
         .db
         .lock()
@@ -2564,6 +2586,7 @@ async fn reset_account_cooldown(
         let db = state.db.lock();
         db.clear_account_cooldown(&id).map_err(ApiError::internal)?;
     }
+    state.bump_settings_revision();
     let account = state
         .db
         .lock()
@@ -2995,7 +3018,9 @@ async fn update_settings(
     }
     let (zen_enabled, zen_free_alias_enabled) =
         zen_settings_from_free_model_routing(config.free_model_routing);
-    state.set_config(config).map_err(ApiError::internal)?;
+    state
+        .set_config_and_zen_free_settings(config, zen_enabled, zen_free_alias_enabled)
+        .map_err(ApiError::internal)?;
     let runtime_sync = (|| -> anyhow::Result<()> {
         if auto_start_supported {
             state.sync_auto_start(next_auto_start)?;
@@ -3006,7 +3031,15 @@ async fn update_settings(
         Ok(())
     })();
     if let Err(sync_error) = runtime_sync {
-        let config_rollback_error = state.set_config(previous_config.clone()).err();
+        let (previous_zen_enabled, previous_zen_free_alias_enabled) =
+            zen_settings_from_free_model_routing(previous_config.free_model_routing);
+        let config_rollback_error = state
+            .set_config_and_zen_free_settings(
+                previous_config.clone(),
+                previous_zen_enabled,
+                previous_zen_free_alias_enabled,
+            )
+            .err();
         let auto_start_rollback_error = auto_start_supported
             .then(|| state.sync_auto_start(previous_config.auto_start).err())
             .flatten();
@@ -3028,17 +3061,6 @@ async fn update_settings(
             message.push_str(&format!("; failed to restore Dock visibility: {error}"));
         }
         return Err(ApiError::internal(message));
-    }
-    // A legacy settings update is also a Zen route mutation. set_config
-    // performed the one shared revision bump; keep the provider state in sync
-    // without advancing it again.
-    if let Err(error) = state
-        .db
-        .lock()
-        .update_zen_free_settings(zen_enabled, zen_free_alias_enabled)
-    {
-        let _ = state.set_config(previous_config);
-        return Err(ApiError::internal(error));
     }
     Ok(Json(SettingsRevisionResponse {
         revision: state.settings_revision(),

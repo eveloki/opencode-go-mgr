@@ -1,4 +1,5 @@
 use chrono::Utc;
+use ocg_core::browser::browser_profile_paths;
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
@@ -1312,6 +1313,77 @@ async fn account_crud_exposes_and_enforces_shared_revision_without_breaking_lega
             .iter()
             .all(|account| { account["revision"].as_u64() == Some(revision) })
     );
+
+    let stale_cooldown_reset = client
+        .post(format!("{base}/accounts/{account_id}/reset-cooldown"))
+        .json(&json!({ "expected_revision": revision - 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_cooldown_reset.status(), StatusCode::CONFLICT);
+    assert_eq!(state.settings_revision(), revision);
+
+    let cooldown_reset: serde_json::Value = client
+        .post(format!("{base}/accounts/{account_id}/reset-cooldown"))
+        .json(&json!({ "expected_revision": revision }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert_eq!(cooldown_reset["revision"].as_u64(), Some(revision));
+
+    let legacy_cooldown_reset: serde_json::Value = client
+        .post(format!("{base}/accounts/{account_id}/reset-cooldown"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert_eq!(legacy_cooldown_reset["revision"].as_u64(), Some(revision));
+
+    let profile = browser_profile_paths(&state.data_dir(), &account_id).unwrap()[0].clone();
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(profile.join("Cookies"), b"stale request must preserve this").unwrap();
+    let stale_profile_reset = client
+        .delete(format!("{base}/accounts/{account_id}/browser-profile"))
+        .json(&json!({ "expected_revision": revision - 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_profile_reset.status(), StatusCode::CONFLICT);
+    assert!(profile.join("Cookies").is_file());
+
+    let profile_reset: serde_json::Value = client
+        .delete(format!("{base}/accounts/{account_id}/browser-profile"))
+        .json(&json!({ "expected_revision": revision }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert_eq!(profile_reset["revision"].as_u64(), Some(revision));
+    assert!(!profile.exists());
+
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(profile.join("Cookies"), b"legacy request").unwrap();
+    let legacy_profile_reset: serde_json::Value = client
+        .delete(format!("{base}/accounts/{account_id}/browser-profile"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert_eq!(legacy_profile_reset["revision"].as_u64(), Some(revision));
+    assert!(!profile.exists());
 
     let stale_delete = client
         .delete(format!("{base}/accounts/{account_id}"))

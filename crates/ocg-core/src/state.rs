@@ -1,7 +1,8 @@
 use crate::crypto::KeyCipher;
 use crate::db::Database;
 use crate::models::{
-    AppConfig, normalize_client_root_url, normalize_opencode_invite_url, normalize_proxy_url,
+    AppConfig, FreeModelRouting, normalize_client_root_url, normalize_opencode_invite_url,
+    normalize_proxy_url,
 };
 use crate::pricing::{
     PricingEstimate, PricingSnapshot, embedded_seed, ensure_current_adjustment_policy,
@@ -429,7 +430,7 @@ impl CoreStateInner {
         status.error = None;
     }
 
-    pub fn set_config(&self, mut config: AppConfig) -> crate::Result<()> {
+    fn prepare_config(&self, mut config: AppConfig) -> crate::Result<(AppConfig, reqwest::Client)> {
         if self.client_root_url_override.is_some() {
             config.client_root_url = self.config.lock().client_root_url.clone();
         }
@@ -441,10 +442,51 @@ impl CoreStateInner {
         // validate() enforces the non-blank primary key on every write path.
         config.validate().map_err(anyhow::Error::msg)?;
         let http_client = crate::http_client::build(&config)?;
+        Ok((config, http_client))
+    }
+
+    pub fn set_config(&self, config: AppConfig) -> crate::Result<()> {
+        let (zen_enabled, zen_free_alias_enabled) = match config.free_model_routing {
+            FreeModelRouting::Deny => (false, false),
+            FreeModelRouting::Explicit => (true, false),
+            FreeModelRouting::Prefer => (true, true),
+        };
+        self.set_config_and_zen_free_settings(config, zen_enabled, zen_free_alias_enabled)
+    }
+
+    /// Atomically persists AppConfig and the database-owned Zen singleton,
+    /// then publishes the already-committed config to in-memory readers.
+    /// Callers serialize all Zen mutations through `settings_update`.
+    pub fn set_config_and_zen_free_settings(
+        &self,
+        config: AppConfig,
+        zen_enabled: bool,
+        zen_free_alias_enabled: bool,
+    ) -> crate::Result<()> {
+        let expected_zen_settings = match config.free_model_routing {
+            FreeModelRouting::Deny => (false, false),
+            FreeModelRouting::Explicit => (true, false),
+            FreeModelRouting::Prefer => (true, true),
+        };
+        anyhow::ensure!(
+            (zen_enabled, zen_free_alias_enabled) == expected_zen_settings,
+            "Zen Free settings must match AppConfig.free_model_routing"
+        );
+        let (config, http_client) = self.prepare_config(config)?;
+        let config_json = serde_json::to_string(&config)?;
         {
             let db = self.db.lock();
-            save_config(&db, &config)?;
+            db.set_config_and_update_zen_free_settings(
+                &config_json,
+                zen_enabled,
+                zen_free_alias_enabled,
+            )?;
         }
+        self.apply_persisted_config(config, http_client);
+        Ok(())
+    }
+
+    fn apply_persisted_config(&self, config: AppConfig, http_client: reqwest::Client) {
         let should_reset_routing = {
             let mut current_config = self.config.lock();
             let mut current_client = self.http_client.lock();
@@ -506,7 +548,6 @@ impl CoreStateInner {
         if should_reset_routing {
             self.routing.reset();
         }
-        Ok(())
     }
 
     /// Resolves an authenticating credential by presented value; used by the

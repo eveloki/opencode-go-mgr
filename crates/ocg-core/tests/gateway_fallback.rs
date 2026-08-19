@@ -30,6 +30,7 @@ const OPAQUE_ACCOUNT_KEY: &str = "opaque/account+key=42";
 const LIMITED_BODY_WITH_ECHOED_KEY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached for opaque/account+key=42. Resets in 3 days.","detail":"opaque/account+key=42"}}"#;
 const ERROR_BODY_WITH_ECHOED_KEY: &str = r#"{"error":{"message":"provider rejected opaque/account+key=42","detail":"opaque/account+key=42"}}"#;
 const SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+const SUCCESS_BODY_WITHOUT_USAGE: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
 const SUCCESS_BODY_WITH_ECHOED_KEY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"before opaque/account+key=42 after"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
 const SUCCESS_BODY_WITH_COMMON_KEY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"before text after"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
 const SUCCESS_BODY_WITH_NESTED_ARGUMENT_KEY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"run","arguments":"{\"data\":\"safe\",\"token\":\"data\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
@@ -39,6 +40,11 @@ const MESSAGES_SUCCESS_BODY_WITH_ECHOED_KEY_IN_THINKING: &str = r#"{"id":"msg-ok
 const CHAT_STREAM_BODY: &str = concat!(
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
+    "data: [DONE]\n\n"
+);
+const CHAT_STREAM_WITHOUT_USAGE: &str = concat!(
+    "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
     "data: [DONE]\n\n"
 );
 const CHAT_STREAM_WITH_UNTERMINATED_KEY_TAIL: &str = concat!(
@@ -2875,6 +2881,64 @@ async fn zen_free_is_anonymous_across_all_client_formats_and_logs_route_identity
             && log.quota_multiplier.is_none()
             && log.local_adjustment_multiplier.is_none()
     }));
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn zen_free_non_stream_success_without_usage_is_still_zero_cost_free() {
+    let replies = HashMap::from([(
+        String::new(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY_WITHOUT_USAGE,
+        }]),
+    )]);
+    let (mock_base, _calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) =
+        protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
+    assert_eq!(log.status, "success");
+    assert_eq!(log.cost_state, "free");
+    assert_eq!(log.raw_cost_usd, Some(0.0));
+    assert_eq!(log.quota_debit, Some(0.0));
+    assert_eq!(log.effective_paid_cost_usd, Some(0.0));
+    assert_eq!((log.prompt_tokens, log.completion_tokens), (0, 0));
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn zen_free_stream_success_without_usage_is_still_zero_cost_free() {
+    let replies = HashMap::from([(
+        String::new(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: CHAT_STREAM_WITHOUT_USAGE,
+        }]),
+    )]);
+    let (mock_base, _calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) =
+        protocol_stream_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
+    assert_eq!(log.status, "success");
+    assert_eq!(log.cost_state, "free");
+    assert_eq!(log.raw_cost_usd, Some(0.0));
+    assert_eq!(log.quota_debit, Some(0.0));
+    assert_eq!(log.effective_paid_cost_usd, Some(0.0));
+    assert_eq!((log.prompt_tokens, log.completion_tokens), (0, 0));
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());

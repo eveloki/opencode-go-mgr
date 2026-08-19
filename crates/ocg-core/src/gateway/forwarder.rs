@@ -2288,6 +2288,7 @@ fn log_forward(
     metrics.scope_to_provider(
         Some(account.provider_id.as_str()),
         Some(account.offering_id.as_str()),
+        status.starts_with("success"),
     );
     let cost_state = match (metrics.cost_state, status) {
         ("not_applicable", "outcome_unknown") => "outcome_unknown",
@@ -2310,8 +2311,8 @@ fn log_forward(
         credential_account_id: context.credential_account_id.clone(),
         client_key_id: context.client_key_id.clone(),
         client_key_name: context.client_key_name.clone(),
-        status: if status == "success" && cost_state == "unpriced" {
-            "success_unpriced".to_string()
+        status: if status.starts_with("success") {
+            success_status_for_cost(cost_state).to_string()
         } else {
             status.to_string()
         },

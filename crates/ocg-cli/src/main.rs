@@ -330,13 +330,14 @@ async fn key_command(
             // ponytail: drop the outer guard from line 197 before re-locking —
             // parking_lot::Mutex is not re-entrant, so the second lock() would deadlock.
             drop(db);
-            let browser_operation = state.browser.operation().await;
-            state.recover_browser_profiles_for_account(&id)?;
             let account = state
                 .db
                 .lock()
                 .get_account(&id)?
                 .ok_or_else(|| anyhow::anyhow!("key not found: {}", id))?;
+            reject_zen_key_operation(&account)?;
+            let browser_operation = state.browser.operation().await;
+            state.recover_browser_profiles_for_account(&id)?;
             browser_operation.stop_account(&id).await?;
             let staged = StagedBrowserProfiles::stage(
                 &state.data_dir(),
@@ -393,6 +394,7 @@ fn toggle_account(state: &Arc<CoreStateInner>, id: &str, enabled: bool) -> Resul
     let account = db
         .get_account(id)?
         .ok_or_else(|| anyhow::anyhow!("key not found: {}", id))?;
+    reject_zen_key_operation(&account)?;
     if enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
         anyhow::bail!("account setup is not complete and cannot be enabled");
     }
@@ -422,6 +424,13 @@ fn toggle_account(state: &Arc<CoreStateInner>, id: &str, enabled: bool) -> Resul
         id,
         account.name
     );
+    Ok(())
+}
+
+fn reject_zen_key_operation(account: &Account) -> Result<()> {
+    if account.is_zen_free() {
+        anyhow::bail!("Zen Free is provider-owned; use the dashboard provider-settings operation");
+    }
     Ok(())
 }
 
@@ -521,6 +530,9 @@ async fn ping_keys(
         let db = state.db.lock();
         match id {
             Some(i) => match db.get_account(i)? {
+                Some(a) if a.is_zen_free() => anyhow::bail!(
+                    "Zen Free is provider-owned; use the dashboard provider-settings operation"
+                ),
                 Some(a)
                     if a.credential_kind == CredentialKind::ApiKey
                         && a.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
@@ -579,7 +591,7 @@ mod tests {
     use ocg_core::browser::browser_profile_paths;
     use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
     use ocg_core::models::{AccountSetupStep, AccountType};
-    use ocg_core::provider::CredentialKind;
+    use ocg_core::provider::{CredentialKind, ZEN_FREE_ACCOUNT_ID};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -902,6 +914,63 @@ mod tests {
 
         let missing_toggle = toggle_account(&state, "missing-id", true);
         assert!(missing_toggle.is_err());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn cli_key_operations_reject_the_provider_owned_zen_singleton() {
+        let dir = temp_dir("zen-key-guard");
+        let cipher = test_cipher();
+        let state = build_state(dir.clone(), cipher.clone()).unwrap();
+        let config_before = state.config();
+        let zen_before = state
+            .db
+            .lock()
+            .get_account(ZEN_FREE_ACCOUNT_ID)
+            .unwrap()
+            .unwrap();
+        let profile = browser_profile_paths(&dir, ZEN_FREE_ACCOUNT_ID).unwrap()[0].clone();
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("Cookies"), b"keep").unwrap();
+
+        for action in [
+            KeyAction::Enable {
+                id: ZEN_FREE_ACCOUNT_ID.into(),
+            },
+            KeyAction::Disable {
+                id: ZEN_FREE_ACCOUNT_ID.into(),
+            },
+            KeyAction::Remove {
+                id: ZEN_FREE_ACCOUNT_ID.into(),
+            },
+            KeyAction::Ping {
+                id: Some(ZEN_FREE_ACCOUNT_ID.into()),
+                model: "deepseek-v4-flash-free".into(),
+                message: "ping".into(),
+                max_tokens: 3,
+            },
+        ] {
+            let error = key_command(dir.clone(), cipher.clone(), action)
+                .await
+                .expect_err("Zen must not be mutable through CLI key commands");
+            assert!(error.to_string().contains("provider-owned"));
+        }
+
+        let state_after = build_state(dir.clone(), cipher).unwrap();
+        let zen_after = state_after
+            .db
+            .lock()
+            .get_account(ZEN_FREE_ACCOUNT_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(zen_after.enabled, zen_before.enabled);
+        assert_eq!(zen_after.free_alias_enabled, zen_before.free_alias_enabled);
+        assert_eq!(
+            state_after.config().free_model_routing,
+            config_before.free_model_routing
+        );
+        assert!(profile.join("Cookies").is_file());
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -32,9 +32,9 @@ pub const FORWARD_LOG_BACKFILL_CHUNK_PAUSE: std::time::Duration =
 /// This must not be tied only to an account row: disabling or deleting the key
 /// that observed the 429 does not restore the shared upstream quota.
 pub const FREE_CHANNEL_COOLDOWN_SETTING: &str = "free_channel_cooldown_until";
-/// One-time, non-overwriting SQLite snapshot taken before an on-disk v21
-/// database receives any v22 writes.
-pub const V21_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v22.";
+/// One-time, non-overwriting SQLite snapshot taken before an existing pre-v22
+/// database receives any migration writes on its way to v22.
+pub const PRE_V22_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v22.";
 
 pub struct ForwardLogQueryOptions<'a> {
     pub limit: i64,
@@ -179,20 +179,25 @@ fn schema_version_on(conn: &Connection) -> Result<i32> {
         .unwrap_or(0))
 }
 
-fn verify_v21_backup(path: &Path) -> Result<()> {
+fn verify_pre_v22_backup(path: &Path, source_version: i32) -> Result<()> {
     let backup = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("failed to open v21 backup {}", path.display()))?;
+        .with_context(|| format!("failed to open pre-v22 backup {}", path.display()))?;
     let version = schema_version_on(&backup)?;
     anyhow::ensure!(
-        version == 21,
-        "refusing to overwrite invalid v21 backup {} (schema version {version})",
+        version == source_version,
+        "refusing to reuse invalid pre-v22 backup {} (expected schema version {source_version}, found {version})",
         path.display()
     );
     Ok(())
 }
 
-fn ensure_v21_backup(conn: &Connection, db_path: &Path) -> Result<()> {
-    if schema_version_on(conn)? != 21 {
+fn ensure_pre_v22_backup(conn: &Connection, db_path: &Path) -> Result<()> {
+    let source_version = schema_version_on(conn)?;
+    let unversioned_legacy = source_version == 0
+        && (table_exists(conn, "accounts")?
+            || table_exists(conn, "settings")?
+            || table_exists(conn, "forward_logs")?);
+    if !(1..22).contains(&source_version) && !unversioned_legacy {
         return Ok(());
     }
 
@@ -206,7 +211,7 @@ fn ensure_v21_backup(conn: &Connection, db_path: &Path) -> Result<()> {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
-                    name.starts_with(V21_BACKUP_FILE_PREFIX) && name.ends_with(".bak")
+                    name.starts_with(PRE_V22_BACKUP_FILE_PREFIX) && name.ends_with(".bak")
                 })
         })
         .collect::<Vec<_>>();
@@ -214,13 +219,14 @@ fn ensure_v21_backup(conn: &Connection, db_path: &Path) -> Result<()> {
     if let Some(valid) = existing_backups
         .iter()
         .rev()
-        .find(|path| verify_v21_backup(path).is_ok())
+        .find(|path| verify_pre_v22_backup(path, source_version).is_ok())
     {
-        return verify_v21_backup(valid);
+        return verify_pre_v22_backup(valid, source_version);
     }
 
     let timestamp = Utc::now().format("%Y%m%dT%H%M%S%9fZ");
-    let backup_path = db_path.with_file_name(format!("{V21_BACKUP_FILE_PREFIX}{timestamp}.bak"));
+    let backup_path =
+        db_path.with_file_name(format!("{PRE_V22_BACKUP_FILE_PREFIX}{timestamp}.bak"));
 
     // VACUUM INTO is SQLite's consistent online snapshot mechanism: unlike a
     // raw file copy it also includes committed pages still resident in WAL.
@@ -228,10 +234,11 @@ fn ensure_v21_backup(conn: &Connection, db_path: &Path) -> Result<()> {
     // pre-v22 rollback point across retries.
     let backup_value = backup_path.to_string_lossy().into_owned();
     match conn.execute("VACUUM main INTO ?1", [&backup_value]) {
-        Ok(_) => verify_v21_backup(&backup_path),
-        Err(error) if backup_path.exists() => verify_v21_backup(&backup_path).with_context(|| {
-            format!("v21 backup appeared concurrently after SQLite reported: {error}")
-        }),
+        Ok(_) => verify_pre_v22_backup(&backup_path, source_version),
+        Err(error) if backup_path.exists() => verify_pre_v22_backup(&backup_path, source_version)
+            .with_context(|| {
+                format!("pre-v22 backup appeared concurrently after SQLite reported: {error}")
+            }),
         Err(error) => Err(error).with_context(|| {
             format!(
                 "failed to create pre-v22 database backup {}",
@@ -360,7 +367,7 @@ impl Database {
         let db_path = data_dir.join("data.sqlite");
         let conn = Connection::open(&db_path)?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
-        ensure_v21_backup(&conn, &db_path)?;
+        ensure_pre_v22_backup(&conn, &db_path)?;
         // WAL keeps request-path log writes off the rollback-journal FULL fsync;
         // must be set outside any transaction, hence before migrate().
         let _journal_mode: String =
@@ -1616,25 +1623,7 @@ impl Database {
             .get_account(id)?
             .ok_or_else(|| anyhow::anyhow!("account not found"))?;
         if existing.is_zen_free() {
-            anyhow::ensure!(
-                update.name.is_none()
-                    && update.username.is_none()
-                    && update.password.is_none()
-                    && update.key.is_none()
-                    && update.referral_code.is_none()
-                    && update.purchase_date.is_none()
-                    && update.notes.is_none()
-                    && key_cipher.is_none()
-                    && password_cipher.is_none(),
-                "Zen Free only supports enable/disable and reordering"
-            );
-            if let Some(enabled) = update.enabled {
-                self.conn.execute(
-                    "UPDATE accounts SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![id, enabled as i32, Utc::now().to_rfc3339()],
-                )?;
-            }
-            return Ok(());
+            anyhow::bail!("Zen Free settings must use the dedicated provider-settings operation");
         }
         let name = update.name.as_ref().unwrap_or(&existing.name);
         let username = match &update.username {
@@ -1702,6 +1691,38 @@ impl Database {
             ],
         )?;
         anyhow::ensure!(changed == 1, "Zen Free singleton is missing");
+        Ok(())
+    }
+
+    /// Persist the legacy AppConfig projection and the canonical Zen singleton
+    /// settings in one SQLite transaction. Callers must validate and serialize
+    /// the config before entering this persistence boundary.
+    pub fn set_config_and_update_zen_free_settings(
+        &self,
+        config_json: &str,
+        enabled: bool,
+        free_alias_enabled: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('config', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [config_json],
+        )?;
+        let changed = tx.execute(
+            "UPDATE accounts SET enabled = ?2, free_alias_enabled = ?3, updated_at = ?4
+             WHERE id = ?1 AND provider_id = ?5 AND offering_id = ?6",
+            params![
+                ZEN_FREE_ACCOUNT_ID,
+                enabled as i32,
+                free_alias_enabled as i32,
+                Utc::now().to_rfc3339(),
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "Zen Free singleton is missing");
+        tx.commit()?;
         Ok(())
     }
 
@@ -2311,7 +2332,11 @@ impl Database {
             )
             .optional()?;
         if let Some((provider_id, offering_id)) = binding.as_ref() {
-            metrics.scope_to_provider(provider_id.as_deref(), offering_id.as_deref());
+            metrics.scope_to_provider(
+                provider_id.as_deref(),
+                offering_id.as_deref(),
+                status.starts_with("success"),
+            );
         }
         let cost_state = match (metrics.cost_state, status) {
             ("not_applicable", "outcome_unknown") => "outcome_unknown",
@@ -2319,8 +2344,12 @@ impl Database {
             ("not_applicable", "success_unpriced") => "unpriced",
             (state, _) => state,
         };
-        let stored_status = if status == "success" && cost_state == "unpriced" {
-            "success_unpriced"
+        let stored_status = if status.starts_with("success") {
+            match cost_state {
+                "priced" | "free" => "success",
+                "usage_missing" => "success_no_usage",
+                _ => "success_unpriced",
+            }
         } else {
             status
         };
@@ -2471,19 +2500,7 @@ impl Database {
     ) -> Result<ForwardLogPage> {
         let limit = options.limit.clamp(1, 200);
         let offset = options.offset.max(0);
-        let (filter, filter_params) = forward_log_filter(
-            options.status,
-            options.account_id,
-            options.provider_id,
-            options.offering_id,
-            options.route_account_id,
-            options.credential_account_id,
-            options.model,
-            options.request_id,
-            options.start_time,
-            options.end_time,
-            options.key_id,
-        );
+        let (filter, filter_params) = forward_log_filter(&options);
         let order_clause = forward_log_order(options.sort_by, options.sort_order);
         let summary_sql = format!(
             "SELECT COUNT(*),
@@ -3750,40 +3767,28 @@ fn effective_usage(
     })
 }
 
-fn forward_log_filter(
-    status: Option<&str>,
-    account_id: Option<&str>,
-    provider_id: Option<&str>,
-    offering_id: Option<&str>,
-    route_account_id: Option<&str>,
-    credential_account_id: Option<&str>,
-    model: Option<&str>,
-    request_id: Option<&str>,
-    start_time: Option<&str>,
-    end_time: Option<&str>,
-    key_id: Option<&str>,
-) -> (String, Vec<Value>) {
+fn forward_log_filter(options: &ForwardLogQueryOptions<'_>) -> (String, Vec<Value>) {
     let mut filter = String::new();
     let mut params = Vec::new();
     // (clause, optional parameter); clause order must match parameter order.
     // The key filter goes last because the unattributed sentinel expands to
     // a literal `IS NULL` clause with no parameter.
     let mut clauses: Vec<(String, Option<&str>)> = [
-        ("status = ?", status),
-        ("account_id = ?", account_id),
-        ("provider_id = ?", provider_id),
-        ("offering_id = ?", offering_id),
-        ("route_account_id = ?", route_account_id),
-        ("credential_account_id = ?", credential_account_id),
-        ("model = ?", model),
-        ("request_id = ?", request_id),
-        ("julianday(timestamp) >= julianday(?)", start_time),
-        ("julianday(timestamp) <= julianday(?)", end_time),
+        ("status = ?", options.status),
+        ("account_id = ?", options.account_id),
+        ("provider_id = ?", options.provider_id),
+        ("offering_id = ?", options.offering_id),
+        ("route_account_id = ?", options.route_account_id),
+        ("credential_account_id = ?", options.credential_account_id),
+        ("model = ?", options.model),
+        ("request_id = ?", options.request_id),
+        ("julianday(timestamp) >= julianday(?)", options.start_time),
+        ("julianday(timestamp) <= julianday(?)", options.end_time),
     ]
     .into_iter()
     .filter_map(|(clause, value)| value.map(|value| (clause.to_string(), Some(value))))
     .collect();
-    match key_id {
+    match options.key_id {
         Some(UNATTRIBUTED_KEY_FILTER) => clauses.push(("client_key_id IS NULL".to_string(), None)),
         Some(id) => clauses.push(("client_key_id = ?".to_string(), Some(id))),
         None => {}
@@ -4041,7 +4046,22 @@ mod tests {
         .expect("v21 fixture should be created");
     }
 
-    fn v21_backup_paths(dir: &Path) -> Vec<PathBuf> {
+    fn create_v20_fixture(dir: &Path, include_reserved_account_conflict: bool) {
+        create_v21_fixture(dir, include_reserved_account_conflict);
+        let conn = Connection::open(dir.join("data.sqlite")).expect("v21 fixture should reopen");
+        conn.execute_batch(
+            "ALTER TABLE accounts DROP COLUMN usage_sync_last_expedited_at;
+             ALTER TABLE accounts DROP COLUMN usage_sync_failure_streak;
+             ALTER TABLE accounts DROP COLUMN usage_sync_next_eligible_at;
+             ALTER TABLE accounts DROP COLUMN usage_sync_last_attempt_at;
+             ALTER TABLE accounts DROP COLUMN usage_sync_last_success_at;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version (version) VALUES (20);",
+        )
+        .expect("v20 fixture should be created");
+    }
+
+    fn pre_v22_backup_paths(dir: &Path) -> Vec<PathBuf> {
         let mut paths = fs::read_dir(dir)
             .expect("fixture directory should be readable")
             .filter_map(|entry| entry.ok())
@@ -4050,7 +4070,7 @@ mod tests {
                 path.file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| {
-                        name.starts_with(V21_BACKUP_FILE_PREFIX) && name.ends_with(".bak")
+                        name.starts_with(PRE_V22_BACKUP_FILE_PREFIX) && name.ends_with(".bak")
                     })
             })
             .collect::<Vec<_>>();
@@ -4937,6 +4957,79 @@ mod tests {
     }
 
     #[test]
+    fn zen_settings_and_config_commit_atomically_and_generic_update_is_rejected() {
+        let dir = temp_data_dir("zen-config-atomic");
+        let db = Database::open(dir.clone()).expect("db should open");
+        db.set_setting("config", r#"{"marker":"before"}"#)
+            .expect("initial config should save");
+        let zen_before = db
+            .get_account(ZEN_FREE_ACCOUNT_ID)
+            .expect("Zen lookup should work")
+            .expect("Zen singleton should exist");
+
+        let generic = AccountUpdate {
+            name: None,
+            username: None,
+            password: None,
+            key: None,
+            enabled: Some(!zen_before.enabled),
+            referral_code: None,
+            purchase_date: None,
+            notes: None,
+        };
+        assert!(
+            db.update_account(ZEN_FREE_ACCOUNT_ID, &generic, None, None)
+                .is_err(),
+            "generic account writers must not bypass the Zen facade"
+        );
+
+        db.conn
+            .execute_batch(&format!(
+                "CREATE TRIGGER reject_zen_provider_settings
+                 BEFORE UPDATE OF enabled, free_alias_enabled ON accounts
+                 WHEN OLD.id = '{ZEN_FREE_ACCOUNT_ID}'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced Zen settings failure');
+                 END;"
+            ))
+            .expect("failure trigger should install");
+        let error = db
+            .set_config_and_update_zen_free_settings(
+                r#"{"marker":"after-failed"}"#,
+                !zen_before.enabled,
+                !zen_before.free_alias_enabled,
+            )
+            .expect_err("Zen row failure must abort the config write");
+        assert!(error.to_string().contains("forced Zen settings failure"));
+        assert_eq!(
+            db.get_setting("config").unwrap().as_deref(),
+            Some(r#"{"marker":"before"}"#)
+        );
+        let zen_after_failure = db.get_account(ZEN_FREE_ACCOUNT_ID).unwrap().unwrap();
+        assert_eq!(zen_after_failure.enabled, zen_before.enabled);
+        assert_eq!(
+            zen_after_failure.free_alias_enabled,
+            zen_before.free_alias_enabled
+        );
+
+        db.conn
+            .execute("DROP TRIGGER reject_zen_provider_settings", [])
+            .expect("failure trigger should drop");
+        db.set_config_and_update_zen_free_settings(r#"{"marker":"after"}"#, true, true)
+            .expect("config and Zen settings should commit together");
+        assert_eq!(
+            db.get_setting("config").unwrap().as_deref(),
+            Some(r#"{"marker":"after"}"#)
+        );
+        let zen_after = db.get_account(ZEN_FREE_ACCOUNT_ID).unwrap().unwrap();
+        assert!(zen_after.enabled);
+        assert!(zen_after.free_alias_enabled);
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
     fn reorder_accounts_validates_atomically_and_persists_dense_order() {
         let dir = temp_data_dir("reorder");
         let db = Database::open(dir.clone()).expect("db should open");
@@ -5098,14 +5191,55 @@ mod tests {
         );
 
         drop(conn);
-        let backups_before = v21_backup_paths(&dir);
+        let backups_before = pre_v22_backup_paths(&dir);
         assert_eq!(backups_before.len(), 1);
         let backup_bytes =
             fs::read(&backups_before[0]).expect("rollback backup should be readable");
         assert!(Database::open(dir.clone()).is_err());
-        assert_eq!(v21_backup_paths(&dir), backups_before);
+        assert_eq!(pre_v22_backup_paths(&dir), backups_before);
         assert_eq!(
             fs::read(&backups_before[0]).expect("rollback backup should remain readable"),
+            backup_bytes
+        );
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn v20_to_v22_failure_rolls_back_v21_and_v22_writes() {
+        let dir = temp_data_dir("v20-v22-atomic-migration");
+        create_v20_fixture(&dir, true);
+
+        assert!(Database::open(dir.clone()).is_err());
+        let conn = Connection::open(dir.join("data.sqlite")).expect("db should reopen");
+        let columns = conn
+            .prepare("PRAGMA table_info(accounts)")
+            .expect("table info should prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("table info should query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("columns should load");
+        assert!(
+            !columns
+                .iter()
+                .any(|name| name == "usage_sync_last_success_at")
+        );
+        assert!(!columns.iter().any(|name| name == "provider_id"));
+        assert_eq!(schema_version_on(&conn).unwrap(), 20);
+        drop(conn);
+
+        let backups_before = pre_v22_backup_paths(&dir);
+        assert_eq!(backups_before.len(), 1);
+        let backup_bytes = fs::read(&backups_before[0]).expect("backup should be readable");
+        let backup =
+            Connection::open_with_flags(&backups_before[0], OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("backup should open read-only");
+        assert_eq!(schema_version_on(&backup).unwrap(), 20);
+        drop(backup);
+
+        assert!(Database::open(dir.clone()).is_err());
+        assert_eq!(pre_v22_backup_paths(&dir), backups_before);
+        assert_eq!(
+            fs::read(&backups_before[0]).expect("backup should remain readable"),
             backup_bytes
         );
         fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -6993,7 +7127,7 @@ mod tests {
         );
         drop(db);
 
-        let backups_before = v21_backup_paths(&dir);
+        let backups_before = pre_v22_backup_paths(&dir);
         assert_eq!(backups_before.len(), 1);
         let backup_path = &backups_before[0];
         let backup_name = backup_path
@@ -7001,7 +7135,7 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("backup should have a UTF-8 filename");
         let timestamp = backup_name
-            .strip_prefix(V21_BACKUP_FILE_PREFIX)
+            .strip_prefix(PRE_V22_BACKUP_FILE_PREFIX)
             .and_then(|name| name.strip_suffix(".bak"))
             .expect("backup should use the v22 rollback name");
         assert_eq!(timestamp.len(), 25);
@@ -7047,13 +7181,58 @@ mod tests {
         let reopened = Database::open(dir.clone()).expect("v22 database should reopen");
         assert_eq!(reopened.schema_version().unwrap(), 22);
         drop(reopened);
-        assert_eq!(v21_backup_paths(&dir), backups_before);
+        assert_eq!(pre_v22_backup_paths(&dir), backups_before);
         assert_eq!(
             fs::read(backup_path).expect("backup should remain readable"),
             backup_bytes
         );
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v20_to_v22_creates_verified_source_backup_before_direct_upgrade() {
+        let dir = temp_data_dir("v20-v22-backup");
+        create_v20_fixture(&dir, false);
+
+        let db = Database::open(dir.clone()).expect("v20 database should migrate directly");
+        assert_eq!(db.schema_version().unwrap(), 22);
+        let account_columns = db
+            .conn
+            .prepare("PRAGMA table_info(accounts)")
+            .expect("table info should prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("table info should query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("columns should load");
+        assert!(
+            account_columns
+                .iter()
+                .any(|name| name == "usage_sync_last_success_at")
+        );
+        assert!(account_columns.iter().any(|name| name == "provider_id"));
+        drop(db);
+
+        let backups_before = pre_v22_backup_paths(&dir);
+        assert_eq!(backups_before.len(), 1);
+        let backup_bytes = fs::read(&backups_before[0]).expect("backup should be readable");
+        let backup =
+            Connection::open_with_flags(&backups_before[0], OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("backup should open read-only");
+        assert_eq!(schema_version_on(&backup).unwrap(), 20);
+        assert!(!table_has_column(&backup, "accounts", "provider_id").unwrap());
+        assert!(!table_has_column(&backup, "accounts", "usage_sync_last_success_at").unwrap());
+        drop(backup);
+
+        let reopened = Database::open(dir.clone()).expect("v22 database should reopen");
+        assert_eq!(reopened.schema_version().unwrap(), 22);
+        drop(reopened);
+        assert_eq!(pre_v22_backup_paths(&dir), backups_before);
+        assert_eq!(
+            fs::read(&backups_before[0]).expect("backup should remain readable"),
+            backup_bytes
+        );
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
 
     #[test]
