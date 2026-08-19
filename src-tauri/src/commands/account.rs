@@ -4,6 +4,7 @@ use ocg_core::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
 use ocg_core::models::{
     Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate, normalize_account_notes,
 };
+use ocg_core::provider::builtin_offering;
 use ocg_core::state::CoreState;
 use tauri::State;
 
@@ -27,8 +28,22 @@ pub(crate) fn create_account_inner(
 ) -> Result<Account, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
+    let provider_id = input.provider_id.trim();
+    let offering_id = input.offering_id.trim();
+    let offering = builtin_offering(provider_id, offering_id)
+        .ok_or_else(|| format!("unknown provider offering `{provider_id}/{offering_id}`"))?;
+    if offering.singleton_account_id.is_some() {
+        return Err(
+            "singleton provider offering cannot be created through the account command".into(),
+        );
+    }
     let account = Account {
         id: id.clone(),
+        provider_id: offering.provider_id.to_string(),
+        offering_id: offering.offering_id.to_string(),
+        credential_kind: offering.credential_kind,
+        quota_scope: offering.quota_scope,
+        free_alias_enabled: false,
         name: input.name,
         username: input.username,
         password_cipher: match input.password.as_deref().map(str::trim) {
@@ -317,11 +332,13 @@ mod tests {
     async fn account_command_inners_cover_lifecycle() {
         let (dir, core) = temp_core();
 
-        assert!(get_accounts_inner(&core).unwrap().is_empty());
+        assert_eq!(get_accounts_inner(&core).unwrap().len(), 1);
 
         let created = create_account_inner(
             &core,
             AccountInput {
+                provider_id: ocg_core::provider::default_provider_id(),
+                offering_id: ocg_core::provider::default_offering_id(),
                 name: "main".into(),
                 username: Some("alice".into()),
                 password: Some("  secret  ".into()),
@@ -335,9 +352,50 @@ mod tests {
         assert_eq!(created.name, "main");
         assert!(created.password_cipher.is_some());
 
+        let goat = create_account_inner(
+            &core,
+            AccountInput {
+                provider_id: ocg_core::provider::COMMAND_CODE_PROVIDER_ID.into(),
+                offering_id: ocg_core::provider::GOAT_OFFERING_ID.into(),
+                name: "goat".into(),
+                username: None,
+                password: None,
+                key: "goat-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            goat.provider_id,
+            ocg_core::provider::COMMAND_CODE_PROVIDER_ID
+        );
+        assert_eq!(goat.offering_id, ocg_core::provider::GOAT_OFFERING_ID);
+
+        assert!(
+            create_account_inner(
+                &core,
+                AccountInput {
+                    provider_id: ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID.into(),
+                    offering_id: ocg_core::provider::ANONYMOUS_FREE_OFFERING_ID.into(),
+                    name: "zen".into(),
+                    username: None,
+                    password: None,
+                    key: String::new(),
+                    referral_code: None,
+                    purchase_date: None,
+                    notes: None,
+                },
+            )
+            .is_err()
+        );
+
         let blank = create_account_inner(
             &core,
             AccountInput {
+                provider_id: ocg_core::provider::default_provider_id(),
+                offering_id: ocg_core::provider::default_offering_id(),
                 name: "blank".into(),
                 username: None,
                 password: Some("".into()),
@@ -351,7 +409,7 @@ mod tests {
         assert!(blank.password_cipher.is_none());
 
         let listed = get_accounts_inner(&core).unwrap();
-        assert_eq!(listed.len(), 2);
+        assert_eq!(listed.len(), 4);
 
         let updated = update_account_inner(
             &core,
@@ -452,7 +510,7 @@ mod tests {
             .unwrap();
 
         delete_account_inner(&core, "missing".into()).await.unwrap();
-        assert_eq!(get_accounts_inner(&core).unwrap().len(), 1);
+        assert_eq!(get_accounts_inner(&core).unwrap().len(), 3);
 
         assert!(toggle_account_inner(&core, "missing".into()).is_err());
         assert!(test_account_inner(&core, "missing".into()).is_err());

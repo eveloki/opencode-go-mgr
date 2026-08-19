@@ -856,6 +856,11 @@ mod tests {
         let now = chrono::Utc::now();
         let account = Account {
             id: "account-1".into(),
+            provider_id: ocg_core::provider::default_provider_id(),
+            offering_id: ocg_core::provider::default_offering_id(),
+            credential_kind: ocg_core::provider::default_credential_kind(),
+            quota_scope: ocg_core::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: "account-1".into(),
             username: None,
             password_cipher: None,

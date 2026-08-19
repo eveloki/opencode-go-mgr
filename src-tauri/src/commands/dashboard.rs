@@ -81,6 +81,11 @@ mod tests {
         let base =
             |id: &str, name: &str, setup_step: AccountSetupStep, key_cipher: String| Account {
                 id: id.into(),
+                provider_id: ocg_core::provider::default_provider_id(),
+                offering_id: ocg_core::provider::default_offering_id(),
+                credential_kind: ocg_core::provider::default_credential_kind(),
+                quota_scope: ocg_core::provider::default_quota_scope(),
+                free_alias_enabled: false,
                 name: name.into(),
                 username: None,
                 password_cipher: None,
@@ -125,7 +130,7 @@ mod tests {
         }
 
         let summary = get_dashboard_summary_inner(&core).unwrap();
-        assert_eq!(summary.total_accounts, 2);
+        assert_eq!(summary.total_accounts, 3);
         assert_eq!(summary.available_accounts, 0);
 
         let _ = fs::remove_dir_all(dir);
@@ -140,12 +145,14 @@ mod tests {
         let core = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
 
         let summary = get_dashboard_summary_inner(&core).unwrap();
-        assert_eq!(summary.total_accounts, 0);
+        assert_eq!(summary.total_accounts, 1);
         assert!(!summary.gateway_running);
 
         crate::commands::account::create_account_inner(
             &core,
             AccountInput {
+                provider_id: ocg_core::provider::default_provider_id(),
+                offering_id: ocg_core::provider::default_offering_id(),
                 name: "a".into(),
                 username: None,
                 password: None,
@@ -159,12 +166,12 @@ mod tests {
 
         // Mark one account cooling so available count differs from total.
         let id = get_dashboard_summary_inner(&core).unwrap();
-        assert_eq!(id.total_accounts, 1);
+        assert_eq!(id.total_accounts, 2);
         assert_eq!(id.available_accounts, 1);
 
         {
             let accounts = core.db.lock().list_accounts().unwrap();
-            let account: &Account = &accounts[0];
+            let account = accounts.iter().find(|account| account.name == "a").unwrap();
             core.db
                 .lock()
                 .set_account_cooldown(
