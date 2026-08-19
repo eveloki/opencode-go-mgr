@@ -11,7 +11,9 @@ use crate::gateway::{
 };
 use crate::go_usage::GoUsageError;
 use crate::models::*;
-use crate::pricing::{PricingSnapshot, fetch_official_snapshot, stamp_pricing_activation};
+use crate::pricing::{
+    PricingSnapshot, ensure_seed_model_coverage, fetch_official_snapshot, stamp_pricing_activation,
+};
 use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
 use axum::{
     Json, Router,
@@ -650,7 +652,10 @@ fn apply_pricing_refresh(
                 });
             }
 
-            let mut candidate = official;
+            // Official rows win; the seed only backfills models the document
+            // omits (e.g. muse-spark-1.2), so refreshes cannot strand them
+            // unpriced again.
+            let mut candidate = ensure_seed_model_coverage(official);
             if matches!(policy, Some(PricingRefreshPolicy::KeepCurrent)) {
                 merge_current_multipliers(&active, &mut candidate);
             }

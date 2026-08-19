@@ -1252,7 +1252,7 @@ fn apply_effort_aliases(mut body: Value, model: &str) -> Value {
     if let Some(replacement) = body
         .pointer("/reasoning/effort")
         .and_then(Value::as_str)
-        .and_then(|e| rewrite(e))
+        .and_then(&rewrite)
     {
         if let Some(reasoning) = body.get_mut("reasoning").and_then(Value::as_object_mut) {
             reasoning.insert("effort".into(), Value::String(replacement));
@@ -1261,7 +1261,7 @@ fn apply_effort_aliases(mut body: Value, model: &str) -> Value {
     if let Some(replacement) = body
         .get("reasoning_effort")
         .and_then(Value::as_str)
-        .and_then(|e| rewrite(e))
+        .and_then(&rewrite)
     {
         body["reasoning_effort"] = Value::String(replacement);
     }
