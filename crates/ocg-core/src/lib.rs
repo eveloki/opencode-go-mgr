@@ -10,6 +10,7 @@ pub mod go_usage;
 pub(crate) mod http_client;
 pub mod models;
 pub mod pricing;
+pub mod provider;
 pub mod state;
 pub mod usage_sync;
 

@@ -1,60 +1,27 @@
-use axum::Router;
-use axum::body::Body;
-use axum::extract::{OriginalUri, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
 use ocg_core::models::{Account, AccountUpdate, ForwardLog, ProxyMode, RoutingMode};
+use ocg_core::provider::ZEN_FREE_ACCOUNT_ID;
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
-use std::convert::Infallible;
 use std::fs;
 use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-type DelayedChunks = Vec<(StdDuration, &'static str)>;
-type DelayedResponses = Arc<Mutex<VecDeque<DelayedChunks>>>;
+#[path = "fixtures/fake_upstream.rs"]
+mod fake_upstream;
 
-#[derive(Clone)]
-struct MockReply {
-    status: u16,
-    body: &'static str,
-}
-
-#[derive(Clone)]
-struct MockCall {
-    key: String,
-    path: String,
-    authorization: Option<String>,
-    x_api_key: Option<String>,
-    anthropic_version: Option<String>,
-    body: String,
-    accept_encoding: Option<String>,
-    conversation_header: Option<String>,
-}
-
-#[derive(Clone)]
-struct MockState {
-    replies: Arc<Mutex<HashMap<String, VecDeque<MockReply>>>>,
-    calls: Arc<Mutex<Vec<MockCall>>>,
-}
-
-#[derive(Clone)]
-struct DelayedReply {
-    status: StatusCode,
-    content_type: &'static str,
-    responses: DelayedResponses,
-    calls: Arc<AtomicUsize>,
-}
+use fake_upstream::{
+    DelayedChunks, FakeCall as MockCall, FakeReply as MockReply, start_delayed_fake_upstream,
+    start_fake_upstream, start_raw_disconnect_upstream,
+};
 
 const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
 const OPAQUE_ACCOUNT_KEY: &str = "opaque/account+key=42";
@@ -131,32 +98,7 @@ async fn start_mock_upstream(
     Arc<Mutex<Vec<MockCall>>>,
     tokio::sync::oneshot::Sender<()>,
 ) {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let state = MockState {
-        replies: Arc::new(Mutex::new(replies)),
-        calls: calls.clone(),
-    };
-    let app = Router::new()
-        .route("/v1/chat/completions", post(mock_chat))
-        .route("/v1/responses", post(mock_chat))
-        .route("/v1/messages", post(mock_chat))
-        .route("/v1/models", get(mock_chat))
-        .route("/zen/v1/chat/completions", post(mock_chat))
-        .route("/zen/v1/responses", post(mock_chat))
-        .route("/zen/v1/messages", post(mock_chat))
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
-        let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
-        });
-        let _ = server.await;
-    });
-    (format!("http://{}", addr), calls, shutdown_tx)
+    start_fake_upstream(replies).await
 }
 
 async fn start_delayed_messages_upstream(
@@ -179,153 +121,114 @@ async fn start_sequenced_delayed_upstream(
     content_type: &'static str,
     responses: Vec<DelayedChunks>,
 ) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
-    assert!(!responses.is_empty());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let app = Router::new()
-        .route("/v1/chat/completions", post(delayed_reply))
-        .route("/v1/messages", post(delayed_reply))
-        .route("/v1/models", get(delayed_reply))
-        .with_state(DelayedReply {
-            status,
-            content_type,
-            responses: Arc::new(Mutex::new(VecDeque::from(responses))),
-            calls: calls.clone(),
-        });
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
-        let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
-        });
-        let _ = server.await;
-    });
-    (format!("http://{}", addr), calls, shutdown_tx)
+    start_delayed_fake_upstream(status, content_type, responses).await
 }
 
-async fn start_raw_disconnect_upstream(
-    response: Vec<u8>,
-) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let calls_h = calls.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = &mut shutdown_rx => break,
-                accepted = listener.accept() => {
-                    let Ok((mut socket, _)) = accepted else { break };
-                    calls_h.fetch_add(1, Ordering::Relaxed);
-                    let mut request = vec![0_u8; 16 * 1024];
-                    let _ = socket.read(&mut request).await;
-                    let _ = socket.write_all(&response).await;
-                    let _ = socket.shutdown().await;
-                }
-            }
-        }
-    });
-    (format!("http://{addr}"), calls, shutdown_tx)
-}
-
-async fn delayed_reply(State(state): State<DelayedReply>) -> Response {
-    state.calls.fetch_add(1, Ordering::Relaxed);
-    let chunks = {
-        let mut responses = state.responses.lock().unwrap();
-        if responses.len() > 1 {
-            responses.pop_front().unwrap()
-        } else {
-            responses.front().unwrap().clone()
-        }
-    };
-    let stream = futures_util::stream::unfold(VecDeque::from(chunks), |mut chunks| async move {
-        let (delay, chunk) = chunks.pop_front()?;
-        tokio::time::sleep(delay).await;
-        Some((
-            Ok::<_, Infallible>(bytes::Bytes::from_static(chunk.as_bytes())),
-            chunks,
-        ))
-    });
-    Response::builder()
-        .status(state.status)
-        .header("content-type", state.content_type)
-        .body(Body::from_stream(stream))
-        .unwrap()
-}
-
-async fn mock_chat(
-    State(state): State<MockState>,
-    OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    let authorization = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let x_api_key = headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let anthropic_version = headers
-        .get("anthropic-version")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let key = authorization
-        .as_deref()
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .or(x_api_key.as_deref())
-        .unwrap_or("")
-        .to_string();
-    let accept_encoding = headers
-        .get(axum::http::header::ACCEPT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let conversation_header = headers
-        .get("x-ocg-conversation-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    state.calls.lock().unwrap().push(MockCall {
-        key: key.clone(),
-        path: uri.path().to_string(),
-        authorization,
-        x_api_key,
-        anthropic_version,
-        body,
-        accept_encoding,
-        conversation_header,
-    });
-
-    let reply = {
-        let mut replies = state.replies.lock().unwrap();
-        let queue = replies.entry(key).or_insert_with(|| {
+#[tokio::test]
+async fn fake_upstream_captures_protocol_auth_and_scripts_status_streams() {
+    let replies = HashMap::from([
+        (
+            "chat-key".to_owned(),
             VecDeque::from([MockReply {
-                status: 500,
-                body: r#"{"error":"unexpected key"}"#,
-            }])
-        });
-        if queue.len() > 1 {
-            queue.pop_front().unwrap()
-        } else {
-            queue.front().unwrap().clone()
-        }
-    };
+                status: StatusCode::UNAUTHORIZED.as_u16(),
+                body: r#"{"error":"unauthorized"}"#,
+            }]),
+        ),
+        (
+            "responses-key".to_owned(),
+            VecDeque::from([MockReply {
+                status: StatusCode::FORBIDDEN.as_u16(),
+                body: r#"{"error":"forbidden"}"#,
+            }]),
+        ),
+        (
+            "messages-key".to_owned(),
+            VecDeque::from([MockReply {
+                status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                body: r#"{"error":"rate limited"}"#,
+            }]),
+        ),
+        (
+            "gemini-key".to_owned(),
+            VecDeque::from([MockReply {
+                status: StatusCode::OK.as_u16(),
+                body: "data: {\"usageMetadata\":{\"promptTokenCount\":1}}\n\n",
+            }]),
+        ),
+        (
+            String::new(),
+            VecDeque::from([MockReply {
+                status: StatusCode::OK.as_u16(),
+                body: r#"{"ok":true}"#,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_fake) = start_mock_upstream(replies).await;
+    let client = loopback_client();
 
-    let content_type = if reply.body.starts_with("data:") || reply.body.starts_with("event:") {
-        "text/event-stream"
-    } else {
-        "application/json"
-    };
-    (
-        StatusCode::from_u16(reply.status).unwrap(),
-        [("content-type", content_type)],
-        reply.body,
-    )
+    assert_eq!(
+        client
+            .post(format!("{base_url}/v1/chat/completions"))
+            .header(reqwest::header::AUTHORIZATION, "Bearer chat-key")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .post(format!("{base_url}/v1/responses"))
+            .header(reqwest::header::AUTHORIZATION, "Bearer responses-key")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        client
+            .post(format!("{base_url}/v1/messages"))
+            .header("x-api-key", "messages-key")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let gemini = client
+        .post(format!(
+            "{base_url}/v1beta/models/fake:streamGenerateContent"
+        ))
+        .header("x-goog-api-key", "gemini-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gemini.status(), StatusCode::OK);
+    assert!(gemini.text().await.unwrap().contains("usageMetadata"));
+    assert_eq!(
+        client
+            .post(format!("{base_url}/zen/free"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 5);
+    assert_eq!(calls[0].path, "/v1/chat/completions");
+    assert_eq!(calls[1].path, "/v1/responses");
+    assert_eq!(calls[2].x_api_key.as_deref(), Some("messages-key"));
+    assert_eq!(calls[3].path, "/v1beta/models/fake:streamGenerateContent");
+    assert_eq!(calls[3].x_goog_api_key.as_deref(), Some("gemini-key"));
+    assert_eq!(calls[4].method, axum::http::Method::POST);
+    assert!(calls[4].authorization.is_none());
+    assert!(calls[4].x_api_key.is_none());
+    assert!(calls[4].x_goog_api_key.is_none());
+    drop(calls);
+    let _ = stop_fake.send(());
 }
 
 fn build_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf) {
@@ -366,6 +269,11 @@ fn build_state_with_routing(
     for (idx, key) in keys.iter().enumerate() {
         let account = Account {
             id: format!("acct-{}", idx + 1),
+            provider_id: ocg_core::provider::default_provider_id(),
+            offering_id: ocg_core::provider::default_offering_id(),
+            credential_kind: ocg_core::provider::default_credential_kind(),
+            quota_scope: ocg_core::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: format!("acct-{}", idx + 1),
             username: None,
             password_cipher: None,
@@ -2304,6 +2212,7 @@ async fn manual_order_drives_fallback_while_ineligible_accounts_are_skipped() {
             "acct-3".into(),
             "acct-2".into(),
             "acct-1".into(),
+            ZEN_FREE_ACCOUNT_ID.into(),
         ])
         .unwrap();
         db.update_account(
@@ -3482,6 +3391,10 @@ async fn gateway_stays_available_while_large_backfill_runs() {
             model: "legacy".into(),
             account_id: "acct".into(),
             account_name: "acct".into(),
+            route_account_id: None,
+            provider_id: None,
+            offering_id: None,
+            credential_account_id: None,
             client_key_id: None,
             client_key_name: None,
             status: "success".into(),
@@ -3491,6 +3404,9 @@ async fn gateway_stays_available_while_large_backfill_runs() {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             cost: Some(0.0),
+            raw_cost_usd: None,
+            quota_debit: None,
+            effective_paid_cost_usd: None,
             pricing_revision_id: None,
             quota_multiplier: None,
             local_adjustment_multiplier: None,

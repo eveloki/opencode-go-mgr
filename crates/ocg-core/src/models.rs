@@ -4,6 +4,11 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::provider::{
+    CredentialKind, QuotaScope, ZEN_FREE_ACCOUNT_ID, default_credential_kind, default_offering_id,
+    default_provider_id, default_quota_scope, validate_account_binding,
+};
+
 /// Default model for dashboard account ping and CLI `ping`.
 pub const DEFAULT_ACCOUNT_TEST_MODEL: &str = "mimo-v2.5";
 
@@ -13,6 +18,16 @@ pub const MAX_ACCOUNT_NOTES_CHARS: usize = 4000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
+    #[serde(default = "default_provider_id")]
+    pub provider_id: String,
+    #[serde(default = "default_offering_id")]
+    pub offering_id: String,
+    #[serde(default = "default_credential_kind")]
+    pub credential_kind: CredentialKind,
+    #[serde(default = "default_quota_scope")]
+    pub quota_scope: QuotaScope,
+    #[serde(default)]
+    pub free_alias_enabled: bool,
     pub name: String,
     pub username: Option<String>,
     pub password_cipher: Option<String>,
@@ -156,6 +171,20 @@ impl TryFrom<&str> for AccountSetupStep {
 }
 
 impl Account {
+    pub fn validate_provider_binding(&self) -> Result<(), crate::provider::ProviderBindingError> {
+        validate_account_binding(
+            &self.id,
+            &self.provider_id,
+            &self.offering_id,
+            self.credential_kind,
+            self.quota_scope,
+        )
+    }
+
+    pub fn is_zen_free(&self) -> bool {
+        self.id == ZEN_FREE_ACCOUNT_ID
+    }
+
     /// Latest end among every cooldown window (UI / any-channel busy).
     pub fn cooldown_ends_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         [
@@ -207,6 +236,10 @@ impl Account {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountInput {
+    #[serde(default = "default_provider_id")]
+    pub provider_id: String,
+    #[serde(default = "default_offering_id")]
+    pub offering_id: String,
     pub name: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -682,6 +715,14 @@ pub struct ForwardLog {
     pub account_id: String,
     pub account_name: String,
     #[serde(default)]
+    pub route_account_id: Option<String>,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub offering_id: Option<String>,
+    #[serde(default)]
+    pub credential_account_id: Option<String>,
+    #[serde(default)]
     pub client_key_id: Option<String>,
     #[serde(default)]
     pub client_key_name: Option<String>,
@@ -692,6 +733,12 @@ pub struct ForwardLog {
     pub cached_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cost: Option<f64>,
+    #[serde(default)]
+    pub raw_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub quota_debit: Option<f64>,
+    #[serde(default)]
+    pub effective_paid_cost_usd: Option<f64>,
     pub pricing_revision_id: Option<String>,
     pub quota_multiplier: Option<f64>,
     pub local_adjustment_multiplier: Option<f64>,
@@ -713,6 +760,9 @@ pub struct ForwardMetrics {
     pub cached_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cost: f64,
+    pub raw_cost_usd: Option<f64>,
+    pub quota_debit: Option<f64>,
+    pub effective_paid_cost_usd: Option<f64>,
     pub pricing_revision_id: Option<String>,
     pub quota_multiplier: Option<f64>,
     pub local_adjustment_multiplier: Option<f64>,
@@ -728,6 +778,9 @@ impl Default for ForwardMetrics {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             cost: 0.0,
+            raw_cost_usd: None,
+            quota_debit: None,
+            effective_paid_cost_usd: None,
             pricing_revision_id: None,
             quota_multiplier: None,
             local_adjustment_multiplier: None,

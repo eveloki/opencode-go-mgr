@@ -51,6 +51,11 @@ fn benchmark_state(base_url: String) -> (Arc<CoreStateInner>, std::path::PathBuf
         .lock()
         .create_account(&Account {
             id: "bench-account".to_string(),
+            provider_id: ocg_core::provider::default_provider_id(),
+            offering_id: ocg_core::provider::default_offering_id(),
+            credential_kind: ocg_core::provider::default_credential_kind(),
+            quota_scope: ocg_core::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: "Benchmark".to_string(),
             username: None,
             password_cipher: None,

@@ -128,6 +128,11 @@ mod tests {
         let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
         Account {
             id: id.into(),
+            provider_id: crate::provider::default_provider_id(),
+            offering_id: crate::provider::default_offering_id(),
+            credential_kind: crate::provider::default_credential_kind(),
+            quota_scope: crate::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: id.into(),
             username: None,
             password_cipher: None,
@@ -186,8 +191,12 @@ mod tests {
         let db = Database::open(dir.clone()).unwrap();
         db.create_account(&account("first", true, None)).unwrap();
         db.create_account(&account("second", true, None)).unwrap();
-        db.reorder_accounts(&["second".into(), "first".into()])
-            .unwrap();
+        db.reorder_accounts(&[
+            "second".into(),
+            "first".into(),
+            crate::provider::ZEN_FREE_ACCOUNT_ID.into(),
+        ])
+        .unwrap();
 
         let selected = AccountSelector::new().select(&db, None).unwrap().unwrap();
         assert_eq!(selected.id, "second");
@@ -245,6 +254,10 @@ mod tests {
             model: "test".into(),
             account_id: "estimated-full".into(),
             account_name: "estimated-full".into(),
+            route_account_id: None,
+            provider_id: None,
+            offering_id: None,
+            credential_account_id: None,
             client_key_id: None,
             client_key_name: None,
             status: "success".into(),
@@ -254,6 +267,9 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             cost: Some(1000.0),
+            raw_cost_usd: None,
+            quota_debit: None,
+            effective_paid_cost_usd: None,
             pricing_revision_id: None,
             quota_multiplier: None,
             local_adjustment_multiplier: None,

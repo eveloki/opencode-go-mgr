@@ -870,6 +870,11 @@ async fn create_account(
     let id = uuid::Uuid::new_v4().to_string();
     let account = Account {
         id: id.clone(),
+        provider_id: crate::provider::default_provider_id(),
+        offering_id: crate::provider::default_offering_id(),
+        credential_kind: crate::provider::default_credential_kind(),
+        quota_scope: crate::provider::default_quota_scope(),
+        free_alias_enabled: false,
         name,
         username: clean_optional(input.username),
         password_cipher: encrypted_optional(&state, &input.password)?,
@@ -946,6 +951,11 @@ async fn create_managed_account(
     let id = uuid::Uuid::new_v4().to_string();
     let account = Account {
         id: id.clone(),
+        provider_id: crate::provider::default_provider_id(),
+        offering_id: crate::provider::default_offering_id(),
+        credential_kind: crate::provider::default_credential_kind(),
+        quota_scope: crate::provider::default_quota_scope(),
+        free_alias_enabled: false,
         name,
         username: clean_optional(input.username),
         password_cipher: None,
@@ -3192,6 +3202,11 @@ mod tests {
         let now = Utc::now();
         Account {
             id: id.into(),
+            provider_id: crate::provider::default_provider_id(),
+            offering_id: crate::provider::default_offering_id(),
+            credential_kind: crate::provider::default_credential_kind(),
+            quota_scope: crate::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: id.into(),
             username: None,
             password_cipher: None,
@@ -3739,6 +3754,11 @@ mod tests {
         let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
         let account = Account {
             id: "acct-1".into(),
+            provider_id: crate::provider::default_provider_id(),
+            offering_id: crate::provider::default_offering_id(),
+            credential_kind: crate::provider::default_credential_kind(),
+            quota_scope: crate::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: "main".into(),
             username: Some("user".into()),
             password_cipher: Some(state.encrypt_key("password-secret").unwrap()),
@@ -3807,6 +3827,8 @@ mod tests {
         let account = create_account(
             State(state.clone()),
             Json(AccountInput {
+                provider_id: crate::provider::default_provider_id(),
+                offering_id: crate::provider::default_offering_id(),
                 name: "main".into(),
                 username: None,
                 password: None,
@@ -3855,6 +3877,8 @@ mod tests {
         let created = create_account(
             State(state.clone()),
             Json(AccountInput {
+                provider_id: crate::provider::default_provider_id(),
+                offering_id: crate::provider::default_offering_id(),
                 name: "noted".into(),
                 username: None,
                 password: None,
@@ -4214,12 +4238,25 @@ mod tests {
             .into_iter()
             .map(|account| account.id)
             .collect::<Vec<_>>();
-        assert_eq!(unchanged, ["acct-1", "acct-2", "acct-3"]);
+        assert_eq!(
+            unchanged,
+            [
+                crate::provider::ZEN_FREE_ACCOUNT_ID,
+                "acct-1",
+                "acct-2",
+                "acct-3",
+            ]
+        );
 
         let reordered = reorder_accounts(
             State(state.clone()),
             Json(AccountOrderInput {
-                account_ids: vec!["acct-3".into(), "acct-1".into(), "acct-2".into()],
+                account_ids: vec![
+                    "acct-3".into(),
+                    "acct-1".into(),
+                    "acct-2".into(),
+                    crate::provider::ZEN_FREE_ACCOUNT_ID.into(),
+                ],
             }),
         )
         .await
@@ -4230,7 +4267,12 @@ mod tests {
                 .into_iter()
                 .map(|account| account.id)
                 .collect::<Vec<_>>(),
-            ["acct-3", "acct-1", "acct-2"]
+            [
+                "acct-3",
+                "acct-1",
+                "acct-2",
+                crate::provider::ZEN_FREE_ACCOUNT_ID,
+            ]
         );
 
         drop(state);
@@ -4244,6 +4286,11 @@ mod tests {
         let db = Database::open(dir.clone()).unwrap();
         db.create_account(&Account {
             id: "acct-usage".into(),
+            provider_id: crate::provider::default_provider_id(),
+            offering_id: crate::provider::default_offering_id(),
+            credential_kind: crate::provider::default_credential_kind(),
+            quota_scope: crate::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: "usage".into(),
             username: None,
             password_cipher: None,

@@ -953,6 +953,11 @@ mod tests {
     fn ready_account(state: &CoreState, id: &str, key: &str) -> Account {
         Account {
             id: id.to_string(),
+            provider_id: crate::provider::default_provider_id(),
+            offering_id: crate::provider::default_offering_id(),
+            credential_kind: crate::provider::default_credential_kind(),
+            quota_scope: crate::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: id.to_string(),
             username: None,
             password_cipher: None,
@@ -1288,7 +1293,7 @@ mod tests {
             assert_eq!(sync.failure_streak, 0);
             assert_eq!(sync.last_expedited_at, Some(now));
             // Defaults after migration: missing rows still open.
-            assert_eq!(db.schema_version().unwrap(), 21);
+            assert_eq!(db.schema_version().unwrap(), 22);
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1340,6 +1345,10 @@ mod tests {
                 model: "mimo-v2.5".into(),
                 account_id: "active".into(),
                 account_name: "active".into(),
+                route_account_id: None,
+                provider_id: None,
+                offering_id: None,
+                credential_account_id: None,
                 client_key_id: None,
                 client_key_name: None,
                 status: "success".into(),
@@ -1349,6 +1358,9 @@ mod tests {
                 cached_tokens: 0,
                 cache_creation_tokens: 0,
                 cost: Some(1.0),
+                raw_cost_usd: None,
+                quota_debit: None,
+                effective_paid_cost_usd: None,
                 pricing_revision_id: None,
                 quota_multiplier: None,
                 local_adjustment_multiplier: None,
@@ -1791,6 +1803,10 @@ mod tests {
                 model: "mimo-v2.5".into(),
                 account_id: "wake".into(),
                 account_name: "wake".into(),
+                route_account_id: None,
+                provider_id: None,
+                offering_id: None,
+                credential_account_id: None,
                 client_key_id: None,
                 client_key_name: None,
                 status: "success".into(),
@@ -1800,6 +1816,9 @@ mod tests {
                 cached_tokens: 0,
                 cache_creation_tokens: 0,
                 cost: Some(1.0),
+                raw_cost_usd: None,
+                quota_debit: None,
+                effective_paid_cost_usd: None,
                 pricing_revision_id: None,
                 quota_multiplier: None,
                 local_adjustment_multiplier: None,

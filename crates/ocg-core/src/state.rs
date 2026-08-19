@@ -807,6 +807,11 @@ mod tests {
         let now = chrono::Utc::now();
         let account = Account {
             id: "existing-account".into(),
+            provider_id: crate::provider::default_provider_id(),
+            offering_id: crate::provider::default_offering_id(),
+            credential_kind: crate::provider::default_credential_kind(),
+            quota_scope: crate::provider::default_quota_scope(),
+            free_alias_enabled: false,
             name: "existing-account".into(),
             username: None,
             password_cipher: None,
@@ -868,6 +873,11 @@ mod tests {
         fn test_account(cipher: &Arc<dyn KeyCipher + Send + Sync>, id: &str) -> Account {
             Account {
                 id: id.into(),
+                provider_id: crate::provider::default_provider_id(),
+                offering_id: crate::provider::default_offering_id(),
+                credential_kind: crate::provider::default_credential_kind(),
+                quota_scope: crate::provider::default_quota_scope(),
+                free_alias_enabled: false,
                 name: id.into(),
                 username: None,
                 password_cipher: None,
@@ -1175,6 +1185,11 @@ mod tests {
         fn test_account(cipher: &Arc<dyn KeyCipher + Send + Sync>, id: &str) -> Account {
             Account {
                 id: id.into(),
+                provider_id: crate::provider::default_provider_id(),
+                offering_id: crate::provider::default_offering_id(),
+                credential_kind: crate::provider::default_credential_kind(),
+                quota_scope: crate::provider::default_quota_scope(),
+                free_alias_enabled: false,
                 name: id.into(),
                 username: None,
                 password_cipher: None,

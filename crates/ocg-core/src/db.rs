@@ -1,12 +1,17 @@
 use crate::models::*;
 use crate::pricing::{PricingLimits, PricingSnapshot};
-use anyhow::Result;
+use crate::provider::*;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
 use rusqlite::{
-    Connection, OptionalExtension, Row, params, params_from_iter,
+    Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter,
     types::{Type, Value},
 };
-use std::{collections::HashSet, fmt, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fmt,
+    path::{Path, PathBuf},
+};
 
 pub struct Database {
     conn: Connection,
@@ -27,6 +32,9 @@ pub const FORWARD_LOG_BACKFILL_CHUNK_PAUSE: std::time::Duration =
 /// This must not be tied only to an account row: disabling or deleting the key
 /// that observed the 429 does not restore the shared upstream quota.
 pub const FREE_CHANNEL_COOLDOWN_SETTING: &str = "free_channel_cooldown_until";
+/// One-time, non-overwriting SQLite snapshot taken before an on-disk v21
+/// database receives any v22 writes.
+pub const V21_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v22.";
 
 pub struct ForwardLogQueryOptions<'a> {
     pub limit: i64,
@@ -72,15 +80,7 @@ pub struct AccountUsageSyncSuccessMetadata {
 
 /// Persisted official-usage sync metadata for one account (schema v21).
 /// Never stores plaintext keys or upstream bodies.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccountUsageSyncState {
-    pub account_id: String,
-    pub last_success_at: Option<DateTime<Utc>>,
-    pub last_attempt_at: Option<DateTime<Utc>>,
-    pub next_eligible_at: Option<DateTime<Utc>>,
-    pub failure_streak: i64,
-    pub last_expedited_at: Option<DateTime<Utc>>,
-}
+pub type AccountUsageSyncState = ProviderUsageSyncState;
 
 #[derive(Debug)]
 pub enum ReorderAccountsError {
@@ -140,6 +140,101 @@ fn ensure_column(
         )?;
     }
     Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )? != 0)
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    if !table_exists(conn, table)? {
+        return Ok(false);
+    }
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(columns
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|existing| existing == column))
+}
+
+fn schema_version_on(conn: &Connection) -> Result<i32> {
+    if !table_exists(conn, "schema_version")? {
+        return Ok(0);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0))
+}
+
+fn verify_v21_backup(path: &Path) -> Result<()> {
+    let backup = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open v21 backup {}", path.display()))?;
+    let version = schema_version_on(&backup)?;
+    anyhow::ensure!(
+        version == 21,
+        "refusing to overwrite invalid v21 backup {} (schema version {version})",
+        path.display()
+    );
+    Ok(())
+}
+
+fn ensure_v21_backup(conn: &Connection, db_path: &Path) -> Result<()> {
+    if schema_version_on(conn)? != 21 {
+        return Ok(());
+    }
+
+    let data_dir = db_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("database path has no parent: {}", db_path.display()))?;
+    let mut existing_backups = std::fs::read_dir(data_dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(V21_BACKUP_FILE_PREFIX) && name.ends_with(".bak")
+                })
+        })
+        .collect::<Vec<_>>();
+    existing_backups.sort();
+    if let Some(valid) = existing_backups
+        .iter()
+        .rev()
+        .find(|path| verify_v21_backup(path).is_ok())
+    {
+        return verify_v21_backup(valid);
+    }
+
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%S%9fZ");
+    let backup_path = db_path.with_file_name(format!("{V21_BACKUP_FILE_PREFIX}{timestamp}.bak"));
+
+    // VACUUM INTO is SQLite's consistent online snapshot mechanism: unlike a
+    // raw file copy it also includes committed pages still resident in WAL.
+    // SQLite refuses to overwrite an existing target, preserving the first
+    // pre-v22 rollback point across retries.
+    let backup_value = backup_path.to_string_lossy().into_owned();
+    match conn.execute("VACUUM main INTO ?1", [&backup_value]) {
+        Ok(_) => verify_v21_backup(&backup_path),
+        Err(error) if backup_path.exists() => verify_v21_backup(&backup_path).with_context(|| {
+            format!("v21 backup appeared concurrently after SQLite reported: {error}")
+        }),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to create pre-v22 database backup {}",
+                backup_path.display()
+            )
+        }),
+    }
 }
 
 fn migrate_legacy_usage_baselines(
@@ -259,13 +354,14 @@ impl Database {
     pub fn open(data_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&data_dir)?;
         let db_path = data_dir.join("data.sqlite");
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(&db_path)?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        ensure_v21_backup(&conn, &db_path)?;
         // WAL keeps request-path log writes off the rollback-journal FULL fsync;
         // must be set outside any transaction, hence before migrate().
         let _journal_mode: String =
             conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -874,6 +970,416 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (21);")?;
         }
 
+        if version < 22 {
+            // Several old development fixtures omitted the stable settings
+            // table despite reporting a later schema. Repair it before reading
+            // the legacy free-routing config.
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );",
+            )?;
+            // v22: provider/offering bindings become explicit and immutable for
+            // generic account updates. Additive columns keep old binaries able
+            // to read their legacy projection during a rollback.
+            ensure_column(
+                &tx,
+                "accounts",
+                "provider_id",
+                "TEXT NOT NULL DEFAULT 'opencode'",
+            )?;
+            ensure_column(&tx, "accounts", "offering_id", "TEXT NOT NULL DEFAULT 'go'")?;
+            ensure_column(
+                &tx,
+                "accounts",
+                "credential_kind",
+                "TEXT NOT NULL DEFAULT 'api_key' CHECK (credential_kind IN ('api_key', 'none'))",
+            )?;
+            ensure_column(
+                &tx,
+                "accounts",
+                "quota_scope",
+                "TEXT NOT NULL DEFAULT 'key' CHECK (quota_scope IN ('key', 'egress-ip'))",
+            )?;
+            ensure_column(
+                &tx,
+                "accounts",
+                "free_alias_enabled",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+
+            for (column, definition) in [
+                ("route_account_id", "TEXT"),
+                ("provider_id", "TEXT"),
+                ("offering_id", "TEXT"),
+                ("credential_account_id", "TEXT"),
+                ("raw_cost_usd", "REAL"),
+                ("quota_debit", "REAL"),
+                ("effective_paid_cost_usd", "REAL"),
+            ] {
+                ensure_column(&tx, "forward_logs", column, definition)?;
+            }
+
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS quota_windows (
+                    account_id TEXT NOT NULL,
+                    window_kind TEXT NOT NULL,
+                    used REAL NOT NULL DEFAULT 0,
+                    limit_value REAL,
+                    started_at TEXT,
+                    resets_at TEXT,
+                    calibration_offset REAL NOT NULL DEFAULT 0,
+                    unit TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    observed_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (account_id, window_kind),
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS credit_balances (
+                    account_id TEXT NOT NULL,
+                    balance_kind TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    unit TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    observed_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (account_id, balance_kind),
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS provider_pricing_snapshots (
+                    provider_id TEXT NOT NULL,
+                    offering_id TEXT NOT NULL,
+                    revision TEXT NOT NULL,
+                    activated_at TEXT NOT NULL,
+                    document_updated_at TEXT,
+                    source_url TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    PRIMARY KEY (provider_id, offering_id, revision)
+                );
+                CREATE INDEX IF NOT EXISTS idx_provider_pricing_active
+                    ON provider_pricing_snapshots(provider_id, offering_id, activated_at DESC);
+                CREATE TABLE IF NOT EXISTS provider_usage_sync_state (
+                    account_id TEXT PRIMARY KEY,
+                    last_success_at TEXT,
+                    last_attempt_at TEXT,
+                    next_eligible_at TEXT,
+                    failure_streak INTEGER NOT NULL DEFAULT 0,
+                    last_expedited_at TEXT,
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_forward_logs_route_account
+                    ON forward_logs(route_account_id);
+                CREATE INDEX IF NOT EXISTS idx_forward_logs_provider_offering
+                    ON forward_logs(provider_id, offering_id);",
+            )?;
+
+            let migrated_at = Utc::now();
+            let migrated_at_rfc = migrated_at.to_rfc3339();
+            let mut legacy_free_cooldown: Option<String> = None;
+            let mut normal_account_ids = Vec::new();
+            let mut supports_account_backfill = true;
+            for column in [
+                "name",
+                "key_cipher",
+                "enabled",
+                "recharge_date",
+                "sort_order",
+                "cooldown_until",
+                "cooldown_free_until",
+                "usage_5h_window_started_at",
+                "usage_5h_window_cost_offset",
+                "usage_week_window_started_at",
+                "usage_week_window_cost_offset",
+                "usage_month_window_cost_offset",
+                "created_at",
+                "updated_at",
+            ] {
+                if !table_has_column(&tx, "accounts", column)? {
+                    supports_account_backfill = false;
+                    break;
+                }
+            }
+            if supports_account_backfill {
+                let reserved_binding = tx
+                    .query_row(
+                        "SELECT provider_id, offering_id, credential_kind, quota_scope
+                     FROM accounts WHERE id = ?1",
+                        [ZEN_FREE_ACCOUNT_ID],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                if let Some((provider, offering, credential, scope)) = reserved_binding {
+                    anyhow::ensure!(
+                        provider == OPENCODE_ZEN_FREE_PROVIDER_ID
+                            && offering == ANONYMOUS_FREE_OFFERING_ID
+                            && credential == CredentialKind::None.as_str()
+                            && scope == QuotaScope::EgressIp.as_str(),
+                        "reserved Zen Free account id {ZEN_FREE_ACCOUNT_ID} is already used by a different account"
+                    );
+                }
+
+                let free_mode = tx
+                    .query_row(
+                        "SELECT value FROM settings WHERE key = 'config'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                    .and_then(|config| {
+                        config
+                            .get("free_model_routing")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "explicit".to_string());
+                let (zen_enabled, free_alias_enabled) = match free_mode.as_str() {
+                    "deny" => (false, false),
+                    "prefer" => (true, true),
+                    _ => (true, false),
+                };
+
+                legacy_free_cooldown = tx.query_row(
+                    "SELECT MAX(value) FROM (
+                    SELECT cooldown_free_until AS value FROM accounts
+                    WHERE cooldown_free_until IS NOT NULL
+                    UNION ALL
+                    SELECT value FROM settings WHERE key = ?1
+                 )",
+                    [FREE_CHANNEL_COOLDOWN_SETTING],
+                    |row| row.get(0),
+                )?;
+                let purchase_date = local_today();
+                tx.execute(
+                    "INSERT OR IGNORE INTO accounts (
+                    id, provider_id, offering_id, credential_kind, quota_scope,
+                    free_alias_enabled, name, key_cipher, enabled, recharge_date,
+                    sort_order, cooldown_until, cooldown_free_until, account_type,
+                    setup_step, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9,
+                    (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts),
+                    ?10, ?10, 'key', 'ready', ?11, ?11
+                 )",
+                    params![
+                        ZEN_FREE_ACCOUNT_ID,
+                        OPENCODE_ZEN_FREE_PROVIDER_ID,
+                        ANONYMOUS_FREE_OFFERING_ID,
+                        CredentialKind::None.as_str(),
+                        QuotaScope::EgressIp.as_str(),
+                        free_alias_enabled as i32,
+                        ZEN_FREE_ACCOUNT_NAME,
+                        zen_enabled as i32,
+                        purchase_date,
+                        legacy_free_cooldown,
+                        migrated_at_rfc,
+                    ],
+                )?;
+                // Repair a prior interrupted development migration while retaining
+                // the user's chosen sort order for the singleton row.
+                tx.execute(
+                    "UPDATE accounts SET
+                    provider_id = ?2, offering_id = ?3, credential_kind = ?4,
+                    quota_scope = ?5, free_alias_enabled = ?6, name = ?7,
+                    key_cipher = '', enabled = ?8, cooldown_free_until = ?9,
+                    cooldown_until = ?9, account_type = 'key', setup_step = 'ready',
+                    updated_at = ?10
+                 WHERE id = ?1",
+                    params![
+                        ZEN_FREE_ACCOUNT_ID,
+                        OPENCODE_ZEN_FREE_PROVIDER_ID,
+                        ANONYMOUS_FREE_OFFERING_ID,
+                        CredentialKind::None.as_str(),
+                        QuotaScope::EgressIp.as_str(),
+                        free_alias_enabled as i32,
+                        ZEN_FREE_ACCOUNT_NAME,
+                        zen_enabled as i32,
+                        legacy_free_cooldown,
+                        migrated_at_rfc,
+                    ],
+                )?;
+                if let Some(until) = legacy_free_cooldown.as_deref() {
+                    Self::upsert_free_channel_cooldown(&tx, until)?;
+                }
+                tx.execute(
+                    "UPDATE accounts SET cooldown_free_until = NULL
+                 WHERE id <> ?1",
+                    [ZEN_FREE_ACCOUNT_ID],
+                )?;
+                normal_account_ids = {
+                    let mut stmt = tx.prepare("SELECT id FROM accounts WHERE id <> ?1")?;
+                    stmt.query_map([ZEN_FREE_ACCOUNT_ID], |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                for id in &normal_account_ids {
+                    let cooldown = Self::compute_cooldown_until(&tx, id, &migrated_at_rfc)?;
+                    tx.execute(
+                        "UPDATE accounts SET cooldown_until = ?2 WHERE id = ?1",
+                        params![id, cooldown],
+                    )?;
+                }
+            }
+
+            // Route attribution is snapshotted independently from the
+            // credential-bearing account. Historical monetary cost remains in
+            // `cost`; the new three cost columns intentionally stay NULL.
+            if table_has_column(&tx, "forward_logs", "account_id")?
+                && table_has_column(&tx, "forward_logs", "cost_state")?
+            {
+                tx.execute(
+                    "UPDATE forward_logs SET
+                    route_account_id = CASE WHEN cost_state = 'free' THEN ?1 ELSE account_id END,
+                    provider_id = CASE WHEN cost_state = 'free' THEN ?2 ELSE ?3 END,
+                    offering_id = CASE WHEN cost_state = 'free' THEN ?4 ELSE ?5 END,
+                    credential_account_id = account_id
+                 WHERE route_account_id IS NULL
+                    OR provider_id IS NULL
+                    OR offering_id IS NULL
+                    OR credential_account_id IS NULL",
+                    params![
+                        ZEN_FREE_ACCOUNT_ID,
+                        OPENCODE_ZEN_FREE_PROVIDER_ID,
+                        OPENCODE_PROVIDER_ID,
+                        ANONYMOUS_FREE_OFFERING_ID,
+                        GO_OFFERING_ID,
+                    ],
+                )?;
+            }
+
+            if table_exists(&tx, "pricing_snapshots")? {
+                tx.execute(
+                    "INSERT OR IGNORE INTO provider_pricing_snapshots (
+                    provider_id, offering_id, revision, activated_at,
+                    document_updated_at, source_url, content_hash, snapshot_json
+                 ) SELECT ?1, ?2, revision, activated_at, document_updated_at,
+                          source_url, content_hash, snapshot_json
+                   FROM pricing_snapshots",
+                    params![OPENCODE_PROVIDER_ID, GO_OFFERING_ID],
+                )?;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO provider_usage_sync_state (
+                    account_id, last_success_at, last_attempt_at, next_eligible_at,
+                    failure_streak, last_expedited_at
+                 ) SELECT id, usage_sync_last_success_at, usage_sync_last_attempt_at,
+                          usage_sync_next_eligible_at, usage_sync_failure_streak,
+                          usage_sync_last_expedited_at
+                   FROM accounts WHERE id <> ?1",
+                [ZEN_FREE_ACCOUNT_ID],
+            )?;
+
+            let limits = if table_exists(&tx, "pricing_snapshots")? {
+                tx.query_row(
+                    "SELECT snapshot_json FROM pricing_snapshots
+                     ORDER BY activated_at DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|json| serde_json::from_str::<PricingSnapshot>(&json))
+                .transpose()?
+                .map(|snapshot| snapshot.limits)
+                .unwrap_or_else(|| crate::pricing::embedded_seed().limits)
+            } else {
+                crate::pricing::embedded_seed().limits
+            };
+            for account_id in &normal_account_ids {
+                let usage = account_usage_with_limits_on(&tx, account_id, &limits, migrated_at)?;
+                let (started_5h, offset_5h, started_week, offset_week, offset_month, purchase) = tx
+                    .query_row(
+                        "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
+                                usage_week_window_started_at, usage_week_window_cost_offset,
+                                usage_month_window_cost_offset, recharge_date
+                         FROM accounts WHERE id = ?1",
+                        [account_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<String>>(0)?,
+                                row.get::<_, f64>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, f64>(3)?,
+                                row.get::<_, f64>(4)?,
+                                row.get::<_, String>(5)?,
+                            ))
+                        },
+                    )?;
+                let month_started = month_window_start_utc(&purchase)?.to_rfc3339();
+                for (kind, used, limit, started, resets, offset) in [
+                    (
+                        QUOTA_WINDOW_FIVE_HOURS,
+                        usage.window_5h,
+                        limits.window_5h,
+                        started_5h,
+                        usage.resets_in_5h,
+                        offset_5h,
+                    ),
+                    (
+                        QUOTA_WINDOW_WEEK,
+                        usage.window_week,
+                        limits.window_week,
+                        started_week,
+                        usage.resets_in_week,
+                        offset_week,
+                    ),
+                    (
+                        QUOTA_WINDOW_MONTH,
+                        usage.window_month,
+                        limits.window_month,
+                        Some(month_started),
+                        usage.resets_in_month,
+                        offset_month,
+                    ),
+                ] {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO quota_windows (
+                            account_id, window_kind, used, limit_value, started_at,
+                            resets_at, calibration_offset, unit, source, observed_at,
+                            updated_at
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'usd',
+                                   'migration-v22', NULL, ?8)",
+                        params![
+                            account_id,
+                            kind,
+                            used,
+                            limit,
+                            started,
+                            resets.map(|value| value.to_rfc3339()),
+                            offset,
+                            migrated_at_rfc,
+                        ],
+                    )?;
+                }
+            }
+            if supports_account_backfill {
+                tx.execute(
+                    "INSERT OR IGNORE INTO quota_windows (
+                    account_id, window_kind, used, limit_value, started_at,
+                    resets_at, calibration_offset, unit, source, observed_at,
+                    updated_at
+                 ) VALUES (?1, ?2, 0, NULL, NULL, ?3, 0, 'request',
+                           'migration-v22', NULL, ?4)",
+                    params![
+                        ZEN_FREE_ACCOUNT_ID,
+                        QUOTA_WINDOW_FREE,
+                        legacy_free_cooldown,
+                        migrated_at_rfc,
+                    ],
+                )?;
+            }
+
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (22);")?;
+        }
+
         // Unreleased #43 drafts numbered client-key columns as v18 and the
         // sub-key table as v19, so those databases already report version
         // >= 18 and skip the notes gate above. ensure_column is idempotent
@@ -931,7 +1437,8 @@ impl Database {
 
     pub fn insert_pricing_snapshot(&self, snapshot: &PricingSnapshot) -> Result<()> {
         let snapshot_json = serde_json::to_string(snapshot)?;
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT OR IGNORE INTO pricing_snapshots
              (revision, activated_at, document_updated_at, source_url, content_hash, snapshot_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -944,6 +1451,23 @@ impl Database {
                 snapshot_json,
             ],
         )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO provider_pricing_snapshots
+             (provider_id, offering_id, revision, activated_at, document_updated_at,
+              source_url, content_hash, snapshot_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                OPENCODE_PROVIDER_ID,
+                GO_OFFERING_ID,
+                snapshot.revision,
+                snapshot.activated_at,
+                snapshot.document_updated_at,
+                snapshot.source_url,
+                snapshot.content_hash,
+                snapshot_json,
+            ],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -962,16 +1486,81 @@ impl Database {
             .transpose()
     }
 
+    pub fn insert_provider_pricing_snapshot(
+        &self,
+        snapshot: &ProviderPricingSnapshot,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            builtin_offering(&snapshot.provider_id, &snapshot.offering_id).is_some(),
+            "unknown provider offering `{}/{}`",
+            snapshot.provider_id,
+            snapshot.offering_id
+        );
+        self.conn.execute(
+            "INSERT OR IGNORE INTO provider_pricing_snapshots
+             (provider_id, offering_id, revision, activated_at, document_updated_at,
+              source_url, content_hash, snapshot_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                snapshot.provider_id,
+                snapshot.offering_id,
+                snapshot.revision,
+                snapshot.activated_at,
+                snapshot.document_updated_at,
+                snapshot.source_url,
+                snapshot.content_hash,
+                snapshot.snapshot_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn latest_provider_pricing_snapshot(
+        &self,
+        provider_id: &str,
+        offering_id: &str,
+    ) -> Result<Option<ProviderPricingSnapshot>> {
+        self.conn
+            .query_row(
+                "SELECT provider_id, offering_id, revision, activated_at,
+                        document_updated_at, source_url, content_hash, snapshot_json
+                 FROM provider_pricing_snapshots
+                 WHERE provider_id = ?1 AND offering_id = ?2
+                 ORDER BY activated_at DESC, rowid DESC LIMIT 1",
+                params![provider_id, offering_id],
+                |row| {
+                    Ok(ProviderPricingSnapshot {
+                        provider_id: row.get(0)?,
+                        offering_id: row.get(1)?,
+                        revision: row.get(2)?,
+                        activated_at: row.get(3)?,
+                        document_updated_at: row.get(4)?,
+                        source_url: row.get(5)?,
+                        content_hash: row.get(6)?,
+                        snapshot_json: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     // Accounts
     pub fn create_account(&self, account: &Account) -> Result<()> {
+        anyhow::ensure!(
+            account.id != ZEN_FREE_ACCOUNT_ID,
+            "Zen Free is database-owned and cannot be created through the generic account API"
+        );
+        account.validate_provider_binding()?;
         let purchase_date = if account.purchase_date.trim().is_empty() {
             local_today()
         } else {
             normalize_purchase_date(&account.purchase_date)?
         };
-        self.conn.execute(
-            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at, provider_id, offering_id, credential_kind, quota_scope, free_alias_enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
                 account.id,
                 account.name,
@@ -994,8 +1583,21 @@ impl Database {
                 account.notes,
                 account.created_at.to_rfc3339(),
                 account.updated_at.to_rfc3339(),
+                account.provider_id,
+                account.offering_id,
+                account.credential_kind.as_str(),
+                account.quota_scope.as_str(),
+                account.free_alias_enabled as i32,
             ],
         )?;
+        tx.execute(
+            "INSERT INTO provider_usage_sync_state (
+                account_id, last_success_at, last_attempt_at, next_eligible_at,
+                failure_streak, last_expedited_at
+             ) VALUES (?1, NULL, NULL, NULL, 0, NULL)",
+            [&account.id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1009,6 +1611,27 @@ impl Database {
         let existing = self
             .get_account(id)?
             .ok_or_else(|| anyhow::anyhow!("account not found"))?;
+        if existing.is_zen_free() {
+            anyhow::ensure!(
+                update.name.is_none()
+                    && update.username.is_none()
+                    && update.password.is_none()
+                    && update.key.is_none()
+                    && update.referral_code.is_none()
+                    && update.purchase_date.is_none()
+                    && update.notes.is_none()
+                    && key_cipher.is_none()
+                    && password_cipher.is_none(),
+                "Zen Free only supports enable/disable and reordering"
+            );
+            if let Some(enabled) = update.enabled {
+                self.conn.execute(
+                    "UPDATE accounts SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, enabled as i32, Utc::now().to_rfc3339()],
+                )?;
+            }
+            return Ok(());
+        }
         let name = update.name.as_ref().unwrap_or(&existing.name);
         let username = match &update.username {
             Some(s) if s.is_empty() => None,
@@ -1061,8 +1684,35 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_zen_free_settings(&self, enabled: bool, free_alias_enabled: bool) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE accounts SET enabled = ?2, free_alias_enabled = ?3, updated_at = ?4
+             WHERE id = ?1 AND provider_id = ?5 AND offering_id = ?6",
+            params![
+                ZEN_FREE_ACCOUNT_ID,
+                enabled as i32,
+                free_alias_enabled as i32,
+                Utc::now().to_rfc3339(),
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "Zen Free singleton is missing");
+        Ok(())
+    }
+
     pub fn delete_account(&mut self, id: &str) -> Result<()> {
+        anyhow::ensure!(
+            id != ZEN_FREE_ACCOUNT_ID,
+            "Zen Free is a built-in singleton and cannot be deleted"
+        );
         let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM quota_windows WHERE account_id = ?1", [id])?;
+        tx.execute("DELETE FROM credit_balances WHERE account_id = ?1", [id])?;
+        tx.execute(
+            "DELETE FROM provider_usage_sync_state WHERE account_id = ?1",
+            [id],
+        )?;
         tx.execute("DELETE FROM accounts WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(())
@@ -1080,6 +1730,116 @@ impl Database {
         Ok(version)
     }
 
+    pub fn upsert_quota_window(&self, window: &QuotaWindow) -> Result<()> {
+        anyhow::ensure!(
+            self.get_account(&window.account_id)?.is_some(),
+            "account not found"
+        );
+        self.conn.execute(
+            "INSERT INTO quota_windows (
+                account_id, window_kind, used, limit_value, started_at, resets_at,
+                calibration_offset, unit, source, observed_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(account_id, window_kind) DO UPDATE SET
+                used = excluded.used,
+                limit_value = excluded.limit_value,
+                started_at = excluded.started_at,
+                resets_at = excluded.resets_at,
+                calibration_offset = excluded.calibration_offset,
+                unit = excluded.unit,
+                source = excluded.source,
+                observed_at = excluded.observed_at,
+                updated_at = excluded.updated_at",
+            params![
+                window.account_id,
+                window.window_kind,
+                window.used,
+                window.limit_value,
+                window.started_at.map(|value| value.to_rfc3339()),
+                window.resets_at.map(|value| value.to_rfc3339()),
+                window.calibration_offset,
+                window.unit,
+                window.source,
+                window.observed_at.map(|value| value.to_rfc3339()),
+                window.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_quota_windows(&self, account_id: &str) -> Result<Vec<QuotaWindow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT account_id, window_kind, used, limit_value, started_at,
+                    resets_at, calibration_offset, unit, source, observed_at, updated_at
+             FROM quota_windows WHERE account_id = ?1 ORDER BY window_kind ASC",
+        )?;
+        let rows = stmt.query_map([account_id], |row| {
+            Ok(QuotaWindow {
+                account_id: row.get(0)?,
+                window_kind: row.get(1)?,
+                used: row.get(2)?,
+                limit_value: row.get(3)?,
+                started_at: row.get::<_, Option<String>>(4)?.map(parse_datetime),
+                resets_at: row.get::<_, Option<String>>(5)?.map(parse_datetime),
+                calibration_offset: row.get(6)?,
+                unit: row.get(7)?,
+                source: row.get(8)?,
+                observed_at: row.get::<_, Option<String>>(9)?.map(parse_datetime),
+                updated_at: parse_datetime(row.get::<_, String>(10)?),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn upsert_credit_balance(&self, balance: &CreditBalance) -> Result<()> {
+        anyhow::ensure!(
+            self.get_account(&balance.account_id)?.is_some(),
+            "account not found"
+        );
+        self.conn.execute(
+            "INSERT INTO credit_balances (
+                account_id, balance_kind, amount, unit, source, observed_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(account_id, balance_kind) DO UPDATE SET
+                amount = excluded.amount,
+                unit = excluded.unit,
+                source = excluded.source,
+                observed_at = excluded.observed_at,
+                updated_at = excluded.updated_at",
+            params![
+                balance.account_id,
+                balance.balance_kind,
+                balance.amount,
+                balance.unit,
+                balance.source,
+                balance.observed_at.map(|value| value.to_rfc3339()),
+                balance.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_credit_balances(&self, account_id: &str) -> Result<Vec<CreditBalance>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT account_id, balance_kind, amount, unit, source, observed_at, updated_at
+             FROM credit_balances WHERE account_id = ?1 ORDER BY balance_kind ASC",
+        )?;
+        let rows = stmt.query_map([account_id], |row| {
+            Ok(CreditBalance {
+                account_id: row.get(0)?,
+                balance_kind: row.get(1)?,
+                amount: row.get(2)?,
+                unit: row.get(3)?,
+                source: row.get(4)?,
+                observed_at: row.get::<_, Option<String>>(5)?.map(parse_datetime),
+                updated_at: parse_datetime(row.get::<_, String>(6)?),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn account_usage_sync_state(
         &self,
         account_id: &str,
@@ -1087,10 +1847,9 @@ impl Database {
         let row = self
             .conn
             .query_row(
-                "SELECT usage_sync_last_success_at, usage_sync_last_attempt_at,
-                        usage_sync_next_eligible_at, usage_sync_failure_streak,
-                        usage_sync_last_expedited_at
-                 FROM accounts WHERE id = ?1",
+                "SELECT last_success_at, last_attempt_at, next_eligible_at,
+                        failure_streak, last_expedited_at
+                 FROM provider_usage_sync_state WHERE account_id = ?1",
                 [account_id],
                 |row| {
                     Ok(AccountUsageSyncState {
@@ -1132,10 +1891,10 @@ impl Database {
             None => proposal,
         };
         self.conn.execute(
-            "UPDATE accounts
-             SET usage_sync_next_eligible_at = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![next.to_rfc3339(), Utc::now().to_rfc3339(), account_id],
+            "UPDATE provider_usage_sync_state
+             SET next_eligible_at = ?1
+             WHERE account_id = ?2",
+            params![next.to_rfc3339(), account_id],
         )?;
         Ok(())
     }
@@ -1168,12 +1927,11 @@ impl Database {
     ) -> Result<()> {
         // Never clear last_success_at on failure.
         self.conn.execute(
-            "UPDATE accounts
-             SET usage_sync_last_attempt_at = ?1,
-                 usage_sync_next_eligible_at = ?2,
-                 usage_sync_failure_streak = ?3,
-                 updated_at = ?1
-             WHERE id = ?4",
+            "UPDATE provider_usage_sync_state
+             SET last_attempt_at = ?1,
+                 next_eligible_at = ?2,
+                 failure_streak = ?3
+             WHERE account_id = ?4",
             params![
                 now.to_rfc3339(),
                 next_eligible_at.to_rfc3339(),
@@ -1192,9 +1950,9 @@ impl Database {
         now: DateTime<Utc>,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE accounts
-             SET usage_sync_last_attempt_at = ?1, updated_at = ?1
-             WHERE id = ?2",
+            "UPDATE provider_usage_sync_state
+             SET last_attempt_at = ?1
+             WHERE account_id = ?2",
             params![now.to_rfc3339(), account_id],
         )?;
         Ok(())
@@ -1226,7 +1984,7 @@ impl Database {
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes FROM accounts WHERE id = ?1"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, offering_id, credential_kind, quota_scope, free_alias_enabled FROM accounts WHERE id = ?1"
         )?;
         let account = stmt.query_row([id], account_from_row).optional()?;
         Ok(account)
@@ -1234,7 +1992,7 @@ impl Database {
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, offering_id, credential_kind, quota_scope, free_alias_enabled FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
         )?;
         let rows = stmt.query_map([], account_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
@@ -1436,9 +2194,12 @@ impl Database {
             tx.execute(
                 "INSERT INTO forward_logs
                  (timestamp, model, account_id, account_name, client_key_id, client_key_name,
+                  route_account_id, provider_id, offering_id, credential_account_id,
                   status, http_status, prompt_tokens, completion_tokens, cached_tokens,
-                  cache_creation_tokens, cost, cost_state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, 0, 0, 0, 'legacy_estimate')",
+                  cache_creation_tokens, cost, cost_state, raw_cost_usd, quota_debit,
+                  effective_paid_cost_usd)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                         0, 0, 0, 0, 0, 'legacy_estimate', ?13, ?14, ?15)",
                 params![
                     log.timestamp.to_rfc3339(),
                     log.model,
@@ -1446,8 +2207,15 @@ impl Database {
                     log.account_name,
                     log.client_key_id,
                     log.client_key_name,
+                    log.route_account_id,
+                    log.provider_id,
+                    log.offering_id,
+                    log.credential_account_id,
                     log.status,
                     log.http_status,
+                    log.raw_cost_usd,
+                    log.quota_debit,
+                    log.effective_paid_cost_usd,
                 ],
             )?;
         }
@@ -1465,13 +2233,16 @@ impl Database {
         self.conn.execute(
             "INSERT INTO forward_logs
              (timestamp, model, account_id, account_name, client_key_id, client_key_name,
+              route_account_id, provider_id, offering_id, credential_account_id,
               status, http_status,
               prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
+              raw_cost_usd, quota_debit, effective_paid_cost_usd,
               pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
               service_tier, cost_state, error_message, request_id, attempt,
               error_source, error_stage, duration_ms, diagnostic_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                     ?31, ?32)",
             params![
                 log.timestamp.to_rfc3339(),
                 log.model,
@@ -1479,6 +2250,10 @@ impl Database {
                 log.account_name,
                 log.client_key_id,
                 log.client_key_name,
+                log.route_account_id,
+                log.provider_id,
+                log.offering_id,
+                log.credential_account_id,
                 log.status,
                 log.http_status,
                 log.prompt_tokens,
@@ -1486,6 +2261,9 @@ impl Database {
                 log.cached_tokens,
                 log.cache_creation_tokens,
                 log.cost.unwrap_or(0.0),
+                log.raw_cost_usd,
+                log.quota_debit,
+                log.effective_paid_cost_usd,
                 log.pricing_revision_id,
                 log.quota_multiplier,
                 log.local_adjustment_multiplier,
@@ -1535,16 +2313,19 @@ impl Database {
                  cached_tokens = ?6,
                  cache_creation_tokens = ?7,
                  cost = ?8,
-                 pricing_revision_id = ?9,
-                 quota_multiplier = ?10,
-                 local_adjustment_multiplier = ?11,
-                 service_tier = ?12,
-                 cost_state = ?13,
-                 error_message = COALESCE(?14, error_message),
-                 error_source = COALESCE(?15, error_source),
-                 error_stage = COALESCE(?16, error_stage),
-                 duration_ms = COALESCE(?17, duration_ms),
-                 diagnostic_json = COALESCE(?18, diagnostic_json)
+                 raw_cost_usd = ?9,
+                 quota_debit = ?10,
+                 effective_paid_cost_usd = ?11,
+                 pricing_revision_id = ?12,
+                 quota_multiplier = ?13,
+                 local_adjustment_multiplier = ?14,
+                 service_tier = ?15,
+                 cost_state = ?16,
+                 error_message = COALESCE(?17, error_message),
+                 error_source = COALESCE(?18, error_source),
+                 error_stage = COALESCE(?19, error_stage),
+                 duration_ms = COALESCE(?20, duration_ms),
+                 diagnostic_json = COALESCE(?21, diagnostic_json)
              WHERE id = ?1",
             params![
                 id,
@@ -1555,6 +2336,9 @@ impl Database {
                 metrics.cached_tokens,
                 metrics.cache_creation_tokens,
                 stored_cost,
+                metrics.raw_cost_usd,
+                metrics.quota_debit,
+                metrics.effective_paid_cost_usd,
                 metrics.pricing_revision_id,
                 metrics.quota_multiplier,
                 metrics.local_adjustment_multiplier,
@@ -1647,7 +2431,9 @@ impl Database {
                     pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
                     service_tier, cost_state, error_message, request_id, attempt,
                     error_source, error_stage, duration_ms, diagnostic_json,
-                    client_key_id, client_key_name
+                    client_key_id, client_key_name, route_account_id, provider_id,
+                    offering_id, credential_account_id, raw_cost_usd, quota_debit,
+                    effective_paid_cost_usd
              FROM forward_logs ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], forward_log_from_row)?;
@@ -1698,7 +2484,9 @@ impl Database {
                     pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
                     service_tier, cost_state, error_message, request_id, attempt,
                     error_source, error_stage, duration_ms, diagnostic_json,
-                    client_key_id, client_key_name
+                    client_key_id, client_key_name, route_account_id, provider_id,
+                    offering_id, credential_account_id, raw_cost_usd, quota_debit,
+                    effective_paid_cost_usd
              FROM forward_logs{filter}
              {order_clause}
              LIMIT ? OFFSET ?"
@@ -2426,14 +3214,13 @@ fn record_account_usage_sync_success_on(
 ) -> Result<()> {
     let changed = if metadata.mark_expedited {
         conn.execute(
-            "UPDATE accounts
-             SET usage_sync_last_success_at = ?1,
-                 usage_sync_last_attempt_at = ?1,
-                 usage_sync_next_eligible_at = ?2,
-                 usage_sync_failure_streak = 0,
-                 usage_sync_last_expedited_at = ?1,
-                 updated_at = ?1
-             WHERE id = ?3",
+            "UPDATE provider_usage_sync_state
+             SET last_success_at = ?1,
+                 last_attempt_at = ?1,
+                 next_eligible_at = ?2,
+                 failure_streak = 0,
+                 last_expedited_at = ?1
+             WHERE account_id = ?3",
             params![
                 metadata.now.to_rfc3339(),
                 metadata.next_eligible_at.to_rfc3339(),
@@ -2442,13 +3229,12 @@ fn record_account_usage_sync_success_on(
         )?
     } else {
         conn.execute(
-            "UPDATE accounts
-             SET usage_sync_last_success_at = ?1,
-                 usage_sync_last_attempt_at = ?1,
-                 usage_sync_next_eligible_at = ?2,
-                 usage_sync_failure_streak = 0,
-                 updated_at = ?1
-             WHERE id = ?3",
+            "UPDATE provider_usage_sync_state
+             SET last_success_at = ?1,
+                 last_attempt_at = ?1,
+                 next_eligible_at = ?2,
+                 failure_streak = 0
+             WHERE account_id = ?3",
             params![
                 metadata.now.to_rfc3339(),
                 metadata.next_eligible_at.to_rfc3339(),
@@ -2935,6 +3721,10 @@ fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog>
         account_name: row.get(4)?,
         client_key_id: row.get(24)?,
         client_key_name: row.get(25)?,
+        route_account_id: row.get(26)?,
+        provider_id: row.get(27)?,
+        offering_id: row.get(28)?,
+        credential_account_id: row.get(29)?,
         status: row.get(5)?,
         http_status: row.get(6)?,
         prompt_tokens: row.get(7)?,
@@ -2942,6 +3732,9 @@ fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog>
         cached_tokens: row.get(9)?,
         cache_creation_tokens: row.get(10)?,
         cost,
+        raw_cost_usd: row.get(30)?,
+        quota_debit: row.get(31)?,
+        effective_paid_cost_usd: row.get(32)?,
         pricing_revision_id: row.get(12)?,
         quota_multiplier: row.get(13)?,
         local_adjustment_multiplier: row.get(14)?,
@@ -2973,7 +3766,8 @@ fn sub_gateway_key_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubGate
 
 fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     // SELECT order: id,name,username,password,key,enabled,referral,recharge,
-    // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup,notes
+    // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup,notes,
+    // provider,offering,credential,quota_scope,free_alias_enabled
     let created_at = row.get::<_, String>(15)?;
     let purchase_date = match row.get::<_, Option<String>>(7)? {
         Some(value) if normalize_purchase_date(&value).is_ok() => value,
@@ -3004,8 +3798,29 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
             Box::new(std::io::Error::other(error)),
         )
     })?;
+    let credential_value = row.get::<_, String>(23)?;
+    let credential_kind = CredentialKind::try_from(credential_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            23,
+            Type::Text,
+            Box::new(std::io::Error::other(error)),
+        )
+    })?;
+    let quota_scope_value = row.get::<_, String>(24)?;
+    let quota_scope = QuotaScope::try_from(quota_scope_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            24,
+            Type::Text,
+            Box::new(std::io::Error::other(error)),
+        )
+    })?;
     Ok(Account {
         id: row.get(0)?,
+        provider_id: row.get(21)?,
+        offering_id: row.get(22)?,
+        credential_kind,
+        quota_scope,
+        free_alias_enabled: row.get::<_, i32>(25)? != 0,
         name: row.get(1)?,
         username: row.get(2)?,
         password_cipher: row.get(3)?,
@@ -3071,6 +3886,11 @@ mod tests {
     fn account(id: &str) -> Account {
         Account {
             id: id.into(),
+            provider_id: default_provider_id(),
+            offering_id: default_offering_id(),
+            credential_kind: default_credential_kind(),
+            quota_scope: default_quota_scope(),
+            free_alias_enabled: false,
             name: id.into(),
             username: None,
             password_cipher: None,
@@ -3102,6 +3922,10 @@ mod tests {
             model: "test".into(),
             account_id: account_id.into(),
             account_name: account_id.into(),
+            route_account_id: None,
+            provider_id: None,
+            offering_id: None,
+            credential_account_id: None,
             client_key_id: None,
             client_key_name: None,
             status: status.into(),
@@ -3111,6 +3935,9 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             cost: Some(cost),
+            raw_cost_usd: None,
+            quota_debit: None,
+            effective_paid_cost_usd: None,
             pricing_revision_id: None,
             quota_multiplier: None,
             local_adjustment_multiplier: None,
@@ -3176,7 +4003,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
@@ -3403,7 +4230,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 21, "{label}");
+            assert_eq!(version, 22, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -3481,7 +4308,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -3564,7 +4391,7 @@ mod tests {
                 .iter()
                 .map(|account| account.id.as_str())
                 .collect::<Vec<_>>(),
-            ["a", "b", "c", "d"]
+            ["a", "b", "c", "d", ZEN_FREE_ACCOUNT_ID]
         );
         assert_eq!(accounts[0].purchase_date, "2025-12-31");
         assert_eq!(accounts[1].purchase_date, "2026-01-01");
@@ -3578,7 +4405,7 @@ mod tests {
             .expect("sort query should run")
             .collect::<rusqlite::Result<Vec<_>>>()
             .expect("sort orders should load");
-        assert_eq!(sort_orders, [0, 1, 2, 3]);
+        assert_eq!(sort_orders, [0, 1, 2, 3, 4]);
         drop(db);
 
         let reopened = Database::open(dir.clone()).expect("migrated db should reopen");
@@ -3589,7 +4416,7 @@ mod tests {
                 .iter()
                 .map(|account| account.id.as_str())
                 .collect::<Vec<_>>(),
-            ["a", "b", "c", "d"]
+            ["a", "b", "c", "d", ZEN_FREE_ACCOUNT_ID]
         );
 
         drop(reopened);
@@ -3630,7 +4457,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -3774,7 +4601,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -3823,7 +4650,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
             .with_timezone(&Utc);
@@ -3847,7 +4674,7 @@ mod tests {
         let accounts = db
             .list_accounts()
             .expect("one corrupt row must not break the account list");
-        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts.len(), 3);
         // 仅 invalid 被破坏；null 仍持有原始 2025-12-31。
         let invalid_account = accounts
             .iter()
@@ -3911,15 +4738,15 @@ mod tests {
                 .iter()
                 .map(|account| account.id.as_str())
                 .collect::<Vec<_>>(),
-            ["first", "second"]
+            [ZEN_FREE_ACCOUNT_ID, "first", "second"]
         );
-        assert_eq!(accounts[0].purchase_date, local_today());
+        assert_eq!(accounts[1].purchase_date, local_today());
         assert_eq!(
-            accounts[0].expires_on,
-            purchase_expires_on(&accounts[0].purchase_date)
+            accounts[1].expires_on,
+            purchase_expires_on(&accounts[1].purchase_date)
                 .expect("default date should have an expiry")
         );
-        assert_eq!(accounts[1].expires_on, "2024-02-29");
+        assert_eq!(accounts[2].expires_on, "2024-02-29");
 
         let mut invalid = account("invalid");
         invalid.purchase_date = "2026-2-03".to_string();
@@ -3943,18 +4770,28 @@ mod tests {
                 .expect("account should be created");
         }
 
-        db.reorder_accounts(&["c".into(), "a".into(), "b".into()])
-            .expect("valid reorder should save");
-        assert_eq!(account_ids(&db), ["c", "a", "b"]);
+        db.reorder_accounts(&[
+            "c".into(),
+            "a".into(),
+            "b".into(),
+            ZEN_FREE_ACCOUNT_ID.into(),
+        ])
+        .expect("valid reorder should save");
+        assert_eq!(account_ids(&db), ["c", "a", "b", ZEN_FREE_ACCOUNT_ID]);
 
         let duplicate = db
-            .reorder_accounts(&["c".into(), "c".into(), "b".into()])
+            .reorder_accounts(&[
+                "c".into(),
+                "c".into(),
+                "b".into(),
+                ZEN_FREE_ACCOUNT_ID.into(),
+            ])
             .expect_err("duplicates should fail");
         assert!(matches!(
             duplicate,
             ReorderAccountsError::DuplicateAccountId
         ));
-        assert_eq!(account_ids(&db), ["c", "a", "b"]);
+        assert_eq!(account_ids(&db), ["c", "a", "b", ZEN_FREE_ACCOUNT_ID]);
 
         for stale in [
             vec!["c".into(), "a".into()],
@@ -3965,7 +4802,7 @@ mod tests {
                 .reorder_accounts(&stale)
                 .expect_err("stale account set should fail");
             assert!(matches!(error, ReorderAccountsError::AccountSetMismatch));
-            assert_eq!(account_ids(&db), ["c", "a", "b"]);
+            assert_eq!(account_ids(&db), ["c", "a", "b", ZEN_FREE_ACCOUNT_ID]);
         }
 
         let sort_orders = db
@@ -3976,18 +4813,18 @@ mod tests {
             .expect("sort query should run")
             .collect::<rusqlite::Result<Vec<_>>>()
             .expect("sort orders should load");
-        assert_eq!(sort_orders, [0, 1, 2]);
+        assert_eq!(sort_orders, [0, 1, 2, 3]);
         drop(db);
 
         let reopened = Database::open(dir.clone()).expect("db should reopen");
-        assert_eq!(account_ids(&reopened), ["c", "a", "b"]);
+        assert_eq!(account_ids(&reopened), ["c", "a", "b", ZEN_FREE_ACCOUNT_ID]);
         drop(reopened);
 
         let empty_dir = temp_data_dir("reorder-empty");
         let empty = Database::open(empty_dir.clone()).expect("empty db should open");
         empty
-            .reorder_accounts(&[])
-            .expect("empty order should be valid for an empty database");
+            .reorder_accounts(&[ZEN_FREE_ACCOUNT_ID.into()])
+            .expect("the built-in Zen row is the complete empty-user order");
         drop(empty);
 
         fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -4014,10 +4851,15 @@ mod tests {
             .expect("failure trigger should be installed");
 
         let error = db
-            .reorder_accounts(&["c".into(), "a".into(), "b".into()])
+            .reorder_accounts(&[
+                "c".into(),
+                "a".into(),
+                "b".into(),
+                ZEN_FREE_ACCOUNT_ID.into(),
+            ])
             .expect_err("the trigger should interrupt the reorder");
         assert!(matches!(error, ReorderAccountsError::Database(_)));
-        assert_eq!(account_ids(&db), ["a", "b", "c"]);
+        assert_eq!(account_ids(&db), [ZEN_FREE_ACCOUNT_ID, "a", "b", "c"]);
 
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -4250,7 +5092,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -4304,7 +5146,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -4379,7 +5221,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert!(auth_error.is_none());
 
         drop(db);
@@ -5109,8 +5951,8 @@ mod tests {
         db.conn
             .execute_batch(
                 "CREATE TRIGGER fail_official_sync_metadata
-                 BEFORE UPDATE OF usage_sync_last_success_at ON accounts
-                 WHEN NEW.id = 'atomic-sync'
+                 BEFORE UPDATE OF last_success_at ON provider_usage_sync_state
+                 WHEN NEW.account_id = 'atomic-sync'
                  BEGIN
                     SELECT RAISE(ABORT, 'forced usage sync metadata failure');
                  END;",
@@ -5665,7 +6507,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
 
         let index_exists: i64 = db
             .conn
@@ -5688,7 +6530,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -5725,7 +6567,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
 
         // Replaying the migration converges to the same shape.
         db.migrate().unwrap();
@@ -5755,7 +6597,7 @@ mod tests {
         ] {
             assert!(columns.contains(&name.to_string()), "missing {name}");
         }
-        assert_eq!(db.schema_version().unwrap(), 21);
+        assert_eq!(db.schema_version().unwrap(), 22);
 
         let account = account("sync-defaults");
         db.create_account(&account).unwrap();
@@ -5770,7 +6612,7 @@ mod tests {
         assert!(sync.last_expedited_at.is_none());
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 21);
+        assert_eq!(db.schema_version().unwrap(), 22);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -5812,7 +6654,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("repaired schema should load");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_eq!(notes_after, 1);
         db.list_accounts()
             .expect("account reads must survive a missing notes column on the draft");
@@ -5910,6 +6752,10 @@ mod tests {
             model: "m".into(),
             account_id: "a".into(),
             account_name: "a".into(),
+            route_account_id: None,
+            provider_id: None,
+            offering_id: None,
+            credential_account_id: None,
             client_key_id: Some("sub-1".into()),
             client_key_name: Some("Laptop".into()),
             status: "success".into(),
@@ -5919,6 +6765,9 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             cost: None,
+            raw_cost_usd: None,
+            quota_debit: None,
+            effective_paid_cost_usd: None,
             pricing_revision_id: None,
             quota_multiplier: None,
             local_adjustment_multiplier: None,

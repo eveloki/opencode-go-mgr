@@ -3,6 +3,7 @@ use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::models::{AppConfig, ForwardLog, RoutingMode};
+use ocg_core::provider::ZEN_FREE_ACCOUNT_ID;
 use ocg_core::state::CoreStateInner;
 use reqwest::StatusCode;
 use serde_json::json;
@@ -108,7 +109,7 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
     assert_eq!(
         client
             .put(format!("{base}/accounts/order"))
-            .json(&json!({ "account_ids": [] }))
+            .json(&json!({ "account_ids": [ZEN_FREE_ACCOUNT_ID] }))
             .send()
             .await
             .unwrap()
@@ -165,15 +166,23 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
     let reordered = client
         .put(format!("{base}/accounts/order"))
         .header(reqwest::header::COOKIE, &cookie)
-        .json(&json!({ "account_ids": [] }))
+        .json(&json!({ "account_ids": [ZEN_FREE_ACCOUNT_ID] }))
         .send()
         .await
         .unwrap();
     assert_eq!(reordered.status(), StatusCode::OK);
-    assert_eq!(
-        reordered.json::<serde_json::Value>().await.unwrap(),
-        json!([])
-    );
+    let reordered = reordered.json::<serde_json::Value>().await.unwrap();
+    let reordered_ids = reordered
+        .as_array()
+        .expect("reorder response should be an account list")
+        .iter()
+        .map(|account| {
+            account["id"]
+                .as_str()
+                .expect("account id should be a string")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reordered_ids, [ZEN_FREE_ACCOUNT_ID]);
     assert_eq!(
         client
             .get(format!("{base}/application-models"))
@@ -957,6 +966,10 @@ async fn loopback_forward_logs_apply_filters_before_pagination() {
                 model: "glm-5.2".into(),
                 account_id: account_id.into(),
                 account_name: account_id.into(),
+                route_account_id: None,
+                provider_id: None,
+                offering_id: None,
+                credential_account_id: None,
                 client_key_id: None,
                 client_key_name: None,
                 status: "success".into(),
@@ -966,6 +979,9 @@ async fn loopback_forward_logs_apply_filters_before_pagination() {
                 cached_tokens: 0,
                 cache_creation_tokens: 0,
                 cost: Some(prompt_tokens as f64 / 100.0),
+                raw_cost_usd: None,
+                quota_debit: None,
+                effective_paid_cost_usd: None,
                 pricing_revision_id: None,
                 quota_multiplier: None,
                 local_adjustment_multiplier: None,
