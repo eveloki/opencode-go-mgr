@@ -220,6 +220,7 @@ import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import {
+  reconcileEditingAccount,
   withFreshAccountRevision,
 } from "./account-cas.ts";
 import {
@@ -835,7 +836,11 @@ async function reloadAfterControlPlaneConflict(): Promise<void> {
   }
   accounts.value = loaded;
   if (editingAccount.value) {
-    editingAccount.value = loaded.find(({ id }) => id === editingAccount.value?.id) ?? null;
+    const stillListed = reconcileEditingAccount(loaded, editingAccount.value.id);
+    editingAccount.value = stillListed;
+    // The form derives edit-vs-create from account presence; without closing
+    // the modal it would morph into the create form for a deleted account.
+    if (!stillListed) showModal.value = false;
   }
   if (managedWizardAccountId.value && !loadedIds.has(managedWizardAccountId.value)) {
     showManagedWizard.value = false;

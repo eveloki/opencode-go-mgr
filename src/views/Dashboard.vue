@@ -213,7 +213,7 @@
       <div class="card-head">
         <div>
           <h3 class="card-title">{{ t("供应商摘要") }}</h3>
-          <span class="card-desc">{{ t("账号健康与当前日志范围成本") }}</span>
+          <span class="card-desc">{{ t("账号健康与累计成本") }}</span>
         </div>
       </div>
       <div v-if="!providerOverviewLoaded" class="section-state">
@@ -235,7 +235,7 @@
           <dl class="provider-metrics">
             <div><dt>{{ t("账号") }}</dt><dd>{{ formatNumber(provider.total) }}</dd></div>
             <div><dt>{{ t("已启用") }}</dt><dd>{{ formatNumber(provider.enabled) }}</dd></div>
-            <div><dt>{{ t("当前日志范围成本") }}</dt><dd>{{ providerCostText(provider) }}</dd></div>
+            <div><dt>{{ t("累计成本") }}</dt><dd>{{ providerCostText(provider) }}</dd></div>
           </dl>
         </article>
       </div>

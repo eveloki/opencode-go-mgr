@@ -89,6 +89,26 @@ test("provider filters keep accessible labels and participate in clear/has-filte
   assert.match(logs, /!!credentialAccountFilter\.value/);
 });
 
+test("provider filter selects keep an accessible name after selection", () => {
+  // Once a value is chosen the placeholder is replaced by the selection, so it
+  // can no longer serve as the accessible name. Each select must carry a
+  // static aria-label using the same translated label, independent of value.
+  for (const [filter, label] of [
+    ["providerFilter", "服务商"],
+    ["offeringFilter", "服务方案"],
+    ["routeAccountFilter", "路由账号"],
+    ["credentialAccountFilter", "凭证账号"],
+  ] as const) {
+    const start = logs.indexOf(`v-model:value="${filter}"`);
+    assert.notEqual(start, -1, filter);
+    const selectBlock = logs.slice(start, logs.indexOf("/>", start));
+    assert.ok(
+      selectBlock.includes(`:aria-label="t('${label}')"`),
+      `${filter} must keep aria-label "${label}" after selection`,
+    );
+  }
+});
+
 test("row details render provider attribution and costs, with null as unknown and never $0", () => {
   assert.match(logs, /renderProviderCost\(row\)/);
   for (const label of ["服务商与费用", "原始供应商成本", "额度扣减", "有效付费成本"]) {

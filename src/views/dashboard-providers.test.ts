@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Account } from "../api/tauri.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
-import { buildProviderOverviews, providerPairKey } from "./dashboard-providers.ts";
+import { buildProviderOverviews, providerAccountHealthy, providerPairKey } from "./dashboard-providers.ts";
 
 function account(id: string, provider_id: string, offering_id: string, credential_kind: "api_key" | "none"): Account {
   return {
@@ -71,6 +71,51 @@ test("provider dashboard keeps Zen credentialless, GOAT fail-closed, and unknown
   assert.equal(rows[2]?.cost_state, "free");
 });
 
+test("provider health honors provider-specific cooldowns and ignores expired or foreign ones", () => {
+  const now = Date.parse("2026-01-15T12:00:00Z");
+  const future = "2026-01-15T13:00:00Z";
+  const past = "2026-01-15T11:00:00Z";
+
+  const go = (overrides: Partial<Account>) => ({
+    ...account("go", "opencode", "go", "api_key"),
+    ...overrides,
+  });
+  const zen = (overrides: Partial<Account>) => ({
+    ...account("zen", "opencode-zen-free", "anonymous-free", "none"),
+    ...overrides,
+  });
+
+  // Active Go cooldowns (generic/legacy and per-window) block health.
+  for (const field of [
+    "cooldown_until",
+    "cooldown_generic_until",
+    "cooldown_5h_until",
+    "cooldown_week_until",
+    "cooldown_month_until",
+  ] as const) {
+    assert.equal(providerAccountHealthy(go({ [field]: future }), now), false, field);
+    assert.equal(providerAccountHealthy(go({ [field]: past }), now), true, `${field} expired`);
+  }
+  // Go never honors the Zen free lane cooldown.
+  assert.equal(providerAccountHealthy(go({ cooldown_free_until: future }), now), true);
+
+  // Zen free honors generic/legacy plus its own free lane cooldown.
+  for (const field of ["cooldown_until", "cooldown_generic_until", "cooldown_free_until"] as const) {
+    assert.equal(providerAccountHealthy(zen({ [field]: future }), now), false, field);
+    assert.equal(providerAccountHealthy(zen({ [field]: past }), now), true, `${field} expired`);
+  }
+  // Zen free ignores the Go per-window cooldowns.
+  assert.equal(providerAccountHealthy(zen({ cooldown_5h_until: future }), now), true);
+
+  // GOAT stays fail-closed even with valid credentials and no cooldown.
+  assert.equal(providerAccountHealthy(
+    account("goat", "command-code", "goat", "api_key"),
+    now,
+  ), false);
+  // Malformed cooldown timestamps never block health.
+  assert.equal(providerAccountHealthy(go({ cooldown_until: "not-a-date" }), now), true);
+});
+
 test("dashboard loads provider-filtered remote summaries and skips legacy usage for non-Go cards", () => {
   const source = readFileSync(new URL("./Dashboard.vue", import.meta.url), "utf8");
   assert.match(source, /providerApi\.getProviderCatalog\(\)/);
@@ -80,4 +125,8 @@ test("dashboard loads provider-filtered remote summaries and skips legacy usage 
   assert.match(source, /account\.offering_id === "go"/);
   assert.match(source, /provider\.cost_state === "unknown"[^]*?t\("未知"\)/);
   assert.match(source, /供应商尚未配置/);
+  // Cost copy says cumulative, not "current log range".
+  assert.match(source, /t\("账号健康与累计成本"\)/);
+  assert.match(source, /t\("累计成本"\)/);
+  assert.doesNotMatch(source, /当前日志范围成本/);
 });

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   ACCOUNT_REVISION_UNAVAILABLE_MESSAGE,
+  reconcileEditingAccount,
   withFreshAccountRevision,
 } from "./account-cas.ts";
 
@@ -32,6 +33,23 @@ test("a missing fresh revision aborts the mutation before it can send a request"
     new RegExp(ACCOUNT_REVISION_UNAVAILABLE_MESSAGE),
   );
   assert.equal(mutationCalls, 0);
+});
+
+test("conflict reload keeps the edit modal for a surviving account, closes it for a deleted one", () => {
+  const loaded = [{ id: "a1" }, { id: "a2" }];
+
+  // Surviving account: fresh copy returned, caller keeps the modal open.
+  assert.deepEqual(reconcileEditingAccount(loaded, "a2"), { id: "a2" });
+
+  // Deleted account: null, caller must close the modal so it cannot morph
+  // into create mode.
+  assert.equal(reconcileEditingAccount(loaded, "gone"), null);
+  assert.equal(reconcileEditingAccount(loaded, null), null);
+  assert.equal(reconcileEditingAccount([], "a1"), null);
+
+  // The component wires both branches: reconcile, then close on missing.
+  assert.match(accounts, /reconcileEditingAccount\(loaded, editingAccount\.value\.id\)/);
+  assert.match(accounts, /editingAccount\.value = stillListed;\s*\n[\s\S]*?if \(!stillListed\) showModal\.value = false;/);
 });
 
 test("GOAT cards are fail-closed and never call legacy Go usage or ping controls", () => {

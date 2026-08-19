@@ -110,6 +110,7 @@
               v-model:value="providerFilter"
               :options="providerOptions"
               :placeholder="t('服务商')"
+              :aria-label="t('服务商')"
               :consistent-menu-width="false"
             />
           </div>
@@ -119,6 +120,7 @@
               v-model:value="offeringFilter"
               :options="offeringOptions"
               :placeholder="t('服务方案')"
+              :aria-label="t('服务方案')"
               :consistent-menu-width="false"
             />
           </div>
@@ -128,6 +130,7 @@
               v-model:value="routeAccountFilter"
               :options="routeAccountOptions"
               :placeholder="t('路由账号')"
+              :aria-label="t('路由账号')"
               :consistent-menu-width="false"
             />
           </div>
@@ -137,6 +140,7 @@
               v-model:value="credentialAccountFilter"
               :options="credentialAccountOptions"
               :placeholder="t('凭证账号')"
+              :aria-label="t('凭证账号')"
               :consistent-menu-width="false"
             />
           </div>
@@ -239,6 +243,9 @@
         <p v-if="keyFilter" class="key-filter-note" role="status">
           {{ t("升级前用量统一计入主 Key") }}
         </p>
+        <n-alert v-if="forwardError" type="error" :title="t('加载请求日志失败: {error}', { error: forwardError })">
+          <n-button size="small" secondary @click="loadForwardLogs">{{ t("重试") }}</n-button>
+        </n-alert>
         <n-data-table
           :columns="forwardColumns"
           :data="forwardLogs"
@@ -289,6 +296,7 @@ import type {
 import { t } from "../i18n/index.ts";
 import { locale } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
+import { dashboardErrorDetail } from "../utils/errors.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
 import type { TimePreset } from "./log-time-range.ts";
 import { providerOfferingLabel } from "./account-providers.ts";
@@ -317,6 +325,7 @@ const clientKeys = ref<ForwardLogClientKey[]>([]);
 const gatewayLoading = ref(false);
 const gatewayError = ref("");
 const forwardLoading = ref(false);
+const forwardError = ref("");
 const statusFilter = ref<string>(query.get("status") ?? "");
 const accountFilter = ref<string>(query.get("account") ?? "");
 const modelFilter = ref<string>(query.get("model") ?? "");
@@ -818,6 +827,7 @@ let forwardRequest = 0;
 async function loadForwardLogs() {
   const request = ++forwardRequest;
   forwardLoading.value = true;
+  forwardError.value = "";
   forwardLogs.value = [];
   forwardTotals.value = emptySummary();
   try {
@@ -846,7 +856,8 @@ async function loadForwardLogs() {
     if (request === forwardRequest) {
       forwardLogs.value = [];
       forwardTotals.value = emptySummary();
-      message.error(t("加载请求日志失败: {error}", { error: String(e) }));
+      forwardError.value = dashboardErrorDetail(e);
+      message.error(t("加载请求日志失败: {error}", { error: forwardError.value }));
     }
   } finally {
     if (request === forwardRequest) forwardLoading.value = false;

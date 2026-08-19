@@ -20,21 +20,39 @@ export function providerPairKey(providerId: string, offeringId: string): string 
   return `${providerId}/${offeringId}`;
 }
 
-function accountCooling(account: Account, now: number): boolean {
-  if (!account.cooldown_until) return false;
-  const until = Date.parse(account.cooldown_until);
-  return Number.isFinite(until) && until > now;
+function cooldownActive(until: string | null, now: number): boolean {
+  if (!until) return false;
+  const parsed = Date.parse(until);
+  return Number.isFinite(parsed) && parsed > now;
 }
 
+// Each provider family only honors the cooldown fields its runtime writes:
+// Go uses the generic/legacy plus per-window fields (never the Zen free lane),
+// Zen free uses generic/legacy plus its shared egress-IP lane cooldown.
+const GO_COOLDOWN_FIELDS = [
+  "cooldown_until",
+  "cooldown_generic_until",
+  "cooldown_5h_until",
+  "cooldown_week_until",
+  "cooldown_month_until",
+] as const;
+const ZEN_FREE_COOLDOWN_FIELDS = [
+  "cooldown_until",
+  "cooldown_generic_until",
+  "cooldown_free_until",
+] as const;
+
 export function providerAccountHealthy(account: Account, now: number): boolean {
-  if (!account.enabled || account.setup_step !== "ready" || account.auth_error || accountCooling(account, now)) {
+  if (!account.enabled || account.setup_step !== "ready" || account.auth_error) {
     return false;
   }
   if (account.provider_id === "opencode" && account.offering_id === "go") {
-    return account.credential_kind === "api_key";
+    return account.credential_kind === "api_key"
+      && !GO_COOLDOWN_FIELDS.some((field) => cooldownActive(account[field], now));
   }
   if (account.provider_id === "opencode-zen-free" && account.offering_id === "anonymous-free") {
-    return account.credential_kind === "none";
+    return account.credential_kind === "none"
+      && !ZEN_FREE_COOLDOWN_FIELDS.some((field) => cooldownActive(account[field], now));
   }
   // GOAT and unknown offerings stay fail-closed until a verified runtime
   // contract is configured.
