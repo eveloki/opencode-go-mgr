@@ -1135,6 +1135,246 @@ async fn loopback_forward_logs_filter_by_provider_attribution() {
 }
 
 #[tokio::test]
+async fn account_crud_exposes_and_enforces_shared_revision_without_breaking_legacy_calls() {
+    let state = state("account-revision-cas");
+    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
+    let client = loopback_client();
+
+    let initial_revision = state.settings_revision();
+    let listed: serde_json::Value = client
+        .get(format!("{base}/accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| { account["revision"].as_u64() == Some(initial_revision) })
+    );
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/accounts"))
+        .json(&json!({
+            "name": "CAS account",
+            "key": "cas-key",
+            "expected_revision": initial_revision
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account_id = created["id"].as_str().unwrap().to_string();
+    let mut revision = created["revision"].as_u64().unwrap();
+    assert_eq!(revision, initial_revision + 1);
+
+    client
+        .patch(format!("{base}/accounts/{account_id}/usage"))
+        .json(&json!({
+            "window": "window_5h",
+            "percent": 50.0,
+            "resets_in_minutes": 180
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let provider_usage: serde_json::Value = client
+        .get(format!("{base}/accounts/{account_id}/provider-usage"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(provider_usage["availability"], "available");
+    assert_eq!(provider_usage["quota_windows"].as_array().unwrap().len(), 3);
+    let rolling = provider_usage["quota_windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|window| window["window_kind"] == "five_hours")
+        .unwrap();
+    assert_eq!(rolling["source"], "opencode-go-live");
+    assert_eq!(
+        rolling["used"].as_f64().unwrap(),
+        rolling["limit_value"].as_f64().unwrap() * 0.5
+    );
+
+    let stale = client
+        .patch(format!("{base}/accounts/{account_id}"))
+        .json(&json!({
+            "name": "stale",
+            "expected_revision": initial_revision
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(state.settings_revision(), revision);
+
+    let updated: serde_json::Value = client
+        .patch(format!("{base}/accounts/{account_id}"))
+        .json(&json!({
+            "name": "updated",
+            "expected_revision": revision
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert_eq!(updated["revision"].as_u64(), Some(revision));
+
+    // Empty-body legacy toggle remains accepted and still advances the shared
+    // revision returned on the account DTO.
+    let toggled: serde_json::Value = client
+        .post(format!("{base}/accounts/{account_id}/toggle"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert_eq!(toggled["revision"].as_u64(), Some(revision));
+
+    let stale_toggle = client
+        .post(format!("{base}/accounts/{account_id}/toggle"))
+        .json(&json!({ "expected_revision": revision - 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_toggle.status(), StatusCode::CONFLICT);
+
+    let accounts: serde_json::Value = client
+        .get(format!("{base}/accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut account_ids = accounts
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|account| account["id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    account_ids.reverse();
+    let reordered: serde_json::Value = client
+        .put(format!("{base}/accounts/order"))
+        .json(&json!({
+            "account_ids": account_ids.clone(),
+            "expected_revision": revision
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert!(
+        reordered
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| { account["revision"].as_u64() == Some(revision) })
+    );
+
+    let legacy_reordered: serde_json::Value = client
+        .put(format!("{base}/accounts/order"))
+        .json(&json!({ "account_ids": account_ids }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert!(
+        legacy_reordered
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| { account["revision"].as_u64() == Some(revision) })
+    );
+
+    let stale_delete = client
+        .delete(format!("{base}/accounts/{account_id}"))
+        .json(&json!({ "expected_revision": revision - 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
+    assert!(state.db.lock().get_account(&account_id).unwrap().is_some());
+
+    let deleted = client
+        .delete(format!("{base}/accounts/{account_id}"))
+        .json(&json!({ "expected_revision": revision }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    revision += 1;
+    assert_eq!(
+        deleted
+            .headers()
+            .get("x-ocg-settings-revision")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        revision.to_string()
+    );
+    assert_eq!(state.settings_revision(), revision);
+
+    let legacy_created: serde_json::Value = client
+        .post(format!("{base}/accounts"))
+        .json(&json!({ "name": "legacy delete", "key": "legacy-key" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    revision += 1;
+    assert_eq!(legacy_created["revision"].as_u64(), Some(revision));
+    let legacy_id = legacy_created["id"].as_str().unwrap();
+    let legacy_deleted = client
+        .delete(format!("{base}/accounts/{legacy_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy_deleted.status(), StatusCode::NO_CONTENT);
+    revision += 1;
+    assert_eq!(
+        legacy_deleted
+            .headers()
+            .get("x-ocg-settings-revision")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        revision.to_string()
+    );
+    assert_eq!(state.settings_revision(), revision);
+
+    gateway::stop_gateway(handle);
+}
+
+#[tokio::test]
 async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_consistent() {
     let state = state("multi-provider-dashboard");
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -1160,8 +1400,16 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
                 && item["offering_id"] == GOAT_OFFERING_ID
         })
         .unwrap();
-    assert_eq!(goat["pricing_availability"], "unconfigured");
-    assert_eq!(goat["usage_availability"], "unconfigured");
+    assert_eq!(goat["pricing_availability"], "unavailable");
+    assert_eq!(goat["usage_availability"], "unavailable");
+    let zen_catalog = catalog
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["provider_id"] == "opencode-zen-free")
+        .unwrap();
+    assert_eq!(zen_catalog["pricing_availability"], "not_applicable");
+    assert_eq!(zen_catalog["usage_availability"], "local_state");
 
     let models: serde_json::Value = client
         .get(format!("{base}/providers/model-capabilities"))
@@ -1196,7 +1444,33 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
     assert_eq!(created["offering_id"], GOAT_OFFERING_ID);
     assert_eq!(created["credential_kind"], "api_key");
     assert_eq!(created["quota_scope"], "key");
+    assert_eq!(
+        created["revision"].as_u64(),
+        Some(state.settings_revision())
+    );
     let goat_id = created["id"].as_str().unwrap();
+    let summary: serde_json::Value = client
+        .get(format!("{base}/dashboard/summary"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        summary["available_accounts"], 1,
+        "Zen Free is available without a key while unconfigured GOAT is not"
+    );
+    let goat_usage: serde_json::Value = client
+        .get(format!("{base}/accounts/{goat_id}/provider-usage"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(goat_usage["availability"], "unavailable");
+    assert_eq!(goat_usage["experimental"], true);
     assert_eq!(
         client
             .post(format!("{base}/accounts/{goat_id}/test"))
@@ -1245,6 +1519,9 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
             .json(&json!({
                 "window": "window_5h", "percent": 50.0
             })),
+        client.post(format!(
+            "{base}/accounts/{ZEN_FREE_ACCOUNT_ID}/reset-cooldown"
+        )),
     ] {
         assert_eq!(
             request.send().await.unwrap().status(),
@@ -1271,6 +1548,45 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
     assert_eq!(
         state.config().free_model_routing,
         ocg_core::models::FreeModelRouting::Prefer
+    );
+
+    let free_until = Utc::now() + chrono::Duration::minutes(5);
+    state
+        .db
+        .lock()
+        .set_account_rate_limit(
+            ZEN_FREE_ACCOUNT_ID,
+            free_until,
+            "test free cooldown",
+            Some(ocg_core::models::UsageWindowKind::Free),
+        )
+        .unwrap();
+    let zen_usage: serde_json::Value = client
+        .get(format!(
+            "{base}/accounts/{ZEN_FREE_ACCOUNT_ID}/provider-usage"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(zen_usage["availability"], "local_state");
+    assert_eq!(zen_usage["experimental"], false);
+    assert!(zen_usage["free_cooldown_until"].is_string());
+    assert_eq!(zen_usage["quota_windows"][0]["window_kind"], "free");
+    assert_eq!(zen_usage["quota_windows"][0]["used"], 1.0);
+    let cooled_summary: serde_json::Value = client
+        .get(format!("{base}/dashboard/summary"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        cooled_summary["available_accounts"], 0,
+        "the authoritative egress cooldown blocks Zen while GOAT remains unavailable"
     );
 
     let stale = client

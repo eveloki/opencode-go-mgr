@@ -2280,11 +2280,15 @@ fn log_forward(
     model: &str,
     status: &str,
     http_status: Option<i32>,
-    metrics: ForwardMetrics,
+    mut metrics: ForwardMetrics,
     error_message: Option<&str>,
     context: &ForwardAttemptContext,
     failure: Option<FailureRecord>,
 ) -> Result<i64> {
+    metrics.scope_to_provider(
+        Some(account.provider_id.as_str()),
+        Some(account.offering_id.as_str()),
+    );
     let cost_state = match (metrics.cost_state, status) {
         ("not_applicable", "outcome_unknown") => "outcome_unknown",
         ("not_applicable", "success_no_usage") => "usage_missing",
@@ -2306,7 +2310,11 @@ fn log_forward(
         credential_account_id: context.credential_account_id.clone(),
         client_key_id: context.client_key_id.clone(),
         client_key_name: context.client_key_name.clone(),
-        status: status.to_string(),
+        status: if status == "success" && cost_state == "unpriced" {
+            "success_unpriced".to_string()
+        } else {
+            status.to_string()
+        },
         http_status,
         prompt_tokens: metrics.prompt_tokens,
         completion_tokens: metrics.completion_tokens,

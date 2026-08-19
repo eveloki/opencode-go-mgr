@@ -2293,15 +2293,36 @@ impl Database {
         id: i64,
         status: &str,
         http_status: Option<i32>,
-        metrics: ForwardMetrics,
+        mut metrics: ForwardMetrics,
         error_message: Option<&str>,
         diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
     ) -> Result<()> {
+        let binding = self
+            .conn
+            .query_row(
+                "SELECT provider_id, offering_id FROM forward_logs WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((provider_id, offering_id)) = binding.as_ref() {
+            metrics.scope_to_provider(provider_id.as_deref(), offering_id.as_deref());
+        }
         let cost_state = match (metrics.cost_state, status) {
             ("not_applicable", "outcome_unknown") => "outcome_unknown",
             ("not_applicable", "success_no_usage") => "usage_missing",
             ("not_applicable", "success_unpriced") => "unpriced",
             (state, _) => state,
+        };
+        let stored_status = if status == "success" && cost_state == "unpriced" {
+            "success_unpriced"
+        } else {
+            status
         };
         let stored_cost = if cost_state == "priced" {
             metrics.cost
@@ -2333,7 +2354,7 @@ impl Database {
              WHERE id = ?1",
             params![
                 id,
-                status,
+                stored_status,
                 http_status,
                 metrics.prompt_tokens,
                 metrics.completion_tokens,
@@ -3152,6 +3173,86 @@ impl Database {
         limits: &PricingLimits,
     ) -> Result<UsageWindow> {
         account_usage_with_limits_on(&self.conn, account_id, limits, Utc::now())
+    }
+
+    /// Project the canonical legacy Go accounting windows into the provider
+    /// API shape. The v22 `quota_windows` rows are migration/interoperability
+    /// storage, not a second Go accounting authority: local forward logs and
+    /// calibration offsets continue to advance between official syncs.
+    pub fn live_opencode_go_quota_windows(
+        &self,
+        account_id: &str,
+        limits: &PricingLimits,
+    ) -> Result<Vec<QuotaWindow>> {
+        let now = Utc::now();
+        let usage = account_usage_with_limits_on(&self.conn, account_id, limits, now)?;
+        let metadata = self
+            .conn
+            .query_row(
+                "SELECT usage_5h_window_started_at, usage_5h_window_cost_offset,
+                        usage_week_window_started_at, usage_week_window_cost_offset,
+                        usage_month_window_cost_offset, recharge_date
+                 FROM accounts WHERE id = ?1",
+                [account_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("account {account_id} not found"))?;
+        let observed_at = self
+            .account_usage_sync_state(account_id)?
+            .and_then(|sync| sync.last_success_at);
+        let month_started_at = month_window_start_utc(&metadata.5).ok();
+
+        Ok(vec![
+            QuotaWindow {
+                account_id: account_id.to_string(),
+                window_kind: QUOTA_WINDOW_FIVE_HOURS.to_string(),
+                used: usage.window_5h,
+                limit_value: Some(limits.window_5h),
+                started_at: metadata.0.map(parse_datetime),
+                resets_at: usage.resets_in_5h,
+                calibration_offset: metadata.1,
+                unit: "usd".to_string(),
+                source: "opencode-go-live".to_string(),
+                observed_at,
+                updated_at: now,
+            },
+            QuotaWindow {
+                account_id: account_id.to_string(),
+                window_kind: QUOTA_WINDOW_WEEK.to_string(),
+                used: usage.window_week,
+                limit_value: Some(limits.window_week),
+                started_at: metadata.2.map(parse_datetime),
+                resets_at: usage.resets_in_week,
+                calibration_offset: metadata.3,
+                unit: "usd".to_string(),
+                source: "opencode-go-live".to_string(),
+                observed_at,
+                updated_at: now,
+            },
+            QuotaWindow {
+                account_id: account_id.to_string(),
+                window_kind: QUOTA_WINDOW_MONTH.to_string(),
+                used: usage.window_month,
+                limit_value: Some(limits.window_month),
+                started_at: month_started_at,
+                resets_at: usage.resets_in_month,
+                calibration_offset: metadata.4,
+                unit: "usd".to_string(),
+                source: "opencode-go-live".to_string(),
+                observed_at,
+                updated_at: now,
+            },
+        ])
     }
 
     pub fn total_usage(&self) -> Result<(f64, f64, f64)> {
@@ -6820,6 +6921,38 @@ mod tests {
     }
 
     #[test]
+    fn fresh_go_accounts_project_live_provider_quota_windows() {
+        let dir = temp_data_dir("fresh-provider-quota");
+        let db = Database::open(dir.clone()).unwrap();
+        db.create_account(&account("fresh-go")).unwrap();
+        assert!(db.list_quota_windows("fresh-go").unwrap().is_empty());
+
+        let limits = crate::pricing::embedded_seed().limits;
+        db.calibrate_account_usage(
+            "fresh-go",
+            UsageWindowKind::FiveHours,
+            50.0,
+            Some(180),
+            limits.window_5h,
+        )
+        .unwrap();
+        let windows = db
+            .live_opencode_go_quota_windows("fresh-go", &limits)
+            .unwrap();
+        assert_eq!(windows.len(), 3);
+        let rolling = windows
+            .iter()
+            .find(|window| window.window_kind == QUOTA_WINDOW_FIVE_HOURS)
+            .unwrap();
+        assert!((rolling.used - limits.window_5h * 0.5).abs() < 1e-9);
+        assert_eq!(rolling.limit_value, Some(limits.window_5h));
+        assert_eq!(rolling.source, "opencode-go-live");
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn v21_to_v22_creates_one_usable_rollback_backup() {
         let dir = temp_data_dir("v21-v22-backup");
         create_v21_fixture(&dir, false);
@@ -6830,6 +6963,33 @@ mod tests {
             db.get_account("rollback-account")
                 .expect("migrated account should load")
                 .is_some()
+        );
+        let migrated = db.list_quota_windows("rollback-account").unwrap();
+        let migrated_rolling = migrated
+            .iter()
+            .find(|window| window.window_kind == QUOTA_WINDOW_FIVE_HOURS)
+            .unwrap()
+            .used;
+        db.log_forward(&forward_log("rollback-account", "success", 1.5))
+            .unwrap();
+        let limits = crate::pricing::embedded_seed().limits;
+        let live = db
+            .live_opencode_go_quota_windows("rollback-account", &limits)
+            .unwrap();
+        let live_rolling = live
+            .iter()
+            .find(|window| window.window_kind == QUOTA_WINDOW_FIVE_HOURS)
+            .unwrap();
+        assert!((live_rolling.used - (migrated_rolling + 1.5)).abs() < 1e-9);
+        assert_eq!(
+            db.list_quota_windows("rollback-account")
+                .unwrap()
+                .iter()
+                .find(|window| window.window_kind == QUOTA_WINDOW_FIVE_HOURS)
+                .unwrap()
+                .used,
+            migrated_rolling,
+            "frozen migration rows must not be the provider API authority"
         );
         drop(db);
 

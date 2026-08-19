@@ -790,6 +790,50 @@ impl Default for ForwardMetrics {
     }
 }
 
+impl ForwardMetrics {
+    /// Constrain generic token-derived metrics to the selected provider's
+    /// verified pricing contract. Legacy rows without provider attribution are
+    /// intentionally left alone, while an explicitly attributed provider can
+    /// never inherit OpenCode Go pricing by accident.
+    pub(crate) fn scope_to_provider(
+        &mut self,
+        provider_id: Option<&str>,
+        offering_id: Option<&str>,
+    ) {
+        let Some(provider_id) = provider_id else {
+            return;
+        };
+        if provider_id == crate::provider::OPENCODE_PROVIDER_ID
+            && offering_id == Some(crate::provider::GO_OFFERING_ID)
+        {
+            return;
+        }
+
+        let has_cost_outcome = matches!(self.cost_state, "priced" | "unpriced" | "free");
+        self.cost = 0.0;
+        self.pricing_revision_id = None;
+        self.quota_multiplier = None;
+        self.local_adjustment_multiplier = None;
+
+        if provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+            && offering_id == Some(crate::provider::ANONYMOUS_FREE_OFFERING_ID)
+            && has_cost_outcome
+        {
+            self.raw_cost_usd = Some(0.0);
+            self.quota_debit = Some(0.0);
+            self.effective_paid_cost_usd = Some(0.0);
+            self.cost_state = "free";
+        } else {
+            self.raw_cost_usd = None;
+            self.quota_debit = None;
+            self.effective_paid_cost_usd = None;
+            if has_cost_outcome {
+                self.cost_state = "unpriced";
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardLogSummary {
     pub total_requests: i64,

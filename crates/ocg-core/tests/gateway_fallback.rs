@@ -2865,6 +2865,16 @@ async fn zen_free_is_anonymous_across_all_client_formats_and_logs_route_identity
             && log.credential_account_id.is_none()
             && log.account_id == ZEN_FREE_ACCOUNT_ID
     }));
+    assert!(logs.iter().all(|log| {
+        log.status == "success"
+            && log.cost_state == "free"
+            && log.raw_cost_usd == Some(0.0)
+            && log.quota_debit == Some(0.0)
+            && log.effective_paid_cost_usd == Some(0.0)
+            && log.pricing_revision_id.is_none()
+            && log.quota_multiplier.is_none()
+            && log.local_adjustment_multiplier.is_none()
+    }));
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -3104,6 +3114,17 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
             && log.provider_id.as_deref() == Some(COMMAND_CODE_PROVIDER_ID)
             && log.offering_id.as_deref() == Some(GOAT_OFFERING_ID)
             && log.credential_account_id.as_deref() == Some(goat_id.as_str())
+    }));
+    assert!(logs.iter().all(|log| {
+        log.status == "success_unpriced"
+            && log.cost_state == "unpriced"
+            && log.cost.is_none()
+            && log.raw_cost_usd.is_none()
+            && log.quota_debit.is_none()
+            && log.effective_paid_cost_usd.is_none()
+            && log.pricing_revision_id.is_none()
+            && log.quota_multiplier.is_none()
+            && log.local_adjustment_multiplier.is_none()
     }));
 
     gateway::stop_gateway(gateway_handle);
