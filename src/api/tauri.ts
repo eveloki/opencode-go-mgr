@@ -27,6 +27,8 @@ export interface Account {
   credential_kind: AccountCredentialKind;
   quota_scope: AccountQuotaScope;
   free_alias_enabled: boolean;
+  /** Shared control-plane revision for optimistic account/settings writes. */
+  revision?: number;
   purchase_date: string;
   expires_on: string;
   cooldown_until: string | null;
@@ -65,6 +67,7 @@ export interface AccountInput {
   offering_id?: string;
   purchase_date?: string;
   notes?: string;
+  expected_revision?: number;
 }
 
 export interface AccountUpdate {
@@ -75,6 +78,7 @@ export interface AccountUpdate {
   enabled?: boolean;
   purchase_date?: string;
   notes?: string;
+  expected_revision?: number;
 }
 
 export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
@@ -445,13 +449,28 @@ export const tauriApi = {
     request<Account>("/accounts/managed", { method: "POST", body: jsonBody(input) }),
   updateAccount: (id: string, update: AccountUpdate) =>
     request<Account>(`/accounts/${id}`, { method: "PATCH", body: jsonBody(update) }),
-  reorderAccounts: (accountIds: string[]) =>
+  reorderAccounts: (accountIds: string[], expectedRevision?: number | null) =>
     request<Account[]>("/accounts/order", {
       method: "PUT",
-      body: jsonBody({ account_ids: accountIds }),
+      body: jsonBody({
+        account_ids: accountIds,
+        ...(expectedRevision === null || expectedRevision === undefined
+          ? {}
+          : { expected_revision: expectedRevision }),
+      }),
     }),
-  deleteAccount: (id: string) => request<void>(`/accounts/${id}`, { method: "DELETE" }),
-  toggleAccount: (id: string) => request<Account>(`/accounts/${id}/toggle`, { method: "POST" }),
+  deleteAccount: (id: string, expectedRevision?: number | null) => request<void>(`/accounts/${id}`, {
+    method: "DELETE",
+    ...(expectedRevision === null || expectedRevision === undefined
+      ? {}
+      : { body: jsonBody({ expected_revision: expectedRevision }) }),
+  }),
+  toggleAccount: (id: string, expectedRevision?: number | null) => request<Account>(`/accounts/${id}/toggle`, {
+    method: "POST",
+    ...(expectedRevision === null || expectedRevision === undefined
+      ? {}
+      : { body: jsonBody({ expected_revision: expectedRevision }) }),
+  }),
   testAccount: async (id: string) => {
     const result = await request<{ message: string }>(`/accounts/${id}/test`, { method: "POST" });
     return result.message;

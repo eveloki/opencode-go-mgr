@@ -28,10 +28,11 @@ function sameAccountOrder(left: readonly Account[], right: readonly Account[]): 
 export function useAccountOrder(options: {
   accounts: Ref<Account[]>;
   busy: Ref<boolean>;
+  revision: Ref<number | null>;
   loadAccountUsage: (accountId: string) => Promise<void>;
   removeAccountState: (accountId: string) => void;
 }) {
-  const { accounts, busy, loadAccountUsage, removeAccountState } = options;
+  const { accounts, busy, revision, loadAccountUsage, removeAccountState } = options;
   const message = useMessage();
 
   const orderSaving = ref(false);
@@ -54,8 +55,12 @@ export function useAccountOrder(options: {
     if (sameAccountOrder(previous, accounts.value)) return;
     orderSaving.value = true;
     try {
-      const saved = await tauriApi.reorderAccounts(accounts.value.map(({ id }) => id));
+      const saved = await tauriApi.reorderAccounts(
+        accounts.value.map(({ id }) => id),
+        revision.value,
+      );
       accounts.value = saved;
+      revision.value = saved[0]?.revision ?? revision.value;
       const moved = accounts.value.find(({ id }) => id === movedAccountId);
       const position = accounts.value.findIndex(({ id }) => id === movedAccountId) + 1;
       if (moved && position > 0) {
@@ -75,8 +80,13 @@ export function useAccountOrder(options: {
             if (!loadedIds.has(id)) removeAccountState(id);
           }
           accounts.value = loaded;
+          revision.value = loaded[0]?.revision ?? null;
           await mapWithConcurrency(
-            loaded.filter(({ id }) => !knownIds.has(id)),
+            loaded.filter((account) => (
+              !knownIds.has(account.id)
+              && account.provider_id === "opencode"
+              && account.offering_id === "go"
+            )),
             4,
             ({ id }) => loadAccountUsage(id),
           );

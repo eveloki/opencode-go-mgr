@@ -82,7 +82,7 @@ test("Zen card toggles use the dedicated provider-settings call with the setting
 test("non-Zen accounts keep the legacy toggle endpoint", () => {
   const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
 
-  assert.match(accounts, /tauriApi\.toggleAccount\(id\)/);
+  assert.match(accounts, /tauriApi\.toggleAccount\(id, revision\)/);
   assert.match(accounts, /if \(account && isZenFreeAccount\(account\)\)/);
   assert.equal(ZEN_FREE_ACCOUNT_ID, "00000000-0000-0000-0000-000000000002");
   assert.equal(ZEN_FREE_OFFERING.quota_scope, "egress-ip");

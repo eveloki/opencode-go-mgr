@@ -209,6 +209,38 @@
       </article>
     </section>
 
+    <section class="card provider-card" :aria-label="t('供应商摘要')" :aria-busy="!providerOverviewLoaded">
+      <div class="card-head">
+        <div>
+          <h3 class="card-title">{{ t("供应商摘要") }}</h3>
+          <span class="card-desc">{{ t("账号健康与当前日志范围成本") }}</span>
+        </div>
+      </div>
+      <div v-if="!providerOverviewLoaded" class="section-state">
+        {{ loading ? t("加载中…") : t("仪表盘数据加载失败") }}
+      </div>
+      <n-empty v-else-if="providerOverviews.length === 0" :description="t('服务商目录暂无数据')" />
+      <div v-else class="provider-grid" role="list">
+        <article v-for="provider in providerOverviews" :key="provider.key" class="provider-cell" role="listitem">
+          <div class="provider-head">
+            <strong>{{ provider.label }}</strong>
+            <n-tag
+              size="small"
+              :type="provider.healthy > 0 ? 'success' : provider.provider_id === 'command-code' ? 'warning' : 'default'"
+              :bordered="false"
+            >
+              {{ provider.provider_id === "command-code" ? t("未配置") : t("健康 {healthy}/{total}", { healthy: provider.healthy, total: provider.total }) }}
+            </n-tag>
+          </div>
+          <dl class="provider-metrics">
+            <div><dt>{{ t("账号") }}</dt><dd>{{ formatNumber(provider.total) }}</dd></div>
+            <div><dt>{{ t("已启用") }}</dt><dd>{{ formatNumber(provider.enabled) }}</dd></div>
+            <div><dt>{{ t("当前日志范围成本") }}</dt><dd>{{ providerCostText(provider) }}</dd></div>
+          </dl>
+        </article>
+      </div>
+    </section>
+
     <section class="card chart-card">
       <div class="card-head chart-head">
         <div>
@@ -254,7 +286,7 @@
             <strong>{{ account.name }}</strong>
             <span
               class="account-status"
-              :class="account.setup_step !== 'ready' ? 'pending' : account.auth_error ? 'auth-error' : account.enabled ? (isCoolingDown(account) ? 'cooling' : 'active') : 'disabled'"
+              :class="accountStatusClass(account)"
             >{{ statusLabel(account) }}</span>
           </div>
           <n-tooltip v-if="account.setup_step === 'ready'" trigger="click">
@@ -279,6 +311,12 @@
           </n-tooltip>
           <div v-if="account.setup_step !== 'ready'" class="account-usage-empty account-usage-empty--pending">
             {{ t("注册进度已保存，请前往账号页继续") }}
+          </div>
+          <div v-else-if="isZenAccount(account)" class="account-usage-empty">
+            {{ t("免费 · 出口 IP 共享") }}
+          </div>
+          <div v-else-if="isUnconfiguredAccount(account)" class="account-usage-empty account-usage-empty--pending">
+            {{ t("供应商尚未配置") }}
           </div>
           <div v-else-if="usageMap[account.id]" class="account-usage mono">
             <div v-for="row in getUsageRows(account.id)" :key="row.label" class="account-usage-row">
@@ -315,6 +353,8 @@ import {
 } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
 import { PRIMARY_KEY_ID, tauriApi } from "../api/tauri";
+import { providerApi } from "../api/providers.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
   Account,
   ConnectionInfo,
@@ -329,6 +369,11 @@ import { userFacingError } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import { daysUntilDate, expiryTagType } from "./account-lifecycle";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
+import {
+  buildProviderOverviews,
+  providerPairKey,
+} from "./dashboard-providers.ts";
+import type { ProviderOverview } from "./dashboard-providers.ts";
 
 type ConnectionTarget = "api" | "key" | "upstream";
 
@@ -355,6 +400,9 @@ const summaryLoaded = ref(false);
 const costsLoaded = ref(false);
 const dashboardError = ref(false);
 const usageFailedAccountIds = ref(new Set<string>());
+const providerCatalog = ref<ProviderCatalogEntry[]>([]);
+const providerCosts = ref<Record<string, number | null>>({});
+const providerOverviewLoaded = ref(false);
 const refreshingKey = ref(false);
 const lifecycleNow = ref(Date.now());
 
@@ -385,6 +433,12 @@ const legendModels = computed(() => {
     .map((model, index) => ({ model, color: CHART_PALETTE[index % CHART_PALETTE.length] }));
 });
 const totalChartCost = computed(() => dailyCosts.value.reduce((sum, row) => sum + row.cost, 0));
+const providerOverviews = computed(() => buildProviderOverviews(
+  accounts.value,
+  providerCatalog.value,
+  providerCosts.value,
+  lifecycleNow.value,
+));
 const maskedKey = computed(() => maskConnectionKey(selectedKey.value?.value ?? ""));
 // The primary key is pinned first; only enabled sub keys join the switcher.
 const enabledGatewayKeys = computed<SwitcherKey[]>(() => [
@@ -439,6 +493,7 @@ function isCoolingDown(account: Account): boolean {
 
 function statusLabel(account: Account): string {
   if (account.setup_step !== "ready") return t("注册中");
+  if (isUnconfiguredAccount(account)) return t("未配置");
   if (account.auth_error) {
     return account.enabled
       ? t("认证失效（401 熔断）")
@@ -446,6 +501,28 @@ function statusLabel(account: Account): string {
   }
   if (!account.enabled) return t("已禁用");
   return isCoolingDown(account) ? t("冷却中") : t("可用");
+}
+
+function accountStatusClass(account: Account): string {
+  if (account.setup_step !== "ready") return "pending";
+  if (isUnconfiguredAccount(account)) return "pending";
+  if (account.auth_error) return "auth-error";
+  if (!account.enabled) return "disabled";
+  return isCoolingDown(account) ? "cooling" : "active";
+}
+
+function isZenAccount(account: Account): boolean {
+  return account.provider_id === "opencode-zen-free" && account.offering_id === "anonymous-free";
+}
+
+function isUnconfiguredAccount(account: Account): boolean {
+  return account.provider_id === "command-code" && account.offering_id === "goat";
+}
+
+function providerCostText(provider: ProviderOverview): string {
+  if (provider.cost_state === "free") return t("免费");
+  if (provider.cost_state === "unknown" || provider.cost === null) return t("未知");
+  return formatCost(provider.cost);
 }
 
 function accountExpiryDays(account: Account): number {
@@ -569,21 +646,29 @@ async function loadDashboard() {
   accountsLoaded.value = false;
   summaryLoaded.value = false;
   costsLoaded.value = false;
+  providerOverviewLoaded.value = false;
   usageFailedAccountIds.value = new Set();
   accounts.value = [];
   usageMap.value = {};
   dailyCosts.value = [];
-  const [loadedAccounts, connection, loadedSummary, costs] = await Promise.allSettled([
+  providerCatalog.value = [];
+  providerCosts.value = {};
+  const [loadedAccounts, connection, loadedSummary, costs, catalog] = await Promise.allSettled([
     tauriApi.getAccounts(),
     tauriApi.getConnection(),
     tauriApi.getDashboardSummary(),
     tauriApi.getDailyCostByModel(30),
+    providerApi.getProviderCatalog(),
   ]);
   if (loadedAccounts.status === "fulfilled") {
     accounts.value = loadedAccounts.value;
     accountsLoaded.value = true;
     // 限流并发拉取每账号用量，避免账号多时 N 次请求同时打到后端
-    const readyAccounts = loadedAccounts.value.filter(({ setup_step }) => setup_step === "ready");
+    const readyAccounts = loadedAccounts.value.filter((account) => (
+      account.setup_step === "ready"
+      && account.provider_id === "opencode"
+      && account.offering_id === "go"
+    ));
     const settled = await mapWithConcurrency(
       readyAccounts,
       4,
@@ -607,7 +692,29 @@ async function loadDashboard() {
     dailyCosts.value = costs.value;
     costsLoaded.value = true;
   }
-  dashboardError.value = [loadedAccounts, connection, loadedSummary, costs].some((result) => result.status === "rejected")
+  let providerCostFailed = false;
+  if (catalog.status === "fulfilled") {
+    providerCatalog.value = catalog.value;
+    const go = catalog.value.find((entry) => entry.provider_id === "opencode" && entry.offering_id === "go");
+    if (go) {
+      try {
+        const page = await tauriApi.getForwardLogs({
+          provider_id: go.provider_id,
+          offering_id: go.offering_id,
+          limit: 1,
+          offset: 0,
+        });
+        providerCosts.value = {
+          [providerPairKey(go.provider_id, go.offering_id)]: page.summary.cost,
+        };
+      } catch {
+        providerCostFailed = true;
+      }
+    }
+    providerOverviewLoaded.value = true;
+  }
+  dashboardError.value = [loadedAccounts, connection, loadedSummary, costs, catalog].some((result) => result.status === "rejected")
+    || providerCostFailed
     || usageFailedAccountIds.value.size > 0;
   if (dashboardError.value) {
     message.error(t("部分仪表盘数据加载失败"));
@@ -975,6 +1082,55 @@ onUnmounted(() => {
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-sm);
 }
+.provider-card {
+  padding-bottom: 16px;
+}
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 4px 18px 0;
+}
+.provider-cell {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ocg-canvas) 70%, var(--ocg-surface));
+}
+.provider-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.provider-head strong {
+  overflow: hidden;
+  color: var(--ocg-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-metrics {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+.provider-metrics > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.provider-metrics dt {
+  color: var(--ocg-subtle);
+  font-size: var(--ocg-font-sm);
+}
+.provider-metrics dd {
+  margin: 0;
+  color: var(--ocg-ink);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: var(--ocg-font-sm);
+}
 .chart-card {
   padding-bottom: 12px;
 }
@@ -1102,6 +1258,9 @@ onUnmounted(() => {
   }
   .kpi-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .provider-grid {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -624,4 +624,11 @@ export const ptBRMessages = {
   "额度扣减": "Débito de cota",
   "有效付费成本": "Custo pago efetivo",
   "未知": "Desconhecido",
+  "供应商摘要": "Resumo de provedores",
+  "账号健康与当前日志范围成本": "Saúde das contas e custo do intervalo atual de logs",
+  "健康 {healthy}/{total}": "Saudáveis {healthy}/{total}",
+  "当前日志范围成本": "Custo do intervalo atual de logs",
+  "免费 · 出口 IP 共享": "Grátis · compartilhado por IP de saída",
+  "供应商尚未配置": "O provedor não está configurado",
+  "未配置": "Não configurado",
 } satisfies Messages;

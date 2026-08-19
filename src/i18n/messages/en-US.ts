@@ -622,6 +622,13 @@ export const enUSMessages = {
   "额度扣减": "Quota debit",
   "有效付费成本": "Effective paid cost",
   "未知": "Unknown",
+  "供应商摘要": "Provider summary",
+  "账号健康与当前日志范围成本": "Account health and cost in the current log range",
+  "健康 {healthy}/{total}": "Healthy {healthy}/{total}",
+  "当前日志范围成本": "Current log-range cost",
+  "免费 · 出口 IP 共享": "Free · shared by egress IP",
+  "供应商尚未配置": "Provider is not configured",
+  "未配置": "Not configured",
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

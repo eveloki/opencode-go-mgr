@@ -157,7 +157,7 @@ test("shows a distinct account authentication breaker instead of disguising it a
   assert.match(card, /account\.auth_error \|\| isCooling\(account, now\)/);
   assert.match(display, /account\.enabled[\s\S]*t\("认证失效（401 熔断）"\)[\s\S]*t\("已禁用"\)/);
   assert.match(display, /if \(account\.auth_error\) return "error"/);
-  assert.match(dashboard, /account\.auth_error \? 'auth-error'/);
+  assert.match(dashboard, /if \(account\.auth_error\) return "auth-error"/);
   assert.match(dashboard, /\.account-status\.auth-error \{ color: var\(--ocg-error\); \}/);
 });
 

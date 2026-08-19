@@ -623,4 +623,11 @@ export const esESMessages = {
   "额度扣减": "Débito de cuota",
   "有效付费成本": "Costo pagado efectivo",
   "未知": "Desconocido",
+  "供应商摘要": "Resumen de proveedores",
+  "账号健康与当前日志范围成本": "Estado de las cuentas y costo del rango de registros actual",
+  "健康 {healthy}/{total}": "Saludables {healthy}/{total}",
+  "当前日志范围成本": "Costo del rango de registros actual",
+  "免费 · 出口 IP 共享": "Gratis · compartido por IP de salida",
+  "供应商尚未配置": "El proveedor no está configurado",
+  "未配置": "Sin configurar",
 } satisfies Messages;

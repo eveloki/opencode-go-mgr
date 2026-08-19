@@ -290,6 +290,7 @@ const {
 } = useAccountOrder({
   accounts,
   busy,
+  revision: settingsRevision,
   loadAccountUsage,
   removeAccountState,
 });
@@ -557,11 +558,13 @@ async function resetBrowserProfile(accountId: string): Promise<void> {
 
 function replaceAccount(account: Account): void {
   accounts.value = accounts.value.map((item) => (item.id === account.id ? account : item));
+  settingsRevision.value = account.revision ?? settingsRevision.value;
   if (editingAccount.value?.id === account.id) editingAccount.value = account;
 }
 
 function addAccount(account: Account): void {
   accounts.value = [...accounts.value, account];
+  settingsRevision.value = account.revision ?? settingsRevision.value;
 }
 
 function removeAccountState(id: string): void {
@@ -578,13 +581,14 @@ function removeAccountState(id: string): void {
 async function refreshAccountState(id: string): Promise<Account | null> {
   const loaded = await tauriApi.getAccounts();
   accounts.value = loaded;
+  settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
   const account = loaded.find((item) => item.id === id);
   if (!account) {
     removeAccountState(id);
     message.warning(t("未找到该账号，已为你刷新列表"));
     return null;
   }
-  if (accountIsReady(account) && !isZenFreeAccount(account)) {
+  if (accountIsReady(account) && account.provider_id === "opencode" && account.offering_id === "go") {
     await loadAccountUsage(id);
   } else {
     delete usageMap.value[id];
@@ -612,10 +616,15 @@ async function loadAccounts() {
   try {
     const loaded = await tauriApi.getAccounts();
     accounts.value = loaded;
+    settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
     // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
     if (quotaLimits.value) {
       await mapWithConcurrency(
-        loaded.filter((account) => accountIsReady(account) && !isZenFreeAccount(account)),
+        loaded.filter((account) => (
+          accountIsReady(account)
+          && account.provider_id === "opencode"
+          && account.offering_id === "go"
+        )),
         4,
         (account) => loadAccountUsage(account.id),
       );
@@ -676,7 +685,11 @@ async function onFormSave(payload: {
     if (payload.key !== undefined) update.key = payload.key;
     busy.value = true;
     try {
-      const saved = await tauriApi.updateAccount(editingAccount.value.id, update);
+      const revision = await ensureSettingsRevision();
+      const saved = await tauriApi.updateAccount(editingAccount.value.id, {
+        ...update,
+        ...(revision === null ? {} : { expected_revision: revision }),
+      });
       replaceAccount(saved);
       // purchase_date defines the monthly usage window and changing it clears
       // the persisted calibration offset, so the local usage snapshot must be
@@ -701,9 +714,14 @@ async function onFormSave(payload: {
     };
     busy.value = true;
     try {
-      const created = await tauriApi.createAccount(input);
+      const revision = await ensureSettingsRevision();
+      const created = await tauriApi.createAccount({
+        ...input,
+        ...(revision === null ? {} : { expected_revision: revision }),
+      });
       message.success(t("账号已添加"));
       addAccount(created);
+      settingsRevision.value = created.revision ?? settingsRevision.value;
       if (!isZenFreeAccount(created)) {
         await loadAccountUsage(created.id);
       }
@@ -744,7 +762,8 @@ async function toggleAccount(id: string) {
     return;
   }
   try {
-    const updated = await tauriApi.toggleAccount(id);
+    const revision = await ensureSettingsRevision();
+    const updated = await tauriApi.toggleAccount(id, revision);
     replaceAccount(updated);
   } catch (e) {
     message.error(t("切换失败: {error}", { error: dashboardErrorDetail(e) }));
@@ -829,7 +848,12 @@ async function reloadAfterProviderSettingsConflict(id: string): Promise<void> {
 
 async function deleteAccount(id: string) {
   try {
-    await tauriApi.deleteAccount(id);
+    const revision = await ensureSettingsRevision();
+    await tauriApi.deleteAccount(id, revision);
+    // DELETE returns the new revision in a response header; the shared JSON
+    // transport intentionally stays body-only, so reload it before the next
+    // mutation instead of guessing the counter.
+    settingsRevision.value = null;
     message.success(t("账号已删除"));
     removeAccountState(id);
   } catch (e) {

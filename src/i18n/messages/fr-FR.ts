@@ -624,4 +624,11 @@ export const frFRMessages = {
   "额度扣减": "Débit de quota",
   "有效付费成本": "Coût payé effectif",
   "未知": "Inconnu",
+  "供应商摘要": "Résumé des fournisseurs",
+  "账号健康与当前日志范围成本": "État des comptes et coût de la plage de journaux actuelle",
+  "健康 {healthy}/{total}": "Sains {healthy}/{total}",
+  "当前日志范围成本": "Coût de la plage de journaux actuelle",
+  "免费 · 出口 IP 共享": "Gratuit · partagé par IP de sortie",
+  "供应商尚未配置": "Le fournisseur n’est pas configuré",
+  "未配置": "Non configuré",
 } satisfies Messages;

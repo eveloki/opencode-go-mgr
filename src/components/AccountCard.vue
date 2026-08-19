@@ -40,6 +40,14 @@
             <n-tag v-if="isZen" type="info" size="small" :bordered="false">
               {{ t("免费通道") }}
             </n-tag>
+            <n-tag
+              v-else
+              :type="isGoat ? 'warning' : 'default'"
+              size="small"
+              :bordered="false"
+            >
+              {{ providerOfferingLabel(account) }}
+            </n-tag>
             <n-tooltip v-if="account.auth_error || isCooling(account, now)">
               <template #trigger>
                 <n-tag :type="accountStatusTagType(account, now)" size="small">
@@ -72,7 +80,7 @@
 
     <template #header-extra>
       <n-space align="center" :size="8">
-        <n-tooltip v-if="!isZen && accountIsReady(account)" trigger="hover">
+        <n-tooltip v-if="isGo && accountIsReady(account)" trigger="hover">
           <template #trigger>
             <n-button
               circle
@@ -116,7 +124,7 @@
         </n-tooltip>
 
         <n-tooltip
-          v-if="!isZen && accountIsReady(account)"
+          v-if="isGo && accountIsReady(account)"
           trigger="hover"
         >
           <template #trigger>
@@ -136,7 +144,7 @@
         </n-tooltip>
 
         <n-popover
-          v-if="!isZen && accountIsReady(account) && edits"
+          v-if="isGo && accountIsReady(account) && edits"
           trigger="click"
           placement="bottom-end"
           :show-arrow="false"
@@ -208,7 +216,7 @@
         {{ t("继续注册") }}
       </n-button>
     </div>
-    <div v-else-if="!isZen && !quotaLimitsFailed">
+    <div v-else-if="isGo && !quotaLimitsFailed">
       <div v-if="usageLoadError" class="usage-load-error" role="alert">
         <span>{{ t("用量加载失败") }}</span>
         <n-button
@@ -234,6 +242,9 @@
       >
         {{ usageSyncCaption(account, now) }}
       </p>
+    </div>
+    <div v-else-if="isGoat" class="provider-unconfigured" role="status">
+      {{ t("供应商尚未配置") }}
     </div>
   </n-card>
 </template>
@@ -274,7 +285,7 @@ import {
   usageSyncCaption,
 } from "../views/account-display.ts";
 import type { AccountMenuOption } from "../views/account-display.ts";
-import { isZenFreeAccount } from "../views/account-providers.ts";
+import { isZenFreeAccount, providerOfferingLabel } from "../views/account-providers.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../views/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
@@ -315,6 +326,12 @@ const emit = defineEmits<{
 }>();
 
 const isZen = computed(() => isZenFreeAccount(props.account));
+const isGo = computed(() => (
+  props.account.provider_id === "opencode" && props.account.offering_id === "go"
+));
+const isGoat = computed(() => (
+  props.account.provider_id === "command-code" && props.account.offering_id === "goat"
+));
 
 const usageEditorAvailable = computed(() => {
   if (props.usageLoading || props.usageLoadError) return false;
@@ -341,6 +358,10 @@ const usageEditorAvailable = computed(() => {
   border-color: var(--ocg-primary);
   box-shadow: 0 10px 28px color-mix(in srgb, var(--ocg-primary) 18%, transparent);
   opacity: 0.72;
+}
+.provider-unconfigured {
+  color: var(--ocg-warning);
+  font-size: var(--ocg-font-sm);
 }
 
 .account-title {

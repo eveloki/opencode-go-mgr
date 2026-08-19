@@ -624,4 +624,11 @@ export const deDEMessages = {
   "额度扣减": "Kontingentabzug",
   "有效付费成本": "Effektive bezahlte Kosten",
   "未知": "Unbekannt",
+  "供应商摘要": "Anbieterübersicht",
+  "账号健康与当前日志范围成本": "Kontostatus und Kosten im aktuellen Protokollbereich",
+  "健康 {healthy}/{total}": "Verfügbar {healthy}/{total}",
+  "当前日志范围成本": "Kosten im aktuellen Protokollbereich",
+  "免费 · 出口 IP 共享": "Kostenlos · nach Ausgangs-IP geteilt",
+  "供应商尚未配置": "Anbieter ist nicht konfiguriert",
+  "未配置": "Nicht konfiguriert",
 } satisfies Messages;
