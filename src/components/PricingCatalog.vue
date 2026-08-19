@@ -1,5 +1,28 @@
 <template>
-  <section class="pricing-card" aria-labelledby="pricing-title">
+  <div class="pricing-catalog">
+    <div
+      v-if="catalogLoading"
+      class="catalog-state"
+      role="status"
+      aria-live="polite"
+      :aria-label="t('加载中…')"
+    >
+      <n-spin size="small" />
+    </div>
+    <n-alert
+      v-else-if="catalogError"
+      type="error"
+      :title="t('加载服务商目录失败: {error}', { error: catalogError })"
+    >
+      <n-button size="small" secondary @click="loadProviderCatalog">{{ t("重试") }}</n-button>
+    </n-alert>
+    <n-empty
+      v-else-if="catalogEmpty"
+      class="catalog-state"
+      :description="t('服务商目录暂无数据')"
+    />
+
+    <section class="pricing-card" aria-labelledby="pricing-title">
     <div class="pricing-head">
       <div>
         <h2 id="pricing-title">$ {{ t("OpenCode Go 额度价格表") }}</h2>
@@ -73,6 +96,34 @@
       </template>
     </n-spin>
   </section>
+
+    <section
+      v-for="section in secondaryOfferingSections"
+      :key="`${section.provider_id}/${section.offering_id}`"
+      class="pricing-card pricing-offering"
+      :aria-labelledby="`pricing-offering-${section.provider_id}`"
+    >
+      <div class="pricing-head">
+        <div>
+          <h2 :id="`pricing-offering-${section.provider_id}`">
+            {{ section.label }}
+            <n-tag
+              v-if="section.presentation === 'experimental'"
+              type="warning"
+              size="small"
+              :bordered="false"
+            >{{ t("实验性") }}</n-tag>
+          </h2>
+          <p v-if="section.presentation === 'experimental'">
+            {{ t("实验性接入，尚未配置价格目录，不展示价格表。") }}
+          </p>
+          <p v-else>
+            {{ t("零价格；额度按出口 IP 共享，429 后整条 free 通道冷却。") }}
+          </p>
+        </div>
+      </div>
+    </section>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -81,9 +132,11 @@ import {
   NAlert,
   NButton,
   NDataTable,
+  NEmpty,
   NIcon,
   NInputNumber,
   NSpin,
+  NTag,
   NTooltip,
   useDialog,
   useMessage,
@@ -95,8 +148,11 @@ import type {
   PricingMultiplierChange,
   PricingSnapshot,
 } from "../api/tauri";
+import { providerApi } from "../api/providers.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { locale, t } from "../i18n/index.ts";
 import {
+  buildPricingOfferingSections,
   buildPricingTableRows,
   effectivePricingRate,
   formatPricingMultiplier,
@@ -107,6 +163,9 @@ import type { PricingTableRow } from "../views/pricing-view";
 const message = useMessage();
 const dialog = useDialog();
 const snapshot = ref<PricingSnapshot | null>(null);
+const catalog = ref<ProviderCatalogEntry[] | null>(null);
+const catalogLoading = ref(false);
+const catalogError = ref("");
 const loading = ref(false);
 const refreshing = ref(false);
 const confirmationOpen = ref(false);
@@ -122,6 +181,29 @@ const tableRows = computed(() => buildPricingTableRows(snapshot.value?.models ??
   priorityService: t("优先服务"),
   minimaxM3UpperPriority: t("> 512K 输入 + 优先服务"),
 }));
+
+const offeringSections = computed(() => buildPricingOfferingSections(catalog.value));
+const secondaryOfferingSections = computed(() => (
+  offeringSections.value.filter(({ presentation }) => presentation !== "table")
+));
+const catalogEmpty = computed(() => (
+  catalog.value !== null && catalog.value.length === 0
+));
+
+// The catalog is fetched once on mount (or via the error-state retry); there
+// is deliberately no polling, matching the manual-refresh pricing policy.
+async function loadProviderCatalog() {
+  if (catalogLoading.value) return;
+  catalogLoading.value = true;
+  catalogError.value = "";
+  try {
+    catalog.value = await providerApi.getProviderCatalog();
+  } catch (error) {
+    catalogError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    catalogLoading.value = false;
+  }
+}
 
 function formatRate(value: number | null) {
   return formatPricingRate(value, locale.value);
@@ -513,9 +595,23 @@ async function performPricingRefresh(
 }
 
 onMounted(() => void loadPricing());
+onMounted(() => void loadProviderCatalog());
 </script>
 
 <style scoped>
+.pricing-catalog {
+  display: grid;
+  gap: 16px;
+}
+.catalog-state {
+  min-height: 42px;
+  display: grid;
+  place-items: center;
+}
+.pricing-offering h2 :deep(.n-tag) {
+  margin-left: 8px;
+  vertical-align: middle;
+}
 .pricing-card {
   grid-column: 1 / -1;
   padding: 22px;

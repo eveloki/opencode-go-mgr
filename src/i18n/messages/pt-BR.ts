@@ -164,6 +164,12 @@ export const ptBRMessages = {
   "{name} {period} 距上游重置还剩分钟": "Minutos até a redefinição upstream para {name} {period}",
   "用量加载失败": "Falha ao carregar o uso",
   "重试": "Tentar novamente",
+  "加载服务商目录失败: {error}": "Falha ao carregar o catálogo de provedores: {error}",
+  "服务商目录暂无数据": "O catálogo de provedores ainda não tem dados",
+  "{label}（实验性 · 未配置）": "{label} (experimental · não configurado)",
+  "实验性": "Experimental",
+  "实验性接入，尚未配置价格目录，不展示价格表。": "Integração experimental sem catálogo de preços configurado; nenhuma tabela de preços é exibida.",
+  "零价格；额度按出口 IP 共享，429 后整条 free 通道冷却。": "Custo zero; a cota é compartilhada por IP de saída e um 429 resfria todo o canal free.",
   "用量保存失败: {error}": "Falha ao salvar o uso: {error}",
   "{name} {period} 当前用量百分比": "Percentual de uso atual de {name} em {period}",
   "加载账号失败: {error}": "Falha ao carregar contas: {error}",
@@ -607,4 +613,6 @@ export const ptBRMessages = {
   "未归因": "Não atribuído",
   "升级前用量统一计入主 Key": "O uso anterior à atualização é atribuído à Key principal",
   "加载 Key 筛选失败: {error}": "Falha ao carregar o filtro de Key: {error}",
+
+  "账号设置已被其他操作修改，已重新加载最新状态，请重试": "As configurações da conta foram alteradas por outra operação. O estado mais recente foi recarregado; tente novamente",
 } satisfies Messages;

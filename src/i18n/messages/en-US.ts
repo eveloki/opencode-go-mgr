@@ -163,6 +163,12 @@ export const enUSMessages = {
   "{name} {period} 距上游重置还剩分钟": "Minutes until upstream reset for {name} {period}",
   "用量加载失败": "Usage failed to load",
   "重试": "Retry",
+  "加载服务商目录失败: {error}": "Failed to load the provider catalog: {error}",
+  "服务商目录暂无数据": "The provider catalog has no data yet",
+  "{label}（实验性 · 未配置）": "{label} (experimental · not configured)",
+  "实验性": "Experimental",
+  "实验性接入，尚未配置价格目录，不展示价格表。": "Experimental integration without a configured price catalog; no price table is shown.",
+  "零价格；额度按出口 IP 共享，429 后整条 free 通道冷却。": "Zero cost; quota is shared per egress IP, and a 429 cools the whole free channel.",
   "用量保存失败: {error}": "Failed to save usage: {error}",
   "{name} {period} 当前用量百分比": "Current {period} usage percentage for {name}",
   "加载账号失败: {error}": "Failed to load accounts: {error}",
@@ -605,6 +611,8 @@ export const enUSMessages = {
   "未归因": "Unattributed",
   "升级前用量统一计入主 Key": "Usage from before the upgrade is attributed to the primary Key",
   "加载 Key 筛选失败: {error}": "Failed to load the Key filter: {error}",
+
+  "账号设置已被其他操作修改，已重新加载最新状态，请重试": "Account settings were changed elsewhere. The latest state was reloaded; try again.",
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

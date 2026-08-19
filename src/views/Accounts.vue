@@ -201,6 +201,7 @@ import {
 } from "naive-ui";
 import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, tauriApi } from "../api/tauri";
+import { providerApi } from "../api/providers.ts";
 import type {
   Account,
   AccountInput,
@@ -234,6 +235,9 @@ const accountListLoading = ref(true);
 const accountListError = ref("");
 const pinging = ref<Record<string, boolean>>({});
 const freeAliasSaving = ref<Record<string, boolean>>({});
+const providerSettingsSaving = ref<Record<string, boolean>>({});
+/** Settings revision from `GET /settings`, used for conditional Zen writes. */
+const settingsRevision = ref<number | null>(null);
 const showModal = ref(false);
 const showAddModal = ref(false);
 const showManagedCreate = ref(false);
@@ -568,6 +572,7 @@ function removeAccountState(id: string): void {
   delete usageLoadErrors.value[id];
   delete pinging.value[id];
   delete freeAliasSaving.value[id];
+  delete providerSettingsSaving.value[id];
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -630,8 +635,10 @@ async function loadRegistrationOptions(): Promise<void> {
   ]);
   if (settingsResult.status === "fulfilled") {
     opencodeInviteUrl.value = settingsResult.value.opencode_invite_url || "";
+    settingsRevision.value = settingsResult.value.revision;
   } else {
     opencodeInviteUrl.value = "";
+    settingsRevision.value = null;
   }
   if (browserResult.status === "fulfilled") {
     browserCapabilities.value = browserResult.value;
@@ -729,6 +736,13 @@ async function pingAccount(id: string) {
 }
 
 async function toggleAccount(id: string) {
+  const account = accounts.value.find((item) => item.id === id);
+  // The Zen Free singleton only accepts the dedicated provider-settings write;
+  // never fall back to the generic account PATCH/toggle for it.
+  if (account && isZenFreeAccount(account)) {
+    await saveZenProviderSettings(account, { enabled: !account.enabled });
+    return;
+  }
   try {
     const updated = await tauriApi.toggleAccount(id);
     replaceAccount(updated);
@@ -742,13 +756,74 @@ async function toggleFreeAlias(id: string) {
   if (!account || !isZenFreeAccount(account) || freeAliasSaving.value[id]) return;
   freeAliasSaving.value[id] = true;
   try {
-    const updated = await tauriApi.setAccountFreeAlias(id, !account.free_alias_enabled);
-    replaceAccount(updated);
-    message.success(t("Free 别名设置已保存"));
-  } catch (e) {
-    message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
+    await saveZenProviderSettings(
+      account,
+      { free_alias_enabled: !account.free_alias_enabled },
+      t("Free 别名设置已保存"),
+    );
   } finally {
     freeAliasSaving.value[id] = false;
+  }
+}
+
+async function ensureSettingsRevision(): Promise<number | null> {
+  if (settingsRevision.value !== null) return settingsRevision.value;
+  try {
+    const settings = await tauriApi.getSettings();
+    settingsRevision.value = settings.revision;
+  } catch {
+    settingsRevision.value = null;
+  }
+  return settingsRevision.value;
+}
+
+/**
+ * Both Zen card toggles (enabled + free alias) write through the dedicated
+ * provider-settings endpoint with both current flags preserved and the latest
+ * settings revision attached. A 409 means the settings were changed elsewhere:
+ * reload accounts/settings and ask the user to retry, in the same style as the
+ * settings-page conflict recovery.
+ */
+async function saveZenProviderSettings(
+  account: Account,
+  patch: { enabled?: boolean; free_alias_enabled?: boolean },
+  successMessage?: string,
+): Promise<void> {
+  if (providerSettingsSaving.value[account.id]) return;
+  providerSettingsSaving.value[account.id] = true;
+  try {
+    const revision = await ensureSettingsRevision();
+    const result = await providerApi.updateProviderSettings(account.id, {
+      enabled: patch.enabled ?? account.enabled,
+      free_alias_enabled: patch.free_alias_enabled ?? account.free_alias_enabled,
+      ...(revision === null ? {} : { expected_revision: revision }),
+    });
+    settingsRevision.value = result.revision;
+    replaceAccount(result.account);
+    if (successMessage) message.success(successMessage);
+  } catch (error) {
+    if (error instanceof DashboardRequestError && error.status === 409) {
+      await reloadAfterProviderSettingsConflict(account.id);
+      message.warning(t("账号设置已被其他操作修改，已重新加载最新状态，请重试"));
+    } else {
+      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
+    }
+  } finally {
+    providerSettingsSaving.value[account.id] = false;
+  }
+}
+
+async function reloadAfterProviderSettingsConflict(id: string): Promise<void> {
+  try {
+    const settings = await tauriApi.getSettings();
+    settingsRevision.value = settings.revision;
+  } catch {
+    settingsRevision.value = null;
+  }
+  try {
+    await refreshAccountState(id);
+  } catch {
+    // The conflict notice stays authoritative; the next explicit refresh retries.
   }
 }
 

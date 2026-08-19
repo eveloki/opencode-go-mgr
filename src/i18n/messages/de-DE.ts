@@ -164,6 +164,12 @@ export const deDEMessages = {
   "{name} {period} 距上游重置还剩分钟": "Minuten bis zum Upstream-Reset für {name} {period}",
   "用量加载失败": "Die Nutzung konnte nicht geladen werden",
   "重试": "Erneut versuchen",
+  "加载服务商目录失败: {error}": "Provider-Katalog konnte nicht geladen werden: {error}",
+  "服务商目录暂无数据": "Der Provider-Katalog enthält noch keine Daten",
+  "{label}（实验性 · 未配置）": "{label} (experimentell · nicht konfiguriert)",
+  "实验性": "Experimentell",
+  "实验性接入，尚未配置价格目录，不展示价格表。": "Experimentelle Anbindung ohne konfigurierten Preiskatalog; es wird keine Preistabelle angezeigt.",
+  "零价格；额度按出口 IP 共享，429 后整条 free 通道冷却。": "Kostenlos; das Kontingent wird pro Ausgangs-IP geteilt, nach einem 429 wird der gesamte Free-Kanal abgekühlt.",
   "用量保存失败: {error}": "Nutzung konnte nicht gespeichert werden: {error}",
   "{name} {period} 当前用量百分比": "Aktueller Nutzungsprozentsatz für {name}, {period}",
   "加载账号失败: {error}": "Konten konnten nicht geladen werden: {error}",
@@ -607,4 +613,6 @@ export const deDEMessages = {
   "未归因": "Nicht zugeordnet",
   "升级前用量统一计入主 Key": "Nutzung vor dem Upgrade wird dem primären Key zugeordnet",
   "加载 Key 筛选失败: {error}": "Key-Filter konnte nicht geladen werden: {error}",
+
+  "账号设置已被其他操作修改，已重新加载最新状态，请重试": "Die Kontoeinstellungen wurden von einer anderen Aktion geändert. Der neueste Stand wurde neu geladen; bitte erneut versuchen",
 } satisfies Messages;

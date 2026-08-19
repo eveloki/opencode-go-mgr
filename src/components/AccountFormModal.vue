@@ -153,7 +153,9 @@ const isEdit = computed(() => !!props.account);
 const title = computed(() => (isEdit.value ? t("编辑账号") : t("导入已有 Key")));
 const providerOptions = computed(() => PROVIDER_OFFERINGS.map((offering) => ({
   value: offering.provider_id,
-  label: offering.label,
+  label: offering.provider_id === "command-code"
+    ? t("{label}（实验性 · 未配置）", { label: offering.label })
+    : offering.label,
 })));
 
 const rules = computed<FormRules>(() => {

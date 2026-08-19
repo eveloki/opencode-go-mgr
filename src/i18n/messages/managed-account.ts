@@ -158,6 +158,7 @@ export const managedAccountEnUSMessages = {
   "启用 {name} 的 Free 别名": "Enable the Free alias for {name}",
   "禁用 {name} 的 Free 别名": "Disable the Free alias for {name}",
   "Free 别名设置已保存": "Free alias setting saved",
+  "账号设置已被其他操作修改，已重新加载最新状态，请重试": "Account settings were changed elsewhere. The latest state was reloaded; try again.",
 } as const;
 
 export const managedAccountZhTWMessages: Record<keyof typeof managedAccountEnUSMessages, string> = {
@@ -318,4 +319,5 @@ export const managedAccountZhTWMessages: Record<keyof typeof managedAccountEnUSM
   "启用 {name} 的 Free 别名": "啟用 {name} 的 Free 別名",
   "禁用 {name} 的 Free 别名": "停用 {name} 的 Free 別名",
   "Free 别名设置已保存": "Free 別名設定已儲存",
+  "账号设置已被其他操作修改，已重新加载最新状态，请重试": "帳號設定已被其他操作修改，已重新載入最新狀態，請重試",
 };

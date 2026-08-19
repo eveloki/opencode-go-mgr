@@ -73,8 +73,6 @@ export interface AccountUpdate {
   password?: string;
   key?: string;
   enabled?: boolean;
-  /** Only accepted for the built-in Zen Free singleton. */
-  free_alias_enabled?: boolean;
   purchase_date?: string;
   notes?: string;
 }
@@ -435,12 +433,6 @@ export const tauriApi = {
     request<Account>("/accounts/managed", { method: "POST", body: jsonBody(input) }),
   updateAccount: (id: string, update: AccountUpdate) =>
     request<Account>(`/accounts/${id}`, { method: "PATCH", body: jsonBody(update) }),
-  /** Narrow toggle for the built-in Zen Free singleton's free alias flag. */
-  setAccountFreeAlias: (id: string, enabled: boolean) =>
-    request<Account>(`/accounts/${id}`, {
-      method: "PATCH",
-      body: jsonBody({ free_alias_enabled: enabled }),
-    }),
   reorderAccounts: (accountIds: string[]) =>
     request<Account[]>("/accounts/order", {
       method: "PUT",

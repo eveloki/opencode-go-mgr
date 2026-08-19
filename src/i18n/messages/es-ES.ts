@@ -164,6 +164,12 @@ export const esESMessages = {
   "{name} {period} 距上游重置还剩分钟": "Minutos hasta el reinicio upstream para {name} {period}",
   "用量加载失败": "No se pudo cargar el uso",
   "重试": "Reintentar",
+  "加载服务商目录失败: {error}": "Error al cargar el catálogo de proveedores: {error}",
+  "服务商目录暂无数据": "El catálogo de proveedores aún no tiene datos",
+  "{label}（实验性 · 未配置）": "{label} (experimental · sin configurar)",
+  "实验性": "Experimental",
+  "实验性接入，尚未配置价格目录，不展示价格表。": "Integración experimental sin catálogo de precios configurado; no se muestra tabla de precios.",
+  "零价格；额度按出口 IP 共享，429 后整条 free 通道冷却。": "Costo cero; la cuota se comparte por IP de salida y un 429 enfría todo el canal free.",
   "用量保存失败: {error}": "No se pudo guardar el uso: {error}",
   "{name} {period} 当前用量百分比": "Porcentaje de uso actual de {name} para {period}",
   "加载账号失败: {error}": "No se pudieron cargar las cuentas: {error}",
@@ -606,4 +612,6 @@ export const esESMessages = {
   "未归因": "Sin atribuir",
   "升级前用量统一计入主 Key": "El uso anterior a la actualización se atribuye a la Key principal",
   "加载 Key 筛选失败: {error}": "Error al cargar el filtro de Key: {error}",
+
+  "账号设置已被其他操作修改，已重新加载最新状态，请重试": "La configuración de la cuenta fue modificada por otra operación. Se recargó el estado más reciente; inténtalo de nuevo",
 } satisfies Messages;

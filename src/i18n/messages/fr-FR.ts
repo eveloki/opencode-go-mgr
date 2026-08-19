@@ -164,6 +164,12 @@ export const frFRMessages = {
   "{name} {period} 距上游重置还剩分钟": "Minutes jusqu'à la réinitialisation en amont pour {name} {period}",
   "用量加载失败": "Échec du chargement de l’utilisation",
   "重试": "Réessayer",
+  "加载服务商目录失败: {error}": "Échec du chargement du catalogue des fournisseurs : {error}",
+  "服务商目录暂无数据": "Le catalogue des fournisseurs ne contient aucune donnée",
+  "{label}（实验性 · 未配置）": "{label} (expérimental · non configuré)",
+  "实验性": "Expérimental",
+  "实验性接入，尚未配置价格目录，不展示价格表。": "Intégration expérimentale sans catalogue de prix configuré ; aucun tableau de prix affiché.",
+  "零价格；额度按出口 IP 共享，429 后整条 free 通道冷却。": "Coût nul ; le quota est partagé par IP de sortie et un 429 refroidit tout le canal free.",
   "用量保存失败: {error}": "Échec de l’enregistrement de l’utilisation : {error}",
   "{name} {period} 当前用量百分比": "Pourcentage d’utilisation actuel de {name} pour {period}",
   "加载账号失败: {error}": "Échec du chargement des comptes : {error}",
@@ -607,4 +613,6 @@ export const frFRMessages = {
   "未归因": "Non attribué",
   "升级前用量统一计入主 Key": "L'usage antérieur à la mise à niveau est attribué à la Key principale",
   "加载 Key 筛选失败: {error}": "Échec du chargement du filtre de Key : {error}",
+
+  "账号设置已被其他操作修改，已重新加载最新状态，请重试": "Les paramètres du compte ont été modifiés par une autre opération. L'état le plus récent a été rechargé ; réessayez",
 } satisfies Messages;
