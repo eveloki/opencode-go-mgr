@@ -1677,23 +1677,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_zen_free_settings(&self, enabled: bool, free_alias_enabled: bool) -> Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE accounts SET enabled = ?2, free_alias_enabled = ?3, updated_at = ?4
-             WHERE id = ?1 AND provider_id = ?5 AND offering_id = ?6",
-            params![
-                ZEN_FREE_ACCOUNT_ID,
-                enabled as i32,
-                free_alias_enabled as i32,
-                Utc::now().to_rfc3339(),
-                OPENCODE_ZEN_FREE_PROVIDER_ID,
-                ANONYMOUS_FREE_OFFERING_ID,
-            ],
-        )?;
-        anyhow::ensure!(changed == 1, "Zen Free singleton is missing");
-        Ok(())
-    }
-
     /// Persist the legacy AppConfig projection and the canonical Zen singleton
     /// settings in one SQLite transaction. Callers must validate and serialize
     /// the config before entering this persistence boundary.

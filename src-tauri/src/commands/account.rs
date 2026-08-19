@@ -276,7 +276,17 @@ pub(crate) fn get_account_usage_inner(
     core: &CoreState,
     id: String,
 ) -> Result<ocg_core::models::UsageWindow, String> {
-    core.db.lock().account_usage(&id).map_err(|e| e.to_string())
+    let db = core.db.lock();
+    let account = db
+        .get_account(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "account not found".to_string())?;
+    if account.provider_id != ocg_core::provider::OPENCODE_PROVIDER_ID
+        || account.offering_id != ocg_core::provider::GO_OFFERING_ID
+    {
+        return Err("legacy usage windows are only available for OpenCode Go accounts".into());
+    }
+    db.account_usage(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -443,6 +453,10 @@ mod tests {
 
         let usage = get_account_usage_inner(&core, created.id.clone()).unwrap();
         assert_eq!(usage.account_id, created.id);
+        assert!(get_account_usage_inner(&core, goat.id).is_err());
+        assert!(
+            get_account_usage_inner(&core, ocg_core::provider::ZEN_FREE_ACCOUNT_ID.into()).is_err()
+        );
 
         {
             let db = core.db.lock();

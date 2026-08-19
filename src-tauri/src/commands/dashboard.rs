@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use chrono::Utc;
-use ocg_core::models::{DailyModelCost, DashboardSummary};
+use ocg_core::models::{DailyModelCost, DashboardSummary, UpstreamChannel};
 use ocg_core::state::CoreState;
 use tauri::State;
 
@@ -14,15 +14,13 @@ pub(crate) fn get_dashboard_summary_inner(core: &CoreState) -> Result<DashboardS
     let accounts = db.list_accounts().map_err(|e| e.to_string())?;
     let total_accounts = accounts.len();
     let now = Utc::now();
+    let free_channel_cooling = db
+        .free_channel_cooldown_until()
+        .map_err(|e| e.to_string())?
+        .is_some();
     let available_accounts = accounts
         .iter()
-        .filter(|a| {
-            a.enabled
-                && a.setup_step.is_ready()
-                && !a.key_cipher.is_empty()
-                && a.auth_error.is_none()
-                && !a.is_cooling_at(now)
-        })
+        .filter(|account| dashboard_account_is_available(account, now, free_channel_cooling))
         .count();
 
     let gateway_running = core.gateway.lock().is_some();
@@ -37,6 +35,30 @@ pub(crate) fn get_dashboard_summary_inner(core: &CoreState) -> Result<DashboardS
         week_cost,
         month_cost,
     })
+}
+
+fn dashboard_account_is_available(
+    account: &ocg_core::models::Account,
+    now: chrono::DateTime<Utc>,
+    free_channel_cooling: bool,
+) -> bool {
+    if !account.enabled
+        || !account.setup_step.is_ready()
+        || account.auth_error.is_some()
+        || account.validate_provider_binding().is_err()
+    {
+        return false;
+    }
+    match (account.provider_id.as_str(), account.offering_id.as_str()) {
+        (ocg_core::provider::OPENCODE_PROVIDER_ID, ocg_core::provider::GO_OFFERING_ID) => {
+            !account.key_cipher.is_empty() && !account.is_cooling_for(UpstreamChannel::Go, now)
+        }
+        (
+            ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+            ocg_core::provider::ANONYMOUS_FREE_OFFERING_ID,
+        ) => !free_channel_cooling && !account.is_cooling_for(UpstreamChannel::Free, now),
+        _ => false,
+    }
 }
 
 /// Return per-day, per-model cost buckets for the last `days` days, for the
@@ -131,7 +153,7 @@ mod tests {
 
         let summary = get_dashboard_summary_inner(&core).unwrap();
         assert_eq!(summary.total_accounts, 3);
-        assert_eq!(summary.available_accounts, 0);
+        assert_eq!(summary.available_accounts, 1);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -167,7 +189,7 @@ mod tests {
         // Mark one account cooling so available count differs from total.
         let id = get_dashboard_summary_inner(&core).unwrap();
         assert_eq!(id.total_accounts, 2);
-        assert_eq!(id.available_accounts, 1);
+        assert_eq!(id.available_accounts, 2);
 
         {
             let accounts = core.db.lock().list_accounts().unwrap();
@@ -183,7 +205,7 @@ mod tests {
         }
 
         let cooled = get_dashboard_summary_inner(&core).unwrap();
-        assert_eq!(cooled.available_accounts, 0);
+        assert_eq!(cooled.available_accounts, 1);
         assert!(
             get_daily_cost_by_model_inner(&core, Some(7))
                 .unwrap()
@@ -193,6 +215,53 @@ mod tests {
             get_daily_cost_by_model_inner(&core, None)
                 .unwrap()
                 .is_empty()
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_summary_excludes_goat_and_honors_zen_free_cooldown() {
+        let dir = std::env::temp_dir().join(format!("ocg-tauri-dash-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let core = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        crate::commands::account::create_account_inner(
+            &core,
+            AccountInput {
+                provider_id: ocg_core::provider::COMMAND_CODE_PROVIDER_ID.into(),
+                offering_id: ocg_core::provider::GOAT_OFFERING_ID.into(),
+                name: "goat".into(),
+                username: None,
+                password: None,
+                key: "goat-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+        let summary = get_dashboard_summary_inner(&core).unwrap();
+        assert_eq!(summary.total_accounts, 2);
+        assert_eq!(summary.available_accounts, 1);
+
+        core.db
+            .lock()
+            .set_account_rate_limit(
+                ocg_core::provider::ZEN_FREE_ACCOUNT_ID,
+                Utc::now() + chrono::Duration::hours(1),
+                "free limited",
+                Some(ocg_core::models::UsageWindowKind::Free),
+            )
+            .unwrap();
+
+        assert_eq!(
+            get_dashboard_summary_inner(&core)
+                .unwrap()
+                .available_accounts,
+            0
         );
 
         let _ = fs::remove_dir_all(dir);
