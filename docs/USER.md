@@ -39,18 +39,18 @@ the true / false circuit breakers, and protocol conversion actually work.
 
 ## What It Does
 
-OCG Manager keeps OpenCode-Go account keys in a local SQLite database and
-exposes a loopback gateway at `http://127.0.0.1:9042/v1`. The same gateway
-also serves the Vue 3 dashboard at `/dashboard/` and its JSON API at
-`/dashboard/api`. Every node is independent: there is no remote sync, no
+OCG Manager keeps officially distributable provider API keys in a local SQLite
+database and exposes a loopback gateway at `http://127.0.0.1:9042/v1`. The
+same gateway also serves the Vue 3 dashboard at `/dashboard/` and its JSON API
+at `/dashboard/api`. Every node is independent: there is no remote sync, no
 Admin API, and no telemetry.
 
 The gateway does four jobs:
 
 1. Authenticate the client with the **Key** issued by the dashboard.
-2. Pick a usable OpenCode-Go account for the request.
-3. Convert the request to that model's native OpenCode-Go protocol, and the
-   response back to the client protocol.
+2. Pick a usable account card after capability filtering.
+3. Convert the request to the selected offering's supported upstream protocol,
+   and the response back to the client protocol.
 4. Log the request, write usage and any cooldown to SQLite, and surface
    everything in the dashboard.
 
@@ -92,10 +92,10 @@ browser.
 
 ## Connect Your First Client
 
-1. In **Accounts**, add an OpenCode-Go account with its key. The login account
-   is optional; when entered first, it is copied into the required display
-   name until you edit that name yourself. The dashboard does not collect or
-   manage the OpenCode-Go login password.
+1. In **Accounts**, add an OpenCode Go account with an officially distributable
+   API key. The login account is optional; when entered first, it is copied
+   into the required display name until you edit that name yourself. The
+   dashboard does not collect or manage an OpenCode login password.
 2. In the dashboard's **Connection Center**, copy the **Key** and the
    **API Base URL** (`http://127.0.0.1:9042/v1`).
 3. Point your client at the base URL with the Key. The
@@ -185,6 +185,16 @@ safe: the primary key value survives untouched, every sub key and its
 enabled/disabled/deleted state is intact when you upgrade again, and no
 revoked credential can ever come back to life by downgrading. Sub keys
 simply do not authenticate while the older build runs.
+
+### Provider Migration (Schema v22)
+
+Schema v22 makes the provider and offering binding explicit on every account
+card and stores provider-scoped pricing and usage metadata. Before it writes a
+v22 database, the application creates one verified, non-overwriting rollback
+copy beside `data.sqlite`, named `data.sqlite.pre-v22.<timestamp>.bak`. Keep
+that file with your normal backup until the upgraded installation has been
+verified. It is a v21 rollback point, not a replacement for a complete backup;
+never open the migrated database with an older build.
 
 ### Backup
 
@@ -455,11 +465,29 @@ page.
 
 ### Accounts
 
+Each account card is one credential for one provider offering and one
+independent quota pool. Cards share one manually persisted global order; after
+the request's capability filter, strict priority, global sticky, and
+round-robin routing all reuse that order. There is no separate provider page,
+model-routing page, or per-model quota pool.
+
+The built-in offerings are:
+
+| Offering | Credential and state | Availability |
+| --- | --- | --- |
+| OpenCode / Go | One officially distributable API key per card | Configured path |
+| OpenCode Zen / Free | One credentialless, anonymous singleton with no authentication headers; sortable and enableable, but not deletable | Experimental free path; its quota is shared by egress IP |
+| Command Code / GOAT | API-key-shaped schema and UI reservation | Unconfigured and fail-closed; not a production inference, pricing, or usage path |
+
+Do not add consumer subscription credentials, browser cookies, or reverse
+proxies as account keys. GOAT has no verified first-party endpoint,
+authentication, model, pricing, or alpha contract in this project. It must not
+be aliased to OpenCode or send a GOAT key to any OpenCode endpoint.
+
 The **Accounts** view splits creation into **Import existing Key** and
 **Register new account (Beta)**:
 
-- A **Key account** keeps the existing flow and stores an OpenCode-Go key you
-  already have.
+- A **Key account** stores one officially distributable OpenCode Go API key.
 - A **managed account** immediately creates a disabled, recoverable draft,
   then runs the wizard through optional sign-in identity, invite registration,
   payment, and key verification. The draft and current step are persisted to
@@ -521,8 +549,9 @@ to the sign-in identity step. Deleting an account likewise deletes its
 cookies/profile, and the confirmation states this explicitly. That login state
 can then be recovered only from a backup or by signing in again.
 
-Each completed account card shows the account name, cooldown state, and the
-5-hour / weekly / monthly usage bars driven by local accounting.
+Each completed OpenCode Go card shows the account name, cooldown state, and
+the 5-hour / weekly / monthly usage bars driven by local accounting. Zen Free
+has its own anonymous, egress-IP-shared free cooldown rather than a key quota.
 
 - **Usage baselines.** Type a percentage or drag a bar to set its current
   real-world usage baseline. After the value is saved, successful request
@@ -572,27 +601,31 @@ Each completed account card shows the account name, cooldown state, and the
 
 ### Pricing
 
-The **Pricing** view shows the active revision, documentation timestamp,
-window limits, four USD token rates, `Usage`, and one official quota multiplier.
-Combinable prices use the standard tier as the complete root row. Expanding it
-shows higher-context Qwen tiers, DeepSeek Peak hours, and MiniMax long-context,
-high-speed, priority, or combined upgrade tiers. DeepSeek V4 Pro and Flash use
-Off-Peak rates except 01:00–04:00 and 06:00–10:00 UTC, when Peak rates apply.
+The **Pricing** view shows immutable provider pricing snapshots. Refresh is
+manual only: OpenCode Go can fetch `https://opencode.ai/docs/go/` after you
+press refresh, while offerings without a verified first-party pricing contract
+remain unavailable and cannot be refreshed. A failed fetch or validation keeps
+the last successful snapshot.
 
-The official multiplier defaults to `monthly limit / Usage`, but can be edited
-for temporary promotions. Saving creates a persistent revision used by later
-local quota estimates. The application contacts only
-`https://opencode.ai/docs/go/`, and only after you press refresh. When fetched
-official multipliers differ from the active values, the dashboard shows the
-differences and asks whether to keep the current values or use the latest
-official values; it does not activate new prices or model choices before that
-decision. A failed fetch or validation keeps the last successful snapshot.
+For OpenCode Go, the view shows the revision, documentation timestamp, window
+limits, token rates, `Usage`, and the quota-debit multiplier. The allowance is
+not a quota pool and does not route requests: it only derives that debit
+multiplier (`monthly limit / Usage`). Saving a temporary override creates a
+new persistent revision for later estimates. There is no model-level quota
+pool. GOAT has no pricing snapshot and is not presented as priced support.
 
 ### Logs
 
 The **Logs** view shows the rolling buffer of requests the gateway has
-forwarded: timestamp, chosen account, model, status code, the upstream error
-if any, and the streamed usage when the upstream emitted a usage chunk.
+forwarded: timestamp, selected provider/offering, route account, credential
+account, model, status code, the upstream error if any, and the streamed usage
+when the upstream emitted a usage chunk. Filters cover provider, offering,
+route account, credential account, model, status, time range, and client Key.
+
+Each row also preserves raw supplier cost, quota debit, and effective paid cost
+when the selected offering supplies enough pricing evidence. These are distinct
+values: an allowance only changes the quota-debit multiplier; it does not make
+a model or provider routable.
 
 - Chat streaming requests set `stream_options.include_usage` so OpenAI-compatible
   upstreams emit a usage chunk. Rows with `success_no_usage` mean the stream
@@ -617,6 +650,10 @@ The **Settings** view exposes the persistent gateway configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`).
 - **Upstream URL** — the OpenCode-Go base URL.
+- **Routing mode** — strict priority, global sticky, or round robin. All three
+  modes apply the one global card order only after filtering incompatible,
+  disabled, cooling, or already-failed cards; they do not create a provider or
+  model routing table.
 - **Outbound proxy** — a process-wide setting shared by every account.
   `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,
   `ALL_PROXY`, and `NO_PROXY`; Windows also reads the system proxy and connects
@@ -928,11 +965,13 @@ Settings expose three OpenCode Zen free-routing modes:
 | **Explicit free only** (default) | Only client-requested free models use `https://opencode.ai/zen`; Go models stay on Go |
 | **Prefer mapped free models** | Current maps: `deepseek-v4-flash` → `deepseek-v4-flash-free`, `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted (IP-shared 429, no key rotation) fall back to Go |
 
-Free and Go cooldowns are **independent**. Zen free promo quota is shared per
-egress IP, so a free `429` cools the whole free channel and does **not** rotate
-keys; prefer mode then falls back to Go. Multi-account routing still applies on
-the Go channel (and for free-channel `401`/`403`). Under sticky-global routing,
-Free and Go currently share one preferred account id across channels.
+Free and Go cooldowns are **independent**. Zen Free sends no authentication
+headers. Its promo quota is shared per egress IP, so a free `429` cools the
+whole free channel and does **not** rotate keys; when a mapped free request can
+fall through, prefer mode safely continues on Go. A free `401` or `403` blocks
+that route. Multi-account routing still applies on the Go channel. Under
+sticky-global routing, Free and Go currently share one preferred account id
+across channels.
 Successful free-channel rows keep token counts but use `cost_state=free` and do
 not enter Go quota totals; prefer-mode fallbacks that land on Go are priced as
 usual. Free models are promotional, use a separate quota, and may use request

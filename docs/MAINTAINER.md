@@ -176,7 +176,8 @@ difference, and the Claude Desktop three-role persistence behavior.
   `x-api-key`, or `x-goog-api-key`. `forwarder.rs` must strip those client
   credentials and inject the selected account key per the actual
   Chat/Messages upstream protocol — never pass Gemini or Anthropic client
-  credentials through to OpenCode-Go.
+  credentials through to an upstream offering. Never alias Command Code / GOAT
+  to OpenCode or send a GOAT key to an OpenCode endpoint.
 - The standard entries are `/v1/chat/completions`, `/v1/responses`,
   `/v1/messages`, and `/v1/models`. Claude Desktop uses
   `/claude-desktop/v1/messages` and `/claude-desktop/v1/models`. Gemini
@@ -198,17 +199,26 @@ difference, and the Claude Desktop three-role persistence behavior.
   entering the existing Messages preparation path. The mapping is read and
   written through the protected `/dashboard/api/claude-desktop/models`
   endpoint; an ordinary settings update must preserve it.
-- `selector.rs` picks the next account and skips disabled / cooled-down /
-  already-failed accounts. Zen free quota is shared per egress IP: any active
-  `cooldown_free_until` exhausts the whole free channel (no key rotation).
-  `limit.rs` parses the upstream 429 reset phrase.
-  `pricing.rs` loads the active OpenCode Go pricing snapshot and derives
-  quota cost from token usage; the dashboard windows use the limits stored in
-  that same snapshot. `PricingModel.quota_multiplier` is the single applied
-  official multiplier. A fetched snapshot derives it as
-  `monthly limit / Usage`; the protected multiplier update endpoint may
-  persist user overrides for temporary promotions under a new immutable
-  revision.
+- `provider.rs` owns the built-in bindings: OpenCode / Go uses an API key and a
+  per-key quota scope; OpenCode Zen / Free is one credentialless, anonymous,
+  egress-IP-scoped singleton; Command Code / GOAT is schema/UI-reserved only.
+  GOAT production inference, pricing, and usage are fail-closed until a
+  verified first-party endpoint, authentication, model, pricing, and alpha
+  contract exist. Accept only officially distributable API keys: never add
+  consumer subscriptions, cookies, or reverse-proxy credentials as accounts.
+- `selector.rs` filters account cards by capability, enabled/ready state,
+  credential validity, cooldown, and request-local failures before applying
+  the persisted global manual order. Strict priority, global sticky, and
+  round-robin reuse that same order; do not introduce a provider page,
+  model-routing page, or per-model quota pool. Zen Free quota is shared per
+  egress IP: any active `cooldown_free_until` exhausts the whole free channel
+  (no key rotation). `limit.rs` parses the upstream 429 reset phrase.
+- `pricing.rs` stores immutable provider-scoped pricing snapshots. Refresh is
+  manual only and is available only for offerings with verified source
+  contracts. For OpenCode Go, an allowance derives the account quota-debit
+  multiplier (`monthly limit / Usage`) only; it is not a routable quota pool.
+  A protected multiplier update may persist temporary overrides under a new
+  immutable revision.
 - Pricing refresh is user-triggered through protected
   `GET /dashboard/api/pricing`, `PUT /dashboard/api/pricing/multipliers`, and
   `POST /dashboard/api/pricing/refresh`. A refresh whose official multipliers
@@ -218,7 +228,8 @@ difference, and the Claude Desktop three-role persistence behavior.
   official candidate must be confirmed again. The
   fetcher is restricted to the OpenCode Go HTTPS host, same-host redirects, a
   20-second deadline, and a 2 MiB body. Validation failure never activates a
-  partial snapshot; `pricing_snapshots` retains the last successful revision.
+  partial snapshot; the provider snapshot store retains the last successful
+  revision. No GOAT snapshot may be manufactured from OpenCode data.
   MiniMax context, priority, and high-speed adjustments are local policy and
   never trigger a supplier-site request.
 - `forwarder.rs` returns an explicit action to `handler.rs`: only a pre-send
@@ -258,6 +269,11 @@ difference, and the Claude Desktop three-role persistence behavior.
   role models; every other guide only produces client configuration and does
   not change gateway settings. The Pricing view reads and refreshes the active
   OpenCode Go snapshot through the protected pricing API.
+- Account cards are the provider/offering/credential/quota unit. Zen Free is
+  database-owned: it can be enabled, disabled, and reordered, but cannot be
+  created or deleted through generic account APIs. Logs retain provider,
+  offering, route-account, credential-account, raw-cost, quota-debit, and
+  effective-paid-cost attribution, and their corresponding filters.
 
 ### Account Lifecycle And Browser Runtime
 
@@ -341,6 +357,13 @@ difference, and the Claude Desktop three-role persistence behavior.
   queries. `crates/ocg-core/src/models.rs` defines the shared serde types
   and `AppConfig`. `crates/ocg-core/src/crypto.rs` provides key obfuscation
   and `.encryption-key` management.
+- Schema v22 creates explicit immutable provider/offering bindings, provider
+  pricing/usage state, quota windows, and provider-aware forward-log fields.
+  When a v21 on-disk database is first migrated, `Database::open` creates and
+  verifies exactly one non-overwriting sibling rollback copy named
+  `data.sqlite.pre-v22.<timestamp>.bak` before any v22 write. Preserve it with
+  the normal backup; it is a v21 rollback point, not a general backup or a
+  license to run an older binary on the migrated database.
 - `crates/ocg-core/src/state.rs` is the `CoreStateInner` shared by the
   gateway, dashboard, and CLI.
 - `AppConfig` uses serde defaults for backward-compatible loading. A pre-1.3

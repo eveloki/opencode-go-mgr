@@ -38,16 +38,16 @@
 
 ## 产品定位
 
-OCG Manager 把 OpenCode-Go 账号 Key 保存在本地 SQLite，并通过回环 Gateway
-`http://127.0.0.1:9042/v1` 暴露给客户端。同一个 Gateway 同时承载 Vue 3 管理
-面板（路径 `/dashboard/`）和面板的 JSON API（路径 `/dashboard/api`）。每个
-节点都独立运行——项目不提供远端同步、Admin API、遥测。
+OCG Manager 把可由官方分发的供应商 API Key 保存在本地 SQLite，并通过回环 Gateway
+`http://127.0.0.1:9042/v1` 暴露给客户端。同一个 Gateway 同时承载 Vue 3 管理面板
+（路径 `/dashboard/`）和面板的 JSON API（路径 `/dashboard/api`）。每个节点都独立
+运行——项目不提供远端同步、Admin API、遥测。
 
 Gateway 的四件事：
 
 1. 用面板签发的 **Key** 验证客户端。
-2. 为请求挑一个可用的 OpenCode-Go 账号。
-3. 把请求转换到该模型在 OpenCode-Go 上的原生协议，把响应再转回客户端协议。
+2. 经能力过滤后，为请求挑一张可用账号卡。
+3. 把请求转换到所选 offering 支持的上游协议，再把响应转回客户端协议。
 4. 把请求日志、用量、冷却全部写回 SQLite，并在面板里呈现。
 
 ## 安装与首次启动
@@ -86,9 +86,9 @@ Gateway 的四件事：
 
 ## 接入第一个客户端
 
-1. 在 **账号** 视图用 Key 添加一个 OpenCode-Go 账号。登录账号可选；新增时如果
-   先填写账号，它会自动作为必填名称，直到你手动修改名称。面板不收集或维护
-   OpenCode-Go 登录密码。
+1. 在 **账号** 视图用官方分发的 API Key 添加一个 OpenCode Go 账号。登录账号可选；
+   新增时如果先填写账号，它会自动作为必填名称，直到你手动修改名称。面板不收集
+   或维护 OpenCode 登录密码。
 2. 在面板的 **接入中心** 复制 **Key** 和 **API Base URL**
    （`http://127.0.0.1:9042/v1`）。
 3. 把客户端指向该 Base URL 并填入 Key。**应用** 视图内置了 16 个常见
@@ -170,6 +170,14 @@ Release 后，后续签名桌面版可在 **设置** 中一键下载并安装。
 该表。因此降级到旧版是安全的：主 Key 值原样保留，所有子 Key 及其启用/停用/
 删除状态在再次升级后完好如初，任何已撤销的凭证都不可能因降级而复活。只是
 旧版本运行期间子 Key 暂时无法鉴权。
+
+### 供应商迁移（schema v22）
+
+schema v22 为每张账号卡显式保存 provider 和 offering 绑定，并保存按供应商区分的
+价格和用量元数据。在向 v22 数据库写入前，程序会在 `data.sqlite` 同目录创建一份已
+验证、不会覆盖的回滚副本：`data.sqlite.pre-v22.<timestamp>.bak`。在确认升级后的安装
+可用前，请把它和常规备份一起保留。它只是 v21 的回滚点，不能替代完整备份；不要用
+旧版程序打开已迁移的数据库。
 
 ### 备份
 
@@ -388,9 +396,25 @@ Claude Desktop 是例外，它的模型映射是持久化的：复制配置前�
 
 ### 账号
 
+每张账号卡对应一个 provider offering 的一份凭据和一个独立额度池。所有卡片共享一份
+可手动持久化的全局顺序；请求先经过能力过滤，严格优先级、全局粘性和轮询三种路由再
+复用这份顺序。没有独立的供应商页、模型路由页或按模型划分的额度池。
+
+内置 offering 如下：
+
+| Offering | 凭据与状态 | 可用性 |
+| --- | --- | --- |
+| OpenCode / Go | 每张卡一份官方分发的 API Key | 已配置路径 |
+| OpenCode Zen / Free | 一张不带鉴权头、无需凭据的匿名单例卡；可排序、可启停，不可删除 | 实验性免费路径；额度按出口 IP 共享 |
+| Command Code / GOAT | 预留 API-Key 形状的 schema 与 UI | 未配置且 fail-closed；不是生产推理、计价或用量路径 |
+
+不要把消费者订阅凭据、浏览器 Cookie 或反向代理当作账号 Key。项目没有 GOAT 的已验证
+第一方 endpoint、鉴权、模型、价格或 alpha 合约；不得把它别名为 OpenCode，也不得向
+任何 OpenCode endpoint 发送 GOAT Key。
+
 **账号** 视图把新增入口分为 **导入已有 Key** 与 **注册新账号（Beta）**：
 
-- **Key 账号**沿用原有流程，直接保存已有 OpenCode-Go Key。
+- **Key 账号**直接保存一份官方分发的 OpenCode Go API Key。
 - **托管账号**先创建一条禁用的可恢复草稿，再按向导完成登录身份（可选）、邀请
   注册、支付、Key 验证。草稿与当前步骤会立即写入 SQLite；关闭页面或重启服务后
   可继续。注册中账号不会参与 Gateway 路由，也不会显示用量、测试或启用控件。
@@ -433,8 +457,9 @@ Key，只退出控制台登录；注册中的托管账号还会回到登录身�
 浏览器 Cookie/Profile，确认框会明确提示这一点。之后这些登录状态无法从 OCG
 Manager 恢复，只能从备份恢复或重新登录。
 
-每张已完成账号卡显示账号名、冷却状态，以及由本地估算驱动的 5 小时、本周、本月
-用量条。
+每张已完成的 OpenCode Go 账号卡显示账号名、冷却状态，以及由本地估算驱动的 5 小时、
+本周、本月用量条。Zen Free 使用独立的匿名、按出口 IP 共享的 free 冷却，不使用某个
+Key 的额度。
 
 - **用量校准**：每个窗口都可以输入百分比或拖动进度条，将其保存为当前实际用量
   基线；保存后，OCG Manager 记录的成功请求成本会继续累加到该基线上。达到 100%
@@ -467,22 +492,25 @@ Manager 恢复，只能从备份恢复或重新登录。
 
 ### 价格表
 
-**价格表** 视图显示当前 revision、文档更新时间、窗口额度、四类美元 token 单价、
-`Usage` 和用于额度结算的单一官方倍率。可组合价格以标准档作为完整根行；展开根行后，
-可查看 Qwen 的更高上下文档、DeepSeek 的 Peak 时段，以及 MiniMax 的长上下文、高速、
-优先服务和组合升级档。DeepSeek V4 Pro / Flash 在 UTC 01:00–04:00 与 06:00–10:00
-使用 Peak 单价，其余时间为 Off-Peak。
+**价格表** 展示不可变的、按供应商区分的价格快照。刷新仅由用户手动发起：OpenCode Go
+在点击刷新后才会访问 `https://opencode.ai/docs/go/`；没有已验证第一方价格合约的
+offering 会保持 unavailable，不能刷新。抓取或校验失败时继续使用最后一次成功快照。
 
-官方倍率默认按“月额度 / Usage”推导，也可以按临时活动手动修改；修改会生成新的
-持久化 revision 并立即用于后续本地额度估算。只有用户点击刷新时才会访问
-`https://opencode.ai/docs/go/`。如果刷新的官方倍率与当前设置不同，面板会先列出
-差异，并让用户选择保留当前倍率或采用最新官方倍率；确认前不会启用新的价格和
-模型列表。抓取或校验失败时继续使用最后一次成功快照。
+对 OpenCode Go，页面展示 revision、文档更新时间、窗口额度、token 单价、`Usage` 和
+额度扣减倍率。allowance 不是额度池、不会参与路由，只用于推导扣减倍率（“月额度 /
+Usage”）。临时覆盖会创建新的持久化 revision，供后续估算使用；不存在按模型划分的
+额度池。GOAT 没有价格快照，不得作为已计价支持展示。
 
 ### 日志
 
-**日志** 视图展示 Gateway 转发的请求滚动列表：时间戳、所选账号、模型、状态码、
-上游错误（如果有），以及上游发出 usage chunk 时的精确流式用量。
+**日志** 视图展示 Gateway 转发的请求滚动列表：时间戳、选中的 provider/offering、
+route account、credential account、模型、状态码、上游错误（如果有），以及上游发出
+usage chunk 时的精确流式用量。可按 provider、offering、route account、credential
+account、模型、状态、时间范围与客户端 Key 筛选。
+
+在所选 offering 提供足够的价格证据时，每行还会保留原始供应商成本、额度扣减与实际
+付费成本。这三者互不等同：allowance 只改变额度扣减倍率，不会让某个模型或供应商变得
+可路由。
 
 - Chat 流式请求会设置 `stream_options.include_usage`，让 OpenAI 兼容上游返回
   usage chunk。仍然没有 usage chunk 的行会标 `success_no_usage`。usage chunk
@@ -502,6 +530,8 @@ Manager 恢复，只能从备份恢复或重新登录。
 
 - **Gateway 端口**：Gateway 监听端口（默认 `9042`）。
 - **上游地址**：OpenCode-Go 基础 URL。
+- **路由方案**：严格优先级、全局粘性或轮询。三种方案都会先过滤不兼容、禁用、冷却或
+  本请求已失败的卡片，再使用同一份全局卡片顺序；不会生成供应商或模型路由表。
 - **出站代理**：这是进程级设置，不区分账号。`自动（系统 / 环境）` 会读取
   `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，Windows 还会读取系统
   代理；没有代理时直接连接。`手动 HTTP 代理` 将所有 HTTP/HTTPS 目标严格送往
@@ -758,13 +788,13 @@ Go 快照。
 | **仅显式使用 Free 模型**（默认） | 只有客户端显式请求 free 才走 `https://opencode.ai/zen`；Go 模型仍走 Go 上游 |
 | **自动优先同名 Free 模型** | 当前映射：`deepseek-v4-flash` → `deepseek-v4-flash-free`，`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽（按 IP 共享，不换 Key）或超长后回落 Go |
 
-Free 与 Go 使用**独立冷却窗口**。Zen free 促销额度按出口 IP 共享，因此 free
-`429` 会冷却整条 free 通道，**不会**换 Key 重试；prefer 随后回落 Go。Go 通道
-（以及 free 通道的 `401`/`403`）仍按现有方案做多账号轮询。sticky-global 路由
-下，Free 与 Go 目前共享同一个全局偏好账号（跨通道不单独记粘性）。成功的 free
-通道请求会记录 token，但 `cost_state=free`，不计入 Go 额度；prefer 回落到 Go
-的请求仍按 Go 计价。Free 为限时促销，额度独立，且请求数据可能用于改进模型——
-不要提交机密内容。
+Free 与 Go 使用**独立冷却窗口**。Zen Free 不发送鉴权头，促销额度按出口 IP 共享；
+free `429` 会冷却整条 free 通道，**不会**换 Key 重试。映射到 free 的请求可以安全
+回落时，prefer 会继续走 Go；free `401` 或 `403` 会阻断该路由。Go 通道仍按现有方案
+做多账号轮询。sticky-global 路由下，Free 与 Go 目前共享同一个全局偏好账号（跨通道
+不单独记粘性）。成功的 free 通道请求会记录 token，但 `cost_state=free`，不计入 Go
+额度；prefer 回落到 Go 的请求仍按 Go 计价。Free 为限时促销，额度独立，且请求数据
+可能用于改进模型——不要提交机密内容。
 
 ## CLI
 

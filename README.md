@@ -2,11 +2,12 @@
 
 # OCG Manager
 
-OCG Manager is a local operations console for OpenCode-Go accounts. It stores
-your account keys in SQLite and serves a multi-protocol gateway — plus the
-management dashboard — at `http://127.0.0.1:9042`. Clients speak OpenAI,
-Anthropic, Gemini, or Claude Desktop; the gateway converts each request to
-that model's native OpenCode-Go protocol and converts the response back.
+OCG Manager is a local operations console for provider API-key accounts. It
+stores one provider/offering credential per account card in SQLite and serves a
+multi-protocol gateway — plus the management dashboard — at
+`http://127.0.0.1:9042`. Clients speak OpenAI, Anthropic, Gemini, or Claude
+Desktop; the gateway converts each request to the selected offering's supported
+upstream protocol and converts the response back.
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
@@ -19,8 +20,9 @@ that model's native OpenCode-Go protocol and converts the response back.
 - **One port, four client families** — OpenAI Chat Completions / Responses,
   Anthropic Messages, Gemini `generateContent` / `streamGenerateContent`,
   model discovery, and Claude Desktop aliases.
-- **Local multi-account rotation** — drag account cards to persist priority;
-  the gateway skips disabled, cooling, or already-failed accounts.
+- **Local multi-account routing** — drag account cards to persist one global
+  order; strict priority, sticky, and round-robin reuse it after capability
+  filtering.
 - **Quota bars are warnings** — 5-hour / weekly / monthly usage is a local
   estimate. A full bar does not stop traffic; only an upstream `429` cools
   an account down.
