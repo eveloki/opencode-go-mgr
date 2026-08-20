@@ -382,6 +382,24 @@ pub fn embedded_seed() -> PricingSnapshot {
             15.0,
             PricingTimeWindow::Peak,
         ),
+        seed_model(
+            "muse-spark-1.2",
+            "Muse Spark 1.2",
+            0.10,
+            0.20,
+            0.002,
+            None,
+            60.0,
+        ),
+        seed_model(
+            "muse-spark-1.2-contributor",
+            "Muse Spark 1.2 Contributor",
+            0.10,
+            0.20,
+            0.002,
+            None,
+            60.0,
+        ),
         seed_model("hy3", "Hy3", 0.14, 0.58, 0.035, None, 60.0),
     ];
     apply_official_pricing_policy(&mut models, MONTHLY_LIMIT);
@@ -417,6 +435,43 @@ pub(crate) fn ensure_current_adjustment_policy(mut snapshot: PricingSnapshot) ->
     }
     add_adjustments(&mut snapshot.models);
     snapshot.adjustment_policy_version = ADJUSTMENT_POLICY_VERSION.to_string();
+    snapshot.revision = unique_revision_for_content_hash(&snapshot.content_hash);
+    snapshot.activated_at = Utc::now().to_rfc3339();
+    snapshot
+}
+
+// These are deliberately the only seed rows that can be backfilled into an
+// official snapshot. The public Go pricing table lists Contributor but omits
+// standard Muse; standard rates come from live Go measurements, not that table.
+// Do not turn this into "every embedded seed row": an official removal must
+// not silently revive unrelated models forever.
+const SEED_COVERAGE_MODEL_IDS: &[&str] = &["muse-spark-1.2", "muse-spark-1.2-contributor"];
+
+/// Append the explicitly allowlisted Muse rows that an existing snapshot does
+/// not know about yet. Entries already present — official rows or user-edited
+/// multipliers — are never overwritten.
+pub(crate) fn ensure_seed_model_coverage(mut snapshot: PricingSnapshot) -> PricingSnapshot {
+    let known = snapshot
+        .models
+        .iter()
+        .map(|model| model.model_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut missing: Vec<PricingModel> = embedded_seed()
+        .models
+        .into_iter()
+        .filter(|model| {
+            SEED_COVERAGE_MODEL_IDS.contains(&model.model_id.as_str())
+                && !known.contains(model.model_id.as_str())
+        })
+        .collect();
+    if missing.is_empty() {
+        return snapshot;
+    }
+    // Recompute with the snapshot's own monthly limit so the appended rows
+    // agree with the rest of the snapshot even if the official limit moved.
+    apply_official_multipliers(&mut missing, snapshot.limits.window_month);
+    snapshot.models.extend(missing);
+    sort_models(&mut snapshot.models);
     snapshot.revision = unique_revision_for_content_hash(&snapshot.content_hash);
     snapshot.activated_at = Utc::now().to_rfc3339();
     snapshot
@@ -1102,10 +1157,95 @@ fn collapse_whitespace(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        embedded_seed, ensure_current_adjustment_policy, fetch_official_snapshot,
-        legacy_policy_needs_multiplier_repair, parse_official_html,
+        embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage,
+        fetch_official_snapshot, legacy_policy_needs_multiplier_repair, parse_official_html,
     };
     use chrono::{DateTime, Utc};
+
+    #[test]
+    fn seed_coverage_backfills_missing_models_and_prices_them() {
+        // A snapshot from a database created before the seed grew: no muse rows.
+        let mut snapshot = embedded_seed();
+        let previous_revision = snapshot.revision.clone();
+        snapshot
+            .models
+            .retain(|entry| !entry.model_id.starts_with("muse-spark-1.2"));
+        assert!(
+            snapshot
+                .estimate("muse-spark-1.2", 1_000, 100, 0, 0, None)
+                .cost
+                .is_none()
+        );
+
+        let repaired = ensure_seed_model_coverage(snapshot);
+        assert_ne!(repaired.revision, previous_revision);
+        let estimate = repaired.estimate("muse-spark-1.2", 1_000, 100, 0, 0, None);
+        let cost = estimate.cost.expect("muse-spark-1.2 must be priced");
+        // 1k uncached input @ $0.10 + 100 output @ $0.20 per M tokens.
+        assert!((cost - (1_000.0 * 0.10 + 100.0 * 0.20) / 1_000_000.0).abs() < 1e-9);
+        assert!(
+            repaired
+                .estimate("muse-spark-1.2-contributor", 1_000, 100, 0, 0, None)
+                .cost
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn seed_coverage_never_overwrites_existing_rows() {
+        // A snapshot whose muse-contributor row came from the official table
+        // (or carries a user-edited multiplier) must survive the backfill.
+        let mut snapshot = embedded_seed();
+        snapshot
+            .models
+            .retain(|entry| entry.model_id != "muse-spark-1.2-contributor");
+        let edited = super::PricingModel {
+            model_id: "muse-spark-1.2-contributor".to_string(),
+            display_name: "Muse Spark 1.2 Contributor".to_string(),
+            input: 0.10,
+            output: 0.20,
+            cache_read: 0.002,
+            cache_write: None,
+            usage: 60.0,
+            quota_multiplier: 2.5,
+            min_input_tokens: None,
+            max_input_tokens: None,
+            time_window: super::PricingTimeWindow::Always,
+            adjustments: Vec::new(),
+        };
+        snapshot.models.push(edited);
+
+        let repaired = ensure_seed_model_coverage(snapshot);
+        let row = repaired
+            .models
+            .iter()
+            .find(|entry| entry.model_id == "muse-spark-1.2-contributor")
+            .unwrap();
+        assert_eq!(row.quota_multiplier, 2.5);
+    }
+
+    #[test]
+    fn seed_coverage_is_noop_when_every_seed_model_is_present() {
+        let snapshot = embedded_seed();
+        let repaired = ensure_seed_model_coverage(snapshot.clone());
+        assert_eq!(repaired.revision, snapshot.revision);
+        assert_eq!(repaired.activated_at, snapshot.activated_at);
+    }
+
+    #[test]
+    fn seed_coverage_does_not_revive_models_outside_the_muse_allowlist() {
+        let mut snapshot = embedded_seed();
+        snapshot.models.retain(|entry| entry.model_id != "grok-4.5");
+
+        let repaired = ensure_seed_model_coverage(snapshot);
+
+        assert!(
+            repaired
+                .models
+                .iter()
+                .all(|entry| entry.model_id != "grok-4.5")
+        );
+    }
 
     #[test]
     fn seed_uses_go_usage_as_quota_multiplier() {

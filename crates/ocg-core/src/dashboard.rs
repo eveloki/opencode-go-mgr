@@ -11,7 +11,9 @@ use crate::gateway::{
 };
 use crate::go_usage::GoUsageError;
 use crate::models::*;
-use crate::pricing::{PricingSnapshot, fetch_official_snapshot, stamp_pricing_activation};
+use crate::pricing::{
+    PricingSnapshot, ensure_seed_model_coverage, fetch_official_snapshot, stamp_pricing_activation,
+};
 use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
 use axum::{
     Json, Router,
@@ -636,6 +638,10 @@ fn apply_pricing_refresh(
     match result {
         Ok(official) => {
             let active = state.pricing_snapshot();
+            // Compare the candidate after allowlisted coverage is applied. A
+            // seed-only Muse row can carry a user multiplier; comparing the
+            // incomplete official table first would erase it without a prompt.
+            let official = ensure_seed_model_coverage(official);
             let multiplier_changes = pricing_multiplier_changes(&active, &official);
             let official_content_hash = official.content_hash.clone();
             let confirmation_matches = expected_official_content_hash
@@ -650,6 +656,8 @@ fn apply_pricing_refresh(
                 });
             }
 
+            // Official rows win; the allowlisted seed coverage above prevents
+            // the public table's omitted standard Muse row from becoming unpriced.
             let mut candidate = official;
             if matches!(policy, Some(PricingRefreshPolicy::KeepCurrent)) {
                 merge_current_multipliers(&active, &mut candidate);
@@ -3130,6 +3138,7 @@ mod tests {
         Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate, AppConfig,
         ClaudeDesktopModels, ProxyMode, UsageWindow, normalize_purchase_date, purchase_expires_on,
     };
+    use crate::pricing::stamp_pricing_activation;
     use crate::state::CoreStateInner;
     use axum::Json;
     use axum::extract::{Path as AxumPath, State};
@@ -3566,6 +3575,86 @@ mod tests {
                 .unwrap()
                 .quota_multiplier,
             3.0
+        );
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn seed_only_muse_multiplier_requires_confirmation_and_honors_refresh_policy() {
+        let dir = temp_data_dir("pricing-muse-seed-confirmation");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("pricing-test"));
+        let state = Arc::new(
+            CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap(),
+        );
+        let mut active = state.pricing_snapshot().as_ref().clone();
+        let standard_multiplier = active
+            .models
+            .iter()
+            .find(|model| model.model_id == "muse-spark-1.2")
+            .unwrap()
+            .quota_multiplier;
+        for model in &mut active.models {
+            if model.model_id == "muse-spark-1.2" {
+                model.quota_multiplier = 2.5;
+            }
+        }
+        let active = stamp_pricing_activation(active);
+        state.activate_pricing_snapshot(active).unwrap();
+
+        // The public table omits standard Muse. The refresh candidate must be
+        // covered before its multiplier is compared with the active snapshot.
+        let mut official = state.pricing_snapshot().as_ref().clone();
+        official.content_hash = "official-without-muse".into();
+        official
+            .models
+            .retain(|model| !model.model_id.starts_with("muse-spark-1.2"));
+
+        let preview = apply_pricing_refresh(&state, Ok(official.clone()), None, None).unwrap();
+        assert_eq!(preview.refresh_status, "needs_confirmation");
+        assert_eq!(preview.multiplier_changes.len(), 1);
+        assert_eq!(preview.multiplier_changes[0].model_id, "muse-spark-1.2");
+
+        let kept = apply_pricing_refresh(
+            &state,
+            Ok(official.clone()),
+            Some(PricingRefreshPolicy::KeepCurrent),
+            preview.official_content_hash.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(kept.refresh_status, "success");
+        assert_eq!(
+            kept.snapshot
+                .models
+                .iter()
+                .find(|model| model.model_id == "muse-spark-1.2")
+                .unwrap()
+                .quota_multiplier,
+            2.5
+        );
+
+        let second_preview =
+            apply_pricing_refresh(&state, Ok(official.clone()), None, None).unwrap();
+        assert_eq!(second_preview.refresh_status, "needs_confirmation");
+        let replaced = apply_pricing_refresh(
+            &state,
+            Ok(official),
+            Some(PricingRefreshPolicy::UseOfficial),
+            second_preview.official_content_hash.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(replaced.refresh_status, "success");
+        assert_eq!(
+            replaced
+                .snapshot
+                .models
+                .iter()
+                .find(|model| model.model_id == "muse-spark-1.2")
+                .unwrap()
+                .quota_multiplier,
+            standard_multiplier
         );
 
         drop(state);

@@ -356,6 +356,8 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 | --- | ---: | ---: | --- | --- | :---: | --- |
 | `grok-4.5` | 500K | 500K | 文本、图像 | 始终 | ✓ | low / medium / high（默认 high） |
 | `gpt-5.6-luna` | 1.05M | 128K | 文本、图像 | ✓ | ✓ | low / medium / high / max（默认 medium） |
+| `muse-spark-1.2` | 1M | 128K | 文本、图像 | ✓ | ✓ | low / medium / high（默认 high） |
+| `muse-spark-1.2-contributor` | 1M | 128K | 文本、图像 | ✓ | ✓ | low / medium / high（默认 high） |
 | `glm-5.3` | 1M | 128K | 文本 | ✓ | ✓ | low / high / max（默认 max） |
 | `glm-5.2` | 1M | 128K | 文本 | ✓ | ✓ | high / max（默认 max） |
 | `glm-5.1` | 198K | 32K | 文本 | ✓ | ✓ | — |
@@ -376,6 +378,9 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 | `deepseek-v4-pro` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
 | `deepseek-v4-flash` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
 | `hy3` | 256K | 64K | 文本 | ✓ | ✓ | low / high（默认 high） |
+
+`muse-spark-1.2` 使用零数据保留（ZDR）：提示词和补全内容不会用于训练。
+`muse-spark-1.2-contributor` 不使用 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择 Contributor。Muse 标准价格来自实时 Go 用量测量，因为公开 Go 价格表只列出 Contributor。
 
 显示取整：198K = 202,752；200K = 204,800；256K = 262,144；1M = 1,000,000 或
 1,048,576。`glm-5.3` 的限额与 token 单价已按 models.dev `opencode-go/glm-5.3`
@@ -591,12 +596,16 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 | 推荐上游协议 | 模型 |
 | --- | --- |
 | OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3` |
-| OpenAI Responses | `grok-4.5`、`gpt-5.6-luna` |
+| OpenAI Responses | `grok-4.5`、`gpt-5.6-luna`、`muse-spark-1.2`、`muse-spark-1.2-contributor` |
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
 
 透传矩阵（测试账号实测，2026-08-14）。✓ = 客户端协议原样转发；空 = 转换到该
 模型推荐协议。权威来源：`crates/ocg-core/src/gateway/protocol.rs` 的
 `MODEL_PROTOCOLS`。
+
+`reasoning.effort` 别名（转发或转换前应用）：`muse-spark-1.2` 与
+`muse-spark-1.2-contributor` 把 `max` 映射为 `xhigh`（上游拒绝 `max`）；
+其他模型的 `reasoning.effort` 原样透传。
 
 | 模型 | 推荐 | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |
@@ -606,6 +615,8 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 | `glm-5.1` | Chat | ✓ | ✓ | ✓ |
 | `glm-5` | Chat | ✓ | ✓ | ✓ |
 | `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `muse-spark-1.2` | Responses | | ✓ | |
+| `muse-spark-1.2-contributor` | Responses | | ✓ | |
 | `kimi-k3` | Chat | ✓ | | ✓ |
 | `kimi-k2.7-code` | Chat | ✓ | | |
 | `kimi-k2.6` | Chat | ✓ | | |
