@@ -47,6 +47,8 @@ export const zhTWMessages = {
   "密码需为 8 至 256 个字符": "密碼須為 8 至 256 個字元",
 
   "接入中心": "連線中心",
+  "Contributor 模型的数据使用": "Contributor 模型的資料使用",
+  "Muse Spark 1.2 Contributor 不是 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择它。": "Muse Spark 1.2 Contributor 並非零資料保留（ZDR）；提示詞和補全內容可能用於訓練。僅在你有權以此方式使用的資料上選擇它。",
   "就绪": "就緒",
   "复制 API Base URL": "複製 API Base URL",
   "生成新 Key": "產生新 Key",

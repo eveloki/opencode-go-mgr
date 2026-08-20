@@ -207,6 +207,8 @@ export const jaJPMessages = {
   "密码需为 8 至 256 个字符": "パスワードは8～256文字で入力してください",
 
   "接入中心": "接続センター",
+  "Contributor 模型的数据使用": "Contributor モデルのデータ利用",
+  "Muse Spark 1.2 Contributor 不是 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择它。": "Muse Spark 1.2 Contributor はゼロデータ保持（ZDR）ではありません。プロンプトと補完は学習に使用される場合があります。この用途を許可されたデータでのみ選択してください。",
   "就绪": "準備完了",
   "复制 API Base URL": "API Base URL をコピー",
   "生成新 Key": "新しい Key を生成",

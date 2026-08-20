@@ -207,6 +207,8 @@ export const ptBRMessages = {
   "密码需为 8 至 256 个字符": "A senha deve ter de 8 a 256 caracteres",
 
   "接入中心": "Central de conexão",
+  "Contributor 模型的数据使用": "Uso de dados do modelo Contributor",
+  "Muse Spark 1.2 Contributor 不是 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择它。": "Muse Spark 1.2 Contributor não usa retenção zero de dados (ZDR); prompts e conclusões podem ser usados para treinamento. Selecione-o apenas para dados que você tem autorização para usar dessa forma.",
   "就绪": "Pronto",
   "复制 API Base URL": "Copiar API Base URL",
   "生成新 Key": "Gerar nova Key",

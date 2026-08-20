@@ -108,7 +108,14 @@ struct ModelProtocol {
     id: &'static str,
     preferred: ApiFormat,
     supported: &'static [ApiFormat],
+    /// Aliases applied to `reasoning.effort` / `reasoning_effort` before forwarding
+    /// or converting, for models whose upstream rejects a standard OCG effort.
+    /// Empty slice = pass through unchanged.
+    effort_aliases: &'static [(&'static str, &'static str)],
 }
+
+const NO_EFFORT_ALIASES: &[(&str, &str)] = &[];
+const MUSE_SPARK_EFFORT_ALIASES: &[(&str, &str)] = &[("max", "xhigh")];
 
 // Probe matrix (direct OpenCode-Go, 2026-08-14, test account):
 // preferred stays on the official docs endpoint; supported is live stream +
@@ -129,166 +136,211 @@ const MODEL_PROTOCOLS: &[ModelProtocol] = &[
         id: "grok-4.5",
         preferred: ApiFormat::Responses,
         supported: RESPONSES_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "glm-5.3",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "glm-5.2",
         preferred: ApiFormat::ChatCompletions,
         supported: ALL_THREE,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "glm-5.1",
         preferred: ApiFormat::ChatCompletions,
         supported: ALL_THREE,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "glm-5",
         preferred: ApiFormat::ChatCompletions,
         supported: ALL_THREE,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "gpt-5.6-luna",
         preferred: ApiFormat::Responses,
         supported: CHAT_AND_RESPONSES,
+        effort_aliases: NO_EFFORT_ALIASES,
+    },
+    ModelProtocol {
+        id: "muse-spark-1.2",
+        preferred: ApiFormat::Responses,
+        supported: RESPONSES_ONLY,
+        effort_aliases: MUSE_SPARK_EFFORT_ALIASES,
+    },
+    ModelProtocol {
+        id: "muse-spark-1.2-contributor",
+        preferred: ApiFormat::Responses,
+        supported: RESPONSES_ONLY,
+        effort_aliases: MUSE_SPARK_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "kimi-k3",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "kimi-k2.7-code",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "kimi-k2.6",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "kimi-k2.5",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "deepseek-v4-pro",
         preferred: ApiFormat::ChatCompletions,
         supported: ALL_THREE,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "deepseek-v4-flash",
         preferred: ApiFormat::ChatCompletions,
         supported: ALL_THREE,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "mimo-v2.5",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "mimo-v2.5-pro",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "hy3",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "minimax-m3",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "minimax-m2.7",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "minimax-m2.7-highspeed",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "minimax-m2.5",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "minimax-m2.5-highspeed",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "qwen3.8-max",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "qwen3.7-max",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "qwen3.7-plus",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "qwen3.6-plus",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "qwen3.5-plus",
         preferred: ApiFormat::Messages,
         supported: CHAT_AND_MESSAGES,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "big-pickle",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "deepseek-v4-flash-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "mimo-v2.5-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "ling-3.0-flash-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "laguna-s-2.1-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "longcat-2.0-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "north-mini-code-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
     ModelProtocol {
         id: "nemotron-3-ultra-free",
         preferred: ApiFormat::ChatCompletions,
         supported: CHAT_ONLY,
+        effort_aliases: NO_EFFORT_ALIASES,
     },
 ];
 
@@ -349,6 +401,8 @@ fn prepare_parsed_request(
     stream: bool,
 ) -> Result<RequestPlan, ProtocolError> {
     let upstream = resolve_upstream_format(client, &model)?;
+    let aliased_responses_effort = requested_effort_alias(&parsed, &model);
+    let parsed = apply_effort_aliases(parsed, &model);
     validate_request_features(client, upstream, &parsed)?;
     let tool_context = if client == ApiFormat::Responses {
         responses_tool_context(&parsed)?
@@ -364,7 +418,12 @@ fn prepare_parsed_request(
         .cloned()
         .unwrap_or_else(|| json!("auto"));
     let response_tools = array(&parsed, "tools").to_vec();
-    let converted = convert_request(client, upstream, parsed, &tool_context.namespace_tools)?;
+    let mut converted = convert_request(client, upstream, parsed, &tool_context.namespace_tools)?;
+    if upstream == ApiFormat::Responses
+        && let Some(effort) = aliased_responses_effort
+    {
+        set_responses_reasoning_effort(&mut converted, effort);
+    }
     let service_tier = converted
         .get("service_tier")
         .and_then(Value::as_str)
@@ -1184,6 +1243,77 @@ fn resolve_upstream_format(client: ApiFormat, model: &str) -> Result<ApiFormat, 
         (client, Some(profile)) if profile.supported.contains(&client) => Ok(client),
         (_, Some(profile)) => Ok(profile.preferred),
         (client, None) => Ok(client),
+    }
+}
+
+/// Rewrite `reasoning.effort` (Responses/Gemini) and `reasoning_effort` (Chat)
+/// according to the model's `effort_aliases`. No-op for models without aliases.
+fn apply_effort_aliases(mut body: Value, model: &str) -> Value {
+    let Some(profile) = model_protocol(model) else {
+        return body;
+    };
+    if profile.effort_aliases.is_empty() {
+        return body;
+    }
+    let rewrite = |effort: &str| -> Option<String> {
+        profile
+            .effort_aliases
+            .iter()
+            .find(|(from, _)| *from == effort)
+            .map(|(_, to)| to.to_string())
+    };
+    if let Some(replacement) = body
+        .pointer("/reasoning/effort")
+        .and_then(Value::as_str)
+        .and_then(&rewrite)
+    {
+        if let Some(reasoning) = body.get_mut("reasoning").and_then(Value::as_object_mut) {
+            reasoning.insert("effort".into(), Value::String(replacement));
+        }
+    }
+    if let Some(replacement) = body
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .and_then(&rewrite)
+    {
+        body["reasoning_effort"] = Value::String(replacement);
+    }
+    if let Some(replacement) = body
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)
+        .and_then(&rewrite)
+    {
+        if let Some(output_config) = body.get_mut("output_config").and_then(Value::as_object_mut) {
+            output_config.insert("effort".into(), Value::String(replacement));
+        }
+    }
+    body
+}
+
+/// Returns the aliased effort requested through any supported client shape.
+/// Conversion through Messages represents reasoning as a token budget, so the
+/// original alias must be retained until the final Responses body is built.
+fn requested_effort_alias(body: &Value, model: &str) -> Option<&'static str> {
+    let profile = model_protocol(model)?;
+    let effort = body
+        .pointer("/reasoning/effort")
+        .or_else(|| body.get("reasoning_effort"))
+        .or_else(|| body.pointer("/output_config/effort"))
+        .and_then(Value::as_str)?;
+    profile
+        .effort_aliases
+        .iter()
+        .find_map(|(from, to)| (*from == effort).then_some(*to))
+}
+
+fn set_responses_reasoning_effort(body: &mut Value, effort: &str) {
+    let reasoning = body
+        .as_object_mut()
+        .expect("converted request must remain a JSON object")
+        .entry("reasoning")
+        .or_insert_with(|| json!({ "summary": "auto" }));
+    if let Some(reasoning) = reasoning.as_object_mut() {
+        reasoning.insert("effort".into(), Value::String(effort.to_string()));
     }
 }
 
@@ -5010,5 +5140,72 @@ mod tests {
         assert_eq!(body["type"], "error");
         assert_eq!(body["error"]["message"], "limited");
         assert_eq!(body["error"]["type"], "rate_limit_error");
+    }
+
+    #[test]
+    fn muse_spark_aliases_max_reasoning_effort_to_xhigh_on_responses() {
+        let request = json!({
+            "model":"muse-spark-1.2","input":"hi","store":false,
+            "reasoning":{"effort":"max"}
+        });
+        let plan = prepare_request(ApiFormat::Responses, bytes(request)).unwrap();
+        let body: Value = serde_json::from_slice(&plan.body).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn muse_spark_max_alias_reaches_responses_upstream_from_every_client_protocol() {
+        let requests = [
+            (
+                ApiFormat::Responses,
+                json!({
+                    "model":"muse-spark-1.2","input":"hi","store":false,
+                    "reasoning":{"effort":"max"}
+                }),
+            ),
+            (
+                ApiFormat::ChatCompletions,
+                json!({
+                    "model":"muse-spark-1.2-contributor","messages":[{"role":"user","content":"hi"}],
+                    "reasoning_effort":"max"
+                }),
+            ),
+            (
+                ApiFormat::Messages,
+                json!({
+                    "model":"muse-spark-1.2","max_tokens":8192,
+                    "messages":[{"role":"user","content":"hi"}],
+                    "output_config":{"effort":"max"}
+                }),
+            ),
+        ];
+        for (client, request) in requests {
+            let plan = prepare_request(client, bytes(request)).unwrap();
+            assert_eq!(plan.upstream, ApiFormat::Responses);
+            let body: Value = serde_json::from_slice(&plan.body).unwrap();
+            assert_eq!(body["reasoning"]["effort"], "xhigh");
+        }
+    }
+
+    #[test]
+    fn muse_spark_leaves_non_aliased_effort_untouched() {
+        let request = json!({
+            "model":"muse-spark-1.2","input":"hi","store":false,
+            "reasoning":{"effort":"high"}
+        });
+        let plan = prepare_request(ApiFormat::Responses, bytes(request)).unwrap();
+        let body: Value = serde_json::from_slice(&plan.body).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn non_aliased_model_passes_max_through_unchanged() {
+        let request = json!({
+            "model":"gpt-5.6-luna","input":"hi","store":false,
+            "reasoning":{"effort":"max"}
+        });
+        let plan = prepare_request(ApiFormat::Responses, bytes(request)).unwrap();
+        let body: Value = serde_json::from_slice(&plan.body).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "max");
     }
 }

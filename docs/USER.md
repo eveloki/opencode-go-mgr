@@ -430,6 +430,8 @@ actually carry. The passthrough / conversion matrix is under
 | --- | ---: | ---: | --- | --- | :---: | --- |
 | `grok-4.5` | 500K | 500K | text, image | always | ✓ | low / medium / high (default high) |
 | `gpt-5.6-luna` | 1.05M | 128K | text, image | ✓ | ✓ | low / medium / high / max (default medium) |
+| `muse-spark-1.2` | 1M | 128K | text, image | ✓ | ✓ | low / medium / high (default high) |
+| `muse-spark-1.2-contributor` | 1M | 128K | text, image | ✓ | ✓ | low / medium / high (default high) |
 | `glm-5.3` | 1M | 128K | text | ✓ | ✓ | low / high / max (default max) |
 | `glm-5.2` | 1M | 128K | text | ✓ | ✓ | high / max (default max) |
 | `glm-5.1` | 198K | 32K | text | ✓ | ✓ | — |
@@ -450,6 +452,12 @@ actually carry. The passthrough / conversion matrix is under
 | `deepseek-v4-pro` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
 | `deepseek-v4-flash` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
 | `hy3` | 256K | 64K | text | ✓ | ✓ | low / high (default high) |
+
+`muse-spark-1.2` uses Zero Data Retention (ZDR): prompts and completions are
+not used for training. `muse-spark-1.2-contributor` is not ZDR; prompts and
+completions may be used for training. Select Contributor only for data you are
+authorized to use this way. The standard Muse price is measured from live Go
+usage because the public Go pricing table lists only Contributor.
 
 Rounded display: 198K = 202,752; 200K = 204,800; 256K = 262,144; 1M = 1,000,000
 or 1,048,576. `glm-5.3` limits and token rates follow the dedicated
@@ -763,13 +771,18 @@ Chat; `glm-5.3` is Chat-only.
 | Preferred upstream | Models |
 | --- | --- |
 | OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3` |
-| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna` |
+| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor` |
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
 Passthrough matrix (live test-account probe, 2026-08-14). ✓ = client protocol
 is forwarded as-is; empty = converted to the model's preferred protocol.
 Source of truth: `MODEL_PROTOCOLS` in
 `crates/ocg-core/src/gateway/protocol.rs`.
+
+`reasoning.effort` aliases (applied before forwarding or conversion):
+`muse-spark-1.2` and `muse-spark-1.2-contributor` map `max` → `xhigh`
+(upstream rejects `max`). Other models pass `reasoning.effort` through
+unchanged.
 
 | Model | Preferred | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |
@@ -779,6 +792,8 @@ Source of truth: `MODEL_PROTOCOLS` in
 | `glm-5.1` | Chat | ✓ | ✓ | ✓ |
 | `glm-5` | Chat | ✓ | ✓ | ✓ |
 | `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `muse-spark-1.2` | Responses | | ✓ | |
+| `muse-spark-1.2-contributor` | Responses | | ✓ | |
 | `kimi-k3` | Chat | ✓ | | ✓ |
 | `kimi-k2.7-code` | Chat | ✓ | | |
 | `kimi-k2.6` | Chat | ✓ | | |
@@ -1030,8 +1045,9 @@ dashboard.
 ## Docker
 
 The public headless image can be pulled from GHCR without signing in. It is a
-Linux container and currently publishes `linux/amd64` only; there is no
-native ARM64 image. Each release also includes a pull-only
+Linux container publishing `linux/amd64` and `linux/arm64`; a plain
+`docker pull` selects the matching native variant on either architecture. Each
+release also includes a pull-only
 `compose.example.yaml`; save it as `compose.yaml` and optionally create a
 neighboring `.env`. The example pins its matching release by default, while
 `OCG_IMAGE` can override it. Alternatively, run the Compose commands from a
@@ -1039,7 +1055,7 @@ checkout containing `compose.yaml` and `.env.example` (preferably the
 matching release tag):
 
 ```bash
-git clone --branch v1.8.0 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.8.1 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -1055,7 +1071,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`; the Release
   `compose.example.yaml` defaults to its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.8.0`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.8.1`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `1.5` and `latest` move forward. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is technically immutable.
@@ -1202,13 +1218,13 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.0
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.0
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.1
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.0 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.1 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.0 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.1 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -1310,9 +1326,11 @@ and browser profiles.
   `show_dock_icon` switch.
 - Windows / Linux ARM64 and 32-bit x86 builds are not published. RPM, Snap,
   app-store packages, Windows Authenticode signing, and Apple notarization
-  are not implemented. Updater-enabled installed desktop builds can install
-  signed releases from Settings; 1.4.1, development builds, the CLI, and
-  Docker use the direct/manual upgrade path.
+  are not implemented. That covers desktop installers only; the container
+  images (`ghcr.io/klarkxy/opencode-go-mgr` and its `-browser` sidecar)
+  publish `linux/amd64` and `linux/arm64`. Updater-enabled installed desktop
+  builds can install signed releases from Settings; 1.4.1, development
+  builds, the CLI, and Docker use the direct/manual upgrade path.
 
 ## Troubleshooting
 

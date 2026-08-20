@@ -232,6 +232,31 @@ export const APPLICATION_MODEL_METADATA: Readonly<Record<string, ApplicationMode
     efforts: ["low", "medium", "high", "max"],
     defaultEffort: "medium",
   },
+  "muse-spark-1.2": {
+    // Meta Muse Spark 1.2 via OpenCode Go: context 1_048_576, output 131_072;
+    // text+image input; Responses-only. Standard price comes from live Go
+    // measurement because the public Go pricing table lists only Contributor.
+    // Upstream accepts {none,minimal,low,medium,high,xhigh} but NOT `max`;
+    // expose low/medium/high only so clients never send the unsupported `max`.
+    contextWindow: 1_048_576,
+    maxOutputTokens: 131_072,
+    input: ["text", "image"],
+    reasoning: true,
+    toolUse: true,
+    efforts: ["low", "medium", "high"],
+    defaultEffort: "high",
+  },
+  "muse-spark-1.2-contributor": {
+    // Same checkpoint as muse-spark-1.2. Contributor is not ZDR: prompts and
+    // completions may be used for training; the Applications view warns on selection.
+    contextWindow: 1_048_576,
+    maxOutputTokens: 131_072,
+    input: ["text", "image"],
+    reasoning: true,
+    toolUse: true,
+    efforts: ["low", "medium", "high"],
+    defaultEffort: "high",
+  },
   "glm-5.3": {
     // models.dev opencode-go/glm-5.3 (2026-08-17): context 1_000_000, output 131_072;
     // cost $1.40 / $4.40 / $0.26 matches the official Go table; efforts low/high/max.

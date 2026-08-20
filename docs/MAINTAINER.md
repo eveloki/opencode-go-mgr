@@ -443,7 +443,7 @@ Each CLI archive contains its executable, `dist/`, and `LICENSE`. Do not ship
 the CLI executable alone: `serve` needs the sibling dashboard assets. Windows
 has no portable GUI artifact.
 
-The `linux/amd64` container is published separately as
+The `linux/amd64` and `linux/arm64` containers are published separately as
 `ghcr.io/klarkxy/opencode-go-mgr`; the GitHub Release contains the seven
 ordinary platform payloads, the extra macOS updater archive, four updater
 signatures, the pull-only Compose example, `latest.json`, and `SHA256SUMS`
@@ -673,8 +673,10 @@ clients cannot trust a release signed only by the replacement key.
 Release published by `release.yml` with `github.token` does not recursively
 start another workflow. After the signed tag pipeline publishes the Release,
 dispatch `container.yml` explicitly for that tag with `publish_latest=true`
-for a stable release. It checks out the release tag and, via `docker-bake.hcl`, builds both
-`linux/amd64` smoke images in parallel: the main
+for a stable release. It checks out the release tag and builds each
+architecture natively (amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm` —
+no QEMU emulation for release artifacts). Via `docker-bake.hcl`, each leg
+builds its own `linux/<arch>` smoke images in parallel: the main
 `ghcr.io/klarkxy/opencode-go-mgr` service and the
 `ghcr.io/klarkxy/opencode-go-mgr-browser` sidecar. The main smoke covers the
 dashboard, authentication, and license. The browser smoke starts Xvfb/noVNC
@@ -683,16 +685,32 @@ configuration, and no host-published port, then uses the token-protected
 control API to launch a real ordinary Chromium process with a persistent
 profile.
 
-Both verified results are pushed by digest without assigning a mutable name,
-then enter the repository-wide serialized tag queue. `X.Y.Z` and
-`sha-<12-character-commit>` are created only when absent; an existing tag is
-accepted only when its image's exact candidate digest already matches.
-Stable `X.Y` and opted-in `latest` are decided as a pair: the workflow either
-converges both image channels at the candidate or retains an already aligned
-newer pair; it fails rather than silently retaining a split channel. Each
-image records an SPDX SBOM, BuildKit SLSA provenance, and GitHub signed
-provenance. `X.Y.Z` and `sha-*` are release-specific immutable tags; `X.Y`
-and `latest` are monotonic moving channels. The browser image is a GHCR
+All verified results — two images per architecture — are pushed by digest
+without assigning a mutable name, then enter the repository-wide serialized
+tag queue. `resolve` is the only job that interprets the requested tag or
+optional `source_ref`; both native build legs check out that resolved full
+commit SHA and fail if `HEAD` differs. The publishing job uses the immutable
+`github.workflow_sha`, so the privileged registry helper always matches the
+reviewed workflow definition rather than executable files from a hotfix ref.
+
+Before writing a user-visible tag, the publishing job uses `docker buildx
+imagetools create --dry-run` to assemble each candidate OCI index locally. It
+hashes the exact returned JSON and validates both architecture children plus
+the index version/revision annotations. The main and browser `X.Y.Z` and
+`sha-<12-character-commit>` tags are all preflighted against those locally
+known digests before the browser tags, then the main tags, are created and
+verified. Existing immutable tags are accepted only at the exact candidate
+digest.
+
+Next, an empty Docker credential directory must anonymously pull both exact
+version tags, and GitHub must successfully publish signed provenance for both
+final index digests. Only then does the same serialized job re-read every
+remote moving channel and preflight the pair again. Stable `X.Y` and opted-in
+`latest` either converge both images at the candidate or retain an already
+aligned newer pair; the browser moves before the main image, and a split pair
+fails closed. Each architecture image also records an SPDX SBOM and BuildKit
+SLSA provenance. `X.Y.Z` and `sha-*` are release-specific immutable tags;
+`X.Y` and `latest` are monotonic moving channels. The browser image is a GHCR
 package, not a GitHub Release asset, so the native release keeps only the
 assembled GitHub attachments (the workflow compares that exact set, and the
 local verifier pins the current 15-file contract).
@@ -709,20 +727,27 @@ same digests, so the rerun completes the original publication without replacing
 artifacts. Do not treat the container distribution as complete until that rerun
 is green. Every later release must pass the anonymous gate on its first run.
 
+Before the first stable release on this dual-architecture path, publish a
+temporary SemVer prerelease and dispatch `container.yml` with
+`publish_latest=false`. Use that rehearsal to prove both native runners,
+package visibility, anonymous pulls, exact index children, and both signed
+provenance records. Do not use a stable tag as the rehearsal and do not advance
+`X.Y` or `latest` until the prerelease run is fully green.
+
 After tag publication the gate uses an empty Docker credential directory to
 pull both exact-version tags. A private or inaccessible package therefore fails
 `container.yml` instead of appearing as a successful public Compose dependency.
 
 A manual dispatch can backfill an existing release tag and must opt in before
-updating `latest`. The checkout uses the exact `refs/tags/<tag>` ref,
-verifies that HEAD resolves from that tag, and runs the repository version
-preflight before any image publication. Rebuilding different bytes for an
-existing full-version or `sha-*` tag fails instead of overwriting it; only an
-exact-digest replay is accepted. Its GitHub signing certificate identifies
-the workflow ref that triggered the dispatch, even though the build checks
-out the requested tag. Do not describe a historical manual backfill as
-tag-triggered provenance; normal `release.published` runs use the release tag
-context.
+updating `latest`. `resolve` checks out the exact `refs/tags/<tag>` ref (or the
+explicit hotfix `source_ref`), verifies the release tag and repository version,
+and emits one full SHA; no downstream job re-resolves the symbolic input.
+Rebuilding different bytes for an existing full-version or `sha-*` tag fails
+instead of overwriting it; only an exact-digest replay is accepted. Its GitHub
+signing certificate identifies the workflow ref that triggered the dispatch,
+even though the build checks out the resolved release commit. Do not describe
+a historical manual backfill as tag-triggered provenance; normal
+`release.published` runs use the release tag context.
 
 After publication, record the digest and verify both the OCI index and the
 GitHub attestation. Constrain verification to this signer workflow:
@@ -762,11 +787,12 @@ Pull requests automatically receive the three-job quality gate: frontend
 checks, Linux workspace Rust tests/Clippy (including the Tauri crate), and
 the Windows job that covers compilation and unit tests for Windows-only
 Tauri behavior. Native installer/package smokes remain manual release
-candidates or tag runs. The container workflow covers `linux/amd64` only
-and runs after a release is published or manually dispatched.
+candidates or tag runs. The container workflow covers `linux/amd64` and
+`linux/arm64` (each built and smoke-tested on its native runner) and runs
+after a release is published or manually dispatched.
 
 CI does not drive real desktop UI interactions or launch real Claude Desktop
-or Gemini CLI clients, and it does not test container ARM64, backup/restore,
+or Gemini CLI clients, and it does not test backup/restore,
 database downgrade, migration rollback, an upstream account, or a real
 gateway request. Rust tests cover Gemini/Claude Desktop routing,
 authentication, alias rewriting, non-stream conversion, and SSE event shapes,

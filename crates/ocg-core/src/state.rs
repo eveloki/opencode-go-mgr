@@ -6,6 +6,7 @@ use crate::models::{
 };
 use crate::pricing::{
     PricingEstimate, PricingSnapshot, embedded_seed, ensure_current_adjustment_policy,
+    ensure_seed_model_coverage,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
@@ -179,6 +180,7 @@ impl CoreStateInner {
             Some(snapshot) => {
                 let previous_revision = snapshot.revision.clone();
                 let snapshot = ensure_current_adjustment_policy(snapshot);
+                let snapshot = ensure_seed_model_coverage(snapshot);
                 if snapshot.revision != previous_revision {
                     db.insert_pricing_snapshot(&snapshot)?;
                 }

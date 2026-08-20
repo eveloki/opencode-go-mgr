@@ -13,5 +13,6 @@
 *.vue text eol=lf
 *.css text eol=lf
 *.mjs text eol=lf
+*.sh text eol=lf
 *.md text eol=lf
 *.lock text eol=lf
