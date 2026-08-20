@@ -27,14 +27,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build and verify GHCR images
+  resolve:
+    name: Resolve release metadata
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 15
     outputs:
-      browser_digest: ${{ steps.push_browser.outputs.digest }}
       browser_image: ${{ steps.release.outputs.browser_image }}
-      digest: ${{ steps.push.outputs.digest }}
       full_sha: ${{ steps.commit.outputs.full_sha }}
       image: ${{ steps.release.outputs.image }}
       minor: ${{ steps.release.outputs.minor }}
@@ -45,17 +43,6 @@ jobs:
       version: ${{ steps.release.outputs.version }}
     permissions:
       contents: read
-      packages: write
-      attestations: write
-      id-token: write
-    env:
-      SMOKE_BROWSER_CONTAINER: ocg-browser-smoke-${{ github.run_id }}
-      SMOKE_BROWSER_IMAGE: ocg-browser:smoke-${{ github.run_id }}
-      SMOKE_BROWSER_PROFILE_VOLUME: ocg-browser-profile-smoke-${{ github.run_id }}
-      SMOKE_BROWSER_RUNTIME_VOLUME: ocg-browser-runtime-smoke-${{ github.run_id }}
-      SMOKE_IMAGE: ocg-manager:smoke-${{ github.run_id }}
-      SMOKE_CONTAINER: ocg-manager-smoke-${{ github.run_id }}
-      SMOKE_VOLUME: ocg-manager-smoke-${{ github.run_id }}
 
     steps:
       - name: Resolve release
@@ -139,6 +126,56 @@ jobs:
           echo "full_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
 
+  build:
+    name: Build and verify GHCR images (${{ matrix.arch }})
+    needs: resolve
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runs-on: ubuntu-24.04
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    outputs:
+      browser_digest_amd64: ${{ steps.record_amd64.outputs.browser_digest }}
+      browser_digest_arm64: ${{ steps.record_arm64.outputs.browser_digest }}
+      digest_amd64: ${{ steps.record_amd64.outputs.digest }}
+      digest_arm64: ${{ steps.record_arm64.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      SMOKE_BROWSER_CONTAINER: ocg-browser-smoke-${{ github.run_id }}-${{ matrix.arch }}
+      SMOKE_BROWSER_IMAGE: ocg-browser:smoke-${{ github.run_id }}-${{ matrix.arch }}
+      SMOKE_BROWSER_PROFILE_VOLUME: ocg-browser-profile-smoke-${{ github.run_id }}-${{ matrix.arch }}
+      SMOKE_BROWSER_RUNTIME_VOLUME: ocg-browser-runtime-smoke-${{ github.run_id }}-${{ matrix.arch }}
+      SMOKE_IMAGE: ocg-manager:smoke-${{ github.run_id }}-${{ matrix.arch }}
+      SMOKE_CONTAINER: ocg-manager-smoke-${{ github.run_id }}-${{ matrix.arch }}
+      SMOKE_VOLUME: ocg-manager-smoke-${{ github.run_id }}-${{ matrix.arch }}
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Resolve is the only job allowed to interpret a mutable branch or tag.
+          ref: ${{ needs.resolve.outputs.full_sha }}
+          persist-credentials: false
+
+      - name: Verify resolved release commit
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.full_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha=$(git rev-parse HEAD)
+          if [[ "$actual_sha" != "$EXPECTED_SHA" ]]; then
+            echo "Build checkout drifted from resolved commit: $actual_sha != $EXPECTED_SHA" >&2
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -154,6 +191,8 @@ jobs:
           vars: |
             SMOKE_IMAGE=${{ env.SMOKE_IMAGE }}
             SMOKE_BROWSER_IMAGE=${{ env.SMOKE_BROWSER_IMAGE }}
+            CACHE_SCOPE=ocg-manager-linux-${{ matrix.arch }}
+            CACHE_BROWSER_SCOPE=ocg-browser-linux-${{ matrix.arch }}
 
       - name: Smoke-test container
         shell: bash
@@ -328,29 +367,29 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ steps.release.outputs.image }}
+          images: ${{ needs.resolve.outputs.image }}
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.release.outputs.tag }}
+            type=semver,pattern={{version}},value=${{ needs.resolve.outputs.tag }}
           labels: |
             org.opencontainers.image.title=OCG Manager
             org.opencontainers.image.description=OpenCode-Go multi-account local manager and gateway
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ steps.commit.outputs.full_sha }}
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.full_sha }}
 
       - name: Generate browser image metadata
         id: meta_browser
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ steps.release.outputs.browser_image }}
+          images: ${{ needs.resolve.outputs.browser_image }}
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.release.outputs.tag }}
+            type=semver,pattern={{version}},value=${{ needs.resolve.outputs.tag }}
           labels: |
             org.opencontainers.image.title=OCG Manager Browser Worker
             org.opencontainers.image.description=Isolated Chromium and noVNC sidecar for OCG Manager
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ steps.commit.outputs.full_sha }}
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.full_sha }}
 
       - name: Build and push image
         id: push
@@ -358,14 +397,14 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64
-          outputs: type=image,name=${{ steps.release.outputs.image }},push=true,push-by-digest=true,name-canonical=true
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ needs.resolve.outputs.image }},push=true,push-by-digest=true,name-canonical=true,oci-mediatypes=true
           labels: ${{ steps.meta.outputs.labels }}
           annotations: |
-            index:org.opencontainers.image.version=${{ steps.release.outputs.version }}
-            index:org.opencontainers.image.revision=${{ steps.commit.outputs.full_sha }}
-          cache-from: type=gha,scope=ocg-manager-linux-amd64
-          cache-to: type=gha,mode=max,scope=ocg-manager-linux-amd64
+            index:org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            index:org.opencontainers.image.revision=${{ needs.resolve.outputs.full_sha }}
+          cache-from: type=gha,scope=ocg-manager-linux-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ocg-manager-linux-${{ matrix.arch }}
           provenance: mode=max
           sbom: true
 
@@ -375,20 +414,38 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.browser
-          platforms: linux/amd64
-          outputs: type=image,name=${{ steps.release.outputs.browser_image }},push=true,push-by-digest=true,name-canonical=true
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ needs.resolve.outputs.browser_image }},push=true,push-by-digest=true,name-canonical=true,oci-mediatypes=true
           labels: ${{ steps.meta_browser.outputs.labels }}
           annotations: |
-            index:org.opencontainers.image.version=${{ steps.release.outputs.version }}
-            index:org.opencontainers.image.revision=${{ steps.commit.outputs.full_sha }}
-          cache-from: type=gha,scope=ocg-browser-linux-amd64
-          cache-to: type=gha,mode=max,scope=ocg-browser-linux-amd64
+            index:org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            index:org.opencontainers.image.revision=${{ needs.resolve.outputs.full_sha }}
+          cache-from: type=gha,scope=ocg-browser-linux-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ocg-browser-linux-${{ matrix.arch }}
           provenance: mode=max
           sbom: true
 
+      - name: Record amd64 digests
+        id: record_amd64
+        if: matrix.arch == 'amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "digest=${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          echo "browser_digest=${{ steps.push_browser.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+      - name: Record arm64 digests
+        id: record_arm64
+        if: matrix.arch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "digest=${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          echo "browser_digest=${{ steps.push_browser.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
   publish:
     name: Publish immutable and moving GHCR tags
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     concurrency:
@@ -403,8 +460,22 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          # Run the helper paired with this trusted workflow definition. The
+          # release source itself was resolved once and built at full_sha.
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+
+      - name: Verify trusted workflow commit
+        shell: bash
+        env:
+          EXPECTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha=$(git rev-parse HEAD)
+          if [[ "$actual_sha" != "$EXPECTED_WORKFLOW_SHA" ]]; then
+            echo "Publish checkout drifted from trusted workflow commit: $actual_sha != $EXPECTED_WORKFLOW_SHA" >&2
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -416,247 +487,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish tags without moving immutable references or rolling channels back
+      - name: Publish and verify immutable version and commit tags
+        id: immutable
         shell: bash
         env:
-          BROWSER_DIGEST: ${{ needs.build.outputs.browser_digest }}
-          BROWSER_IMAGE: ${{ needs.build.outputs.browser_image }}
-          CANDIDATE_VERSION: ${{ needs.build.outputs.version }}
-          MAIN_DIGEST: ${{ needs.build.outputs.digest }}
-          MAIN_IMAGE: ${{ needs.build.outputs.image }}
-          MINOR_CHANNEL: ${{ needs.build.outputs.minor }}
-          PUBLISH_LATEST: ${{ needs.build.outputs.publish_latest }}
-          SHORT_SHA: ${{ needs.build.outputs.short_sha }}
-          STABLE: ${{ needs.build.outputs.stable }}
-        run: |
-          set -euo pipefail
-          inspect_digest() {
-            local ref=$1
-            local error_file="$RUNNER_TEMP/imagetools-inspect-error"
-            local manifest
-            if manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>"$error_file"); then
-              jq -er '.digest' <<<"$manifest"
-              return
-            fi
-            if grep -Eqi 'manifest unknown|not found|no such manifest' "$error_file"; then
-              printf ''
-              return
-            fi
-            cat "$error_file" >&2
-            return 1
-          }
-
-          inspect_version() {
-            local ref=$1
-            local error_file="$RUNNER_TEMP/imagetools-version-error"
-            local child_digest
-            local image_ref=$ref
-            local labels
-            local manifest
-            local version
-            if ! manifest=$(docker buildx imagetools inspect "$ref" --raw 2>"$error_file"); then
-              cat "$error_file" >&2
-              return 1
-            fi
-            version=$(jq -r '.annotations."org.opencontainers.image.version" // empty' <<<"$manifest")
-            if [[ -n "$version" ]]; then
-              printf '%s' "$version"
-              return
-            fi
-            child_digest=$(jq -r '
-              [.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64")][0].digest // empty
-            ' <<<"$manifest")
-            if [[ -n "$child_digest" ]]; then
-              image_ref="${ref%:*}@$child_digest"
-            fi
-            if ! labels=$(docker buildx imagetools inspect "$image_ref" --format '{{json .Image.Config.Labels}}' 2>"$error_file"); then
-              cat "$error_file" >&2
-              return 1
-            fi
-            jq -er '."org.opencontainers.image.version"' <<<"$labels"
-          }
-
-          verify_published_digest() {
-            local ref=$1
-            local candidate_digest=$2
-            local actual
-            actual=$(inspect_digest "$ref")
-            if [[ "$actual" != "$candidate_digest" ]]; then
-              echo "Published digest mismatch for $ref: $actual != $candidate_digest" >&2
-              exit 1
-            fi
-          }
-
-          check_immutable() {
-            local image=$1
-            local tag=$2
-            local candidate_digest=$3
-            local ref="$image:$tag"
-            local existing
-            existing=$(inspect_digest "$ref")
-            node scripts/release-policy.mjs immutable-tag \
-              --tag "$tag" \
-              --candidate-digest "$candidate_digest" \
-              --existing-digest "$existing"
-          }
-
-          declare -A IMMUTABLE_DECISIONS
-          declare -A MOVING_DECISIONS
-          declare -A MOVING_CURRENT_VERSIONS
-          declare -A EXPECTED_DIGESTS
-          declare -A MOVING_EXPECTED_VERSIONS
-
-          preflight_immutable() {
-            local image=$1
-            local tag=$2
-            local candidate_digest=$3
-            local key="$image:$tag"
-            local decision
-            decision=$(check_immutable "$image" "$tag" "$candidate_digest")
-            IMMUTABLE_DECISIONS["$key"]=$decision
-            EXPECTED_DIGESTS["$key"]=$candidate_digest
-          }
-
-          preflight_immutable_image_tags() {
-            local image=$1
-            local candidate_digest=$2
-            preflight_immutable "$image" "$CANDIDATE_VERSION" "$candidate_digest"
-            preflight_immutable "$image" "sha-$SHORT_SHA" "$candidate_digest"
-          }
-
-          preflight_moving_pair() {
-            local tag=$1
-            local main_ref="$MAIN_IMAGE:$tag"
-            local browser_ref="$BROWSER_IMAGE:$tag"
-            local main_existing
-            local browser_existing
-            local main_current=
-            local browser_current=
-            local decision
-            local main_advance
-            local browser_advance
-            local version
-            main_existing=$(inspect_digest "$main_ref")
-            browser_existing=$(inspect_digest "$browser_ref")
-            if [[ -n "$main_existing" ]]; then
-              main_current=$(inspect_version "$main_ref")
-            fi
-            if [[ -n "$browser_existing" ]]; then
-              browser_current=$(inspect_version "$browser_ref")
-            fi
-            decision=$(node scripts/release-policy.mjs paired-channel \
-              --candidate "$CANDIDATE_VERSION" \
-              --main-current "$main_current" \
-              --browser-current "$browser_current")
-            main_advance=$(jq -er '.mainAdvance' <<<"$decision")
-            browser_advance=$(jq -er '.browserAdvance' <<<"$decision")
-            version=$(jq -er '.version' <<<"$decision")
-            MOVING_DECISIONS["$main_ref"]=$main_advance
-            MOVING_DECISIONS["$browser_ref"]=$browser_advance
-            MOVING_CURRENT_VERSIONS["$main_ref"]=$main_current
-            MOVING_CURRENT_VERSIONS["$browser_ref"]=$browser_current
-            EXPECTED_DIGESTS["$main_ref"]=$([[ "$main_advance" == true ]] && printf '%s' "$MAIN_DIGEST" || printf '%s' "$main_existing")
-            EXPECTED_DIGESTS["$browser_ref"]=$([[ "$browser_advance" == true ]] && printf '%s' "$BROWSER_DIGEST" || printf '%s' "$browser_existing")
-            MOVING_EXPECTED_VERSIONS["$tag"]=$version
-          }
-
-          publish_immutable() {
-            local image=$1
-            local tag=$2
-            local candidate_digest=$3
-            local decision=${IMMUTABLE_DECISIONS["$image:$tag"]}
-            local source_ref="$image@$candidate_digest"
-            local ref="$image:$tag"
-            if [[ "$decision" == create ]]; then
-              docker buildx imagetools create --tag "$ref" "$source_ref"
-            else
-              echo "Immutable tag $ref already resolves to the candidate digest; leaving it unchanged."
-            fi
-            verify_published_digest "$ref" "$candidate_digest"
-          }
-
-          publish_moving() {
-            local image=$1
-            local tag=$2
-            local candidate_digest=$3
-            local key="$image:$tag"
-            local source_ref="$image@$candidate_digest"
-            local ref="$key"
-            local advance=${MOVING_DECISIONS["$key"]}
-            local current_version=${MOVING_CURRENT_VERSIONS["$key"]}
-            if [[ "$advance" == true ]]; then
-              docker buildx imagetools create --tag "$ref" "$source_ref"
-              verify_published_digest "$ref" "$candidate_digest"
-              echo "Advanced $ref from ${current_version:-none} to $CANDIDATE_VERSION."
-            else
-              echo "Kept $ref at newer or equal version $current_version."
-            fi
-          }
-
-          publish_immutable_image_tags() {
-            local image=$1
-            local candidate_digest=$2
-            publish_immutable "$image" "$CANDIDATE_VERSION" "$candidate_digest"
-            publish_immutable "$image" "sha-$SHORT_SHA" "$candidate_digest"
-          }
-
-          verify_paired_tag() {
-            local tag=$1
-            verify_published_digest "$MAIN_IMAGE:$tag" "${EXPECTED_DIGESTS["$MAIN_IMAGE:$tag"]}"
-            verify_published_digest "$BROWSER_IMAGE:$tag" "${EXPECTED_DIGESTS["$BROWSER_IMAGE:$tag"]}"
-          }
-
-          verify_paired_moving_tag() {
-            local tag=$1
-            local expected_version=${MOVING_EXPECTED_VERSIONS["$tag"]}
-            local main_version
-            local browser_version
-            verify_paired_tag "$tag"
-            main_version=$(inspect_version "$MAIN_IMAGE:$tag")
-            browser_version=$(inspect_version "$BROWSER_IMAGE:$tag")
-            if [[ "$main_version" != "$expected_version" || "$browser_version" != "$expected_version" ]]; then
-              echo "Paired channel $tag is split after publication: main=$main_version, browser=$browser_version, expected=$expected_version." >&2
-              exit 1
-            fi
-          }
-
-          publish_moving_pair() {
-            local tag=$1
-            # Publish the sidecar first so the matching dependency exists before the main image moves.
-            publish_moving "$BROWSER_IMAGE" "$tag" "$BROWSER_DIGEST"
-            publish_moving "$MAIN_IMAGE" "$tag" "$MAIN_DIGEST"
-            verify_paired_moving_tag "$tag"
-          }
-
-          # Resolve both images completely before the first registry mutation.
-          preflight_immutable_image_tags "$MAIN_IMAGE" "$MAIN_DIGEST"
-          preflight_immutable_image_tags "$BROWSER_IMAGE" "$BROWSER_DIGEST"
-          if [[ "$STABLE" == true ]]; then
-            preflight_moving_pair "$MINOR_CHANNEL"
-            if [[ "$PUBLISH_LATEST" == true ]]; then
-              preflight_moving_pair latest
-            fi
-          fi
-
-          # A browser failure must not leave a main image available without its sidecar.
-          publish_immutable_image_tags "$BROWSER_IMAGE" "$BROWSER_DIGEST"
-          publish_immutable_image_tags "$MAIN_IMAGE" "$MAIN_DIGEST"
-
-          verify_paired_tag "$CANDIDATE_VERSION"
-          verify_paired_tag "sha-$SHORT_SHA"
-          if [[ "$STABLE" == true ]]; then
-            publish_moving_pair "$MINOR_CHANNEL"
-            if [[ "$PUBLISH_LATEST" == true ]]; then
-              publish_moving_pair latest
-            fi
-          fi
-
+          BROWSER_DIGEST_AMD64: ${{ needs.build.outputs.browser_digest_amd64 }}
+          BROWSER_DIGEST_ARM64: ${{ needs.build.outputs.browser_digest_arm64 }}
+          BROWSER_IMAGE: ${{ needs.resolve.outputs.browser_image }}
+          CANDIDATE_VERSION: ${{ needs.resolve.outputs.version }}
+          FULL_SHA: ${{ needs.resolve.outputs.full_sha }}
+          MAIN_DIGEST_AMD64: ${{ needs.build.outputs.digest_amd64 }}
+          MAIN_DIGEST_ARM64: ${{ needs.build.outputs.digest_arm64 }}
+          MAIN_IMAGE: ${{ needs.resolve.outputs.image }}
+          SHORT_SHA: ${{ needs.resolve.outputs.short_sha }}
+        run: bash scripts/container-publish.sh publish-immutable
       - name: Verify public anonymous GHCR pulls
         shell: bash
         env:
-          BROWSER_IMAGE: ${{ needs.build.outputs.browser_image }}
-          CANDIDATE_VERSION: ${{ needs.build.outputs.version }}
-          MAIN_IMAGE: ${{ needs.build.outputs.image }}
+          BROWSER_IMAGE: ${{ needs.resolve.outputs.browser_image }}
+          CANDIDATE_VERSION: ${{ needs.resolve.outputs.version }}
+          MAIN_IMAGE: ${{ needs.resolve.outputs.image }}
         run: |
           set -euo pipefail
           anonymous_docker_config=$(mktemp -d)
@@ -665,16 +515,50 @@ jobs:
           docker pull --quiet "$MAIN_IMAGE:$CANDIDATE_VERSION"
           docker pull --quiet "$BROWSER_IMAGE:$CANDIDATE_VERSION"
 
+          verify_public_index() {
+            local ref=$1
+            local arches
+            arches=$(docker buildx imagetools inspect --raw "$ref" \
+              | jq -r '[.manifests[]? | select(.platform.os == "linux") | .platform.architecture] | sort | unique | join(",")')
+            if [[ "$arches" != "amd64,arm64" ]]; then
+              echo "Public manifest $ref does not expose both linux/amd64 and linux/arm64: $arches" >&2
+              exit 1
+            fi
+          }
+          verify_public_index "$MAIN_IMAGE:$CANDIDATE_VERSION"
+          verify_public_index "$BROWSER_IMAGE:$CANDIDATE_VERSION"
+          test "$(docker image inspect --format '{{.Architecture}}' "$MAIN_IMAGE:$CANDIDATE_VERSION")" = amd64
+          test "$(docker image inspect --format '{{.Architecture}}' "$BROWSER_IMAGE:$CANDIDATE_VERSION")" = amd64
+
       - name: Generate signed GitHub provenance
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
-          subject-name: ${{ needs.build.outputs.image }}
-          subject-digest: ${{ needs.build.outputs.digest }}
+          subject-name: ${{ needs.resolve.outputs.image }}
+          subject-digest: ${{ steps.immutable.outputs.main_digest }}
           push-to-registry: true
 
       - name: Generate signed GitHub provenance for browser image
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
-          subject-name: ${{ needs.build.outputs.browser_image }}
-          subject-digest: ${{ needs.build.outputs.browser_digest }}
+          subject-name: ${{ needs.resolve.outputs.browser_image }}
+          subject-digest: ${{ steps.immutable.outputs.browser_digest }}
           push-to-registry: true
+
+      - name: Re-read and advance paired moving channels
+        shell: bash
+        env:
+          BROWSER_DIGEST: ${{ steps.immutable.outputs.browser_digest }}
+          BROWSER_DIGEST_AMD64: ${{ needs.build.outputs.browser_digest_amd64 }}
+          BROWSER_DIGEST_ARM64: ${{ needs.build.outputs.browser_digest_arm64 }}
+          BROWSER_IMAGE: ${{ needs.resolve.outputs.browser_image }}
+          CANDIDATE_VERSION: ${{ needs.resolve.outputs.version }}
+          FULL_SHA: ${{ needs.resolve.outputs.full_sha }}
+          MAIN_DIGEST: ${{ steps.immutable.outputs.main_digest }}
+          MAIN_DIGEST_AMD64: ${{ needs.build.outputs.digest_amd64 }}
+          MAIN_DIGEST_ARM64: ${{ needs.build.outputs.digest_arm64 }}
+          MAIN_IMAGE: ${{ needs.resolve.outputs.image }}
+          MINOR_CHANNEL: ${{ needs.resolve.outputs.minor }}
+          PUBLISH_LATEST: ${{ needs.resolve.outputs.publish_latest }}
+          SHORT_SHA: ${{ needs.resolve.outputs.short_sha }}
+          STABLE: ${{ needs.resolve.outputs.stable }}
+        run: bash scripts/container-publish.sh advance-moving
