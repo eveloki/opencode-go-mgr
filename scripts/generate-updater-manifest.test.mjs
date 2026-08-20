@@ -237,6 +237,10 @@ test("release workflow keeps reusable quality checks out of the native build mat
     new URL("../.github/workflows/container.yml", import.meta.url),
     "utf8",
   );
+  const containerPublishHelper = readFileSync(
+    new URL("./container-publish.sh", import.meta.url),
+    "utf8",
+  );
 
   assert.match(quality, /\n  pull_request:/);
   assert.match(quality, /\n  web:/);
@@ -294,7 +298,8 @@ test("release workflow keeps reusable quality checks out of the native build mat
   assert.match(bake, /group "smoke"/);
   assert.match(bake, /target "manager-smoke"/);
   assert.match(bake, /target "browser-smoke"/);
-  assert.match(containerWorkflow, /release-policy\.mjs immutable-tag/);
+  assert.match(containerWorkflow, /bash scripts\/container-publish\.sh publish-immutable/);
+  assert.match(containerPublishHelper, /release-policy\.mjs immutable-tag/);
   assert.match(containerWorkflow, /group: ghcr-moving-channels\s+queue: max/);
 });
 

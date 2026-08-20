@@ -542,15 +542,25 @@ Release 后，稳定版必须对该 tag 显式触发 `container.yml`，并设置
 普通 Chromium 与持久 Profile。
 
 全部验证通过的产物——每架构两个镜像——先按 digest 推送而不分配可变名称，再进入
-仓库级串行标签队列。`X.Y.Z` 与 `sha-<12 位 commit>` 由两个架构的 digest 合并为
-单一多架构 OCI index（显式携带 index 版本/revision 注解，多源组装不继承源注解），
-仅在不存在时创建；已存在时只有各自 digest 与
-候选完全相同才接受，否则失败。稳定版 `X.Y` 和选择更新的 `latest` 按镜像对整体
-决策：要么都收敛到候选版本，要么保留已经对齐的较新版本对；若通道仍会分裂，工作
-流会失败而不是静默保留。两个镜像各自记录 SPDX SBOM、BuildKit SLSA provenance
-与 GitHub 签名 provenance。`X.Y.Z` 和 `sha-*` 是不可变发布标签；`X.Y` 与
-`latest` 是单调移动通道。浏览器镜像是 GHCR 包，不会增加 GitHub Release 附件；
-原生发布只保留组装后的 GitHub 附件（校验器从该集合推导名称/数量）。
+仓库级串行标签队列。只有 `resolve` job 可以解析请求 tag 或可选 `source_ref`；两个
+原生架构 build leg 都检出它输出的完整 commit SHA，并断言 `HEAD` 必须完全相同。
+publish job 则使用不可变的 `github.workflow_sha`，确保带 registry 写权限的 helper
+来自已审查的 workflow 定义，而不是热修 ref 中的可执行文件。
+
+写入用户可见标签前，publish job 先用 `docker buildx imagetools create --dry-run`
+在本地组装两个候选 OCI index，对返回的原始 JSON 求 digest，并校验两个架构 child
+及 index 的 version/revision 注解。主镜像与浏览器镜像的 `X.Y.Z`、`sha-<12 位
+commit>` 四个不可变标签必须全部以本地已知 digest 完成预检，之后才按浏览器在先、
+主镜像在后的顺序创建并验证；已存在标签只有 digest 与候选完全相同时才接受。
+
+随后工作流必须用空 Docker 凭据目录匿名拉取两个精确版本标签，并为两个最终 index
+digest 成功写入 GitHub 签名 provenance。只有这些步骤全绿，同一个串行 job 才会
+重新读取并预检远端移动通道。稳定版 `X.Y` 和选择更新的 `latest` 要么让两个镜像
+都收敛到候选版本，要么保留已经对齐的较新版本对；推进时浏览器在先、主镜像在后，
+若仍会分裂则 fail closed。每个架构镜像还记录 SPDX SBOM 与 BuildKit SLSA
+provenance。`X.Y.Z` 和 `sha-*` 是不可变发布标签；`X.Y` 与 `latest` 是单调移动
+通道。浏览器镜像是 GHCR 包，不会增加 GitHub Release 附件；原生发布只保留组装
+后的 GitHub 附件（校验器从该集合推导名称/数量）。
 
 Package 可见性独立于关联仓库管理，工作流不能依赖 repository token 代为改成
 公开；新的浏览器 package 在首次推送 digest 前也根本不存在。因此第一次创建该
@@ -561,17 +571,22 @@ package 的 `container.yml` 会先完成推送，再因 GitHub 默认的私有�
 原发布，不会替换产物。在重跑全绿前，不得把容器发布视为完成；之后每个 Release
 都必须在第一次运行时直接通过匿名门禁。
 
+首次走这条双架构链路发布稳定版之前，必须先发布一个临时 SemVer prerelease，并以
+`publish_latest=false` 触发 `container.yml`。这次 rehearsal 要证明两个原生
+runner、package 可见性、匿名拉取、index 精确 children 和两份签名 provenance
+全部成立。不得拿稳定 tag 当演练，也不得在预发布全绿之前推进 `X.Y` 或 `latest`。
+
 标签发布后，门禁使用空 Docker 凭证目录匿名拉取两个精确版本标签；package 若仍
 为私有或不可访问，`container.yml` 会失败，而不会伪装成可供公开 Compose 使用的
 成功发布。
 
-手动触发可回填已有 Release tag，且只有显式选择后才会更新 `latest`。工作流会
-显式检出 `refs/tags/<tag>`，验证 HEAD 确实由该 tag 解析得到，并在发布任何镜像
-前运行仓库版本预检。若重建内容与既有完整版本或 `sha-*` 标签的 digest 不同，
-会失败而不是覆盖；只接受完全相同 digest 的重放。它的 GitHub 签名证书记录发起
-dispatch 的 workflow ref，即使构建随后检出了指定 tag。因此不要把历史手动回填
-描述成“由该 tag 触发的 provenance”；正常 `release.published` 使用 Release
-tag 上下文。
+手动触发可回填已有 Release tag，且只有显式选择后才会更新 `latest`。`resolve`
+显式检出 `refs/tags/<tag>`（或明确指定的热修 `source_ref`），校验 Release tag 与
+仓库版本后输出唯一的完整 SHA；后续 job 不再解析符号 ref。若重建内容与既有完整
+版本或 `sha-*` 标签的 digest 不同，会失败而不是覆盖；只接受完全相同 digest 的
+重放。它的 GitHub 签名证书记录发起 dispatch 的 workflow ref，即使构建随后检出
+的是已解析的 release commit。因此不要把历史手动回填描述成“由该 tag 触发的
+provenance”；正常 `release.published` 使用 Release tag 上下文。
 
 发布后记录 digest，并同时核验 OCI index 与 GitHub attestation；验证时约束到
 本仓库的 signer workflow：

@@ -160,9 +160,21 @@ jobs:
       - name: Check out release source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # Same ref policy as the resolve job; both architecture legs build the identical commit.
-          ref: ${{ inputs.source_ref != '' && inputs.source_ref || format('refs/tags/{0}', needs.resolve.outputs.tag) }}
+          # Resolve is the only job allowed to interpret a mutable branch or tag.
+          ref: ${{ needs.resolve.outputs.full_sha }}
           persist-credentials: false
+
+      - name: Verify resolved release commit
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.full_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha=$(git rev-parse HEAD)
+          if [[ "$actual_sha" != "$EXPECTED_SHA" ]]; then
+            echo "Build checkout drifted from resolved commit: $actual_sha != $EXPECTED_SHA" >&2
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -448,8 +460,22 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          # Run the helper paired with this trusted workflow definition. The
+          # release source itself was resolved once and built at full_sha.
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+
+      - name: Verify trusted workflow commit
+        shell: bash
+        env:
+          EXPECTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha=$(git rev-parse HEAD)
+          if [[ "$actual_sha" != "$EXPECTED_WORKFLOW_SHA" ]]; then
+            echo "Publish checkout drifted from trusted workflow commit: $actual_sha != $EXPECTED_WORKFLOW_SHA" >&2
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -461,8 +487,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish tags without moving immutable references or rolling channels back
-        id: publish_tags
+      - name: Publish and verify immutable version and commit tags
+        id: immutable
         shell: bash
         env:
           BROWSER_DIGEST_AMD64: ${{ needs.build.outputs.browser_digest_amd64 }}
@@ -473,357 +499,8 @@ jobs:
           MAIN_DIGEST_AMD64: ${{ needs.build.outputs.digest_amd64 }}
           MAIN_DIGEST_ARM64: ${{ needs.build.outputs.digest_arm64 }}
           MAIN_IMAGE: ${{ needs.resolve.outputs.image }}
-          MINOR_CHANNEL: ${{ needs.resolve.outputs.minor }}
-          PUBLISH_LATEST: ${{ needs.resolve.outputs.publish_latest }}
           SHORT_SHA: ${{ needs.resolve.outputs.short_sha }}
-          STABLE: ${{ needs.resolve.outputs.stable }}
-        run: |
-          set -euo pipefail
-
-          for arch_digest_var in \
-            MAIN_DIGEST_AMD64 MAIN_DIGEST_ARM64 BROWSER_DIGEST_AMD64 BROWSER_DIGEST_ARM64; do
-            if [[ -z "${!arch_digest_var}" ]]; then
-              echo "Missing $arch_digest_var; both architecture legs must publish their digests." >&2
-              exit 1
-            fi
-          done
-
-          inspect_digest() {
-            local ref=$1
-            local error_file="$RUNNER_TEMP/imagetools-inspect-error"
-            local manifest
-            if manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>"$error_file"); then
-              jq -er '.digest' <<<"$manifest"
-              return
-            fi
-            if grep -Eqi 'manifest unknown|not found|no such manifest' "$error_file"; then
-              printf ''
-              return
-            fi
-            cat "$error_file" >&2
-            return 1
-          }
-
-          inspect_version() {
-            local ref=$1
-            local error_file="$RUNNER_TEMP/imagetools-version-error"
-            local child_digest
-            local image_ref=$ref
-            local labels
-            local manifest
-            local version
-            if ! manifest=$(docker buildx imagetools inspect "$ref" --raw 2>"$error_file"); then
-              cat "$error_file" >&2
-              return 1
-            fi
-            version=$(jq -r '.annotations."org.opencontainers.image.version" // empty' <<<"$manifest")
-            if [[ -n "$version" ]]; then
-              printf '%s' "$version"
-              return
-            fi
-            child_digest=$(jq -r '
-              [.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64")][0].digest // empty
-            ' <<<"$manifest")
-            if [[ -z "$child_digest" ]]; then
-              child_digest=$(jq -r '
-                [.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "arm64")][0].digest // empty
-              ' <<<"$manifest")
-            fi
-            if [[ -n "$child_digest" ]]; then
-              image_ref="${ref%:*}@$child_digest"
-            fi
-            if ! labels=$(docker buildx imagetools inspect "$image_ref" --format '{{json .Image.Config.Labels}}' 2>"$error_file"); then
-              cat "$error_file" >&2
-              return 1
-            fi
-            jq -er '."org.opencontainers.image.version"' <<<"$labels"
-          }
-
-          verify_published_digest() {
-            local ref=$1
-            local candidate_digest=$2
-            local actual
-            actual=$(inspect_digest "$ref")
-            if [[ "$actual" != "$candidate_digest" ]]; then
-              echo "Published digest mismatch for $ref: $actual != $candidate_digest" >&2
-              exit 1
-            fi
-          }
-
-          arch_digests_for() {
-            local image=$1
-            if [[ "$image" == "$BROWSER_IMAGE" ]]; then
-              printf '%s %s' "$BROWSER_DIGEST_AMD64" "$BROWSER_DIGEST_ARM64"
-            else
-              printf '%s %s' "$MAIN_DIGEST_AMD64" "$MAIN_DIGEST_ARM64"
-            fi
-          }
-
-          merge_sources() {
-            local image=$1
-            local ref=$2
-            local amd64_digest
-            local arm64_digest
-            read -r amd64_digest arm64_digest <<<"$(arch_digests_for "$image")"
-            docker buildx imagetools create \
-              --tag "$ref" \
-              --annotation "index:org.opencontainers.image.version=$CANDIDATE_VERSION" \
-              --annotation "index:org.opencontainers.image.revision=$FULL_SHA" \
-              "$image@$amd64_digest" "$image@$arm64_digest"
-          }
-
-          verify_merged_index() {
-            local image=$1
-            local ref=$2
-            local amd64_digest
-            local arm64_digest
-            local annotation
-            local arch_manifests
-            local expected_manifests
-            local media_type
-            local raw
-            read -r amd64_digest arm64_digest <<<"$(arch_digests_for "$image")"
-            if ! raw=$(docker buildx imagetools inspect "$ref" --raw 2>"$RUNNER_TEMP/imagetools-index-error"); then
-              cat "$RUNNER_TEMP/imagetools-index-error" >&2
-              return 1
-            fi
-            arch_manifests=$(jq -r '[.manifests[]? | select(.platform.os == "linux") | .digest] | sort | join(",")' <<<"$raw")
-            expected_manifests=$(printf '%s\n%s\n' "$amd64_digest" "$arm64_digest" | LC_ALL=C sort | paste -sd, -)
-            if [[ "$arch_manifests" != "$expected_manifests" ]]; then
-              echo "Published index $ref does not merge exactly the candidate architecture manifests: $arch_manifests. An existing tag is immutable and cannot be replaced." >&2
-              return 1
-            fi
-            media_type=$(jq -r '.mediaType // empty' <<<"$raw")
-            if [[ "$media_type" != "application/vnd.oci.image.index.v1+json" ]]; then
-              echo "Published index $ref has media type '$media_type'; index annotations require an OCI image index. Rebuild with OCI media types before publishing." >&2
-              return 1
-            fi
-            annotation=$(jq -r '.annotations."org.opencontainers.image.version" // empty' <<<"$raw")
-            if [[ "$annotation" != "$CANDIDATE_VERSION" ]]; then
-              echo "Published index $ref carries version annotation '$annotation' instead of '$CANDIDATE_VERSION'." >&2
-              return 1
-            fi
-            local revision
-            revision=$(jq -r '.annotations."org.opencontainers.image.revision" // empty' <<<"$raw")
-            if [[ "$revision" != "$FULL_SHA" ]]; then
-              echo "Published index $ref carries revision annotation '$revision' instead of '$FULL_SHA'." >&2
-              return 1
-            fi
-          }
-
-          check_immutable() {
-            local image=$1
-            local tag=$2
-            local candidate_digest=$3
-            local ref="$image:$tag"
-            local existing
-            existing=$(inspect_digest "$ref") || return 1
-            node scripts/release-policy.mjs immutable-tag \
-              --tag "$tag" \
-              --candidate-digest "$candidate_digest" \
-              --existing-digest "$existing"
-          }
-
-          declare -A IMMUTABLE_DECISIONS
-          declare -A MOVING_DECISIONS
-          declare -A MOVING_CURRENT_VERSIONS
-          declare -A MOVING_EXISTING_DIGESTS
-          declare -A EXPECTED_DIGESTS
-          declare -A MOVING_EXPECTED_VERSIONS
-
-          preflight_immutable() {
-            local image=$1
-            local tag=$2
-            local candidate_digest=$3
-            local key="$image:$tag"
-            local decision
-            decision=$(check_immutable "$image" "$tag" "$candidate_digest")
-            IMMUTABLE_DECISIONS["$key"]=$decision
-            EXPECTED_DIGESTS["$key"]=$candidate_digest
-          }
-
-          preflight_immutable_image_tags() {
-            local image=$1
-            local candidate_digest=$2
-            preflight_immutable "$image" "$CANDIDATE_VERSION" "$candidate_digest"
-            preflight_immutable "$image" "sha-$SHORT_SHA" "$candidate_digest"
-          }
-
-          preflight_moving_pair() {
-            local tag=$1
-            local main_ref="$MAIN_IMAGE:$tag"
-            local browser_ref="$BROWSER_IMAGE:$tag"
-            local main_existing
-            local browser_existing
-            local main_current=
-            local browser_current=
-            local decision
-            local main_advance
-            local browser_advance
-            local version
-            main_existing=$(inspect_digest "$main_ref")
-            browser_existing=$(inspect_digest "$browser_ref")
-            if [[ -n "$main_existing" ]]; then
-              main_current=$(inspect_version "$main_ref")
-            fi
-            if [[ -n "$browser_existing" ]]; then
-              browser_current=$(inspect_version "$browser_ref")
-            fi
-            decision=$(node scripts/release-policy.mjs paired-channel \
-              --candidate "$CANDIDATE_VERSION" \
-              --main-current "$main_current" \
-              --browser-current "$browser_current")
-            main_advance=$(jq -er '.mainAdvance' <<<"$decision")
-            browser_advance=$(jq -er '.browserAdvance' <<<"$decision")
-            version=$(jq -er '.version' <<<"$decision")
-            MOVING_DECISIONS["$main_ref"]=$main_advance
-            MOVING_DECISIONS["$browser_ref"]=$browser_advance
-            MOVING_CURRENT_VERSIONS["$main_ref"]=$main_current
-            MOVING_CURRENT_VERSIONS["$browser_ref"]=$browser_current
-            MOVING_EXISTING_DIGESTS["$main_ref"]=$main_existing
-            MOVING_EXISTING_DIGESTS["$browser_ref"]=$browser_existing
-            MOVING_EXPECTED_VERSIONS["$tag"]=$version
-          }
-
-          resolve_moving_expected_digests() {
-            local tag=$1
-            local main_ref="$MAIN_IMAGE:$tag"
-            local browser_ref="$BROWSER_IMAGE:$tag"
-            EXPECTED_DIGESTS["$main_ref"]=$([[ "${MOVING_DECISIONS["$main_ref"]}" == true ]] && printf '%s' "$MAIN_DIGEST" || printf '%s' "${MOVING_EXISTING_DIGESTS["$main_ref"]}")
-            EXPECTED_DIGESTS["$browser_ref"]=$([[ "${MOVING_DECISIONS["$browser_ref"]}" == true ]] && printf '%s' "$BROWSER_DIGEST" || printf '%s' "${MOVING_EXISTING_DIGESTS["$browser_ref"]}")
-          }
-
-          derive_candidate_index() {
-            local image=$1
-            local ref="$image:$CANDIDATE_VERSION"
-            local existing
-            existing=$(inspect_digest "$ref") || return 1
-            if [[ -z "$existing" ]]; then
-              merge_sources "$image" "$ref"
-              existing=$(inspect_digest "$ref")
-              if [[ -z "$existing" ]]; then
-                echo "Created $ref but could not read back its index digest." >&2
-                return 1
-              fi
-            fi
-            # buildx index assembly is deterministic (no timestamps or nonces), so an
-            # existing tag merging exactly these architecture manifests is the same
-            # digest a fresh create would produce; anything else must not be replaced.
-            # The explicit guard is required because errexit does not propagate into
-            # command substitutions and would silently continue with the old digest.
-            verify_merged_index "$image" "$ref" || return 1
-            printf '%s' "$existing"
-          }
-
-          publish_immutable() {
-            local image=$1
-            local tag=$2
-            local candidate_digest=$3
-            local decision=${IMMUTABLE_DECISIONS["$image:$tag"]}
-            local ref="$image:$tag"
-            if [[ "$decision" == create ]]; then
-              merge_sources "$image" "$ref"
-              verify_merged_index "$image" "$ref"
-            else
-              echo "Immutable tag $ref already resolves to the candidate digest; leaving it unchanged."
-            fi
-            verify_published_digest "$ref" "$candidate_digest"
-          }
-
-          publish_moving() {
-            local image=$1
-            local tag=$2
-            local candidate_digest=$3
-            local key="$image:$tag"
-            local ref="$key"
-            local advance=${MOVING_DECISIONS["$key"]}
-            local current_version=${MOVING_CURRENT_VERSIONS["$key"]}
-            if [[ "$advance" == true ]]; then
-              merge_sources "$image" "$ref"
-              verify_merged_index "$image" "$ref"
-              verify_published_digest "$ref" "$candidate_digest"
-              echo "Advanced $ref from ${current_version:-none} to $CANDIDATE_VERSION."
-            else
-              echo "Kept $ref at newer or equal version $current_version."
-            fi
-          }
-
-          publish_immutable_image_tags() {
-            local image=$1
-            local candidate_digest=$2
-            publish_immutable "$image" "$CANDIDATE_VERSION" "$candidate_digest"
-            publish_immutable "$image" "sha-$SHORT_SHA" "$candidate_digest"
-          }
-
-          verify_paired_tag() {
-            local tag=$1
-            verify_published_digest "$MAIN_IMAGE:$tag" "${EXPECTED_DIGESTS["$MAIN_IMAGE:$tag"]}"
-            verify_published_digest "$BROWSER_IMAGE:$tag" "${EXPECTED_DIGESTS["$BROWSER_IMAGE:$tag"]}"
-          }
-
-          verify_paired_moving_tag() {
-            local tag=$1
-            local expected_version=${MOVING_EXPECTED_VERSIONS["$tag"]}
-            local main_version
-            local browser_version
-            verify_paired_tag "$tag"
-            main_version=$(inspect_version "$MAIN_IMAGE:$tag")
-            browser_version=$(inspect_version "$BROWSER_IMAGE:$tag")
-            if [[ "$main_version" != "$expected_version" || "$browser_version" != "$expected_version" ]]; then
-              echo "Paired channel $tag is split after publication: main=$main_version, browser=$browser_version, expected=$expected_version." >&2
-              exit 1
-            fi
-          }
-
-          publish_moving_pair() {
-            local tag=$1
-            # Publish the sidecar first so the matching dependency exists before the main image moves.
-            publish_moving "$BROWSER_IMAGE" "$tag" "$BROWSER_DIGEST"
-            publish_moving "$MAIN_IMAGE" "$tag" "$MAIN_DIGEST"
-            verify_paired_moving_tag "$tag"
-          }
-
-          # Decide every paired moving channel before the first registry mutation;
-          # these decisions compare remote channel versions and need no candidate
-          # digest.
-          if [[ "$STABLE" == true ]]; then
-            preflight_moving_pair "$MINOR_CHANNEL"
-            if [[ "$PUBLISH_LATEST" == true ]]; then
-              preflight_moving_pair latest
-            fi
-          fi
-
-          # Derive the merged multi-architecture index digests from the version tags
-          # (sidecar first) — the first registry writes — then finish the
-          # digest-dependent decisions before any further mutation.
-          BROWSER_DIGEST=$(derive_candidate_index "$BROWSER_IMAGE")
-          MAIN_DIGEST=$(derive_candidate_index "$MAIN_IMAGE")
-
-          preflight_immutable_image_tags "$MAIN_IMAGE" "$MAIN_DIGEST"
-          preflight_immutable_image_tags "$BROWSER_IMAGE" "$BROWSER_DIGEST"
-          if [[ "$STABLE" == true ]]; then
-            resolve_moving_expected_digests "$MINOR_CHANNEL"
-            if [[ "$PUBLISH_LATEST" == true ]]; then
-              resolve_moving_expected_digests latest
-            fi
-          fi
-
-          # A browser failure must not leave a main image available without its sidecar.
-          publish_immutable_image_tags "$BROWSER_IMAGE" "$BROWSER_DIGEST"
-          publish_immutable_image_tags "$MAIN_IMAGE" "$MAIN_DIGEST"
-
-          verify_paired_tag "$CANDIDATE_VERSION"
-          verify_paired_tag "sha-$SHORT_SHA"
-          if [[ "$STABLE" == true ]]; then
-            publish_moving_pair "$MINOR_CHANNEL"
-            if [[ "$PUBLISH_LATEST" == true ]]; then
-              publish_moving_pair latest
-            fi
-          fi
-
-          echo "main_digest=$MAIN_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "browser_digest=$BROWSER_DIGEST" >> "$GITHUB_OUTPUT"
-
+        run: bash scripts/container-publish.sh publish-immutable
       - name: Verify public anonymous GHCR pulls
         shell: bash
         env:
@@ -857,12 +534,31 @@ jobs:
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-name: ${{ needs.resolve.outputs.image }}
-          subject-digest: ${{ steps.publish_tags.outputs.main_digest }}
+          subject-digest: ${{ steps.immutable.outputs.main_digest }}
           push-to-registry: true
 
       - name: Generate signed GitHub provenance for browser image
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-name: ${{ needs.resolve.outputs.browser_image }}
-          subject-digest: ${{ steps.publish_tags.outputs.browser_digest }}
+          subject-digest: ${{ steps.immutable.outputs.browser_digest }}
           push-to-registry: true
+
+      - name: Re-read and advance paired moving channels
+        shell: bash
+        env:
+          BROWSER_DIGEST: ${{ steps.immutable.outputs.browser_digest }}
+          BROWSER_DIGEST_AMD64: ${{ needs.build.outputs.browser_digest_amd64 }}
+          BROWSER_DIGEST_ARM64: ${{ needs.build.outputs.browser_digest_arm64 }}
+          BROWSER_IMAGE: ${{ needs.resolve.outputs.browser_image }}
+          CANDIDATE_VERSION: ${{ needs.resolve.outputs.version }}
+          FULL_SHA: ${{ needs.resolve.outputs.full_sha }}
+          MAIN_DIGEST: ${{ steps.immutable.outputs.main_digest }}
+          MAIN_DIGEST_AMD64: ${{ needs.build.outputs.digest_amd64 }}
+          MAIN_DIGEST_ARM64: ${{ needs.build.outputs.digest_arm64 }}
+          MAIN_IMAGE: ${{ needs.resolve.outputs.image }}
+          MINOR_CHANNEL: ${{ needs.resolve.outputs.minor }}
+          PUBLISH_LATEST: ${{ needs.resolve.outputs.publish_latest }}
+          SHORT_SHA: ${{ needs.resolve.outputs.short_sha }}
+          STABLE: ${{ needs.resolve.outputs.stable }}
+        run: bash scripts/container-publish.sh advance-moving

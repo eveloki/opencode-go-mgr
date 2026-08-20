@@ -161,30 +161,43 @@ test("the exact draft Release identity flows through verification and publicatio
   assert.doesNotMatch(publishJob, /releases\/tags\//);
 });
 
-test("container publication checks out the release tag or an explicit source ref", () => {
+test("resolve is the only phase that interprets a mutable container source ref", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/container.yml", import.meta.url),
     "utf8",
   );
+  const resolveJob = workflow.match(/\n  resolve:[\s\S]*?\n  build:/)?.[0] ?? "";
+  const buildJob = workflow.match(/\n  build:[\s\S]*?\n  publish:/)?.[0] ?? "";
+  const publishJob = workflow.match(/\n  publish:[\s\S]*$/)?.[0] ?? "";
+
   assert.match(
-    workflow,
+    resolveJob,
     /ref: \$\{\{ inputs\.source_ref != '' && inputs\.source_ref \|\| format\('refs\/tags\/\{0\}', steps\.release\.outputs\.tag\) \}\}/,
   );
-  assert.match(
-    workflow,
-    /ref: \$\{\{ inputs\.source_ref != '' && inputs\.source_ref \|\| format\('refs\/tags\/\{0\}', needs\.resolve\.outputs\.tag\) \}\}/,
-  );
-  assert.match(workflow, /git show-ref --verify --quiet "\$expected_ref"/);
-  assert.match(workflow, /tag_commit=\$\(git rev-parse "\$expected_ref\^\{commit\}"\)/);
-  assert.match(workflow, /node scripts\/release\.mjs --check/);
+  assert.match(resolveJob, /full_sha=\$\(git rev-parse HEAD\)/);
+  assert.match(resolveJob, /node scripts\/release\.mjs --check/);
+
+  assert.match(buildJob, /ref: \$\{\{ needs\.resolve\.outputs\.full_sha \}\}/);
+  assert.match(buildJob, /EXPECTED_SHA: \$\{\{ needs\.resolve\.outputs\.full_sha \}\}/);
+  assert.match(buildJob, /actual_sha=\$\(git rev-parse HEAD\)/);
+  assert.match(buildJob, /\[\[ "\$actual_sha" != "\$EXPECTED_SHA" \]\]/);
+  assert.doesNotMatch(buildJob, /inputs\.source_ref|refs\/tags|github\.workflow_sha/,
+    "both matrix legs must build the resolved commit without symbolic-ref reuse");
+
+  assert.match(publishJob, /ref: \$\{\{ github\.workflow_sha \}\}/);
+  assert.match(publishJob, /EXPECTED_WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
+  assert.match(publishJob, /\[\[ "\$actual_sha" != "\$EXPECTED_WORKFLOW_SHA" \]\]/);
+  assert.doesNotMatch(publishJob, /inputs\.source_ref|refs\/tags/,
+    "the privileged publish helper must come from the trusted workflow commit");
+
   assert.match(workflow, /docker-bake\.hcl/);
   assert.match(workflow, /file: \.\/Dockerfile\.browser/);
   assert.match(workflow, /Smoke-test browser container and real Chromium/);
   assert.match(workflow, /provenance: mode=max[\s\S]*?sbom: true/);
   assert.match(workflow, /subject-name: \$\{\{ needs\.resolve\.outputs\.browser_image \}\}/);
   assert.match(workflow, /subject-name: \$\{\{ needs\.resolve\.outputs\.image \}\}/);
-  assert.match(workflow, /subject-digest: \$\{\{ steps\.publish_tags\.outputs\.main_digest \}\}/);
-  assert.match(workflow, /subject-digest: \$\{\{ steps\.publish_tags\.outputs\.browser_digest \}\}/);
+  assert.match(workflow, /subject-digest: \$\{\{ steps\.immutable\.outputs\.main_digest \}\}/);
+  assert.match(workflow, /subject-digest: \$\{\{ steps\.immutable\.outputs\.browser_digest \}\}/);
 });
 
 test("container publication builds each architecture natively and merges both digests", () => {
@@ -255,76 +268,93 @@ test("paired moving channels either converge at the candidate or remain aligned"
   }), /Refusing to leave paired container channel split/);
 });
 
-test("container publication preflights paired moving channels before publishing the browser then main pair", () => {
+test("immutable publication, public proof, attestations, and moving channels are strictly ordered", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/container.yml", import.meta.url),
     "utf8",
   );
-  const publishStep = workflow.match(
-    /- name: Publish tags without moving immutable references or rolling channels back[\s\S]*?(?=\n      - name: Generate signed GitHub provenance)/,
-  )?.[0] ?? "";
-  const deriveBrowser = publishStep.indexOf('derive_candidate_index "$BROWSER_IMAGE"');
-  const deriveMain = publishStep.indexOf('derive_candidate_index "$MAIN_IMAGE"');
-  const mainPreflight = publishStep.indexOf('preflight_immutable_image_tags "$MAIN_IMAGE" "$MAIN_DIGEST"');
-  const browserPreflight = publishStep.indexOf('preflight_immutable_image_tags "$BROWSER_IMAGE" "$BROWSER_DIGEST"');
-  const movingPreflight = publishStep.indexOf('preflight_moving_pair "$MINOR_CHANNEL"');
-  const browserPublish = publishStep.indexOf('publish_immutable_image_tags "$BROWSER_IMAGE" "$BROWSER_DIGEST"');
-  const mainPublish = publishStep.indexOf('publish_immutable_image_tags "$MAIN_IMAGE" "$MAIN_DIGEST"');
-  const pairVerification = publishStep.indexOf('verify_paired_tag "$CANDIDATE_VERSION"');
-  const movingPublish = publishStep.indexOf('publish_moving_pair "$MINOR_CHANNEL"');
+  const immutable = workflow.indexOf("      - name: Publish and verify immutable version and commit tags");
+  const anonymous = workflow.indexOf("      - name: Verify public anonymous GHCR pulls");
+  const mainAttestation = workflow.indexOf("      - name: Generate signed GitHub provenance\n");
+  const browserAttestation = workflow.indexOf("      - name: Generate signed GitHub provenance for browser image");
+  const moving = workflow.indexOf("      - name: Re-read and advance paired moving channels");
 
-  assert.ok(publishStep.match(/MAIN_DIGEST_AMD64 MAIN_DIGEST_ARM64 BROWSER_DIGEST_AMD64 BROWSER_DIGEST_ARM64/),
-    "all four architecture digests must be asserted non-empty before any publication");
-  assert.match(publishStep, /\[\[ -z "\$\{!arch_digest_var\}" \]\]/,
-    "the non-empty assertion must fail the step, not just enumerate the variables");
-  assert.ok(deriveBrowser >= 0 && deriveMain >= 0,
-    "both images must derive a merged multi-architecture index digest");
-  assert.ok(deriveBrowser < deriveMain,
-    "derive and publish the browser sidecar digest before the main image");
-  assert.ok(mainPreflight >= 0 && browserPreflight >= 0, "both images must be preflighted");
-  assert.ok(movingPreflight >= 0, "moving channels must be preflighted as a pair");
-  assert.ok(movingPreflight < deriveBrowser,
-    "paired moving-channel decisions need no candidate digest and must precede the first registry write");
-  assert.ok(mainPreflight < browserPublish && browserPreflight < browserPublish,
-    "all sha- tag decisions must finish before the first sha- tag write");
-  assert.ok(movingPreflight < movingPublish,
-    "moving-channel decisions must finish before the first moving-channel write");
-  assert.ok(browserPublish < mainPublish,
-    "publish the browser sidecar before exposing the matching main image");
-  assert.ok(mainPublish < pairVerification,
-    "verify both images together only after their publication sequence completes");
-  assert.match(publishStep, /paired-channel/);
-  assert.match(publishStep, /MOVING_EXPECTED_VERSIONS\["\$tag"\]=\$version/);
-  assert.match(
-    publishStep,
-    /EXPECTED_DIGESTS\["\$main_ref"\]=\$\(\[\[ "\$\{MOVING_DECISIONS\["\$main_ref"\]\}" == true \]\] && printf '%s' "\$MAIN_DIGEST" \|\| printf '%s' "\$\{MOVING_EXISTING_DIGESTS\["\$main_ref"\]\}"\)/,
-    "the main expected-digest expansion must stay a plain parameter expansion (stray characters corrupt kept digests)",
+  assert.ok(
+    immutable >= 0
+      && immutable < anonymous
+      && anonymous < mainAttestation
+      && mainAttestation < browserAttestation
+      && browserAttestation < moving,
+    "moving channels must wait for immutable tags, anonymous pulls, and both attestations",
   );
-  assert.match(
-    publishStep,
-    /EXPECTED_DIGESTS\["\$browser_ref"\]=\$\(\[\[ "\$\{MOVING_DECISIONS\["\$browser_ref"\]\}" == true \]\] && printf '%s' "\$BROWSER_DIGEST" \|\| printf '%s' "\$\{MOVING_EXISTING_DIGESTS\["\$browser_ref"\]\}"\)/,
-    "the browser expected-digest expansion must stay a plain parameter expansion (stray characters corrupt kept digests)",
+  assert.match(workflow, /concurrency:\n\s+group: ghcr-moving-channels\n\s+queue: max/);
+  assert.match(workflow, /run: bash scripts\/container-publish\.sh publish-immutable/);
+  assert.match(workflow, /run: bash scripts\/container-publish\.sh advance-moving/);
+  assert.match(workflow, /subject-digest: \$\{\{ steps\.immutable\.outputs\.main_digest \}\}/);
+  assert.match(workflow, /subject-digest: \$\{\{ steps\.immutable\.outputs\.browser_digest \}\}/);
+});
+
+test("candidate index digests are computed without a registry tag before every immutable preflight", () => {
+  const helper = readFileSync(
+    new URL("./container-publish.sh", import.meta.url),
+    "utf8",
   );
-  assert.match(publishStep, /verify_merged_index "\$image" "\$ref" \|\| return 1/,
-    "derive_candidate_index must propagate verify_merged_index failures explicitly; errexit does not reach command substitutions");
-  assert.match(publishStep, /verify_paired_moving_tag/);
-  assert.match(publishStep, /verify_published_digest "\$BROWSER_IMAGE:\$tag"/);
+  const candidateStart = helper.indexOf("candidate_manifest_for() {");
+  const candidateEnd = helper.indexOf("verify_published_digest() {");
+  const candidateFunction = helper.slice(candidateStart, candidateEnd);
+  const immutableStart = helper.indexOf("publish_immutable_phase() {");
+  const movingStart = helper.indexOf("advance_moving_phase() {");
+  const immutablePhase = helper.slice(immutableStart, movingStart);
+  const localMainDigest = immutablePhase.indexOf('main_digest=$(manifest_digest "$main_manifest")');
+  const immutablePreflight = immutablePhase.indexOf('immutable_decisions["$key"]=$(check_immutable');
+  const firstTagWrite = immutablePhase.indexOf('publish_immutable_image_tags "$BROWSER_IMAGE"');
+
+  assert.match(candidateFunction, /docker buildx imagetools create[\s\S]*?--dry-run/);
+  assert.doesNotMatch(candidateFunction, /--tag|staging/);
+  assert.match(helper, /if ! checksum=\$\(printf '%s' "\$manifest" \| sha256sum\); then/);
+  assert.match(immutablePhase, /browser_manifest=\$\(candidate_manifest_for "\$BROWSER_IMAGE"\)/);
+  assert.match(immutablePhase, /main_manifest=\$\(candidate_manifest_for "\$MAIN_IMAGE"\)/);
+  assert.match(immutablePhase, /verify_index_json "\$BROWSER_IMAGE" "browser candidate dry-run" "\$browser_manifest"/);
+  assert.match(immutablePhase, /verify_index_json "\$MAIN_IMAGE" "main candidate dry-run" "\$main_manifest"/);
+  assert.ok(localMainDigest >= 0 && localMainDigest < immutablePreflight,
+    "both local candidate digests must exist before immutable preflight");
+  assert.ok(immutablePreflight >= 0 && immutablePreflight < firstTagWrite,
+    "all immutable decisions must finish before the first version or sha tag write");
   assert.match(
-    publishStep,
-    /docker buildx imagetools create[\s\S]*?--annotation "index:org\.opencontainers\.image\.version=\$CANDIDATE_VERSION"[\s\S]*?--annotation "index:org\.opencontainers\.image\.revision=\$FULL_SHA"[\s\S]*?"\$image@\$amd64_digest" "\$image@\$arm64_digest"/,
-    "every tag must be assembled from both architecture digests with explicit index annotations",
+    immutablePhase,
+    /for image_and_digest in[\s\S]*?"\$MAIN_IMAGE \$main_digest"[\s\S]*?"\$BROWSER_IMAGE \$browser_digest"[\s\S]*?for tag in "\$CANDIDATE_VERSION" "sha-\$SHORT_SHA"/,
   );
-  assert.match(publishStep, /application\/vnd\.oci\.image\.index\.v1\+json/,
-    "published indexes must be verified as OCI image indexes");
-  assert.match(workflow, /oci-mediatypes=true/,
-    "build-push must lock in OCI media types so index annotations cannot be dropped");
-  assert.match(publishStep, /'\.annotations\."org\.opencontainers\.image\.revision" \/\/ empty'/,
-    "verify_merged_index must check the revision annotation as well as the version");
-  assert.match(publishStep, /inspect_version/);
-  assert.match(workflow, /'\.annotations\."org\.opencontainers\.image\.version" \/\/ empty'/,
-    "inspect_version must prefer the index annotation");
-  assert.match(workflow, /\.platform\.architecture == "arm64"/,
-    "inspect_version must fall back to arm64 children after amd64");
+  assert.match(helper, /application\/vnd\.oci\.image\.index\.v1\+json/);
+  assert.match(helper, /org\.opencontainers\.image\.version/);
+  assert.match(helper, /org\.opencontainers\.image\.revision/);
+  assert.match(helper, /arch_manifests[\s\S]*?expected_manifests/);
+  assert.doesNotMatch(helper, /derive_candidate_index|staging[-_]/);
+});
+
+test("moving channels re-read remote state and publish browser before main", () => {
+  const helper = readFileSync(
+    new URL("./container-publish.sh", import.meta.url),
+    "utf8",
+  );
+  const movingStart = helper.indexOf("advance_moving_phase() {");
+  const movingPhase = helper.slice(movingStart);
+  const freshRead = movingPhase.indexOf(
+    'verify_remote_candidate_index "$BROWSER_IMAGE" "$BROWSER_IMAGE:$CANDIDATE_VERSION" "$BROWSER_DIGEST"',
+  );
+  const minorPreflight = movingPhase.indexOf('preflight_moving_pair "$MINOR_CHANNEL"');
+  const minorPublish = movingPhase.lastIndexOf('publish_moving_pair "$MINOR_CHANNEL"');
+  const browserPublish = movingPhase.indexOf('publish_moving "$BROWSER_IMAGE" "$tag" "$BROWSER_DIGEST"');
+  const mainPublish = movingPhase.indexOf('publish_moving "$MAIN_IMAGE" "$tag" "$MAIN_DIGEST"');
+
+  assert.ok(freshRead >= 0 && freshRead < minorPreflight,
+    "moving-channel phase must freshly verify the immutable candidate first");
+  assert.ok(minorPreflight >= 0 && minorPreflight < minorPublish,
+    "all moving-channel decisions must finish before the first moving write");
+  assert.ok(browserPublish >= 0 && browserPublish < mainPublish,
+    "the browser dependency must move before the matching main channel");
+  assert.match(movingPhase, /if \[\[ "\$PUBLISH_LATEST" == true \]\]; then\n\s+preflight_moving_pair latest/);
+  assert.match(movingPhase, /decision=\$\(node scripts\/release-policy\.mjs paired-channel/);
+  assert.match(movingPhase, /verify_paired_moving_tag "\$tag"/);
 });
 
 test("container publication requires anonymous exact-version pulls", () => {
