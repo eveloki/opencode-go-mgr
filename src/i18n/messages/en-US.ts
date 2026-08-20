@@ -46,6 +46,8 @@ export const enUSMessages = {
   "密码需为 8 至 256 个字符": "Password must contain 8–256 characters",
 
   "接入中心": "Connection center",
+  "Contributor 模型的数据使用": "Contributor model data use",
+  "Muse Spark 1.2 Contributor 不是 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择它。": "Muse Spark 1.2 Contributor is not Zero Data Retention (ZDR); prompts and completions may be used for training. Select it only for data you are authorized to use this way.",
   "就绪": "Ready",
   "复制 API Base URL": "Copy API Base URL",
   "生成新 Key": "Generate new key",

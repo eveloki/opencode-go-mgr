@@ -234,7 +234,8 @@ export const APPLICATION_MODEL_METADATA: Readonly<Record<string, ApplicationMode
   },
   "muse-spark-1.2": {
     // Meta Muse Spark 1.2 via OpenCode Go: context 1_048_576, output 131_072;
-    // text+image input; Responses-only. Go-side price matches Contributor tier.
+    // text+image input; Responses-only. Standard price comes from live Go
+    // measurement because the public Go pricing table lists only Contributor.
     // Upstream accepts {none,minimal,low,medium,high,xhigh} but NOT `max`;
     // expose low/medium/high only so clients never send the unsupported `max`.
     contextWindow: 1_048_576,
@@ -246,7 +247,8 @@ export const APPLICATION_MODEL_METADATA: Readonly<Record<string, ApplicationMode
     defaultEffort: "high",
   },
   "muse-spark-1.2-contributor": {
-    // Same checkpoint as muse-spark-1.2; Contributor tier allows training use of prompts/completions.
+    // Same checkpoint as muse-spark-1.2. Contributor is not ZDR: prompts and
+    // completions may be used for training; the Applications view warns on selection.
     contextWindow: 1_048_576,
     maxOutputTokens: 131_072,
     input: ["text", "image"],

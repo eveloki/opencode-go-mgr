@@ -394,6 +394,7 @@ fn prepare_parsed_request(
     stream: bool,
 ) -> Result<RequestPlan, ProtocolError> {
     let upstream = resolve_upstream_format(client, &model)?;
+    let aliased_responses_effort = requested_effort_alias(&parsed, &model);
     let parsed = apply_effort_aliases(parsed, &model);
     validate_request_features(client, upstream, &parsed)?;
     let tool_context = if client == ApiFormat::Responses {
@@ -410,7 +411,12 @@ fn prepare_parsed_request(
         .cloned()
         .unwrap_or_else(|| json!("auto"));
     let response_tools = array(&parsed, "tools").to_vec();
-    let converted = convert_request(client, upstream, parsed, &tool_context.namespace_tools)?;
+    let mut converted = convert_request(client, upstream, parsed, &tool_context.namespace_tools)?;
+    if upstream == ApiFormat::Responses
+        && let Some(effort) = aliased_responses_effort
+    {
+        set_responses_reasoning_effort(&mut converted, effort);
+    }
     let service_tier = converted
         .get("service_tier")
         .and_then(Value::as_str)
@@ -1265,7 +1271,43 @@ fn apply_effort_aliases(mut body: Value, model: &str) -> Value {
     {
         body["reasoning_effort"] = Value::String(replacement);
     }
+    if let Some(replacement) = body
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)
+        .and_then(&rewrite)
+    {
+        if let Some(output_config) = body.get_mut("output_config").and_then(Value::as_object_mut) {
+            output_config.insert("effort".into(), Value::String(replacement));
+        }
+    }
     body
+}
+
+/// Returns the aliased effort requested through any supported client shape.
+/// Conversion through Messages represents reasoning as a token budget, so the
+/// original alias must be retained until the final Responses body is built.
+fn requested_effort_alias(body: &Value, model: &str) -> Option<&'static str> {
+    let profile = model_protocol(model)?;
+    let effort = body
+        .pointer("/reasoning/effort")
+        .or_else(|| body.get("reasoning_effort"))
+        .or_else(|| body.pointer("/output_config/effort"))
+        .and_then(Value::as_str)?;
+    profile
+        .effort_aliases
+        .iter()
+        .find_map(|(from, to)| (*from == effort).then_some(*to))
+}
+
+fn set_responses_reasoning_effort(body: &mut Value, effort: &str) {
+    let reasoning = body
+        .as_object_mut()
+        .expect("converted request must remain a JSON object")
+        .entry("reasoning")
+        .or_insert_with(|| json!({ "summary": "auto" }));
+    if let Some(reasoning) = reasoning.as_object_mut() {
+        reasoning.insert("effort".into(), Value::String(effort.to_string()));
+    }
 }
 
 fn convert_request(
@@ -5105,23 +5147,37 @@ mod tests {
     }
 
     #[test]
-    fn muse_spark_contributor_converts_chat_effort_to_legal_responses_value() {
-        let request = json!({
-            "model":"muse-spark-1.2-contributor","messages":[{"role":"user","content":"hi"}],
-            "reasoning_effort":"max"
-        });
-        let plan = prepare_request(ApiFormat::ChatCompletions, bytes(request)).unwrap();
-        // Responses-only upstream: Chat converts to Responses via the Anthropic
-        // budget_tokens intermediate, which is lossy (effort -> budget -> effort).
-        // Any client effort lands on a legal upstream value; the raw `max` that
-        // the upstream rejects never reaches it on this path.
-        assert_eq!(plan.upstream, ApiFormat::Responses);
-        let body: Value = serde_json::from_slice(&plan.body).unwrap();
-        let effort = body["reasoning"]["effort"].as_str().unwrap();
-        assert!(
-            ["low", "medium", "high", "xhigh"].contains(&effort),
-            "unexpected effort {effort}"
-        );
+    fn muse_spark_max_alias_reaches_responses_upstream_from_every_client_protocol() {
+        let requests = [
+            (
+                ApiFormat::Responses,
+                json!({
+                    "model":"muse-spark-1.2","input":"hi","store":false,
+                    "reasoning":{"effort":"max"}
+                }),
+            ),
+            (
+                ApiFormat::ChatCompletions,
+                json!({
+                    "model":"muse-spark-1.2-contributor","messages":[{"role":"user","content":"hi"}],
+                    "reasoning_effort":"max"
+                }),
+            ),
+            (
+                ApiFormat::Messages,
+                json!({
+                    "model":"muse-spark-1.2","max_tokens":8192,
+                    "messages":[{"role":"user","content":"hi"}],
+                    "output_config":{"effort":"max"}
+                }),
+            ),
+        ];
+        for (client, request) in requests {
+            let plan = prepare_request(client, bytes(request)).unwrap();
+            assert_eq!(plan.upstream, ApiFormat::Responses);
+            let body: Value = serde_json::from_slice(&plan.body).unwrap();
+            assert_eq!(body["reasoning"]["effort"], "xhigh");
+        }
     }
 
     #[test]

@@ -47,6 +47,8 @@ export const deDEMessages = {
   "密码需为 8 至 256 个字符": "Das Passwort muss 8–256 Zeichen enthalten",
 
   "接入中心": "Verbindungszentrale",
+  "Contributor 模型的数据使用": "Datennutzung des Contributor-Modells",
+  "Muse Spark 1.2 Contributor 不是 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择它。": "Muse Spark 1.2 Contributor verwendet keine Zero Data Retention (ZDR); Eingaben und Antworten können zum Training verwendet werden. Wählen Sie es nur für Daten, die Sie auf diese Weise verwenden dürfen.",
   "就绪": "Bereit",
   "复制 API Base URL": "API Base URL kopieren",
   "生成新 Key": "Neuen Key erzeugen",

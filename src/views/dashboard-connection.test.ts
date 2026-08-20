@@ -1036,6 +1036,10 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.match(applications, /@click="loadModels"/);
   assert.match(modelRow, /@click="restoreApplicationDefaults"/);
   assert.match(modelRow, /@click="saveClaudeDesktopModels"/);
+  assert.match(applications, /v-if="usesMuseContributor"/);
+  assert.match(applications, /const selectedApplicationModelIds = computed/);
+  assert.match(applications, /selectedApplicationModelIds\.value\.includes\("muse-spark-1\.2-contributor"\)/);
+  assert.match(applications, /Muse Spark 1\.2 Contributor 不是 ZDR/);
   assert.equal(applications.match(/@click="restoreApplicationDefaults"/g)?.length, 1);
   // Dashboard KeepAlive visibility lifecycle: App caches Dashboard; bind on
   // mount/activation and unbind on deactivation/unmount.

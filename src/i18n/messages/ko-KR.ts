@@ -47,6 +47,8 @@ export const koKRMessages = {
   "密码需为 8 至 256 个字符": "비밀번호는 8~256자여야 합니다",
 
   "接入中心": "연결 센터",
+  "Contributor 模型的数据使用": "Contributor 모델 데이터 사용",
+  "Muse Spark 1.2 Contributor 不是 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择它。": "Muse Spark 1.2 Contributor는 ZDR(데이터 미보존)이 아니며 프롬프트와 완성 내용이 학습에 사용될 수 있습니다. 이 방식으로 사용할 권한이 있는 데이터에만 선택하세요.",
   "就绪": "준비됨",
   "复制 API Base URL": "API Base URL 복사",
   "生成新 Key": "새 Key 생성",

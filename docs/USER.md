@@ -443,6 +443,12 @@ actually carry. The passthrough / conversion matrix is under
 | `deepseek-v4-flash` | 1M | 384K | text | ✓ | ✓ | high / max (default high) |
 | `hy3` | 256K | 64K | text | ✓ | ✓ | low / high (default high) |
 
+`muse-spark-1.2` uses Zero Data Retention (ZDR): prompts and completions are
+not used for training. `muse-spark-1.2-contributor` is not ZDR; prompts and
+completions may be used for training. Select Contributor only for data you are
+authorized to use this way. The standard Muse price is measured from live Go
+usage because the public Go pricing table lists only Contributor.
+
 Rounded display: 198K = 202,752; 200K = 204,800; 256K = 262,144; 1M = 1,000,000
 or 1,048,576. `glm-5.3` limits and token rates follow the dedicated
 models.dev `opencode-go/glm-5.3` row (same $1.40 / $4.40 / $0.26 as the

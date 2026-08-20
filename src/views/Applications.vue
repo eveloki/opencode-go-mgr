@@ -155,6 +155,13 @@
             <p v-if="copyDisabledHint" class="copy-disabled-hint">
               {{ copyDisabledHint }}
             </p>
+            <n-alert
+              v-if="usesMuseContributor"
+              type="warning"
+              :title="t('Contributor 模型的数据使用')"
+            >
+              {{ t('Muse Spark 1.2 Contributor 不是 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择它。') }}
+            </n-alert>
           </section>
 
           <n-alert v-if="settingsError" type="error" :title="t('节点设置加载失败')">
@@ -468,6 +475,17 @@ const primaryModelOptions = computed<SelectOption[]>(() => (
   activeGuide.value.multipleModels
     ? activeModelOptions.value.filter(({ value }) => typeof value === "string" && selectedModels.value.includes(value))
     : activeModelOptions.value
+));
+const selectedApplicationModelIds = computed(() => {
+  if (activeGuide.value.modelFields?.length) {
+    return activeGuide.value.modelFields.map((field) => modelValues.value[field]);
+  }
+  return activeGuide.value.multipleModels
+    ? selectedModels.value
+    : [selectedModel.value];
+});
+const usesMuseContributor = computed(() => (
+  selectedApplicationModelIds.value.includes("muse-spark-1.2-contributor")
 ));
 
 const connectionUrls = computed(() => {

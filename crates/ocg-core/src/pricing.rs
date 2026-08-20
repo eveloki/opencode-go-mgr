@@ -440,11 +440,16 @@ pub(crate) fn ensure_current_adjustment_policy(mut snapshot: PricingSnapshot) ->
     snapshot
 }
 
-/// Append seed models that an existing snapshot does not know about yet, so
-/// upgrades that grow the embedded seed keep pricing models that the official
-/// document does not list (e.g. `muse-spark-1.2`, which the Go API serves but
-/// the docs pricing table omits). Entries already present — official rows or
-/// user-edited multipliers — are never overwritten.
+// These are deliberately the only seed rows that can be backfilled into an
+// official snapshot. The public Go pricing table lists Contributor but omits
+// standard Muse; standard rates come from live Go measurements, not that table.
+// Do not turn this into "every embedded seed row": an official removal must
+// not silently revive unrelated models forever.
+const SEED_COVERAGE_MODEL_IDS: &[&str] = &["muse-spark-1.2", "muse-spark-1.2-contributor"];
+
+/// Append the explicitly allowlisted Muse rows that an existing snapshot does
+/// not know about yet. Entries already present — official rows or user-edited
+/// multipliers — are never overwritten.
 pub(crate) fn ensure_seed_model_coverage(mut snapshot: PricingSnapshot) -> PricingSnapshot {
     let known = snapshot
         .models
@@ -454,7 +459,10 @@ pub(crate) fn ensure_seed_model_coverage(mut snapshot: PricingSnapshot) -> Prici
     let mut missing: Vec<PricingModel> = embedded_seed()
         .models
         .into_iter()
-        .filter(|model| !known.contains(model.model_id.as_str()))
+        .filter(|model| {
+            SEED_COVERAGE_MODEL_IDS.contains(&model.model_id.as_str())
+                && !known.contains(model.model_id.as_str())
+        })
         .collect();
     if missing.is_empty() {
         return snapshot;
@@ -1222,6 +1230,21 @@ mod tests {
         let repaired = ensure_seed_model_coverage(snapshot.clone());
         assert_eq!(repaired.revision, snapshot.revision);
         assert_eq!(repaired.activated_at, snapshot.activated_at);
+    }
+
+    #[test]
+    fn seed_coverage_does_not_revive_models_outside_the_muse_allowlist() {
+        let mut snapshot = embedded_seed();
+        snapshot.models.retain(|entry| entry.model_id != "grok-4.5");
+
+        let repaired = ensure_seed_model_coverage(snapshot);
+
+        assert!(
+            repaired
+                .models
+                .iter()
+                .all(|entry| entry.model_id != "grok-4.5")
+        );
     }
 
     #[test]

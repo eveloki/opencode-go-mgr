@@ -47,6 +47,8 @@ export const frFRMessages = {
   "密码需为 8 至 256 个字符": "Le mot de passe doit contenir de 8 à 256 caractères",
 
   "接入中心": "Centre de connexion",
+  "Contributor 模型的数据使用": "Utilisation des données du modèle Contributor",
+  "Muse Spark 1.2 Contributor 不是 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择它。": "Muse Spark 1.2 Contributor n'utilise pas la conservation zéro des données (ZDR) ; les prompts et les complétions peuvent être utilisés pour l'entraînement. Sélectionnez-le uniquement pour des données que vous êtes autorisé à utiliser ainsi.",
   "就绪": "Prêt",
   "复制 API Base URL": "Copier l’API Base URL",
   "生成新 Key": "Générer une nouvelle Key",

@@ -379,6 +379,9 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 | `deepseek-v4-flash` | 1M | 384K | 文本 | ✓ | ✓ | high / max（默认 high） |
 | `hy3` | 256K | 64K | 文本 | ✓ | ✓ | low / high（默认 high） |
 
+`muse-spark-1.2` 使用零数据保留（ZDR）：提示词和补全内容不会用于训练。
+`muse-spark-1.2-contributor` 不使用 ZDR；提示词和补全内容可能用于训练。仅在你有权这样使用的数据上选择 Contributor。Muse 标准价格来自实时 Go 用量测量，因为公开 Go 价格表只列出 Contributor。
+
 显示取整：198K = 202,752；200K = 204,800；256K = 262,144；1M = 1,000,000 或
 1,048,576。`glm-5.3` 的限额与 token 单价已按 models.dev `opencode-go/glm-5.3`
 独立行对齐（$1.40 / $4.40 / $0.26，与官方 Go 表一致；Usage 仍为 $15）。
