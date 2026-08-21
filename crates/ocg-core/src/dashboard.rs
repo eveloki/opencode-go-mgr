@@ -1415,6 +1415,9 @@ fn create_account_inner(
     }
     let requires_verification =
         plan.verification_policy == crate::provider::VerificationPolicy::Required;
+    let enabled =
+        crate::provider::offering_allows_enablement(offering.provider_id, offering.offering_id)
+            && !requires_verification;
     let purchase_date = match input.purchase_date {
         Some(value) if !value.trim().is_empty() => normalize_purchase_date(&value)
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
@@ -1440,7 +1443,7 @@ fn create_account_inner(
         key_cipher: state
             .encrypt_key(input.key.trim())
             .map_err(ApiError::internal)?,
-        enabled: !requires_verification,
+        enabled,
         account_type: AccountType::Key,
         setup_step: AccountSetupStep::Ready,
         referral_code: clean_optional(input.referral_code),
@@ -1466,7 +1469,7 @@ fn create_account_inner(
             &model_capabilities,
             plan.risk_notice,
         )
-        .map_err(map_account_contract_error)?;
+        .map_err(map_account_write_error)?;
         let _ = db.log_gateway(
             "info",
             "account",
@@ -1479,9 +1482,14 @@ fn create_account_inner(
     Ok(Json(dashboard_account(&state, account)))
 }
 
-fn map_account_contract_error(error: anyhow::Error) -> ApiError {
+fn map_account_write_error(error: anyhow::Error) -> ApiError {
+    if let Some(binding) = error.downcast_ref::<crate::provider::ProviderBindingError>() {
+        return map_provider_binding_error(binding.clone());
+    }
     let message = error.to_string();
-    if message.contains("Custom API accounts require")
+    if message.contains("not routable") {
+        ApiError::status(StatusCode::CONFLICT, message)
+    } else if message.contains("Custom API accounts require")
         || message.contains("only available for Custom")
         || message.contains("risk acknowledgement")
         || message.contains("base URL")
@@ -1493,6 +1501,15 @@ fn map_account_contract_error(error: anyhow::Error) -> ApiError {
         ApiError::bad_request(message)
     } else {
         ApiError::internal(error)
+    }
+}
+
+fn map_provider_binding_error(error: crate::provider::ProviderBindingError) -> ApiError {
+    match error {
+        crate::provider::ProviderBindingError::EnablementNotRoutable { .. } => {
+            ApiError::status(StatusCode::CONFLICT, error.to_string())
+        }
+        other => ApiError::bad_request(other.to_string()),
     }
 }
 
@@ -2059,7 +2076,7 @@ async fn update_account(
             key_cipher.as_deref(),
             password_cipher.as_deref(),
         )
-        .map_err(ApiError::internal)?;
+        .map_err(map_account_write_error)?;
         let _ = db.log_gateway("info", "account", &format!("updated account {}", id));
     }
     let account = state
@@ -2073,14 +2090,10 @@ async fn update_account(
 }
 
 fn ensure_account_can_enable(state: &CoreState, account: &Account) -> Result<(), ApiError> {
+    crate::provider::ensure_offering_can_enable(&account.provider_id, &account.offering_id)
+        .map_err(map_provider_binding_error)?;
     let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
         .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
-    if !plan.routable {
-        return Err(ApiError::status(
-            StatusCode::CONFLICT,
-            "this Plan is catalogued but is not routable in this release",
-        ));
-    }
     if plan.verification_policy == crate::provider::VerificationPolicy::Required {
         let status = state
             .db
@@ -2260,7 +2273,7 @@ async fn toggle_account(
     {
         let db = state.db.lock();
         db.update_account(&id, &update, None, None)
-            .map_err(ApiError::internal)?;
+            .map_err(map_account_write_error)?;
     }
     let account = state
         .db
@@ -2811,7 +2824,7 @@ async fn verify_managed_account_key(
         }
         if !db
             .complete_managed_setup_if_key_matches(&id, &key_cipher)
-            .map_err(ApiError::internal)?
+            .map_err(map_account_write_error)?
         {
             return Err(ApiError::status(
                 StatusCode::CONFLICT,
@@ -4317,7 +4330,7 @@ mod tests {
         parse_semver_version, pricing_multiplier_changes, pricing_semantically_equal,
         provider_account_usage, put_account_custom_config, put_account_model_capabilities,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
-        reorder_accounts, test_proxy, update_account, update_account_usage,
+        reorder_accounts, test_proxy, toggle_account, update_account, update_account_usage,
         update_pricing_multipliers, update_settings, validate_forward_log_query,
         validate_websocket_origin, verify_managed_account_key,
     };
@@ -5798,6 +5811,7 @@ mod tests {
         let mut goat = test_account("goat-summary");
         goat.provider_id = crate::provider::COMMAND_CODE_PROVIDER_ID.to_string();
         goat.offering_id = crate::provider::GOAT_OFFERING_ID.to_string();
+        goat.enabled = false;
         state
             .db
             .lock()
@@ -6945,6 +6959,147 @@ mod tests {
             crate::provider::ConnectionVerificationStatus::Pending
         );
         assert_eq!(caps.model_capabilities[0].model_id, "org/other");
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unroutable_plans_reject_enablement_without_mutating_revision() {
+        let dir = temp_data_dir("enablement-gate");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let go = create_account(
+            State(state.clone()),
+            Json(AccountInput {
+                provider_id: crate::provider::OPENCODE_PROVIDER_ID.into(),
+                offering_id: crate::provider::GO_OFFERING_ID.into(),
+                name: "Go".into(),
+                username: None,
+                password: None,
+                key: "sk-go".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(go.enabled);
+        let go_revision = state.settings_revision();
+        let disabled_go = toggle_account(State(state.clone()), AxumPath(go.id.clone()), None)
+            .await
+            .unwrap()
+            .0;
+        assert!(!disabled_go.enabled);
+        assert_ne!(state.settings_revision(), go_revision);
+        let restored = toggle_account(State(state.clone()), AxumPath(go.id.clone()), None)
+            .await
+            .unwrap()
+            .0;
+        assert!(restored.enabled);
+
+        for plan in crate::provider::BUILTIN_PLANS
+            .iter()
+            .copied()
+            .filter(|plan| !plan.routable && plan.offering.singleton_account_id.is_none())
+        {
+            let custom_config = crate::provider::plan_requires_custom_config(plan).then_some(
+                AccountCustomConfigInput {
+                    base_url: "https://api.example.com/v1".into(),
+                    upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                    auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
+                },
+            );
+            let capabilities = if crate::provider::plan_requires_custom_config(plan) {
+                vec![AccountModelCapabilityInput {
+                    model_id: "org/model".into(),
+                    protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                }]
+            } else {
+                Vec::new()
+            };
+            let acknowledgements = plan
+                .risk_notice
+                .map(|notice| {
+                    vec![AccountAcknowledgementInput {
+                        acknowledgement_id: notice.acknowledgement_id.to_string(),
+                        version: notice.version.to_string(),
+                    }]
+                })
+                .unwrap_or_default();
+            let draft = create_account_inner(
+                state.clone(),
+                AccountInput {
+                    provider_id: plan.offering.provider_id.into(),
+                    offering_id: plan.offering.offering_id.into(),
+                    name: format!("{} draft", plan.display_name),
+                    username: None,
+                    password: None,
+                    key: if plan.key_prefix == Some(crate::provider::SCNET_TOKEN_PLAN_KEY_PREFIX) {
+                        "sk-tp-enablement".into()
+                    } else {
+                        "draft-key".into()
+                    },
+                    referral_code: None,
+                    purchase_date: None,
+                    notes: None,
+                },
+                custom_config,
+                acknowledgements,
+                capabilities,
+            )
+            .unwrap()
+            .0;
+            assert!(!draft.enabled, "{} must save disabled", plan.display_name);
+            let stored_before = state.db.lock().get_account(&draft.id).unwrap().unwrap();
+            let revision_before = state.settings_revision();
+
+            let toggle_err = toggle_account(State(state.clone()), AxumPath(draft.id.clone()), None)
+                .await
+                .expect_err("toggle enable must fail closed");
+            assert_eq!(toggle_err.status, StatusCode::CONFLICT);
+            assert!(toggle_err.message.contains("not routable"));
+
+            let update_err = update_account(
+                State(state.clone()),
+                AxumPath(draft.id.clone()),
+                Json(DashboardAccountUpdate::from(AccountUpdate {
+                    enabled: Some(true),
+                    ..AccountUpdate::default()
+                })),
+            )
+            .await
+            .expect_err("patch enable must fail closed");
+            assert_eq!(update_err.status, StatusCode::CONFLICT);
+            assert!(update_err.message.contains("not routable"));
+
+            assert_eq!(state.settings_revision(), revision_before);
+            let stored_after = state.db.lock().get_account(&draft.id).unwrap().unwrap();
+            assert!(!stored_after.enabled);
+            assert_eq!(stored_after.updated_at, stored_before.updated_at);
+            assert_eq!(stored_after.name, stored_before.name);
+
+            let renamed = update_account(
+                State(state.clone()),
+                AxumPath(draft.id.clone()),
+                Json(DashboardAccountUpdate::from(AccountUpdate {
+                    name: Some(format!("{} edited", plan.display_name)),
+                    enabled: Some(false),
+                    ..AccountUpdate::default()
+                })),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert!(!renamed.enabled);
+            assert_eq!(renamed.name, format!("{} edited", plan.display_name));
+            assert_ne!(state.settings_revision(), revision_before);
+        }
 
         drop(state);
         fs::remove_dir_all(dir).unwrap();

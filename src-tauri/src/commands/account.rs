@@ -51,7 +51,10 @@ pub(crate) fn create_account_inner(
             Some(password) => Some(core.encrypt_key(password).map_err(|e| e.to_string())?),
         },
         key_cipher: core.encrypt_key(&input.key).map_err(|e| e.to_string())?,
-        enabled: true,
+        enabled: ocg_core::provider::offering_allows_enablement(
+            offering.provider_id,
+            offering.offering_id,
+        ),
         account_type: AccountType::Key,
         setup_step: AccountSetupStep::Ready,
         referral_code: input.referral_code,
@@ -70,6 +73,12 @@ pub(crate) fn create_account_inner(
         created_at: now,
         updated_at: now,
     };
+    ocg_core::provider::ensure_enabled_offering_is_routable(
+        &account.provider_id,
+        &account.offering_id,
+        account.enabled,
+    )
+    .map_err(|error| error.to_string())?;
     let db = core.db.lock();
     db.create_account(&account).map_err(|e| e.to_string())?;
     let account = db
@@ -128,6 +137,11 @@ pub(crate) fn update_account_inner(
             if !account.setup_step.is_ready() || resulting_key.is_empty() {
                 return Err("account setup is not complete and cannot be enabled".to_string());
             }
+            ocg_core::provider::ensure_offering_can_enable(
+                &account.provider_id,
+                &account.offering_id,
+            )
+            .map_err(|error| error.to_string())?;
         }
         db.update_account(
             &id,
@@ -215,6 +229,10 @@ pub(crate) fn toggle_account_inner(core: &CoreState, id: String) -> Result<Accou
     let next_enabled = !account.enabled;
     if next_enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
         return Err("account setup is not complete and cannot be enabled".to_string());
+    }
+    if next_enabled {
+        ocg_core::provider::ensure_offering_can_enable(&account.provider_id, &account.offering_id)
+            .map_err(|error| error.to_string())?;
     }
     let update = AccountUpdate {
         name: None,
@@ -382,6 +400,14 @@ mod tests {
             ocg_core::provider::COMMAND_CODE_PROVIDER_ID
         );
         assert_eq!(goat.offering_id, ocg_core::provider::GOAT_OFFERING_ID);
+        assert!(!goat.enabled, "GOAT must persist as a disabled draft");
+        let goat_before = core.db.lock().get_account(&goat.id).unwrap().unwrap();
+        let goat_enable = toggle_account_inner(&core, goat.id.clone())
+            .expect_err("GOAT toggle enable must fail closed");
+        assert!(goat_enable.contains("not routable"), "{goat_enable}");
+        let goat_after = core.db.lock().get_account(&goat.id).unwrap().unwrap();
+        assert!(!goat_after.enabled);
+        assert_eq!(goat_after.updated_at, goat_before.updated_at);
 
         assert!(
             create_account_inner(
@@ -546,6 +572,95 @@ mod tests {
             )
             .is_err()
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unroutable_offerings_cannot_be_enabled_through_account_commands() {
+        let (dir, core) = temp_core();
+        for plan in ocg_core::provider::BUILTIN_PLANS
+            .iter()
+            .copied()
+            .filter(|plan| !plan.routable && plan.offering.singleton_account_id.is_none())
+        {
+            let created = create_account_inner(
+                &core,
+                AccountInput {
+                    provider_id: plan.offering.provider_id.into(),
+                    offering_id: plan.offering.offering_id.into(),
+                    name: format!("{}-tauri", plan.offering.offering_id),
+                    username: None,
+                    password: None,
+                    key: if plan.key_prefix == Some(ocg_core::provider::SCNET_TOKEN_PLAN_KEY_PREFIX)
+                    {
+                        "sk-tp-tauri".into()
+                    } else {
+                        "draft-key".into()
+                    },
+                    referral_code: None,
+                    purchase_date: None,
+                    notes: None,
+                },
+            )
+            .unwrap();
+            assert!(!created.enabled, "{} must save disabled", plan.display_name);
+            let before = core.db.lock().get_account(&created.id).unwrap().unwrap();
+            assert!(
+                toggle_account_inner(&core, created.id.clone())
+                    .is_err_and(|error| error.contains("not routable"))
+            );
+            assert!(
+                update_account_inner(
+                    &core,
+                    created.id.clone(),
+                    AccountUpdate {
+                        enabled: Some(true),
+                        ..AccountUpdate::default()
+                    },
+                )
+                .is_err_and(|error| error.contains("not routable"))
+            );
+            let after = core.db.lock().get_account(&created.id).unwrap().unwrap();
+            assert!(!after.enabled);
+            assert_eq!(after.updated_at, before.updated_at);
+            let renamed = update_account_inner(
+                &core,
+                created.id.clone(),
+                AccountUpdate {
+                    name: Some(format!("{}-edited", plan.offering.offering_id)),
+                    enabled: Some(false),
+                    ..AccountUpdate::default()
+                },
+            )
+            .unwrap();
+            assert!(!renamed.enabled);
+            assert_eq!(
+                renamed.name,
+                format!("{}-edited", plan.offering.offering_id)
+            );
+        }
+
+        let go = create_account_inner(
+            &core,
+            AccountInput {
+                provider_id: ocg_core::provider::OPENCODE_PROVIDER_ID.into(),
+                offering_id: ocg_core::provider::GO_OFFERING_ID.into(),
+                name: "go-tauri".into(),
+                username: None,
+                password: None,
+                key: "sk-go-tauri".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert!(go.enabled);
+        let disabled = toggle_account_inner(&core, go.id.clone()).unwrap();
+        assert!(!disabled.enabled);
+        let enabled = toggle_account_inner(&core, go.id).unwrap();
+        assert!(enabled.enabled);
 
         let _ = fs::remove_dir_all(dir);
     }

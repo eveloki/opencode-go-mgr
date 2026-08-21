@@ -315,6 +315,11 @@ async fn key_command(
                 created_at: now,
                 updated_at: now,
             };
+            ocg_core::provider::ensure_enabled_offering_is_routable(
+                &account.provider_id,
+                &account.offering_id,
+                account.enabled,
+            )?;
             db.create_account(&account)?;
             let account = db
                 .get_account(&id)?
@@ -397,6 +402,9 @@ fn toggle_account(state: &Arc<CoreStateInner>, id: &str, enabled: bool) -> Resul
     reject_zen_key_operation(&account)?;
     if enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
         anyhow::bail!("account setup is not complete and cannot be enabled");
+    }
+    if enabled {
+        ocg_core::provider::ensure_offering_can_enable(&account.provider_id, &account.offering_id)?;
     }
     let update = ocg_core::models::AccountUpdate {
         name: None,
@@ -587,11 +595,12 @@ mod tests {
         resolve_dashboard_dir, resolve_data_dir, start_serve, status_command, stop_serve,
         toggle_account,
     };
+    use chrono::Utc;
     use clap::{CommandFactory, Parser};
     use ocg_core::browser::browser_profile_paths;
     use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
-    use ocg_core::models::{AccountSetupStep, AccountType};
-    use ocg_core::provider::{CredentialKind, ZEN_FREE_ACCOUNT_ID};
+    use ocg_core::models::{Account, AccountSetupStep, AccountType};
+    use ocg_core::provider::{BUILTIN_PLANS, CredentialKind, ZEN_FREE_ACCOUNT_ID};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -914,6 +923,117 @@ mod tests {
 
         let missing_toggle = toggle_account(&state, "missing-id", true);
         assert!(missing_toggle.is_err());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn cli_enable_rejects_unroutable_catalog_plans_without_mutation() {
+        let dir = temp_dir("enablement-gate");
+        let cipher = test_cipher();
+        let state = build_state(dir.clone(), cipher.clone()).unwrap();
+        let now = Utc::now();
+        for plan in BUILTIN_PLANS
+            .iter()
+            .copied()
+            .filter(|plan| !plan.routable && plan.offering.singleton_account_id.is_none())
+        {
+            let id = uuid::Uuid::new_v4().to_string();
+            let draft = Account {
+                id: id.clone(),
+                provider_id: plan.offering.provider_id.to_string(),
+                offering_id: plan.offering.offering_id.to_string(),
+                credential_kind: plan.offering.credential_kind,
+                quota_scope: plan.offering.quota_scope,
+                free_alias_enabled: false,
+                name: format!("{}-cli", plan.offering.offering_id),
+                username: None,
+                password_cipher: None,
+                key_cipher: state.encrypt_key("draft-key").unwrap(),
+                enabled: false,
+                account_type: AccountType::Key,
+                setup_step: AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                notes: None,
+                created_at: now,
+                updated_at: now,
+            };
+            state.db.lock().create_account(&draft).unwrap();
+            let before = state.db.lock().get_account(&id).unwrap().unwrap();
+            let error = toggle_account(&state, &id, true).expect_err("enable must fail closed");
+            assert!(
+                error.to_string().contains("not routable"),
+                "{}: {error}",
+                plan.display_name
+            );
+            let after = state.db.lock().get_account(&id).unwrap().unwrap();
+            assert!(!after.enabled);
+            assert_eq!(after.updated_at, before.updated_at);
+            toggle_account(&state, &id, false).unwrap();
+            key_command(
+                dir.clone(),
+                cipher.clone(),
+                KeyAction::Enable { id: id.clone() },
+            )
+            .await
+            .expect_err("CLI enable must fail closed");
+            assert!(!state.db.lock().get_account(&id).unwrap().unwrap().enabled);
+        }
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Add {
+                name: "go-main".into(),
+                key: "sk-go".into(),
+                username: None,
+                password: None,
+            },
+        )
+        .await
+        .unwrap();
+        let go = state
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.name == "go-main")
+            .unwrap();
+        assert!(go.enabled);
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Disable { id: go.id.clone() },
+        )
+        .await
+        .unwrap();
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Enable { id: go.id.clone() },
+        )
+        .await
+        .unwrap();
+        assert!(
+            state
+                .db
+                .lock()
+                .get_account(&go.id)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

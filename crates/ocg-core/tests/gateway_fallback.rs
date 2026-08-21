@@ -16,7 +16,7 @@ use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::net::TcpListener as StdTcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
@@ -398,7 +398,35 @@ fn create_goat_account(
     account.auth_error = None;
     account.created_at = Utc::now();
     account.updated_at = account.created_at;
+    account.enabled = false;
     state.db.lock().create_account(&account).unwrap();
+    force_enable_unroutable_account_for_loopback_test(&state.data_dir, &account.id);
+    assert!(
+        state
+            .db
+            .lock()
+            .get_account(&account.id)
+            .unwrap()
+            .unwrap()
+            .enabled,
+        "loopback GOAT fixture must be enabled in the already-open database"
+    );
+}
+
+/// Integration-test-only SQLite poke. Production `ocg-core` rlibs have no
+/// persistent enablement bypass; a later `Database::open` sanitizes these rows.
+fn force_enable_unroutable_account_for_loopback_test(data_dir: &Path, account_id: &str) {
+    let conn = rusqlite::Connection::open(data_dir.join("data.sqlite"))
+        .expect("loopback test sqlite should open");
+    conn.busy_timeout(StdDuration::from_millis(5_000))
+        .expect("loopback test sqlite should set busy timeout");
+    let changed = conn
+        .execute(
+            "UPDATE accounts SET enabled = 1 WHERE id = ?1",
+            [account_id],
+        )
+        .expect("loopback test enable poke should execute");
+    assert_eq!(changed, 1, "loopback test account {account_id} must exist");
 }
 
 async fn gemini_call(port: u16, model: &str) -> (StatusCode, serde_json::Value) {

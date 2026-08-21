@@ -4,7 +4,7 @@ use crate::provider::*;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter,
+    Connection, OpenFlags, OptionalExtension, Row, Transaction, params, params_from_iter,
     types::{Type, Value},
 };
 use std::{
@@ -577,6 +577,26 @@ fn migrate_legacy_usage_baselines(
                 migrated_month,
                 &id
             ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Idempotent open/startup backstop: leftover `enabled=1` rows for every
+/// catalog plan with `routable=false` are forced off. Pairs come from
+/// [`BUILTIN_PLANS`]; Go, Zen, and unknown provider/offering rows are skipped.
+fn disable_unroutable_catalog_accounts(tx: &Transaction<'_>) -> Result<()> {
+    if !(table_has_column(tx, "accounts", "provider_id")?
+        && table_has_column(tx, "accounts", "offering_id")?
+        && table_has_column(tx, "accounts", "enabled")?)
+    {
+        return Ok(());
+    }
+    for plan in BUILTIN_PLANS.iter().filter(|plan| !plan.routable) {
+        tx.execute(
+            "UPDATE accounts SET enabled = 0
+             WHERE provider_id = ?1 AND offering_id = ?2 AND enabled <> 0",
+            params![plan.offering.provider_id, plan.offering.offering_id],
         )?;
     }
     Ok(())
@@ -1797,18 +1817,20 @@ impl Database {
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
             );",
         )?;
-        // Fail-closed for databases that already reported v23 from the first
-        // contract slice: unverified GOAT rows must stay pending and disabled.
-        // Sparse pre-v22 fixtures may still lack `enabled` even after additive
-        // column backstops, so skip rather than fail the open.
+        // Fail-closed leftovers for every catalogued-but-unroutable offering,
+        // including already-v23 verified rows. Sparse pre-v22 fixtures may still
+        // lack `enabled` even after additive column backstops, so skip rather
+        // than fail the open. Go/Zen and unknown pairs are not in this set.
+        disable_unroutable_catalog_accounts(&tx)?;
+        // Unverified GOAT rows from the first v23 contract slice stay pending.
+        // Verified leftovers keep their verification snapshot; enablement is
+        // handled above.
         if table_has_column(&tx, "accounts", "provider_id")?
             && table_has_column(&tx, "accounts", "offering_id")?
-            && table_has_column(&tx, "accounts", "enabled")?
             && table_has_column(&tx, "accounts", "verification_status")?
         {
             tx.execute(
-                "UPDATE accounts SET verification_status = 'pending', verification_error = NULL,
-                        enabled = 0
+                "UPDATE accounts SET verification_status = 'pending', verification_error = NULL
                  WHERE provider_id = ?1 AND offering_id = ?2
                    AND verification_status <> 'verified'",
                 params![COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
@@ -1969,6 +1991,11 @@ impl Database {
             "Zen Free is database-owned and cannot be created through the generic account API"
         );
         account.validate_provider_binding()?;
+        ensure_enabled_offering_is_routable(
+            &account.provider_id,
+            &account.offering_id,
+            account.enabled,
+        )?;
         let purchase_date = if account.purchase_date.trim().is_empty() {
             local_today()
         } else {
@@ -1999,6 +2026,11 @@ impl Database {
             "Zen Free is database-owned and cannot be created through the generic account API"
         );
         account.validate_provider_binding()?;
+        ensure_enabled_offering_is_routable(
+            &account.provider_id,
+            &account.offering_id,
+            account.enabled,
+        )?;
         let plan = builtin_plan(&account.provider_id, &account.offering_id)
             .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
         if plan_requires_custom_config(plan) {
@@ -2070,7 +2102,7 @@ impl Database {
             Some(s) => Some(s.clone()),
             None => existing.username.clone(),
         };
-        let enabled = update.enabled.unwrap_or(existing.enabled);
+        let requested_enabled = update.enabled.unwrap_or(existing.enabled);
         let referral_code = match &update.referral_code {
             Some(s) if s.is_empty() => None,        // explicitly cleared
             Some(s) => Some(s.clone()),             // set to new value
@@ -2095,6 +2127,15 @@ impl Database {
         let key_replaced = key_cipher.is_some();
         let requires_verification = builtin_plan(&existing.provider_id, &existing.offering_id)
             .is_some_and(|plan| plan.verification_policy == VerificationPolicy::Required);
+        // Gate the value that will actually persist. Verification-required key
+        // replacement still forces enabled=0 in SQL; that write is not an
+        // enablement of an unroutable Plan.
+        let enabled = if key_replaced && requires_verification {
+            false
+        } else {
+            requested_enabled
+        };
+        ensure_enabled_offering_is_routable(&existing.provider_id, &existing.offering_id, enabled)?;
 
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -2141,6 +2182,11 @@ impl Database {
         enabled: bool,
         free_alias_enabled: bool,
     ) -> Result<()> {
+        ensure_enabled_offering_is_routable(
+            OPENCODE_ZEN_FREE_PROVIDER_ID,
+            ANONYMOUS_FREE_OFFERING_ID,
+            enabled,
+        )?;
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO settings (key, value) VALUES ('config', ?1)
@@ -2754,6 +2800,10 @@ impl Database {
         id: &str,
         expected_key_cipher: &str,
     ) -> Result<bool> {
+        let Some(account) = self.get_account(id)? else {
+            return Ok(false);
+        };
+        ensure_enabled_offering_is_routable(&account.provider_id, &account.offering_id, true)?;
         let changed = self.conn.execute(
             "UPDATE accounts
              SET setup_step = 'ready', enabled = 1, auth_error = NULL, updated_at = ?1
@@ -4930,6 +4980,101 @@ mod tests {
             notes: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    fn persist_unroutable_draft(db: &Database, plan: BuiltinPlan, id: &str, notes: &str) {
+        let mut draft = account(id);
+        draft.provider_id = plan.offering.provider_id.to_string();
+        draft.offering_id = plan.offering.offering_id.to_string();
+        draft.credential_kind = plan.offering.credential_kind;
+        draft.quota_scope = plan.offering.quota_scope;
+        draft.enabled = false;
+        draft.notes = Some(notes.to_string());
+        if plan_requires_custom_config(plan) {
+            db.create_account_with_contract(
+                &draft,
+                Some(&AccountCustomConfigInput {
+                    base_url: "https://api.example.com/v1".into(),
+                    upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                    auth_scheme: UpstreamAuthScheme::Bearer,
+                }),
+                &[AccountModelCapabilityInput {
+                    model_id: "org/model".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                }],
+                plan.risk_notice,
+            )
+            .unwrap();
+        } else {
+            db.create_account_with_contract(&draft, None, &[], plan.risk_notice)
+                .unwrap();
+        }
+    }
+
+    fn leftover_enable(db: &Database, id: &str) {
+        let changed = db
+            .conn
+            .execute("UPDATE accounts SET enabled = 1 WHERE id = ?1", [id])
+            .unwrap();
+        assert_eq!(changed, 1, "{id}");
+    }
+
+    fn clone_account_row_as_enabled(
+        conn: &Connection,
+        source_id: &str,
+        new_id: &str,
+        provider_id: &str,
+        offering_id: &str,
+    ) {
+        let mut stmt = conn.prepare("PRAGMA table_info(accounts)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|column| column.unwrap())
+            .collect();
+        let select_list = columns
+            .iter()
+            .map(|column| match column.as_str() {
+                "id" | "name" => "?1".to_string(),
+                "provider_id" => "?2".to_string(),
+                "offering_id" => "?3".to_string(),
+                "enabled" => "1".to_string(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        conn.execute(
+            &format!(
+                "INSERT INTO accounts ({cols}) SELECT {select_list} FROM accounts WHERE id = ?4",
+                cols = columns.join(", ")
+            ),
+            params![new_id, provider_id, offering_id, source_id],
+        )
+        .unwrap();
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SanitationSnapshot {
+        enabled: bool,
+        name: String,
+        notes: Option<String>,
+        updated_at: DateTime<Utc>,
+        verification: ConnectionVerificationStatus,
+        verification_error: Option<String>,
+    }
+
+    fn sanitation_snapshot(db: &Database, id: &str) -> SanitationSnapshot {
+        let account = db.get_account(id).unwrap().expect(id);
+        let verification = db.account_verification_state(id).unwrap().expect(id);
+        SanitationSnapshot {
+            enabled: account.enabled,
+            name: account.name,
+            notes: account.notes,
+            updated_at: account.updated_at,
+            verification: verification.status,
+            verification_error: verification.verification_error,
         }
     }
 
@@ -8669,7 +8814,7 @@ mod tests {
         let mut goat = account("v22-goat");
         goat.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
         goat.offering_id = GOAT_OFFERING_ID.to_string();
-        goat.enabled = true;
+        goat.enabled = false;
         db.create_account(&goat)
             .expect("representative GOAT account should save");
         db.log_forward(&forward_log("v22-account", "success", 3.5))
@@ -8695,6 +8840,7 @@ mod tests {
              ALTER TABLE forward_logs DROP COLUMN requested_model;
              DELETE FROM schema_version;
              INSERT INTO schema_version (version) VALUES (22);
+             UPDATE accounts SET enabled = 1 WHERE id = 'v22-goat';
              PRAGMA foreign_keys=ON;",
         )
         .expect("v22 fixture should be created");
@@ -8776,6 +8922,7 @@ mod tests {
         let mut goat = account("goat-draft");
         goat.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
         goat.offering_id = GOAT_OFFERING_ID.to_string();
+        goat.enabled = false;
         db.create_account(&goat).unwrap();
         let goat_state = db
             .account_verification_state("goat-draft")
@@ -8786,6 +8933,7 @@ mod tests {
         let mut custom = account("custom-1");
         custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
         custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.enabled = false;
         db.create_account(&custom).unwrap();
         db.upsert_account_custom_config(
             "custom-1",
@@ -8825,6 +8973,7 @@ mod tests {
         let mut scnet = account("scnet-1");
         scnet.provider_id = SCNET_PROVIDER_ID.to_string();
         scnet.offering_id = SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.to_string();
+        scnet.enabled = false;
         db.create_account(&scnet).unwrap();
         let scnet_notice = builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
             .and_then(|plan| plan.risk_notice)
@@ -9038,6 +9187,7 @@ mod tests {
         let mut custom = account("custom-atomic");
         custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
         custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.enabled = false;
         db.conn
             .execute_batch(
                 "CREATE TRIGGER fail_custom_config
@@ -9132,6 +9282,7 @@ mod tests {
         let mut custom_empty = account("custom-empty-caps");
         custom_empty.provider_id = CUSTOM_PROVIDER_ID.to_string();
         custom_empty.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom_empty.enabled = false;
         let empty_caps = db.create_account_with_contract(
             &custom_empty,
             Some(&AccountCustomConfigInput {
@@ -9159,7 +9310,7 @@ mod tests {
         let mut custom = account("custom-protocol");
         custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
         custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
-        custom.enabled = true;
+        custom.enabled = false;
         let mismatch = db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
@@ -9229,7 +9380,7 @@ mod tests {
         let mut custom = account("custom-stale");
         custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
         custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
-        custom.enabled = true;
+        custom.enabled = false;
         db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
@@ -9357,6 +9508,428 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unroutable_catalog_plans_cannot_persist_enabled_true() {
+        let dir = temp_data_dir("enablement-gate");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut go = account("go-enabled");
+        go.enabled = true;
+        db.create_account(&go).unwrap();
+        assert!(db.get_account("go-enabled").unwrap().unwrap().enabled);
+
+        for plan in BUILTIN_PLANS
+            .iter()
+            .copied()
+            .filter(|plan| !plan.routable && plan.offering.singleton_account_id.is_none())
+        {
+            let id = format!("draft-{}", plan.offering.offering_id);
+            let mut draft = account(&id);
+            draft.provider_id = plan.offering.provider_id.to_string();
+            draft.offering_id = plan.offering.offering_id.to_string();
+            draft.credential_kind = plan.offering.credential_kind;
+            draft.quota_scope = plan.offering.quota_scope;
+            draft.enabled = true;
+            let error = db
+                .create_account(&draft)
+                .expect_err("enabled unroutable create must fail closed");
+            assert!(
+                error.to_string().contains("not routable"),
+                "{}/{}: {error}",
+                plan.offering.provider_id,
+                plan.offering.offering_id
+            );
+            assert!(db.get_account(&id).unwrap().is_none());
+
+            draft.enabled = false;
+            if plan_requires_custom_config(plan) {
+                db.create_account_with_contract(
+                    &draft,
+                    Some(&AccountCustomConfigInput {
+                        base_url: "https://api.example.com/v1".into(),
+                        upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                        auth_scheme: UpstreamAuthScheme::Bearer,
+                    }),
+                    &[AccountModelCapabilityInput {
+                        model_id: "org/model".into(),
+                        protocol: UpstreamProtocolKind::ChatCompletions,
+                        source: None,
+                    }],
+                    plan.risk_notice,
+                )
+                .unwrap();
+            } else {
+                db.create_account_with_contract(&draft, None, &[], plan.risk_notice)
+                    .unwrap();
+            }
+            let stored = db.get_account(&id).unwrap().unwrap();
+            assert!(!stored.enabled, "{id} draft must stay disabled");
+            let before = stored.updated_at;
+
+            let enable_error = db
+                .update_account(
+                    &id,
+                    &AccountUpdate {
+                        enabled: Some(true),
+                        ..AccountUpdate::default()
+                    },
+                    None,
+                    None,
+                )
+                .expect_err("enable must fail closed");
+            assert!(
+                enable_error.to_string().contains("not routable"),
+                "{id}: {enable_error}"
+            );
+            let after_reject = db.get_account(&id).unwrap().unwrap();
+            assert!(!after_reject.enabled);
+            assert_eq!(after_reject.updated_at, before);
+            assert_eq!(after_reject.name, stored.name);
+
+            db.update_account(
+                &id,
+                &AccountUpdate {
+                    name: Some(format!("{id}-renamed")),
+                    ..AccountUpdate::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            db.update_account(
+                &id,
+                &AccountUpdate {
+                    enabled: Some(false),
+                    ..AccountUpdate::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            let edited = db.get_account(&id).unwrap().unwrap();
+            assert!(!edited.enabled);
+            assert_eq!(edited.name, format!("{id}-renamed"));
+        }
+
+        db.update_account(
+            "go-enabled",
+            &AccountUpdate {
+                enabled: Some(false),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        db.update_account(
+            "go-enabled",
+            &AccountUpdate {
+                enabled: Some(true),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(db.get_account("go-enabled").unwrap().unwrap().enabled);
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknown() {
+        let unroutable: Vec<_> = BUILTIN_PLANS
+            .iter()
+            .copied()
+            .filter(|plan| !plan.routable)
+            .collect();
+        assert_eq!(
+            unroutable
+                .iter()
+                .map(|plan| (plan.offering.provider_id, plan.offering.offering_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
+                (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
+                (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID),
+                (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID),
+                (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
+            ]
+        );
+
+        let dir = temp_data_dir("unroutable-sanitation");
+        let db = Database::open(dir.clone()).unwrap();
+
+        let mut go = account("go-keep");
+        go.notes = Some("go-notes".into());
+        db.create_account(&go).unwrap();
+        leftover_enable(&db, "go-keep");
+
+        let mut unknown = account("unknown-keep");
+        unknown.notes = Some("unknown-notes".into());
+        db.create_account(&unknown).unwrap();
+        leftover_enable(&db, "unknown-keep");
+        db.conn
+            .execute(
+                "UPDATE accounts
+                 SET provider_id = 'unknown-provider', offering_id = 'unknown-offering'
+                 WHERE id = 'unknown-keep'",
+                [],
+            )
+            .unwrap();
+
+        persist_unroutable_draft(
+            &db,
+            builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap(),
+            "goat-pending",
+            "goat-pending-notes",
+        );
+        leftover_enable(&db, "goat-pending");
+
+        persist_unroutable_draft(
+            &db,
+            builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap(),
+            "goat-verified",
+            "goat-verified-notes",
+        );
+        db.conn
+            .execute(
+                "UPDATE accounts
+                 SET enabled = 1, verification_status = 'verified', verification_error = NULL
+                 WHERE id = 'goat-verified'",
+                [],
+            )
+            .unwrap();
+
+        persist_unroutable_draft(
+            &db,
+            builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap(),
+            "goat-failed",
+            "goat-failed-notes",
+        );
+        db.conn
+            .execute(
+                "UPDATE accounts
+                 SET enabled = 1, verification_status = 'failed', verification_error = 'boom'
+                 WHERE id = 'goat-failed'",
+                [],
+            )
+            .unwrap();
+
+        for plan in unroutable.iter().filter(|plan| {
+            !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
+                && plan.offering.offering_id == GOAT_OFFERING_ID)
+        }) {
+            let id = format!("draft-{}", plan.offering.offering_id);
+            persist_unroutable_draft(&db, *plan, &id, &format!("{id}-notes"));
+            leftover_enable(&db, &id);
+            if plan.offering.offering_id == SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID {
+                db.conn
+                    .execute(
+                        "UPDATE accounts SET verification_status = 'verified' WHERE id = ?1",
+                        [&id],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let zen_before = sanitation_snapshot(&db, ZEN_FREE_ACCOUNT_ID);
+        let go_before = sanitation_snapshot(&db, "go-keep");
+        let unknown_before = sanitation_snapshot(&db, "unknown-keep");
+        let goat_pending_before = sanitation_snapshot(&db, "goat-pending");
+        let goat_verified_before = sanitation_snapshot(&db, "goat-verified");
+        let goat_failed_before = sanitation_snapshot(&db, "goat-failed");
+        assert!(go_before.enabled);
+        assert!(unknown_before.enabled);
+        assert!(goat_pending_before.enabled);
+        assert!(goat_verified_before.enabled);
+        assert!(goat_failed_before.enabled);
+        assert_eq!(
+            goat_pending_before.verification,
+            ConnectionVerificationStatus::Pending
+        );
+        assert_eq!(
+            goat_verified_before.verification,
+            ConnectionVerificationStatus::Verified
+        );
+        assert_eq!(
+            goat_failed_before.verification,
+            ConnectionVerificationStatus::Failed
+        );
+
+        drop(db);
+        let db = Database::open(dir.clone()).unwrap();
+
+        let zen_after = sanitation_snapshot(&db, ZEN_FREE_ACCOUNT_ID);
+        let go_after = sanitation_snapshot(&db, "go-keep");
+        let unknown_after = sanitation_snapshot(&db, "unknown-keep");
+        assert_eq!(zen_after, zen_before);
+        assert_eq!(go_after, go_before);
+        assert_eq!(unknown_after, unknown_before);
+
+        let goat_pending_after = sanitation_snapshot(&db, "goat-pending");
+        assert!(!goat_pending_after.enabled);
+        assert_eq!(goat_pending_after.name, goat_pending_before.name);
+        assert_eq!(goat_pending_after.notes, goat_pending_before.notes);
+        assert_eq!(
+            goat_pending_after.updated_at,
+            goat_pending_before.updated_at
+        );
+        assert_eq!(
+            goat_pending_after.verification,
+            ConnectionVerificationStatus::Pending
+        );
+
+        let goat_verified_after = sanitation_snapshot(&db, "goat-verified");
+        assert!(!goat_verified_after.enabled);
+        assert_eq!(goat_verified_after.name, goat_verified_before.name);
+        assert_eq!(goat_verified_after.notes, goat_verified_before.notes);
+        assert_eq!(
+            goat_verified_after.updated_at,
+            goat_verified_before.updated_at
+        );
+        assert_eq!(
+            goat_verified_after.verification,
+            ConnectionVerificationStatus::Verified
+        );
+
+        let goat_failed_after = sanitation_snapshot(&db, "goat-failed");
+        assert!(!goat_failed_after.enabled);
+        assert_eq!(goat_failed_after.name, goat_failed_before.name);
+        assert_eq!(goat_failed_after.notes, goat_failed_before.notes);
+        assert_eq!(goat_failed_after.updated_at, goat_failed_before.updated_at);
+        assert_eq!(
+            goat_failed_after.verification,
+            ConnectionVerificationStatus::Pending
+        );
+        assert_eq!(goat_failed_after.verification_error, None);
+
+        for plan in unroutable.iter().filter(|plan| {
+            !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
+                && plan.offering.offering_id == GOAT_OFFERING_ID)
+        }) {
+            let id = format!("draft-{}", plan.offering.offering_id);
+            let after = sanitation_snapshot(&db, &id);
+            assert!(!after.enabled, "{id} leftover must be disabled");
+            assert_eq!(after.name, id);
+            assert_eq!(after.notes.as_deref(), Some(format!("{id}-notes").as_str()));
+            if plan.offering.offering_id == SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID {
+                assert_eq!(after.verification, ConnectionVerificationStatus::Verified);
+            } else {
+                assert_eq!(after.verification, ConnectionVerificationStatus::Pending);
+            }
+        }
+
+        let first_pass: Vec<_> = [
+            ZEN_FREE_ACCOUNT_ID,
+            "go-keep",
+            "unknown-keep",
+            "goat-pending",
+            "goat-verified",
+            "goat-failed",
+            "draft-token-plan-basic",
+            "draft-token-plan-standard",
+            "draft-token-plan-premium",
+            "draft-api",
+        ]
+        .into_iter()
+        .map(|id| (id.to_string(), sanitation_snapshot(&db, id)))
+        .collect();
+
+        drop(db);
+        let db = Database::open(dir.clone()).unwrap();
+        for (id, expected) in &first_pass {
+            assert_eq!(
+                sanitation_snapshot(&db, id),
+                *expected,
+                "second open must be idempotent for {id}"
+            );
+        }
+
+        db.update_account(
+            "draft-token-plan-basic",
+            &AccountUpdate {
+                name: Some("draft-token-plan-basic-renamed".into()),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        let recovered = db.get_account("draft-token-plan-basic").unwrap().unwrap();
+        assert!(!recovered.enabled);
+        assert_eq!(recovered.name, "draft-token-plan-basic-renamed");
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v22_open_sanitizes_enabled_unroutable_catalog_rows() {
+        let dir = temp_data_dir("v22-unroutable-sanitation");
+        create_v22_fixture(&dir);
+        let conn = Connection::open(dir.join("data.sqlite")).expect("v22 fixture should reopen");
+        for plan in BUILTIN_PLANS.iter().filter(|plan| {
+            !plan.routable
+                && !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
+                    && plan.offering.offering_id == GOAT_OFFERING_ID)
+        }) {
+            clone_account_row_as_enabled(
+                &conn,
+                "v22-goat",
+                &format!("v22-{}", plan.offering.offering_id),
+                plan.offering.provider_id,
+                plan.offering.offering_id,
+            );
+        }
+        clone_account_row_as_enabled(
+            &conn,
+            "v22-account",
+            "v22-unknown",
+            "unknown-provider",
+            "unknown-offering",
+        );
+        drop(conn);
+
+        let db = Database::open(dir.clone()).expect("v22 database should migrate and sanitize");
+        assert!(db.get_account("v22-account").unwrap().unwrap().enabled);
+        assert!(db.get_account("v22-unknown").unwrap().unwrap().enabled);
+        assert!(
+            db.get_account(ZEN_FREE_ACCOUNT_ID)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        assert!(!db.get_account("v22-goat").unwrap().unwrap().enabled);
+        for plan in BUILTIN_PLANS.iter().filter(|plan| {
+            !plan.routable
+                && !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
+                    && plan.offering.offering_id == GOAT_OFFERING_ID)
+        }) {
+            let id = format!("v22-{}", plan.offering.offering_id);
+            let stored = db.get_account(&id).unwrap().unwrap();
+            assert!(!stored.enabled, "{id}");
+            assert_eq!(stored.provider_id, plan.offering.provider_id);
+            assert_eq!(stored.offering_id, plan.offering.offering_id);
+        }
+        db.update_account(
+            "v22-goat",
+            &AccountUpdate {
+                name: Some("v22-goat-renamed".into()),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        let renamed = db.get_account("v22-goat").unwrap().unwrap();
+        assert!(!renamed.enabled);
+        assert_eq!(renamed.name, "v22-goat-renamed");
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();

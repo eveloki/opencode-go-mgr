@@ -1986,9 +1986,11 @@ mod tests {
         let mut first = ready_account(&state, "goat-a", "goat-key-a");
         first.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
         first.offering_id = GOAT_OFFERING_ID.to_string();
+        first.enabled = false;
         let mut second = ready_account(&state, "goat-b", "goat-key-b");
         second.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
         second.offering_id = GOAT_OFFERING_ID.to_string();
+        second.enabled = false;
         {
             let db = state.db.lock();
             db.create_account(&first).unwrap();

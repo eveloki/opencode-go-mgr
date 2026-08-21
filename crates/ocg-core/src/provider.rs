@@ -759,6 +759,47 @@ pub fn default_verification_status(plan: BuiltinPlan) -> ConnectionVerificationS
     }
 }
 
+/// Catalog-backed enablement capability. Only `routable` offerings may persist
+/// `enabled=true`. Unknown offerings fail closed.
+pub const fn plan_allows_enablement(plan: BuiltinPlan) -> bool {
+    plan.routable
+}
+
+pub fn offering_allows_enablement(provider_id: &str, offering_id: &str) -> bool {
+    builtin_plan(provider_id, offering_id).is_some_and(plan_allows_enablement)
+}
+
+/// Reject `enabled=true` for catalogued-but-unroutable offerings. Disabled
+/// drafts skip the check so they can still be created and edited.
+pub fn ensure_enabled_offering_is_routable(
+    provider_id: &str,
+    offering_id: &str,
+    enabled: bool,
+) -> Result<(), ProviderBindingError> {
+    if !enabled {
+        return Ok(());
+    }
+    ensure_offering_can_enable(provider_id, offering_id)
+}
+
+pub fn ensure_offering_can_enable(
+    provider_id: &str,
+    offering_id: &str,
+) -> Result<(), ProviderBindingError> {
+    match builtin_plan(provider_id, offering_id) {
+        Some(plan) if plan_allows_enablement(plan) => Ok(()),
+        Some(plan) => Err(ProviderBindingError::EnablementNotRoutable {
+            provider_id: plan.offering.provider_id,
+            offering_id: plan.offering.offering_id,
+            display_name: plan.display_name,
+        }),
+        None => Err(ProviderBindingError::UnknownOffering {
+            provider_id: provider_id.to_string(),
+            offering_id: offering_id.to_string(),
+        }),
+    }
+}
+
 pub fn plan_requires_custom_config(plan: BuiltinPlan) -> bool {
     plan.offering.provider_id == CUSTOM_PROVIDER_ID
         && plan.offering.offering_id == CUSTOM_API_OFFERING_ID
@@ -1240,6 +1281,11 @@ pub enum ProviderBindingError {
     },
     InvalidCustomBaseUrl(String),
     InvalidModelId(String),
+    EnablementNotRoutable {
+        provider_id: &'static str,
+        offering_id: &'static str,
+        display_name: &'static str,
+    },
 }
 
 impl fmt::Display for ProviderBindingError {
@@ -1283,6 +1329,10 @@ impl fmt::Display for ProviderBindingError {
             Self::InvalidCustomBaseUrl(message) | Self::InvalidModelId(message) => {
                 f.write_str(message)
             }
+            Self::EnablementNotRoutable { display_name, .. } => write!(
+                f,
+                "{display_name} is catalogued but is not routable in this release"
+            ),
         }
     }
 }
@@ -1460,6 +1510,61 @@ mod tests {
             default_verification_status(go),
             ConnectionVerificationStatus::NotRequired
         );
+    }
+
+    #[test]
+    fn catalog_enablement_gate_is_fail_closed_for_unroutable_plans() {
+        for plan in BUILTIN_PLANS {
+            let provider_id = plan.offering.provider_id;
+            let offering_id = plan.offering.offering_id;
+            assert_eq!(
+                plan_allows_enablement(plan),
+                plan.routable,
+                "{provider_id}/{offering_id}"
+            );
+            assert_eq!(
+                offering_allows_enablement(provider_id, offering_id),
+                plan.routable,
+                "{provider_id}/{offering_id}"
+            );
+            assert!(
+                ensure_enabled_offering_is_routable(provider_id, offering_id, false).is_ok(),
+                "disabled drafts must stay writable: {provider_id}/{offering_id}"
+            );
+            let enabled = ensure_enabled_offering_is_routable(provider_id, offering_id, true);
+            if plan.routable {
+                enabled.expect("routable offerings may enable");
+                ensure_offering_can_enable(provider_id, offering_id).unwrap();
+            } else {
+                let error = enabled.expect_err("unroutable offerings must reject enabled=true");
+                assert!(
+                    matches!(
+                        error,
+                        ProviderBindingError::EnablementNotRoutable {
+                            provider_id: rejected_provider,
+                            offering_id: rejected_offering,
+                            display_name,
+                        } if rejected_provider == provider_id
+                            && rejected_offering == offering_id
+                            && display_name == plan.display_name
+                    ),
+                    "{error:?}"
+                );
+                assert!(error.to_string().contains("not routable"), "{}", error);
+            }
+        }
+        assert!(!offering_allows_enablement(
+            "unknown-provider",
+            "unknown-offering"
+        ));
+        assert!(matches!(
+            ensure_offering_can_enable("unknown-provider", "unknown-offering"),
+            Err(ProviderBindingError::UnknownOffering { .. })
+        ));
+        let zen = builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();
+        assert!(plan_allows_enablement(zen));
+        let go = builtin_plan(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
+        assert!(plan_allows_enablement(go));
     }
 
     #[test]
