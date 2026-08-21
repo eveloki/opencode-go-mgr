@@ -37,8 +37,12 @@ pub const GO_OFFERING_ID: &str = "go";
 pub const COMMAND_CODE_PROVIDER_ID: &str = "command-code";
 pub const GOAT_OFFERING_ID: &str = "goat";
 pub const SCNET_PROVIDER_ID: &str = "scnet";
+pub const SCNET_BASIC_OFFERING_ID: &str = "token-plan-basic";
+pub const SCNET_STANDARD_OFFERING_ID: &str = "token-plan-standard";
+pub const SCNET_PREMIUM_OFFERING_ID: &str = "token-plan-premium";
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
 pub const CUSTOM_OFFERING_ID: &str = "api";
+pub const CUSTOM_UNROUTABLE_MODEL_ID: &str = "custom-unroutable-model";
 
 pub const GO_ALIAS: &str = "deepseek-v4-flash";
 pub const GOAT_UNIQUE_RAW_ID: &str = "deepseek/deepseek-v4-flash";
@@ -234,6 +238,17 @@ impl V2Harness {
         body
     }
 
+    pub async fn account_by_id(&self, id: &str) -> Value {
+        self.accounts()
+            .await
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|account| account["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("account {id} missing from dashboard list"))
+    }
+
     pub async fn settings_revision(&self) -> u64 {
         let (_, settings) = self.get_json("/settings").await;
         settings["revision"].as_u64().unwrap_or(0)
@@ -388,7 +403,7 @@ pub fn catalog_entry<'a>(
 }
 
 pub fn catalog_aliases(entry: &Value) -> Vec<Value> {
-    match &entry["aliases"] {
+    match &entry["model_aliases"] {
         Value::Array(items) => items.clone(),
         _ => Vec::new(),
     }
@@ -398,12 +413,52 @@ pub fn alias_names(entry: &Value) -> HashSet<String> {
     catalog_aliases(entry)
         .into_iter()
         .filter_map(|item| {
-            item["alias"]
-                .as_str()
-                .or_else(|| item.as_str())
+            item.as_str()
+                .or_else(|| item["alias"].as_str())
                 .map(str::to_string)
         })
         .collect()
+}
+
+pub fn form_field_ids(entry: &Value) -> HashSet<String> {
+    entry["form_fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|field| field["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+pub fn matching_acknowledgements(notice: &Value) -> Value {
+    json!([{
+        "acknowledgement_id": notice["acknowledgement_id"],
+        "version": notice["version"]
+    }])
+}
+
+pub fn custom_create_payload(
+    name: &str,
+    key: &str,
+    revision: u64,
+    base_url: &str,
+    model_id: &str,
+) -> Value {
+    json!({
+        "provider_id": CUSTOM_PROVIDER_ID,
+        "offering_id": CUSTOM_OFFERING_ID,
+        "name": name,
+        "key": key,
+        "expected_revision": revision,
+        "custom_config": {
+            "base_url": base_url,
+            "upstream_protocol": "chat_completions",
+            "auth_scheme": "bearer"
+        },
+        "model_capabilities": [{
+            "model_id": model_id,
+            "protocol": "chat_completions"
+        }]
+    })
 }
 
 pub fn overlapping_raw_ids(catalog: &Value) -> Vec<(String, Vec<(String, String)>)> {
@@ -415,7 +470,10 @@ pub fn overlapping_raw_ids(catalog: &Value) -> Vec<(String, Vec<(String, String)
         let provider = entry["provider_id"].as_str().unwrap_or_default();
         let offering = entry["offering_id"].as_str().unwrap_or_default();
         for alias in catalog_aliases(entry) {
-            if let Some(raw) = alias["upstream_model_id"].as_str() {
+            let raw = alias["upstream_model"]
+                .as_str()
+                .or_else(|| alias["upstream_model_id"].as_str());
+            if let Some(raw) = raw {
                 by_raw
                     .entry(raw.to_string())
                     .or_default()
@@ -491,6 +549,15 @@ pub fn client_model_ids(body: &Value) -> Vec<String> {
 
 pub fn required_catalog_fields() -> Vec<String> {
     catalog_contract()["required_entry_fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect()
+}
+
+pub fn risk_notice_fields() -> Vec<String> {
+    catalog_contract()["risk_notice_fields"]
         .as_array()
         .into_iter()
         .flatten()

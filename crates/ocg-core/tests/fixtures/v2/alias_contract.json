@@ -1,5 +1,5 @@
 {
-  "comment": "Client-facing aliases are stable lowercase kebab-case. Existing OpenCode Go model IDs are the preferred aliases. /v1/models must not advertise raw upstream IDs.",
+  "comment": "Client-facing aliases are stable lowercase kebab-case. Existing OpenCode Go model IDs are the preferred aliases. /v1/models must not advertise raw upstream IDs. Live GOAT/SCNet/Custom mappings stay fail-closed in this slice; overlapping raw IDs are covered by the synthetic runtime test rather than a routable Custom path.",
   "preferred_go_aliases": [
     "deepseek-v4-flash",
     "minimax-m2.7",

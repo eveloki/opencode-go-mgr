@@ -1,5 +1,5 @@
 {
-  "comment": "Black-box Plan catalog contract for OCG Manager v2.0. GET /dashboard/api/providers/catalog is the only Plan source. Internal identity stays provider_id + offering_id.",
+  "comment": "Black-box Plan catalog contract for OCG Manager v2.0. GET /dashboard/api/providers/catalog is the only Plan source. Internal identity stays provider_id + offering_id. Catalog JSON uses display_name/display_family, creation_availability, verification_policy, verification_runtime_availability, routable, form_fields, risk_notice, model_aliases, pricing_availability, and usage_availability. risk_notice is omitted when a Plan has none.",
   "catalog_paths": [
     "/dashboard/api/providers/catalog",
     "/dashboard/api/providers"
@@ -8,62 +8,99 @@
     "provider_id",
     "offering_id",
     "display_name",
+    "display_family",
     "creation_availability",
-    "verification_required",
-    "credential_kind",
-    "quota_scope",
+    "verification_policy",
+    "verification_runtime_availability",
+    "routable",
+    "form_fields",
+    "model_aliases",
     "pricing_availability",
-    "usage_availability",
-    "aliases"
+    "usage_availability"
   ],
-  "alias_entry_fields": ["alias", "upstream_model_id", "upstream_protocol"],
+  "risk_notice_fields": ["acknowledgement_id", "version", "content_hash"],
+  "custom_create": {
+    "custom_config_fields": ["base_url", "upstream_protocol", "auth_scheme"],
+    "model_capability_fields": ["model_id", "protocol"]
+  },
   "plans": [
     {
       "provider_id": "opencode",
       "offering_id": "go",
-      "verification_required": false,
+      "verification_policy": "not_required",
+      "verification_runtime_availability": "optional",
       "creation_availability": "available",
+      "routable": true,
       "required_aliases": ["deepseek-v4-flash", "minimax-m2.7", "grok-4.5"]
     },
     {
       "provider_id": "opencode-zen-free",
       "offering_id": "anonymous-free",
-      "verification_required": false,
+      "verification_policy": "not_required",
+      "verification_runtime_availability": "not_applicable",
+      "creation_availability": "unavailable",
+      "routable": true,
       "singleton": true
     },
     {
       "provider_id": "command-code",
       "offering_id": "goat",
-      "verification_required": true,
-      "creation_availability_allowed": ["available", "unavailable"]
+      "verification_policy": "required",
+      "verification_runtime_availability": "unavailable",
+      "creation_availability": "available",
+      "routable": false,
+      "model_aliases_empty": true
     },
     {
       "provider_id": "scnet",
-      "offering_id": "basic",
-      "verification_required": true,
-      "requires_risk_acknowledgement": true,
-      "key_prefix": "sk-tp-"
+      "offering_id": "token-plan-basic",
+      "verification_policy": "required",
+      "verification_runtime_availability": "unavailable",
+      "creation_availability": "available",
+      "routable": false,
+      "requires_risk_notice": true,
+      "key_prefix": "sk-tp-",
+      "model_aliases_empty": true,
+      "required_form_field_ids": ["acknowledgement"]
     },
     {
       "provider_id": "scnet",
-      "offering_id": "standard",
-      "verification_required": true,
-      "requires_risk_acknowledgement": true,
-      "key_prefix": "sk-tp-"
+      "offering_id": "token-plan-standard",
+      "verification_policy": "required",
+      "verification_runtime_availability": "unavailable",
+      "creation_availability": "available",
+      "routable": false,
+      "requires_risk_notice": true,
+      "key_prefix": "sk-tp-",
+      "model_aliases_empty": true,
+      "required_form_field_ids": ["acknowledgement"]
     },
     {
       "provider_id": "scnet",
-      "offering_id": "premium",
-      "verification_required": true,
-      "requires_risk_acknowledgement": true,
-      "key_prefix": "sk-tp-"
+      "offering_id": "token-plan-premium",
+      "verification_policy": "required",
+      "verification_runtime_availability": "unavailable",
+      "creation_availability": "available",
+      "routable": false,
+      "requires_risk_notice": true,
+      "key_prefix": "sk-tp-",
+      "model_aliases_empty": true,
+      "required_form_field_ids": ["acknowledgement"]
     },
     {
       "provider_id": "custom",
       "offering_id": "api",
-      "verification_required": true,
-      "creation_availability_allowed": ["available", "unavailable"]
+      "verification_policy": "required",
+      "verification_runtime_availability": "unavailable",
+      "creation_availability": "available",
+      "routable": false,
+      "model_aliases_empty": true,
+      "required_form_field_ids": [
+        "base_url",
+        "upstream_protocol",
+        "auth_scheme",
+        "model_capabilities"
+      ]
     }
-  ],
-  "risk_acknowledgement_fields": ["id", "version", "content_hash"]
+  ]
 }

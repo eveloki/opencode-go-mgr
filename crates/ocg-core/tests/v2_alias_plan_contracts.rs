@@ -2,8 +2,10 @@
 //!
 //! These tests drive public Gateway and dashboard HTTP/JSON. They are the
 //! independent acceptance slice for the accepted unified-alias / multi-Plan
-//! contracts and may fail on commit e3dea932 solely because that behavior is
-//! not implemented yet.
+//! contracts. POST `/accounts/{id}/verify` is intentionally unavailable in
+//! this slice and must fail closed. Live GOAT / SCNet / Custom stay
+//! unroutable; overlapping raw IDs are covered by the synthetic runtime test
+//! rather than a dashboard-invented Custom route.
 //!
 //! Requirement map: `fixtures/v2/requirement_map.md`.
 //!
@@ -77,22 +79,75 @@ async fn providers_catalog_is_the_only_plan_source() {
             missing.is_empty(),
             "v2-contract: {provider_id}/{offering_id} missing catalog fields {missing:?}: {entry}"
         );
-        if let Some(required_flag) = plan["verification_required"].as_bool() {
+        if let Some(policy) = plan["verification_policy"].as_str() {
             assert_eq!(
-                entry["verification_required"], required_flag,
-                "{provider_id}/{offering_id} verification_required"
+                entry["verification_policy"].as_str(),
+                Some(policy),
+                "{provider_id}/{offering_id} verification_policy"
             );
         }
-        if plan["requires_risk_acknowledgement"] == true {
-            let ack = &entry["risk_acknowledgement"];
-            assert!(
-                ack.is_object(),
-                "{provider_id}/{offering_id} must publish risk_acknowledgement: {entry}"
+        if let Some(runtime) = plan["verification_runtime_availability"].as_str() {
+            assert_eq!(
+                entry["verification_runtime_availability"].as_str(),
+                Some(runtime),
+                "{provider_id}/{offering_id} verification_runtime_availability"
             );
-            for field in ["id", "version", "content_hash"] {
+        }
+        if let Some(availability) = plan["creation_availability"].as_str() {
+            assert_eq!(
+                entry["creation_availability"].as_str(),
+                Some(availability),
+                "{provider_id}/{offering_id} creation_availability"
+            );
+        }
+        if let Some(routable) = plan["routable"].as_bool() {
+            assert_eq!(
+                entry["routable"], routable,
+                "{provider_id}/{offering_id} routable"
+            );
+        }
+        if plan["singleton"] == true {
+            assert_eq!(
+                entry["singleton"], true,
+                "{provider_id}/{offering_id} must be a singleton: {entry}"
+            );
+        }
+        if plan["model_aliases_empty"] == true {
+            let published = alias_names(entry);
+            assert!(
+                published.is_empty(),
+                "{provider_id}/{offering_id} is unroutable and must not publish client aliases: {published:?}"
+            );
+        }
+        if plan["requires_risk_notice"] == true {
+            let notice = &entry["risk_notice"];
+            assert!(
+                notice.is_object(),
+                "{provider_id}/{offering_id} must publish risk_notice: {entry}"
+            );
+            for field in risk_notice_fields() {
                 assert!(
-                    ack[field].as_str().is_some_and(|value| !value.is_empty()),
-                    "risk_acknowledgement.{field} is required: {ack}"
+                    notice[field.as_str()]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty()),
+                    "risk_notice.{field} is required: {notice}"
+                );
+            }
+        }
+        if let Some(prefix) = plan["key_prefix"].as_str() {
+            assert_eq!(
+                entry["key_prefix"].as_str(),
+                Some(prefix),
+                "{provider_id}/{offering_id} key_prefix"
+            );
+        }
+        if let Some(required_ids) = plan["required_form_field_ids"].as_array() {
+            let published = form_field_ids(entry);
+            for field_id in required_ids {
+                let field_id = field_id.as_str().unwrap();
+                assert!(
+                    published.contains(field_id),
+                    "{provider_id}/{offering_id} must publish form field {field_id}, got {published:?}"
                 );
             }
         }
@@ -277,72 +332,68 @@ async fn unique_raw_upstream_id_pins_to_one_provider_and_skips_go() {
 
 /// A raw upstream ID mapped to more than one Plan is rejected as
 /// `ambiguous_model_id` and never reaches an upstream.
+///
+/// Live catalog/registry currently has no overlapping raw IDs. Custom is
+/// catalogued as `custom/api` and stays unroutable, so dashboard create
+/// cannot manufacture a live ambiguous route. Structured
+/// `ambiguous_model_id` coverage lives in
+/// `v2_alias_runtime::ambiguous_model_id_is_structured_across_client_formats`.
 #[tokio::test]
 async fn ambiguous_raw_upstream_id_is_rejected() {
     let harness = V2Harness::start_with_chat_success(&[GO_ACCOUNT_KEY, CUSTOM_ACCOUNT_KEY]).await;
     let _go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
     let catalog = harness.catalog().await;
     let overlaps = overlapping_raw_ids(&catalog);
+    let custom = catalog_entry(&catalog, CUSTOM_PROVIDER_ID, CUSTOM_OFFERING_ID)
+        .expect("catalog must include custom/api");
+    assert_eq!(
+        custom["routable"], false,
+        "v2-contract: custom/api must stay unroutable in this slice: {custom}"
+    );
+    assert_eq!(
+        custom["verification_runtime_availability"].as_str(),
+        Some("unavailable"),
+        "v2-contract: custom/api verification runtime is unavailable: {custom}"
+    );
 
-    let mut requested = Vec::new();
-    if !overlaps.is_empty() {
-        requested.extend(overlaps.into_iter().map(|(raw, _)| raw));
-    } else if catalog_entry(&catalog, CUSTOM_PROVIDER_ID, CUSTOM_OFFERING_ID).is_some() {
-        for (name, alias) in [("custom-a", "custom-one"), ("custom-b", "custom-two")] {
-            let revision = harness.settings_revision().await;
-            let (status, body) = harness
-                .create_account(json!({
-                    "provider_id": CUSTOM_PROVIDER_ID,
-                    "offering_id": CUSTOM_OFFERING_ID,
-                    "name": name,
-                    "key": CUSTOM_ACCOUNT_KEY,
-                    "expected_revision": revision,
-                    "custom": {
-                        "base_url": harness.upstream_base_url.clone(),
-                        "protocol": "chat_completions",
-                        "auth": "bearer",
-                        "models": [{
-                            "alias": alias,
-                            "upstream_model_id": CUSTOM_OVERLAP_RAW_ID
-                        }]
-                    }
-                }))
-                .await;
-            assert!(
-                status.is_success(),
-                "Custom create is required to exercise overlapping raw ids when the catalog has none: {status} {body}"
-            );
-        }
-        requested.push(CUSTOM_OVERLAP_RAW_ID.to_string());
-    } else {
-        panic!(
-            "v2-contract: ambiguous_model_id is untestable until the catalog publishes overlapping raw ids or Custom create exists. catalog={catalog}"
-        );
-    }
-
-    for raw in requested {
-        let (status, body) = harness.chat(&raw).await;
-        assert_eq!(
+    if overlaps.is_empty() {
+        // Do not invent a routable Custom path just to manufacture overlap.
+        let (status, body) = harness.chat(CUSTOM_OVERLAP_RAW_ID).await;
+        assert_ne!(
             status,
-            StatusCode::BAD_REQUEST,
-            "overlapping raw id {raw} must fail closed: {body}"
+            StatusCode::OK,
+            "unmapped raw id {CUSTOM_OVERLAP_RAW_ID} must fail closed rather than fall through to Go: {body}"
         );
-        assert_eq!(
+        assert_ne!(
             error_type(&body),
             Some(AMBIGUOUS_ERROR_TYPE),
-            "overlapping raw id {raw} must return {AMBIGUOUS_ERROR_TYPE}: {body}"
+            "live registry has no overlapping raw ids; {CUSTOM_OVERLAP_RAW_ID} is not an invented Custom ambiguous route: {body}"
         );
-        assert!(
-            error_message(&body).to_ascii_lowercase().contains("alias"),
-            "ambiguous error should point the client at an alias: {body}"
-        );
+    } else {
+        for (raw, _) in overlaps {
+            let (status, body) = harness.chat(&raw).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "overlapping raw id {raw} must fail closed: {body}"
+            );
+            assert_eq!(
+                error_type(&body),
+                Some(AMBIGUOUS_ERROR_TYPE),
+                "overlapping raw id {raw} must return {AMBIGUOUS_ERROR_TYPE}: {body}"
+            );
+            assert!(
+                error_message(&body).to_ascii_lowercase().contains("alias"),
+                "ambiguous error should point the client at an alias: {body}"
+            );
+        }
     }
     assert!(
         harness
             .fake_call_keys()
             .into_iter()
             .all(|key| key != GO_ACCOUNT_KEY && key != CUSTOM_ACCOUNT_KEY),
-        "ambiguous raw ids must not call any upstream: {:?}",
+        "ambiguous or unmapped raw ids must not call any upstream: {:?}",
         harness.fake_calls()
     );
     harness.shutdown();
@@ -424,7 +475,7 @@ async fn go_import_remains_immediately_routable_without_verification() {
     harness.shutdown();
 }
 
-/// GOAT and SCNet create as disabled pending drafts.
+/// GOAT, SCNet, and Custom create as disabled pending drafts.
 #[tokio::test]
 async fn goat_and_scnet_create_disabled_pending_drafts() {
     let harness = V2Harness::start().await;
@@ -433,8 +484,14 @@ async fn goat_and_scnet_create_disabled_pending_drafts() {
     let goat = catalog_entry(&catalog, COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID)
         .expect("catalog must include command-code/goat");
     assert_eq!(
-        goat["verification_required"], true,
+        goat["verification_policy"].as_str(),
+        Some("required"),
         "v2-contract: command-code/goat must require verification: {goat}"
+    );
+    assert_eq!(
+        goat["creation_availability"].as_str(),
+        Some("available"),
+        "GOAT drafts must still be creatable: {goat}"
     );
     let (status, body) = harness
         .create_account(json!({
@@ -460,12 +517,10 @@ async fn goat_and_scnet_create_disabled_pending_drafts() {
         "draft JSON must not return the Key: {body}"
     );
 
-    let scnet = scnet_entries(&catalog)
-        .into_iter()
-        .find(|entry| entry["offering_id"] == "standard")
+    let scnet = catalog_entry(&catalog, SCNET_PROVIDER_ID, SCNET_STANDARD_OFFERING_ID)
         .or_else(|| scnet_entries(&catalog).into_iter().next())
         .expect("v2-contract: catalog must include an SCNet Token Plan");
-    let ack = &scnet["risk_acknowledgement"];
+    let notice = &scnet["risk_notice"];
     let (status, body) = harness
         .create_account(json!({
             "provider_id": scnet["provider_id"],
@@ -473,11 +528,7 @@ async fn goat_and_scnet_create_disabled_pending_drafts() {
             "name": "scnet-draft",
             "key": SCNET_ACCOUNT_KEY,
             "expected_revision": harness.settings_revision().await,
-            "acknowledgement": {
-                "id": ack["id"],
-                "version": ack["version"],
-                "accepted": true
-            }
+            "acknowledgements": matching_acknowledgements(notice)
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -489,6 +540,47 @@ async fn goat_and_scnet_create_disabled_pending_drafts() {
         body["verification_status"].as_str(),
         Some("pending"),
         "SCNet draft verification_status: {body}"
+    );
+
+    let (status, body) = harness
+        .create_account(custom_create_payload(
+            "custom-draft",
+            CUSTOM_ACCOUNT_KEY,
+            harness.settings_revision().await,
+            &harness.upstream_base_url,
+            CUSTOM_UNROUTABLE_MODEL_ID,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["enabled"], false,
+        "Custom must save as a disabled draft: {body}"
+    );
+    assert_eq!(
+        body["verification_status"].as_str(),
+        Some("pending"),
+        "Custom draft verification_status: {body}"
+    );
+    assert_eq!(
+        body["plan_routable"], false,
+        "Custom must remain unroutable: {body}"
+    );
+    assert_eq!(
+        body["custom_config"]["base_url"]
+            .as_str()
+            .map(|value| value.trim_end_matches('/')),
+        Some(harness.upstream_base_url.trim_end_matches('/')),
+        "Custom create must persist custom_config.base_url: {body}"
+    );
+    let capabilities = body["model_capabilities"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        capabilities
+            .iter()
+            .any(|item| item["model_id"] == CUSTOM_UNROUTABLE_MODEL_ID),
+        "Custom create must persist model_capabilities: {body}"
     );
     harness.shutdown();
 }
@@ -526,24 +618,10 @@ async fn disabled_draft_is_not_selected_for_alias_routing() {
     harness.shutdown();
 }
 
-/// Successful verify atomically enables the draft.
+/// POST `/accounts/{id}/verify` is intentionally unavailable in this slice.
 #[tokio::test]
-async fn verify_success_atomically_enables_draft() {
-    let mut replies = go_success_replies(&[GOAT_ACCOUNT_KEY]);
-    replies.insert(
-        GOAT_ACCOUNT_KEY.to_string(),
-        VecDeque::from([
-            FakeReply {
-                status: 200,
-                body: MIXED_UPSTREAM_MODELS_BODY,
-            },
-            FakeReply {
-                status: 200,
-                body: SUCCESS_CHAT_BODY,
-            },
-        ]),
-    );
-    let harness = V2Harness::start_with_upstream(Some(replies)).await;
+async fn verify_runtime_unavailable_leaves_draft_unchanged() {
+    let harness = V2Harness::start().await;
     let (status, draft) = harness
         .create_account(json!({
             "provider_id": COMMAND_CODE_PROVIDER_ID,
@@ -554,7 +632,13 @@ async fn verify_success_atomically_enables_draft() {
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    let id = draft["id"].as_str().expect("draft id");
+    assert_eq!(draft["enabled"], false, "{draft}");
+    assert_eq!(
+        draft["verification_status"].as_str(),
+        Some("pending"),
+        "{draft}"
+    );
+    let id = draft["id"].as_str().expect("draft id").to_string();
     let (status, body) = harness
         .post_json(
             &format!("/accounts/{id}/verify"),
@@ -563,23 +647,41 @@ async fn verify_success_atomically_enables_draft() {
         .await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "v2-contract: POST /accounts/{{id}}/verify must exist and succeed against the fake upstream: {body}"
+        StatusCode::NOT_IMPLEMENTED,
+        "v2-contract: POST /accounts/{{id}}/verify must fail closed with 501 in this slice: {body}"
     );
-    assert_eq!(body["enabled"], true, "{body}");
-    assert_eq!(
+    assert_ne!(
+        body["enabled"], true,
+        "501 verify must not return an enabled account: {body}"
+    );
+    assert_ne!(
         body["verification_status"].as_str(),
         Some("verified"),
-        "{body}"
+        "501 verify must not mark the draft verified: {body}"
     );
-    assert_eq!(body["setup_step"], "ready", "{body}");
     assert!(
-        body["connection_verified_at"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()),
-        "connection_verified_at must be stamped: {body}"
+        !json_contains_secret(&body, GOAT_ACCOUNT_KEY),
+        "verify error leaked the Key: {body}"
     );
-    assert_eq!(body["key"], "", "{body}");
+
+    let stored = harness.account_by_id(&id).await;
+    assert_eq!(
+        stored["enabled"], false,
+        "draft must stay disabled after unavailable verify: {stored}"
+    );
+    assert_eq!(
+        stored["verification_status"].as_str(),
+        Some("pending"),
+        "draft must stay pending after unavailable verify: {stored}"
+    );
+    assert!(
+        stored["connection_verified_at"].is_null()
+            || stored
+                .get("connection_verified_at")
+                .is_none_or(|value| value.as_str().is_none_or(|stamp| stamp.is_empty())),
+        "connection_verified_at must remain unset: {stored}"
+    );
+    assert_eq!(stored["key"], "", "{stored}");
     harness.shutdown();
 }
 
@@ -588,9 +690,8 @@ async fn verify_success_atomically_enables_draft() {
 async fn scnet_create_requires_versioned_acknowledgement() {
     let harness = V2Harness::start().await;
     let catalog = harness.catalog().await;
-    let scnet = scnet_entries(&catalog)
-        .into_iter()
-        .next()
+    let scnet = catalog_entry(&catalog, SCNET_PROVIDER_ID, SCNET_STANDARD_OFFERING_ID)
+        .or_else(|| scnet_entries(&catalog).into_iter().next())
         .expect("v2-contract: catalog must include SCNet");
     let revision = harness.settings_revision().await;
     let (status, body) = harness
@@ -615,11 +716,10 @@ async fn scnet_create_requires_versioned_acknowledgement() {
             "name": "scnet-stale-ack",
             "key": SCNET_ACCOUNT_KEY,
             "expected_revision": harness.settings_revision().await,
-            "acknowledgement": {
-                "id": "not-the-catalog-id",
-                "version": "0",
-                "accepted": true
-            }
+            "acknowledgements": [{
+                "acknowledgement_id": "not-the-catalog-id",
+                "version": "0"
+            }]
         }))
         .await;
     assert_eq!(
@@ -636,11 +736,10 @@ async fn scnet_create_requires_versioned_acknowledgement() {
 async fn scnet_acknowledgement_persists_and_does_not_runtime_block() {
     let harness = V2Harness::start().await;
     let catalog = harness.catalog().await;
-    let scnet = scnet_entries(&catalog)
-        .into_iter()
-        .next()
+    let scnet = catalog_entry(&catalog, SCNET_PROVIDER_ID, SCNET_STANDARD_OFFERING_ID)
+        .or_else(|| scnet_entries(&catalog).into_iter().next())
         .expect("v2-contract: catalog must include SCNet");
-    let ack = &scnet["risk_acknowledgement"];
+    let notice = &scnet["risk_notice"];
     let (status, body) = harness
         .create_account(json!({
             "provider_id": scnet["provider_id"],
@@ -648,11 +747,7 @@ async fn scnet_acknowledgement_persists_and_does_not_runtime_block() {
             "name": "scnet-acked",
             "key": SCNET_ACCOUNT_KEY,
             "expected_revision": harness.settings_revision().await,
-            "acknowledgement": {
-                "id": ack["id"],
-                "version": ack["version"],
-                "accepted": true
-            }
+            "acknowledgements": matching_acknowledgements(notice)
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -660,25 +755,23 @@ async fn scnet_acknowledgement_persists_and_does_not_runtime_block() {
     let stored = body
         .get("acknowledgements")
         .cloned()
-        .or_else(|| body.get("acknowledgement").cloned())
-        .unwrap_or_else(|| panic!("SCNet account must persist acknowledgement: {body}"));
-    let record = if stored.is_array() {
-        stored
-            .as_array()
-            .and_then(|items| items.first())
-            .cloned()
-            .unwrap_or(stored)
-    } else {
-        stored
-    };
-    assert_eq!(record["id"], ack["id"], "{record}");
-    assert_eq!(record["version"], ack["version"], "{record}");
-    assert_eq!(record["content_hash"], ack["content_hash"], "{record}");
+        .unwrap_or_else(|| panic!("SCNet account must persist acknowledgements: {body}"));
+    let record = stored
+        .as_array()
+        .and_then(|items| items.first())
+        .cloned()
+        .unwrap_or_else(|| panic!("SCNet acknowledgements must be a non-empty array: {stored}"));
+    assert_eq!(
+        record["acknowledgement_id"], notice["acknowledgement_id"],
+        "{record}"
+    );
+    assert_eq!(record["version"], notice["version"], "{record}");
+    assert_eq!(record["content_hash"], notice["content_hash"], "{record}");
     assert!(
-        record["confirmed_at"]
+        record["accepted_at"]
             .as_str()
             .is_some_and(|value| !value.is_empty()),
-        "acknowledgement must record confirmed_at: {record}"
+        "acknowledgement must record accepted_at: {record}"
     );
     assert_ne!(body["runtime_blocked"], true, "{body}");
     assert_ne!(record["blocks_runtime"], true, "{record}");
@@ -686,11 +779,12 @@ async fn scnet_acknowledgement_persists_and_does_not_runtime_block() {
         assert_eq!(flag, false, "{body}");
     }
 
-    // Confirmation is not a runtime gate: a later verify/enable path may make
-    // the card routeable. The acknowledgement itself must not add a block.
+    // Confirmation is not a runtime gate. Verification runtime is unavailable
+    // in this slice, so the card stays a disabled draft; the acknowledgement
+    // itself must not add a runtime block.
     assert_eq!(
         body["enabled"], false,
-        "draft stays disabled until verify: {body}"
+        "draft stays disabled while verification runtime is unavailable: {body}"
     );
     harness.shutdown();
 }
