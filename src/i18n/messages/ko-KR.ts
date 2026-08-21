@@ -571,7 +571,7 @@ export const koKRMessages = {
   "Free 模型策略": "Free model policy",
   "控制是否允许使用 OpenCode Zen 免费模型，以及是否在上下文允许时把同名 Go 请求优先路由到 free。": "Control whether OpenCode Zen free models are allowed, and whether matching Go requests may prefer free twins when context fits.",
   "禁止 Free 模型": "Deny free models",
-  "拒绝所有 free / big-pickle 请求，也不会把 Go 模型改写到 free。": "Reject all free / big-pickle requests and never rewrite Go models onto free twins.",
+  "拒绝已登记的 Zen free 模型（如 big-pickle），不拦截 Go 上名字带 free 的模型（如 ox-alpha-free），也不把 Go 模型改写到 Zen。": "Reject registered Zen free models (such as big-pickle). Go models whose ids happen to contain free (such as ox-alpha-free) stay on Go. Never rewrite Go models onto Zen.",
   "仅显式使用 Free 模型": "Explicit free only",
   "只有客户端显式请求 free 模型时才走 Zen free 通道；Go 模型保持 Go 上游。Free 按 IP 限额，429 后整通道冷却，不换 Key。": "Only client-requested free models use the Zen free channel; Go models stay on Go. Free quota is per egress IP: a 429 cools the whole free channel without rotating keys.",
   "自动优先同名 Free 模型": "Prefer mapped free models",
