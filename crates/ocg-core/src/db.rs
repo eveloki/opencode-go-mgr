@@ -4462,32 +4462,49 @@ fn effective_usage(
 fn forward_log_filter(options: &ForwardLogQueryOptions<'_>) -> (String, Vec<Value>) {
     let mut filter = String::new();
     let mut params = Vec::new();
-    // (clause, optional parameter); clause order must match parameter order.
+    // (clause, bound text values); clause order must match parameter order.
     // The key filter goes last because the unattributed sentinel expands to
     // a literal `IS NULL` clause with no parameter.
-    let mut clauses: Vec<(String, Option<&str>)> = [
+    let mut clauses: Vec<(String, Vec<&str>)> = [
         ("status = ?", options.status),
         ("account_id = ?", options.account_id),
         ("provider_id = ?", options.provider_id),
         ("offering_id = ?", options.offering_id),
         ("route_account_id = ?", options.route_account_id),
         ("credential_account_id = ?", options.credential_account_id),
-        ("model = ?", options.model),
+    ]
+    .into_iter()
+    .filter_map(|(clause, value)| value.map(|value| (clause.to_string(), vec![value])))
+    .collect();
+    // Exact-match any stored identity so alias/upstream/legacy rows stay
+    // filterable. Bind the same value once per column; OR stays inside this
+    // predicate so other filters still AND and a row never duplicates.
+    if let Some(model) = options.model.filter(|value| !value.is_empty()) {
+        clauses.push((
+            "(model = ? OR requested_model = ? OR resolved_alias = ? OR upstream_model = ?)"
+                .to_string(),
+            vec![model, model, model, model],
+        ));
+    }
+    for (clause, value) in [
         ("request_id = ?", options.request_id),
         ("julianday(timestamp) >= julianday(?)", options.start_time),
         ("julianday(timestamp) <= julianday(?)", options.end_time),
-    ]
-    .into_iter()
-    .filter_map(|(clause, value)| value.map(|value| (clause.to_string(), Some(value))))
-    .collect();
+    ] {
+        if let Some(value) = value {
+            clauses.push((clause.to_string(), vec![value]));
+        }
+    }
     match options.key_id {
-        Some(UNATTRIBUTED_KEY_FILTER) => clauses.push(("client_key_id IS NULL".to_string(), None)),
-        Some(id) => clauses.push(("client_key_id = ?".to_string(), Some(id))),
+        Some(UNATTRIBUTED_KEY_FILTER) => {
+            clauses.push(("client_key_id IS NULL".to_string(), Vec::new()));
+        }
+        Some(id) => clauses.push(("client_key_id = ?".to_string(), vec![id])),
         None => {}
     }
-    for (clause, value) in clauses {
+    for (clause, values) in clauses {
         append_filter_clause(&mut filter, &clause);
-        if let Some(value) = value {
+        for value in values {
             params.push(Value::Text(value.to_owned()));
         }
     }
@@ -7507,6 +7524,388 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some("goat-b"), Some("goat-a")]
         );
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn empty_forward_query<'a>() -> ForwardLogQueryOptions<'a> {
+        ForwardLogQueryOptions {
+            limit: 50,
+            offset: 0,
+            status: None,
+            account_id: None,
+            provider_id: None,
+            offering_id: None,
+            route_account_id: None,
+            credential_account_id: None,
+            model: None,
+            request_id: None,
+            start_time: None,
+            end_time: None,
+            sort_by: None,
+            sort_order: None,
+            key_id: None,
+        }
+    }
+
+    fn insert_identity_log(
+        db: &Database,
+        log: ForwardLog,
+        requested: Option<&str>,
+        alias: Option<&str>,
+        upstream: Option<&str>,
+    ) -> i64 {
+        let id = db.log_forward(&log).unwrap();
+        db.set_forward_log_native_attribution(
+            id,
+            &ForwardLogNativeAttribution {
+                requested_model: requested.map(str::to_string),
+                resolved_alias: alias.map(str::to_string),
+                upstream_model: upstream.map(str::to_string),
+                native_cost_value: None,
+                native_cost_unit: None,
+                native_cost_currency: None,
+            },
+        )
+        .unwrap();
+        id
+    }
+
+    fn clear_v23_identity(db: &Database, id: i64) {
+        db.conn
+            .execute(
+                "UPDATE forward_logs
+                 SET requested_model = NULL, resolved_alias = NULL, upstream_model = NULL
+                 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn forward_log_model_filter_binds_each_identity_column() {
+        let none = empty_forward_query();
+        let (sql, params) = forward_log_filter(&none);
+        assert!(!sql.to_ascii_lowercase().contains("model"));
+        assert!(params.is_empty());
+
+        let empty = ForwardLogQueryOptions {
+            model: Some(""),
+            ..empty_forward_query()
+        };
+        let (sql, params) = forward_log_filter(&empty);
+        assert!(!sql.to_ascii_lowercase().contains("model"));
+        assert!(params.is_empty());
+
+        let filtered = ForwardLogQueryOptions {
+            status: Some("success"),
+            model: Some("glm-5.2"),
+            ..empty_forward_query()
+        };
+        let (sql, params) = forward_log_filter(&filtered);
+        assert!(sql.contains("status = ?"));
+        assert!(sql.contains(
+            "(model = ? OR requested_model = ? OR resolved_alias = ? OR upstream_model = ?)"
+        ));
+        assert!(sql.contains(" AND "));
+        assert_eq!(params.len(), 5);
+        assert_eq!(params[0], Value::Text("success".into()));
+        assert!(
+            params[1..]
+                .iter()
+                .all(|value| *value == Value::Text("glm-5.2".into()))
+        );
+    }
+
+    #[test]
+    fn forward_logs_model_filter_matches_each_identity_and_legacy_fallback() {
+        let dir = temp_data_dir("forward-model-identity-filter");
+        let db = Database::open(dir.clone()).unwrap();
+
+        let mut legacy = forward_log("acct", "success", 1.0);
+        legacy.model = "needle".into();
+        legacy.prompt_tokens = 1;
+        let legacy_id = db.log_forward(&legacy).unwrap();
+        clear_v23_identity(&db, legacy_id);
+
+        let mut requested_only = forward_log("acct", "success", 2.0);
+        requested_only.model = "legacy-req".into();
+        requested_only.prompt_tokens = 2;
+        let requested_id = insert_identity_log(
+            &db,
+            requested_only,
+            Some("needle"),
+            Some("alias-req"),
+            Some("up-req"),
+        );
+
+        let mut alias_only = forward_log("acct", "success", 3.0);
+        alias_only.model = "legacy-alias".into();
+        alias_only.prompt_tokens = 3;
+        let alias_id = insert_identity_log(
+            &db,
+            alias_only,
+            Some("req-alias"),
+            Some("needle"),
+            Some("up-alias"),
+        );
+
+        let mut upstream_only = forward_log("acct", "success", 4.0);
+        upstream_only.model = "legacy-up".into();
+        upstream_only.prompt_tokens = 4;
+        let upstream_id = insert_identity_log(
+            &db,
+            upstream_only,
+            Some("req-up"),
+            Some("alias-up"),
+            Some("needle"),
+        );
+
+        let mut empty_v23 = forward_log("acct", "success", 5.0);
+        empty_v23.model = "kept-empty".into();
+        empty_v23.prompt_tokens = 5;
+        insert_identity_log(&db, empty_v23, Some(""), Some(""), Some(""));
+
+        let mut other = forward_log("acct", "success", 100.0);
+        other.model = "other-legacy".into();
+        other.prompt_tokens = 100;
+        insert_identity_log(
+            &db,
+            other,
+            Some("other-req"),
+            Some("other-alias"),
+            Some("other-up"),
+        );
+
+        let mut overlap = forward_log("acct", "success", 6.0);
+        overlap.model = "needle".into();
+        overlap.prompt_tokens = 6;
+        let overlap_id =
+            insert_identity_log(&db, overlap, Some("needle"), Some("needle"), Some("needle"));
+
+        let page = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                model: Some("needle"),
+                sort_by: Some("cost"),
+                sort_order: Some("asc"),
+                ..empty_forward_query()
+            })
+            .unwrap();
+        let ids = page.items.iter().map(|log| log.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [legacy_id, requested_id, alias_id, upstream_id, overlap_id]
+        );
+        let unique = ids.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), ids.len());
+        assert_eq!(page.summary.total_requests, 5);
+        assert_eq!(page.summary.prompt_tokens, 16);
+        assert!((page.summary.cost - 16.0).abs() < f64::EPSILON);
+
+        let requested = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                model: Some("legacy-req"),
+                ..empty_forward_query()
+            })
+            .unwrap();
+        assert_eq!(
+            requested.items.iter().map(|log| log.id).collect::<Vec<_>>(),
+            [requested_id]
+        );
+
+        let alias = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                model: Some("alias-req"),
+                ..empty_forward_query()
+            })
+            .unwrap();
+        assert_eq!(
+            alias.items.iter().map(|log| log.id).collect::<Vec<_>>(),
+            [requested_id]
+        );
+
+        let empty_identity = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                model: Some("kept-empty"),
+                ..empty_forward_query()
+            })
+            .unwrap();
+        assert_eq!(empty_identity.summary.total_requests, 1);
+        assert_eq!(empty_identity.items[0].model, "kept-empty");
+
+        let missing = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                model: Some("missing"),
+                ..empty_forward_query()
+            })
+            .unwrap();
+        assert!(missing.items.is_empty());
+        assert_eq!(missing.summary.total_requests, 0);
+
+        let substring = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                model: Some("need"),
+                ..empty_forward_query()
+            })
+            .unwrap();
+        assert!(substring.items.is_empty());
+        assert_eq!(substring.summary.total_requests, 0);
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn forward_logs_model_filter_ands_other_filters_before_pagination() {
+        let dir = temp_data_dir("forward-model-combo-filter");
+        let db = Database::open(dir.clone()).unwrap();
+        let inside = DateTime::parse_from_rfc3339("2026-07-17T04:15:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let outside = DateTime::parse_from_rfc3339("2026-07-17T03:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let matching = |suffix: &str, cost: f64| {
+            let mut log = forward_log("acct", "success", cost);
+            log.model = format!("legacy-{suffix}");
+            log.provider_id = Some("opencode".into());
+            log.offering_id = Some("go".into());
+            log.client_key_id = Some("key-a".into());
+            log.client_key_name = Some("Key-a".into());
+            log.timestamp = inside;
+            log.prompt_tokens = cost as i64;
+            insert_identity_log(
+                &db,
+                log,
+                Some("req-other"),
+                Some("needle"),
+                Some("up-other"),
+            )
+        };
+        let first = matching("a", 1.0);
+        let second = matching("b", 2.0);
+        let third = matching("c", 3.0);
+
+        let mut wrong_provider = forward_log("acct", "success", 9.0);
+        wrong_provider.model = "legacy-provider".into();
+        wrong_provider.provider_id = Some("goat".into());
+        wrong_provider.offering_id = Some("goat".into());
+        wrong_provider.client_key_id = Some("key-a".into());
+        wrong_provider.timestamp = inside;
+        insert_identity_log(
+            &db,
+            wrong_provider,
+            Some("needle"),
+            Some("alias-other"),
+            Some("up-other"),
+        );
+
+        let mut wrong_key = forward_log("acct", "success", 8.0);
+        wrong_key.model = "legacy-key".into();
+        wrong_key.provider_id = Some("opencode".into());
+        wrong_key.offering_id = Some("go".into());
+        wrong_key.client_key_id = Some("key-b".into());
+        wrong_key.timestamp = inside;
+        insert_identity_log(&db, wrong_key, None, None, Some("needle"));
+
+        let mut wrong_status = forward_log("acct", "error", 7.0);
+        wrong_status.model = "needle".into();
+        wrong_status.provider_id = Some("opencode".into());
+        wrong_status.offering_id = Some("go".into());
+        wrong_status.client_key_id = Some("key-a".into());
+        wrong_status.timestamp = inside;
+        let wrong_status_id = db.log_forward(&wrong_status).unwrap();
+        clear_v23_identity(&db, wrong_status_id);
+
+        let mut wrong_time = forward_log("acct", "success", 6.0);
+        wrong_time.model = "legacy-time".into();
+        wrong_time.provider_id = Some("opencode".into());
+        wrong_time.offering_id = Some("go".into());
+        wrong_time.client_key_id = Some("key-a".into());
+        wrong_time.timestamp = outside;
+        insert_identity_log(
+            &db,
+            wrong_time,
+            Some("needle"),
+            Some("needle"),
+            Some("needle"),
+        );
+
+        for index in 0..5 {
+            let mut decoy = forward_log("busy", "success", 100.0);
+            decoy.model = format!("decoy-{index}");
+            decoy.provider_id = Some("opencode".into());
+            decoy.offering_id = Some("go".into());
+            decoy.client_key_id = Some("key-a".into());
+            decoy.timestamp = inside;
+            db.log_forward(&decoy).unwrap();
+        }
+
+        let filtered = ForwardLogQueryOptions {
+            limit: 1,
+            offset: 0,
+            status: Some("success"),
+            provider_id: Some("opencode"),
+            offering_id: Some("go"),
+            model: Some("needle"),
+            key_id: Some("key-a"),
+            start_time: Some("2026-07-17T12:00:00+08:00"),
+            end_time: Some("2026-07-17T12:30:00+08:00"),
+            sort_by: Some("cost"),
+            sort_order: Some("asc"),
+            ..empty_forward_query()
+        };
+        let first_page = db.query_forward_logs(filtered).unwrap();
+        assert_eq!(first_page.items.len(), 1);
+        assert_eq!(first_page.items[0].id, first);
+        assert_eq!(first_page.summary.total_requests, 3);
+        assert_eq!(first_page.summary.prompt_tokens, 6);
+        assert!((first_page.summary.cost - 6.0).abs() < f64::EPSILON);
+
+        let second_page = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                limit: 1,
+                offset: 1,
+                status: Some("success"),
+                provider_id: Some("opencode"),
+                offering_id: Some("go"),
+                model: Some("needle"),
+                key_id: Some("key-a"),
+                start_time: Some("2026-07-17T12:00:00+08:00"),
+                end_time: Some("2026-07-17T12:30:00+08:00"),
+                sort_by: Some("cost"),
+                sort_order: Some("asc"),
+                ..empty_forward_query()
+            })
+            .unwrap();
+        assert_eq!(second_page.items.len(), 1);
+        assert_eq!(second_page.items[0].id, second);
+        assert_eq!(second_page.summary.total_requests, 3);
+
+        let rest = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                limit: 50,
+                offset: 2,
+                status: Some("success"),
+                provider_id: Some("opencode"),
+                offering_id: Some("go"),
+                model: Some("needle"),
+                key_id: Some("key-a"),
+                start_time: Some("2026-07-17T12:00:00+08:00"),
+                end_time: Some("2026-07-17T12:30:00+08:00"),
+                sort_by: Some("cost"),
+                sort_order: Some("asc"),
+                ..empty_forward_query()
+            })
+            .unwrap();
+        assert_eq!(
+            rest.items.iter().map(|log| log.id).collect::<Vec<_>>(),
+            [third]
+        );
+        let unique = [first, second, third].into_iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), 3);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
