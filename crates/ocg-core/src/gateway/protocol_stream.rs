@@ -4,7 +4,8 @@ use super::diagnostics::{
 use super::protocol::{
     ApiFormat, NamespaceToolMapping, ProtocolError, RequestPlan, UsageCounts,
     encode_anthropic_thinking_block, encode_chat_reasoning, responses_id,
-    sanitize_minimax_anthropic_usage, sanitize_minimax_chat_usage, unix_seconds,
+    rewrite_existing_visible_model, sanitize_minimax_anthropic_usage, sanitize_minimax_chat_usage,
+    unix_seconds,
 };
 use bytes::{Bytes, BytesMut};
 use serde_json::{Map, Value, json};
@@ -17,6 +18,7 @@ pub(crate) struct StreamConverter {
     source: ApiFormat,
     target: ApiFormat,
     model: String,
+    client_model: String,
     custom_tools: BTreeSet<String>,
     namespace_tools: BTreeMap<String, NamespaceToolMapping>,
     response_parallel_tool_calls: bool,
@@ -769,11 +771,20 @@ impl StreamConverter {
         Self::new_with_known_secret(plan, None)
     }
 
+    fn visible_model(&self) -> &str {
+        if self.client_model.is_empty() {
+            &self.model
+        } else {
+            &self.client_model
+        }
+    }
+
     pub(crate) fn new_with_known_secret(plan: &RequestPlan, known_secret: Option<&str>) -> Self {
         Self {
             source: plan.upstream,
             target: plan.client,
             model: plan.model.clone(),
+            client_model: plan.response_model().to_string(),
             custom_tools: plan.custom_tools.iter().cloned().collect(),
             namespace_tools: plan
                 .namespace_tools
@@ -1032,14 +1043,26 @@ impl StreamConverter {
         let secret = self.secret_redactor.secret.as_deref();
         let Some((event_name, payload)) = parse_sse_frame(&frame)? else {
             // No data lines: nothing to convert or redact as JSON; passthrough.
-            let passthrough =
-                sanitize_passthrough_sse_frame(self.source, frame, &self.model, secret, None);
+            let passthrough = sanitize_passthrough_sse_frame(
+                self.source,
+                frame,
+                &self.model,
+                &self.client_model,
+                secret,
+                None,
+            );
             return Ok((passthrough, Vec::new(), false));
         };
         let payload = payload.trim();
         let value = parse_sse_payload(payload)?;
-        let passthrough =
-            sanitize_passthrough_sse_frame(self.source, frame, &self.model, secret, value.as_ref());
+        let passthrough = sanitize_passthrough_sse_frame(
+            self.source,
+            frame,
+            &self.model,
+            &self.client_model,
+            secret,
+            value.as_ref(),
+        );
         let (converted, secret_matched) = self.convert_parsed_frame(event_name, payload, value)?;
         Ok((passthrough, converted, secret_matched))
     }
@@ -1112,7 +1135,14 @@ impl StreamConverter {
         frames
             .into_iter()
             .map(|frame| {
-                sanitize_passthrough_sse_frame(self.target, frame, &self.model, Some(secret), None)
+                sanitize_passthrough_sse_frame(
+                    self.target,
+                    frame,
+                    &self.model,
+                    &self.client_model,
+                    Some(secret),
+                    None,
+                )
             })
             .collect()
     }
@@ -1891,11 +1921,15 @@ impl StreamConverter {
 
     fn encode_messages(&mut self, event: PivotEvent) -> Vec<Bytes> {
         match event {
-            PivotEvent::Start { id, model, usage } => vec![sse_json(
+            PivotEvent::Start {
+                id,
+                model: _,
+                usage,
+            } => vec![sse_json(
                 Some("message_start"),
                 &json!({
                     "type":"message_start",
-                    "message":{"id":anthropic_id(&id),"type":"message","role":"assistant","content":[],"model":model,
+                    "message":{"id":anthropic_id(&id),"type":"message","role":"assistant","content":[],"model":self.visible_model(),
                     "stop_reason":null,"stop_sequence":null,"usage":anthropic_usage_json(&usage)}
                 }),
             )],
@@ -1949,9 +1983,13 @@ impl StreamConverter {
 
     fn encode_chat(&mut self, event: PivotEvent) -> Vec<Bytes> {
         match event {
-            PivotEvent::Start { id, model, usage } => {
+            PivotEvent::Start {
+                id,
+                model: _,
+                usage,
+            } => {
                 self.output.id = chat_id(&id);
-                self.output.model = model;
+                self.output.model = self.visible_model().to_string();
                 self.output.usage.merge(usage);
                 vec![self.chat_chunk(json!({"role":"assistant"}), Value::Null)]
             }
@@ -2048,7 +2086,7 @@ impl StreamConverter {
             &json!({
                 "id":if self.output.id.is_empty() { "chatcmpl-ocg" } else { &self.output.id },
                 "object":"chat.completion.chunk","created":unix_seconds(),
-                "model":if self.output.model.is_empty() { &self.model } else { &self.output.model },
+                "model":self.visible_model(),
                 "choices":[{"index":0,"delta":delta,"finish_reason":finish_reason}]
             }),
         )
@@ -2066,7 +2104,7 @@ impl StreamConverter {
                 None,
                 &json!({
                     "id":self.output.id,"object":"chat.completion.chunk","created":unix_seconds(),
-                    "model":self.output.model,"choices":[],"usage":chat_usage_json(&self.output.usage)
+                    "model":self.visible_model(),"choices":[],"usage":chat_usage_json(&self.output.usage)
                 }),
             ));
         }
@@ -2075,9 +2113,13 @@ impl StreamConverter {
 
     fn encode_gemini(&mut self, event: PivotEvent) -> Result<Vec<Bytes>, ProtocolError> {
         match event {
-            PivotEvent::Start { id, model, usage } => {
+            PivotEvent::Start {
+                id,
+                model: _,
+                usage,
+            } => {
                 self.output.id = id;
-                self.output.model = model;
+                self.output.model = self.visible_model().to_string();
                 self.output.usage.merge(usage);
                 Ok(Vec::new())
             }
@@ -2211,7 +2253,7 @@ impl StreamConverter {
         }
         let mut response = json!({
             "candidates": [candidate],
-            "modelVersion": if self.output.model.is_empty() { &self.model } else { &self.output.model },
+            "modelVersion": self.visible_model(),
             "responseId": if self.output.id.is_empty() { "ocg_response" } else { &self.output.id }
         });
         if include_usage && self.output.usage.seen {
@@ -2224,7 +2266,8 @@ impl StreamConverter {
         match event {
             PivotEvent::Start { id, model, usage } => {
                 self.output.id = responses_id(&id);
-                self.output.model = model;
+                self.output.model = self.visible_model().to_string();
+                let _ = model;
                 self.output.created_at = unix_seconds();
                 self.output.usage.merge(usage);
                 let response = self.response_object("in_progress", Value::Null, Vec::new());
@@ -2529,7 +2572,7 @@ impl StreamConverter {
             "completed_at":if status == "completed" { json!(unix_seconds()) } else { Value::Null },"error":null,
             "incomplete_details":incomplete_details,"instructions":null,"max_output_tokens":null,
             "max_tool_calls":null,
-            "model":if self.output.model.is_empty() { &self.model } else { &self.output.model },
+            "model":self.visible_model(),
             "output":output,"parallel_tool_calls":self.response_parallel_tool_calls,"previous_response_id":null,
             "reasoning":{"effort":null,"summary":null},"store":false,"temperature":null,
             "text":{"format":{"type":"text"}},"tool_choice":self.response_tool_choice,"tools":self.response_tools,"top_p":null,
@@ -2648,6 +2691,7 @@ fn sanitize_passthrough_sse_frame(
     format: ApiFormat,
     frame: Bytes,
     model_hint: &str,
+    client_model: &str,
     known_secret: Option<&str>,
     parsed: Option<&Value>,
 ) -> Bytes {
@@ -2695,6 +2739,7 @@ fn sanitize_passthrough_sse_frame(
             }
             ApiFormat::Responses | ApiFormat::Gemini => {}
         }
+        rewrite_existing_visible_model(format, &mut value, client_model);
         if value != source_value {
             output = rewrite_sse_data(&output, &value);
         }
@@ -3019,6 +3064,7 @@ mod tests {
             client,
             upstream,
             model: "test-model".to_string(),
+            client_model: "test-model".to_string(),
             stream: true,
             body: Bytes::new(),
             channel: crate::models::UpstreamChannel::Go,
@@ -3048,6 +3094,61 @@ mod tests {
         );
         output.extend(converter.finish().expect("stream should finish"));
         String::from_utf8(output.concat()).expect("output must be UTF-8")
+    }
+
+    #[test]
+    fn chat_passthrough_rewrites_model_to_client_name() {
+        let mut plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
+        plan.model = "deepseek-v4-flash-free".into();
+        plan.client_model = "deepseek-v4-flash".into();
+        let mut converter = StreamConverter::new(&plan);
+        let input = concat!(
+            "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let output = converter
+            .process_chunk(Bytes::from_static(input.as_bytes()))
+            .unwrap();
+        let text = String::from_utf8(output.concat()).unwrap();
+        assert!(text.contains("\"model\":\"deepseek-v4-flash\""));
+        assert!(!text.contains("upstream-should-not-leak"));
+    }
+
+    #[test]
+    fn messages_passthrough_rewrites_model_to_client_name() {
+        let mut plan = plan(ApiFormat::Messages, ApiFormat::Messages);
+        plan.model = "glm-5.2".into();
+        plan.client_model = "claude-sonnet-4-6".into();
+        let mut converter = StreamConverter::new(&plan);
+        let input = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"upstream-should-not-leak\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let output = converter
+            .process_chunk(Bytes::from_static(input.as_bytes()))
+            .unwrap();
+        let text = String::from_utf8(output.concat()).unwrap();
+        assert!(text.contains("\"model\":\"claude-sonnet-4-6\""));
+        assert!(!text.contains("upstream-should-not-leak"));
+        assert!(text.contains("\"type\":\"message_stop\""));
+    }
+
+    #[test]
+    fn gemini_stream_rewrites_model_version_to_client_name() {
+        let mut plan = plan(ApiFormat::Gemini, ApiFormat::ChatCompletions);
+        plan.model = "deepseek-v4-flash-free".into();
+        plan.client_model = "deepseek-v4-flash".into();
+        let mut converter = StreamConverter::new(&plan);
+        let input = concat!(
+            "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let output = converter
+            .process_chunk(Bytes::from_static(input.as_bytes()))
+            .unwrap();
+        let text = String::from_utf8(output.concat()).unwrap();
+        assert!(text.contains("\"modelVersion\":\"deepseek-v4-flash\""));
+        assert!(!text.contains("upstream-should-not-leak"));
     }
 
     fn messages_text(output: &str) -> String {
@@ -3117,7 +3218,9 @@ mod tests {
 
     #[test]
     fn same_protocol_is_byte_passthrough() {
-        let mut converter = StreamConverter::new(&plan(ApiFormat::Messages, ApiFormat::Messages));
+        let mut plan = plan(ApiFormat::Messages, ApiFormat::Messages);
+        plan.client_model = "m".into();
+        let mut converter = StreamConverter::new(&plan);
         let chunk = Bytes::from_static(
             b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         );
@@ -3153,10 +3256,9 @@ mod tests {
 
     #[test]
     fn same_protocol_keeps_unknown_fields_after_a_false_key_prefix() {
-        let mut converter = StreamConverter::new_with_known_secret(
-            &plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions),
-            Some("sk-real"),
-        );
+        let mut plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
+        plan.client_model = "m".into();
+        let mut converter = StreamConverter::new_with_known_secret(&plan, Some("sk-real"));
         let source = concat!(
             "event: chunk\ndata: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"s\"}}],\"logprobs\":{\"content\":[{\"token\":\"s\",\"vendor_score\":0.7}]},\"vendor_extension\":{\"trace_id\":\"trace_1\"}}\n\n",
             "event: chunk\ndata: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"afe\"}}]}\n\n",
@@ -3722,6 +3824,7 @@ mod tests {
     fn chat_passthrough_keeps_non_minimax_frames_byte_identical() {
         let mut qwen_plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
         qwen_plan.model = "qwen3.7-max".into();
+        qwen_plan.client_model = "qwen3.7-max".into();
         let mut converter = StreamConverter::new(&qwen_plan);
         let frame = Bytes::from_static(
             b": keepalive\r\nid: 7\r\nretry: 1000\r\nevent: chunk\r\ndata: { \"model\": \"qwen3.7-max\", \"choices\": [], \"usage\": {\"prompt_tokens\":10,\"completion_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":10}} }\r\n\r\n",
@@ -3736,6 +3839,7 @@ mod tests {
     fn chat_passthrough_keeps_unchanged_minimax_frames_byte_identical() {
         let mut minimax_plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
         minimax_plan.model = "minimax-m3".into();
+        minimax_plan.client_model = "ocg-generic".into();
         let mut converter = StreamConverter::new(&minimax_plan);
         let frame = Bytes::from_static(
             b"id: 8\nevent: chunk\ndata: { \"model\": \"ocg-generic\", \"choices\": [{\"delta\":{\"content\":\"hi\"}}] }\n\n",

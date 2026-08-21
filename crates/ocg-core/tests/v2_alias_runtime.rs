@@ -1,0 +1,293 @@
+//! HTTP regressions for the v2 Alias runtime slice.
+
+use axum::http::StatusCode;
+use chrono::Utc;
+use ocg_core::alias;
+use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
+use ocg_core::db::Database;
+use ocg_core::gateway;
+use ocg_core::models::{Account, ProxyMode, RoutingMode};
+use ocg_core::state::{CoreStateInner, GatewayHandle};
+use serde_json::Value;
+use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::net::TcpListener as StdTcpListener;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+#[allow(dead_code)]
+#[path = "fixtures/fake_upstream.rs"]
+mod fake_upstream;
+
+use fake_upstream::{FakeCall, FakeReply, start_fake_upstream};
+
+fn temp_data_dir(label: &str) -> PathBuf {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "ocg-v2-alias-runtime-{}-{}",
+        label,
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn loopback_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client should build")
+}
+
+fn build_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf) {
+    let dir = temp_data_dir("state");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+    let db = Database::open(dir.clone()).unwrap();
+    let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+    let mut config = state.config();
+    config.gateway_key = "gw-test".into();
+    config.upstream_base_url = base_url;
+    config.proxy_mode = ProxyMode::Direct;
+    config.routing_mode = RoutingMode::StrictPriority;
+    state.set_config(config).unwrap();
+
+    let now = Utc::now();
+    for (idx, key) in keys.iter().enumerate() {
+        let account = Account {
+            id: format!("acct-{}", idx + 1),
+            provider_id: ocg_core::provider::default_provider_id(),
+            offering_id: ocg_core::provider::default_offering_id(),
+            credential_kind: ocg_core::provider::default_credential_kind(),
+            quota_scope: ocg_core::provider::default_quota_scope(),
+            free_alias_enabled: false,
+            name: format!("acct-{}", idx + 1),
+            username: None,
+            password_cipher: None,
+            key_cipher: state.encrypt_key(key).unwrap(),
+            enabled: true,
+            account_type: ocg_core::models::AccountType::Key,
+            setup_step: ocg_core::models::AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now + chrono::Duration::seconds(idx as i64),
+            updated_at: now + chrono::Duration::seconds(idx as i64),
+        };
+        state.db.lock().create_account(&account).unwrap();
+    }
+
+    (state, dir)
+}
+
+async fn start_gateway(state: Arc<CoreStateInner>) -> (u16, GatewayHandle) {
+    let listener = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let handle = gateway::start_gateway(state, port).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    (port, handle)
+}
+
+fn stop(
+    state: Arc<CoreStateInner>,
+    dir: PathBuf,
+    gateway: GatewayHandle,
+    mock: tokio::sync::oneshot::Sender<()>,
+) {
+    gateway::stop_gateway(gateway);
+    let _ = mock.send(());
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn models_list_exposes_published_aliases_not_raw_upstream_ids() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: r#"{"object":"list","data":[{"id":"not-a-real-upstream-model"},{"id":"deepseek-v4-flash"}]}"#,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let client = loopback_client();
+
+    let unauthorized = client
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .bearer_auth("gw-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["object"], "list");
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"deepseek-v4-flash"));
+    assert!(!ids.contains(&"not-a-real-upstream-model"));
+    for id in &ids {
+        assert!(
+            alias::is_published_alias(id),
+            "advertised `{id}` is not an alias"
+        );
+        assert!(!id.contains('/'));
+        assert!(!id.contains('_'));
+        assert!(!id.contains(' '));
+    }
+    assert_eq!(calls.lock().unwrap()[0].path, "/v1/models");
+
+    stop(state, dir, gateway_handle, stop_mock);
+}
+
+#[tokio::test]
+async fn unknown_chat_model_returns_400_before_any_upstream_request() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let response = loopback_client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth("gw-test")
+        .json(&serde_json::json!({
+            "model": "definitely-not-a-model",
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown model"))
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "unknown Chat models must not reach upstream: {:?}",
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call: &FakeCall| call.path.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    stop(state, dir, gateway_handle, stop_mock);
+}
+
+#[tokio::test]
+async fn slash_form_chat_model_does_not_collapse_and_does_not_hit_upstream() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: r#"{"id":"ok"}"#,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let response = loopback_client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth("gw-test")
+        .json(&serde_json::json!({
+            "model": "glm/5.2",
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("glm/5.2"))
+    );
+    assert!(calls.lock().unwrap().is_empty());
+
+    stop(state, dir, gateway_handle, stop_mock);
+}
+
+#[tokio::test]
+async fn ambiguous_model_id_is_structured_across_client_formats() {
+    let error = ocg_core::gateway::protocol::ProtocolError {
+        status: StatusCode::BAD_REQUEST,
+        message: alias::ResolveError::Ambiguous {
+            requested: "shared-raw".into(),
+            mappings: vec![
+                alias::ProviderMapping {
+                    provider_id: ocg_core::provider::OPENCODE_PROVIDER_ID,
+                    offering_id: ocg_core::provider::GO_OFFERING_ID,
+                    upstream_model: "shared-raw",
+                    routeable: true,
+                },
+                alias::ProviderMapping {
+                    provider_id: ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+                    offering_id: ocg_core::provider::ANONYMOUS_FREE_OFFERING_ID,
+                    upstream_model: "shared-raw",
+                    routeable: true,
+                },
+            ],
+        }
+        .message(),
+        code: Some(alias::AMBIGUOUS_MODEL_ID),
+    };
+    assert_eq!(error.code, Some(alias::AMBIGUOUS_MODEL_ID));
+
+    for format in [
+        ocg_core::gateway::protocol::ApiFormat::ChatCompletions,
+        ocg_core::gateway::protocol::ApiFormat::Messages,
+        ocg_core::gateway::protocol::ApiFormat::Responses,
+        ocg_core::gateway::protocol::ApiFormat::Gemini,
+    ] {
+        let body = ocg_core::gateway::protocol::format_protocol_error(format, &error, None);
+        match format {
+            ocg_core::gateway::protocol::ApiFormat::Gemini => {
+                assert_eq!(body["error"]["reason"], alias::AMBIGUOUS_MODEL_ID);
+                assert_eq!(body["error"]["status"], "INVALID_ARGUMENT");
+            }
+            ocg_core::gateway::protocol::ApiFormat::ChatCompletions
+            | ocg_core::gateway::protocol::ApiFormat::Messages
+            | ocg_core::gateway::protocol::ApiFormat::Responses => {
+                assert_eq!(body["error"]["type"], alias::AMBIGUOUS_MODEL_ID);
+            }
+        }
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(alias::AMBIGUOUS_MODEL_ID))
+        );
+    }
+}

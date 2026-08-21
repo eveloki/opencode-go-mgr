@@ -1,3 +1,4 @@
+use crate::alias;
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, REQUEST_ID_HEADER, RequestTrace, emit_failure, serialize_diagnostic,
 };
@@ -5,20 +6,19 @@ use crate::gateway::forwarder::{
     ForwardAction, UpstreamPayloadTooLargeResponse, forward_get, forward_request,
     rate_limited_response,
 };
-use crate::gateway::free_models::{decide_route, resolve_upstream_base, rewrite_body_model};
+use crate::gateway::materialize::{materialize_account_routes, protocol_error_from_resolve};
 use crate::gateway::protocol::{
-    ApiFormat, ProtocolError, RequestPlan, format_error, prepare_gemini_request, prepare_request,
+    ApiFormat, MaterializeSpec, ProtocolError, RequestPlan, format_error, format_protocol_error,
+    materialize_parsed_request, parse_client_request, parse_gemini_request,
 };
-use crate::gateway::provider_adapter;
-use crate::gateway::routing::{RoutingCandidate, resolve_conversation_key};
+use crate::gateway::routing::resolve_conversation_key;
 use crate::gateway::selector::AccountSelector;
-use crate::models::{Account, UpstreamChannel};
+use crate::models::UpstreamChannel;
 use crate::models::{
     AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
-    ClaudeDesktopModels,
 };
 use crate::state::CoreState;
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
@@ -231,7 +231,13 @@ pub async fn gemini_model_action(
     }
 }
 
-/// GET /v1/models — passthrough, any enabled account's key works.
+/// GET /v1/models — authenticated discovery that never advertises raw IDs
+/// inference would reject.
+///
+/// The request still uses an enabled OpenCode Go account so availability,
+/// cooldown, redaction, and upstream error behavior stay aligned with the
+/// rest of the gateway. On a successful catalog, `data[].id` is restricted to
+/// hardcoded Alias registry names.
 pub async fn models(
     State(state): State<CoreState>,
     Extension(trace): Extension<RequestTrace>,
@@ -248,6 +254,9 @@ pub async fn models(
 
     let (config, client) = state.upstream_context();
     match forward_get(&client, &state, &config, "/v1/models").await {
+        Ok(resp) if resp.status().is_success() => {
+            restrict_models_list_to_published_aliases(resp).await
+        }
         Ok(resp) => resp,
         Err(e) => local_failure_response(
             &state,
@@ -261,6 +270,66 @@ pub async fn models(
             None,
         ),
     }
+}
+
+async fn restrict_models_list_to_published_aliases(
+    response: axum::response::Response,
+) -> axum::response::Response {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = match to_bytes(response.into_body(), 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => return published_alias_models_response(),
+    };
+    let Ok(mut payload) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return restore_models_response(status, headers, bytes);
+    };
+    let Some(data) = payload.get("data").and_then(serde_json::Value::as_array) else {
+        return restore_models_response(status, headers, bytes);
+    };
+    let filtered: Vec<serde_json::Value> = data
+        .iter()
+        .filter(|item| {
+            item.get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(alias::is_published_alias)
+        })
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        return restore_models_response(status, headers, bytes);
+    }
+    payload["data"] = serde_json::Value::Array(filtered);
+    axum::Json(payload).into_response()
+}
+
+fn restore_models_response(
+    status: StatusCode,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> axum::response::Response {
+    let mut response = (status, bytes).into_response();
+    *response.headers_mut() = headers;
+    response
+}
+
+fn published_alias_models_response() -> axum::response::Response {
+    let data: Vec<serde_json::Value> = alias::published_aliases()
+        .into_iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "opencode"
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({
+        "object": "list",
+        "data": data
+    }))
+    .into_response()
 }
 
 async fn proxy_handler(
@@ -293,46 +362,52 @@ async fn proxy_handler_inner(
         );
     };
 
-    let body = if claude_desktop {
-        match rewrite_claude_desktop_model(&body, &config.claude_desktop_models) {
-            Ok(body) => body,
-            Err(error) => {
-                return local_failure_response(
+    let client_body = body.clone();
+    let parsed = match parse_client_request(client_format, body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return local_protocol_failure(
+                &state,
+                &trace,
+                client_format,
+                error,
+                Some(client_body_bytes),
+                Some(&client_body),
+            );
+        }
+    };
+    let client_model = parsed.requested_model.clone();
+    let routing_model = if claude_desktop {
+        match config
+            .claude_desktop_models
+            .model_for_alias(&parsed.requested_model)
+        {
+            Some(model) => model.to_string(),
+            None => {
+                return local_protocol_failure(
                     &state,
                     &trace,
                     ApiFormat::Messages,
-                    error.status,
-                    &error.message,
-                    "client",
-                    "validation",
+                    ProtocolError::new(format!(
+                        "unsupported Claude Desktop model alias `{}`",
+                        parsed.requested_model
+                    )),
                     Some(client_body_bytes),
-                    Some(&body),
+                    Some(&client_body),
                 );
             }
         }
     } else {
-        body
+        parsed.requested_model.clone()
     };
-    // Keep the post-rewrite body so its model always matches the initial plan's
-    // model; that lets route finalization reuse the parsed plan instead of
-    // re-parsing the body on every request.
-    let client_body = body.clone();
-    let plan = match prepare_request(client_format, body) {
-        Ok(plan) => plan,
+    let resolved = match alias::resolve(&routing_model) {
+        Ok(resolved) => resolved,
         Err(error) => {
-            let stage = if error.message.starts_with("invalid JSON request") {
-                "parse"
-            } else {
-                "validation"
-            };
-            return local_failure_response(
+            return local_protocol_failure(
                 &state,
                 &trace,
                 client_format,
-                error.status,
-                &error.message,
-                "client",
-                stage,
+                protocol_error_from_resolve(error),
                 Some(client_body_bytes),
                 Some(&client_body),
             );
@@ -345,7 +420,10 @@ async fn proxy_handler_inner(
         client_body,
         headers,
         client_format,
-        plan,
+        parsed,
+        resolved,
+        client_model,
+        routing_model,
         config,
         client,
         Some(client_key_id),
@@ -353,9 +431,10 @@ async fn proxy_handler_inner(
     .await
 }
 
+#[cfg(test)]
 fn rewrite_claude_desktop_model(
     body: &Bytes,
-    models: &ClaudeDesktopModels,
+    models: &crate::models::ClaudeDesktopModels,
 ) -> Result<Bytes, ProtocolError> {
     let mut request: serde_json::Value = serde_json::from_slice(body)
         .map_err(|error| ProtocolError::new(format!("invalid JSON request: {error}")))?;
@@ -397,22 +476,29 @@ async fn gemini_proxy_handler(
             None,
         );
     };
-    let plan = match prepare_gemini_request(model, stream, body.clone()) {
-        Ok(plan) => plan,
+    let parsed = match parse_gemini_request(model, stream, body.clone()) {
+        Ok(parsed) => parsed,
         Err(error) => {
-            let stage = if error.message.starts_with("invalid JSON request") {
-                "parse"
-            } else {
-                "validation"
-            };
-            return local_failure_response(
+            return local_protocol_failure(
                 &state,
                 &trace,
                 ApiFormat::Gemini,
-                error.status,
-                &error.message,
-                "client",
-                stage,
+                error,
+                Some(client_body_bytes),
+                Some(&body),
+            );
+        }
+    };
+    let client_model = parsed.requested_model.clone();
+    let routing_model = parsed.requested_model.clone();
+    let resolved = match alias::resolve(&routing_model) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return local_protocol_failure(
+                &state,
+                &trace,
+                ApiFormat::Gemini,
+                protocol_error_from_resolve(error),
                 Some(client_body_bytes),
                 Some(&body),
             );
@@ -424,7 +510,10 @@ async fn gemini_proxy_handler(
         body,
         headers,
         ApiFormat::Gemini,
-        plan,
+        parsed,
+        resolved,
+        client_model,
+        routing_model,
         config,
         client,
         Some(client_key_id),
@@ -439,7 +528,10 @@ async fn execute_plan(
     client_body: Bytes,
     headers: HeaderMap,
     client_format: ApiFormat,
-    plan: RequestPlan,
+    parsed: crate::gateway::protocol::ParsedClientRequest,
+    resolved: alias::ResolvedModel,
+    client_model: String,
+    routing_model: String,
     config: AppConfig,
     client: reqwest::Client,
     client_key_id: Option<String>,
@@ -448,17 +540,63 @@ async fn execute_plan(
     // must use one immutable pricing revision from start to finish.
     let pricing_snapshot = state.pricing_snapshot();
     let conversation_key = if config.conversation_sticky {
-        resolve_conversation_key(client_format, &plan.model, &headers, &client_body)
+        resolve_conversation_key(client_format, &routing_model, &headers, &client_body)
     } else {
         None
     };
-    // The client body's model, already extracted by the initial prepare_request.
-    let body_model = plan.model.clone();
+    let (diagnostic_model, diagnostic_channel) = match &resolved {
+        alias::ResolvedModel::Alias {
+            alias, mappings, ..
+        } => {
+            let zen_only = mappings
+                .iter()
+                .filter(|mapping| mapping.routeable)
+                .all(|mapping| mapping.is_zen_free());
+            (
+                (*alias).to_string(),
+                if zen_only {
+                    UpstreamChannel::Free
+                } else {
+                    UpstreamChannel::Go
+                },
+            )
+        }
+        alias::ResolvedModel::PinnedRaw { mapping, .. } => (
+            mapping.upstream_model.to_string(),
+            if mapping.is_zen_free() {
+                UpstreamChannel::Free
+            } else {
+                UpstreamChannel::Go
+            },
+        ),
+    };
+    let requested_plan = match materialize_parsed_request(
+        &parsed,
+        &MaterializeSpec {
+            client_model: client_model.clone(),
+            upstream_model: diagnostic_model,
+            channel: diagnostic_channel,
+            upstream_base_override: None,
+            original_model: None,
+            allow_go_fallback: false,
+        },
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return local_protocol_failure(
+                &state,
+                &trace,
+                client_format,
+                error,
+                Some(client_body.len()),
+                Some(&client_body),
+            );
+        }
+    };
 
     let mut last_error: Option<String> = None;
     let mut failed_ids: Vec<String> = Vec::new();
     let mut attempt = 0u32;
-    let requested_plan = plan;
 
     loop {
         let (accounts, free_cooldown) = {
@@ -503,25 +641,23 @@ async fn execute_plan(
         };
         let free_available =
             free_cooldown.is_none() && !AccountSelector::free_channel_exhausted(&accounts);
-        let route_set = match build_account_route_plans(
+        let route_set = match materialize_account_routes(
             &accounts,
             &config,
-            client_format,
-            &requested_plan,
+            &parsed,
+            &resolved,
+            &client_model,
+            &routing_model,
             &client_body,
-            &body_model,
             free_available,
         ) {
             Ok(route_set) => route_set,
-            Err((status, message)) => {
-                return local_failure_response(
+            Err(error) => {
+                return local_protocol_failure(
                     &state,
                     &trace,
                     client_format,
-                    status,
-                    &message,
-                    "client",
-                    "validation",
+                    error,
                     Some(client_body.len()),
                     Some(&client_body),
                 );
@@ -729,168 +865,6 @@ async fn execute_plan(
     }
 }
 
-#[derive(Debug, Clone)]
-struct AccountRoutePlan {
-    routing: RoutingCandidate,
-    plan: RequestPlan,
-}
-
-struct AccountRouteSet {
-    routes: Vec<AccountRoutePlan>,
-    free_only: bool,
-    incompatibility: Option<String>,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_account_route_plans(
-    accounts: &[Account],
-    config: &AppConfig,
-    client_format: ApiFormat,
-    initial_plan: &RequestPlan,
-    client_body: &Bytes,
-    body_model: &str,
-    free_available: bool,
-) -> Result<AccountRouteSet, (StatusCode, String)> {
-    let decision = decide_route(
-        config.free_model_routing,
-        &initial_plan.model,
-        initial_plan.client,
-        initial_plan.upstream,
-        client_body,
-    )
-    .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
-    let free_only = decision.channel == UpstreamChannel::Free && !decision.allow_go_fallback;
-
-    let free_plan = if decision.channel == UpstreamChannel::Free && free_available {
-        Some(finalize_route_plan(
-            config,
-            client_format,
-            initial_plan.clone(),
-            client_body,
-            body_model,
-            &decision.model,
-            UpstreamChannel::Free,
-            decision.original_model.clone(),
-            decision.mapped_from.clone(),
-            decision.allow_go_fallback,
-        )?)
-    } else if free_only {
-        // Retain a candidate while cooled so selection can report the durable
-        // egress-IP reset instead of treating Zen as an unknown provider.
-        Some(finalize_route_plan(
-            config,
-            client_format,
-            initial_plan.clone(),
-            client_body,
-            body_model,
-            &decision.model,
-            UpstreamChannel::Free,
-            decision.original_model.clone(),
-            decision.mapped_from.clone(),
-            false,
-        )?)
-    } else {
-        None
-    };
-    let go_plan = if decision.channel == UpstreamChannel::Go || decision.allow_go_fallback {
-        Some(finalize_route_plan(
-            config,
-            client_format,
-            initial_plan.clone(),
-            client_body,
-            body_model,
-            &decision.original_model,
-            UpstreamChannel::Go,
-            decision.original_model.clone(),
-            None,
-            false,
-        )?)
-    } else {
-        None
-    };
-
-    let mut routes = Vec::new();
-    let mut rejected = Vec::new();
-    for account in accounts {
-        let plan = if account.provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
-            && account.offering_id == crate::provider::ANONYMOUS_FREE_OFFERING_ID
-        {
-            free_plan.as_ref()
-        } else {
-            go_plan.as_ref()
-        };
-        let Some(plan) = plan else {
-            continue;
-        };
-        match provider_adapter::supports_plan(account, config, plan) {
-            Ok(()) => routes.push(AccountRoutePlan {
-                routing: RoutingCandidate {
-                    account: account.clone(),
-                    channel: plan.channel,
-                    resolved_model: plan.model.clone(),
-                },
-                plan: plan.clone(),
-            }),
-            Err(error) => rejected.push(format!(
-                "{}/{} account `{}`: {error}",
-                account.provider_id, account.offering_id, account.name
-            )),
-        }
-    }
-    let incompatibility = (routes.is_empty() && !rejected.is_empty()).then(|| {
-        format!(
-            "no compatible provider account for model `{}` and {:?}: {}",
-            initial_plan.model,
-            initial_plan.upstream,
-            rejected.join("; ")
-        )
-    });
-    Ok(AccountRouteSet {
-        routes,
-        free_only,
-        incompatibility,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finalize_route_plan(
-    config: &AppConfig,
-    client_format: ApiFormat,
-    initial_plan: RequestPlan,
-    client_body: &Bytes,
-    body_model: &str,
-    model: &str,
-    channel: UpstreamChannel,
-    original_model: String,
-    _mapped_from: Option<String>,
-    allow_go_fallback: bool,
-) -> Result<RequestPlan, (StatusCode, String)> {
-    let base = resolve_upstream_base(channel, &config.upstream_base_url)
-        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
-
-    // When the routed model equals the body's model, the initial plan already
-    // holds the parsed and converted request for this exact body; reusing it
-    // avoids a full JSON parse + conversion per request. Only remapped routes
-    // (free-tier aliases, sticky rebinds, Claude Desktop aliases) re-encode.
-    let mut plan = if body_model != model {
-        let body =
-            rewrite_body_model(client_body, model).map_err(|m| (StatusCode::BAD_REQUEST, m))?;
-        prepare_request(client_format, body).map_err(|error| (error.status, error.message))?
-    } else {
-        initial_plan
-    };
-    plan.model = model.to_string();
-    plan.channel = channel;
-    plan.upstream_base_override = match channel {
-        UpstreamChannel::Free => Some(base),
-        UpstreamChannel::Go => None,
-    };
-    plan.original_model = (original_model != model).then_some(original_model);
-    plan.allow_go_fallback = allow_go_fallback;
-    Ok(plan)
-}
-
-#[allow(clippy::too_many_arguments)]
 /// Candidate credential values a client may present, in fixed priority
 /// order: the Bearer token, then `x-api-key`, then `x-goog-api-key`. Every
 /// non-empty candidate is an independent credential claim; a wrong value
@@ -1018,7 +992,50 @@ fn local_failure_response(
         Some(&encoded),
     );
     emit_failure(&encoded);
-    protocol_error_response(format, status, message, None)
+    protocol_error_from(
+        format,
+        ProtocolError::with_status(status, message.to_string()),
+    )
+}
+
+fn local_protocol_failure(
+    state: &CoreState,
+    trace: &RequestTrace,
+    format: ApiFormat,
+    error: ProtocolError,
+    client_body_bytes: Option<usize>,
+    summary_body: Option<&[u8]>,
+) -> axum::response::Response {
+    let stage = if error.message.starts_with("invalid JSON request") {
+        "parse"
+    } else {
+        "validation"
+    };
+    let mut diagnostic = ErrorDiagnostic::new(trace, 1, "client", stage, format);
+    diagnostic.client_body_bytes = client_body_bytes;
+    diagnostic.downstream_status = Some(error.status.as_u16());
+    if let Some(body) = summary_body {
+        diagnostic = diagnostic.with_request_summary(body);
+    }
+    let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
+    let encoded = serialize_diagnostic(diagnostic);
+    let _ = state.db.lock().log_gateway_diagnostic(
+        if error.status.is_server_error() {
+            "error"
+        } else {
+            "warn"
+        },
+        "gateway_request",
+        &error.message,
+        Some(&trace.request_id),
+        Some(1),
+        Some("client"),
+        Some(stage),
+        Some(duration_ms),
+        Some(&encoded),
+    );
+    emit_failure(&encoded);
+    protocol_error_from(format, error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1077,10 +1094,21 @@ fn protocol_error_response(
         .into_response()
 }
 
+fn protocol_error_from(format: ApiFormat, error: ProtocolError) -> axum::response::Response {
+    (
+        error.status,
+        axum::Json(format_protocol_error(format, &error, None)),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{check_auth, extract_client_key_id, rewrite_claude_desktop_model};
-    use crate::gateway::protocol::{ApiFormat, prepare_request};
+    use crate::gateway::protocol::{
+        ApiFormat, MaterializeSpec, materialize_parsed_request, parse_client_request,
+        prepare_request,
+    };
     use crate::gateway_keys::{CredentialEntry, CredentialSnapshot, PRIMARY_KEY_ID};
     use crate::models::{AppConfig, CLAUDE_DESKTOP_OPUS_ALIAS, ClaudeDesktopModels};
     use crate::state::{CoreState, CoreStateInner};
@@ -1266,6 +1294,35 @@ mod tests {
 
         assert_eq!(plan.model, "glm-5.2");
         // glm-5.2 supports Messages natively (live probe); alias rewrite keeps Messages.
+        assert_eq!(plan.upstream, ApiFormat::Messages);
+
+        let parsed = parse_client_request(ApiFormat::Messages, body).expect("parse once");
+        assert_eq!(parsed.requested_model, CLAUDE_DESKTOP_OPUS_ALIAS);
+        let mapped = models
+            .model_for_alias(&parsed.requested_model)
+            .expect("opus inherits sonnet");
+        let resolved = crate::alias::resolve(mapped).expect("mapped Go alias");
+        assert!(matches!(
+            resolved,
+            crate::alias::ResolvedModel::Alias {
+                alias: "glm-5.2",
+                ..
+            }
+        ));
+        let plan = materialize_parsed_request(
+            &parsed,
+            &MaterializeSpec {
+                client_model: parsed.requested_model.clone(),
+                upstream_model: mapped.to_string(),
+                channel: crate::models::UpstreamChannel::Go,
+                upstream_base_override: None,
+                original_model: None,
+                allow_go_fallback: false,
+            },
+        )
+        .expect("Claude Desktop keeps the original alias as client_model");
+        assert_eq!(plan.model, "glm-5.2");
+        assert_eq!(plan.client_model, CLAUDE_DESKTOP_OPUS_ALIAS);
         assert_eq!(plan.upstream, ApiFormat::Messages);
     }
 

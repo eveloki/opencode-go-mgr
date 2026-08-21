@@ -36,7 +36,10 @@ impl ApiFormat {
 pub struct RequestPlan {
     pub client: ApiFormat,
     pub upstream: ApiFormat,
+    /// Upstream/routed model sent to the provider.
     pub model: String,
+    /// Original client-requested name, echoed in downstream responses.
+    pub client_model: String,
     pub stream: bool,
     pub body: Bytes,
     /// Resolved upstream product channel (Go vs Zen free).
@@ -55,6 +58,43 @@ pub struct RequestPlan {
     pub(crate) response_tools: Vec<Value>,
 }
 
+impl RequestPlan {
+    /// Name written into downstream responses. Falls back to the upstream
+    /// model when a caller constructed a plan without `client_model`.
+    pub fn response_model(&self) -> &str {
+        if self.client_model.is_empty() {
+            &self.model
+        } else {
+            &self.client_model
+        }
+    }
+}
+
+/// Client protocol parsed once, before per-candidate materialization.
+///
+/// Later provider adapters must not re-parse or billable-probe this body.
+/// Convert it with [`materialize_parsed_request`] using that candidate's
+/// upstream model / channel.
+#[derive(Debug, Clone)]
+pub struct ParsedClientRequest {
+    pub client: ApiFormat,
+    pub requested_model: String,
+    pub stream: bool,
+    parsed: Value,
+}
+
+/// Per-candidate identity used to turn a parsed client request into a
+/// [`RequestPlan`]. Endpoint and auth stay in the provider adapter.
+#[derive(Debug, Clone)]
+pub struct MaterializeSpec {
+    pub client_model: String,
+    pub upstream_model: String,
+    pub channel: UpstreamChannel,
+    pub upstream_base_override: Option<String>,
+    pub original_model: Option<String>,
+    pub allow_go_fallback: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NamespaceToolMapping {
     pub(crate) flattened: String,
@@ -67,6 +107,7 @@ pub(crate) struct NamespaceToolMapping {
 pub struct ProtocolError {
     pub status: StatusCode,
     pub message: String,
+    pub code: Option<&'static str>,
 }
 
 impl ProtocolError {
@@ -78,6 +119,19 @@ impl ProtocolError {
         Self {
             status,
             message: message.into(),
+            code: None,
+        }
+    }
+
+    pub(crate) fn with_code(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            code: Some(code),
         }
     }
 }
@@ -360,7 +414,10 @@ const ANTHROPIC_THINKING_ENCRYPTED_PREFIX: &str = "ocg-anthropic-thinking-v1:";
 const CHAT_REASONING_ENCRYPTED_PREFIX: &str = "ocg-chat-reasoning-v1:";
 const CHAT_TOOL_REASONING_PLACEHOLDER: &str = "Tool call reasoning unavailable.";
 
-pub fn prepare_request(client: ApiFormat, body: Bytes) -> Result<RequestPlan, ProtocolError> {
+pub fn parse_client_request(
+    client: ApiFormat,
+    body: Bytes,
+) -> Result<ParsedClientRequest, ProtocolError> {
     let parsed: Value = serde_json::from_slice(&body)
         .map_err(|error| ProtocolError::new(format!("invalid JSON request: {error}")))?;
     let model = parsed
@@ -373,14 +430,19 @@ pub fn prepare_request(client: ApiFormat, body: Bytes) -> Result<RequestPlan, Pr
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    prepare_parsed_request(client, parsed, model, stream)
+    Ok(ParsedClientRequest {
+        client,
+        requested_model: model,
+        stream,
+        parsed,
+    })
 }
 
-pub fn prepare_gemini_request(
+pub fn parse_gemini_request(
     model: String,
     stream: bool,
     body: Bytes,
-) -> Result<RequestPlan, ProtocolError> {
+) -> Result<ParsedClientRequest, ProtocolError> {
     if model.trim().is_empty() {
         return Err(ProtocolError::new("request model is required"));
     }
@@ -389,9 +451,74 @@ pub fn prepare_gemini_request(
     let object = parsed
         .as_object_mut()
         .ok_or_else(|| ProtocolError::new("Gemini request must be a JSON object"))?;
-    object.insert("model".into(), json!(model));
+    object.insert("model".into(), json!(model.clone()));
     object.insert("stream".into(), json!(stream));
-    prepare_parsed_request(ApiFormat::Gemini, parsed, model, stream)
+    Ok(ParsedClientRequest {
+        client: ApiFormat::Gemini,
+        requested_model: model,
+        stream,
+        parsed,
+    })
+}
+
+/// Test-only identity planner. Production inference must parse once, resolve
+/// the name through [`crate::alias::resolve`], then call
+/// [`materialize_parsed_request`]. This helper never bypasses alias
+/// resolution: unknown Chat/Messages models fail closed here too.
+#[cfg(test)]
+pub fn prepare_request(client: ApiFormat, body: Bytes) -> Result<RequestPlan, ProtocolError> {
+    let parsed = parse_client_request(client, body)?;
+    materialize_parsed_request(&parsed, &identity_spec(&parsed))
+}
+
+/// Test-only Gemini identity planner. Same fail-closed contract as
+/// [`prepare_request`]; not a production forward path.
+#[cfg(test)]
+pub fn prepare_gemini_request(
+    model: String,
+    stream: bool,
+    body: Bytes,
+) -> Result<RequestPlan, ProtocolError> {
+    let parsed = parse_gemini_request(model, stream, body)?;
+    materialize_parsed_request(&parsed, &identity_spec(&parsed))
+}
+
+#[cfg(test)]
+fn identity_spec(parsed: &ParsedClientRequest) -> MaterializeSpec {
+    MaterializeSpec {
+        client_model: parsed.requested_model.clone(),
+        upstream_model: parsed.requested_model.clone(),
+        channel: UpstreamChannel::Go,
+        upstream_base_override: None,
+        original_model: None,
+        allow_go_fallback: false,
+    }
+}
+
+/// Convert a request that was already parsed once for a specific candidate.
+///
+/// Protocol selection uses the OpenCode `MODEL_PROTOCOLS` table for the
+/// upstream model. Callers must never trial a billable inference path.
+pub fn materialize_parsed_request(
+    parsed: &ParsedClientRequest,
+    spec: &MaterializeSpec,
+) -> Result<RequestPlan, ProtocolError> {
+    let mut body = parsed.parsed.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.insert("model".into(), json!(&spec.upstream_model));
+    }
+    let mut plan = prepare_parsed_request(
+        parsed.client,
+        body,
+        spec.upstream_model.clone(),
+        parsed.stream,
+    )?;
+    plan.client_model = spec.client_model.clone();
+    plan.channel = spec.channel;
+    plan.upstream_base_override = spec.upstream_base_override.clone();
+    plan.original_model = spec.original_model.clone();
+    plan.allow_go_fallback = spec.allow_go_fallback;
+    Ok(plan)
 }
 
 fn prepare_parsed_request(
@@ -434,6 +561,7 @@ fn prepare_parsed_request(
     Ok(RequestPlan {
         client,
         upstream,
+        client_model: model.clone(),
         model,
         stream,
         body,
@@ -925,7 +1053,75 @@ pub fn transform_response(plan: &RequestPlan, body: &Value) -> Result<Value, Pro
             sanitize_minimax_chat_usage(model.as_deref(), Some(&plan.model), usage);
         }
     }
+    rewrite_visible_model(plan.client, &mut transformed, plan.response_model());
     Ok(transformed)
+}
+
+/// Rewrite client-visible model fields to the original requested name.
+pub(crate) fn rewrite_visible_model(format: ApiFormat, value: &mut Value, client_model: &str) {
+    rewrite_visible_model_inner(format, value, client_model, true);
+}
+
+/// Update existing model fields only. Stream passthrough must not insert a
+/// `model` key into events that never had one (for example `message_stop`).
+pub(crate) fn rewrite_existing_visible_model(
+    format: ApiFormat,
+    value: &mut Value,
+    client_model: &str,
+) {
+    rewrite_visible_model_inner(format, value, client_model, false);
+}
+
+fn rewrite_visible_model_inner(
+    format: ApiFormat,
+    value: &mut Value,
+    client_model: &str,
+    insert: bool,
+) {
+    if client_model.is_empty() {
+        return;
+    }
+    let name = json!(client_model);
+    let assign = |object: &mut serde_json::Map<String, Value>, key: &str, value: Value| match object
+        .get(key)
+    {
+        Some(existing) if existing == &value => {}
+        Some(_) => {
+            object.insert(key.to_string(), value);
+        }
+        None if insert => {
+            object.insert(key.to_string(), value);
+        }
+        None => {}
+    };
+    match format {
+        ApiFormat::ChatCompletions => {
+            if let Some(object) = value.as_object_mut() {
+                assign(object, "model", name);
+            }
+        }
+        ApiFormat::Messages => {
+            if let Some(object) = value.as_object_mut() {
+                assign(object, "model", name.clone());
+                if let Some(message) = object.get_mut("message").and_then(Value::as_object_mut) {
+                    assign(message, "model", name);
+                }
+            }
+        }
+        ApiFormat::Responses => {
+            if let Some(object) = value.as_object_mut() {
+                assign(object, "model", name.clone());
+                if let Some(response) = object.get_mut("response").and_then(Value::as_object_mut) {
+                    assign(response, "model", name);
+                }
+            }
+        }
+        ApiFormat::Gemini => {
+            if let Some(object) = value.as_object_mut() {
+                assign(object, "modelVersion", name);
+            }
+        }
+    }
 }
 
 pub fn transform_between(
@@ -981,12 +1177,30 @@ pub fn format_error(
     message: &str,
     upstream: Option<&Value>,
 ) -> Value {
+    format_error_with_code(format, status, message, upstream, None)
+}
+
+pub fn format_protocol_error(
+    format: ApiFormat,
+    error: &ProtocolError,
+    upstream: Option<&Value>,
+) -> Value {
+    format_error_with_code(format, error.status, &error.message, upstream, error.code)
+}
+
+pub fn format_error_with_code(
+    format: ApiFormat,
+    status: StatusCode,
+    message: &str,
+    upstream: Option<&Value>,
+    code: Option<&str>,
+) -> Value {
     if format == ApiFormat::Gemini {
         let upstream_message = upstream
             .and_then(|value| value.pointer("/error/message"))
             .and_then(Value::as_str)
             .unwrap_or(message);
-        return gemini_error_body(status, upstream_message);
+        return gemini_error_body(status, upstream_message, code);
     }
     let upstream_error = upstream.and_then(|value| value.get("error"));
     let message = upstream_error
@@ -996,6 +1210,7 @@ pub fn format_error(
     let kind = upstream_error
         .and_then(|error| error.get("type"))
         .and_then(Value::as_str)
+        .or(code)
         .unwrap_or_else(|| match status.as_u16() {
             401 | 403 => "authentication_error",
             429 => "rate_limit_error",
@@ -1023,7 +1238,7 @@ pub fn error_body(format: ApiFormat, kind: &str, message: &str) -> Value {
     }
 }
 
-fn gemini_error_body(status: StatusCode, message: &str) -> Value {
+fn gemini_error_body(status: StatusCode, message: &str, code: Option<&str>) -> Value {
     let status_name = match status.as_u16() {
         400 => "INVALID_ARGUMENT",
         401 => "UNAUTHENTICATED",
@@ -1035,9 +1250,21 @@ fn gemini_error_body(status: StatusCode, message: &str) -> Value {
         502..=504 => "UNAVAILABLE",
         _ => "INTERNAL",
     };
-    json!({
-        "error": { "code": status.as_u16(), "message": message, "status": status_name }
-    })
+    let mut error = json!({
+        "code": status.as_u16(),
+        "message": message,
+        "status": status_name
+    });
+    if let Some(code) = code
+        && let Some(object) = error.as_object_mut()
+    {
+        object.insert("reason".into(), json!(code));
+        object.insert(
+            "details".into(),
+            json!([{ "reason": code, "message": message }]),
+        );
+    }
+    json!({ "error": error })
 }
 
 fn gemini_status_for_kind(kind: &str) -> &'static str {
@@ -1237,12 +1464,11 @@ fn model_protocol(model: &str) -> Option<&'static ModelProtocol> {
 fn resolve_upstream_format(client: ApiFormat, model: &str) -> Result<ApiFormat, ProtocolError> {
     match (client, model_protocol(model)) {
         (ApiFormat::Gemini, Some(profile)) => Ok(profile.preferred),
-        (ApiFormat::Gemini, None) | (ApiFormat::Responses, None) => Err(ProtocolError::new(
-            format!("unknown model `{model}` cannot be routed from this endpoint"),
-        )),
         (client, Some(profile)) if profile.supported.contains(&client) => Ok(client),
         (_, Some(profile)) => Ok(profile.preferred),
-        (client, None) => Ok(client),
+        (_, None) => Err(ProtocolError::new(format!(
+            "unknown model `{model}` cannot be routed from this endpoint"
+        ))),
     }
 }
 
@@ -3464,6 +3690,7 @@ mod tests {
             client,
             upstream,
             model: model.into(),
+            client_model: model.into(),
             stream: false,
             body: Bytes::new(),
             channel: UpstreamChannel::Go,
@@ -4210,7 +4437,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_chat_and_messages_models_stay_native() {
+    fn unknown_chat_and_messages_models_fail_closed() {
         let chat = prepare_request(
             ApiFormat::ChatCompletions,
             bytes(json!({
@@ -4218,16 +4445,16 @@ mod tests {
                 "messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}]
             })),
         )
-        .expect("unknown Chat remains Chat");
+        .expect_err("unknown Chat must not stay native");
         let messages = prepare_request(
             ApiFormat::Messages,
             bytes(json!({"model":"custom","max_tokens":1,"messages":[]})),
         )
-        .expect("unknown Messages remains Messages");
-        assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
-        assert_eq!(messages.upstream, ApiFormat::Messages);
-        let chat_body: Value = serde_json::from_slice(&chat.body).unwrap();
-        assert!(chat_body["messages"][0].get("reasoning_content").is_none());
+        .expect_err("unknown Messages must not stay native");
+        assert_eq!(chat.status, StatusCode::BAD_REQUEST);
+        assert!(chat.message.contains("unknown model"));
+        assert_eq!(messages.status, StatusCode::BAD_REQUEST);
+        assert!(messages.message.contains("unknown model"));
     }
 
     #[test]
@@ -5207,5 +5434,154 @@ mod tests {
         let plan = prepare_request(ApiFormat::Responses, bytes(request)).unwrap();
         let body: Value = serde_json::from_slice(&plan.body).unwrap();
         assert_eq!(body["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn prepare_request_records_client_model() {
+        let plan = prepare_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "MiniMax-M3",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .unwrap();
+        assert_eq!(plan.model, "MiniMax-M3");
+        assert_eq!(plan.client_model, "MiniMax-M3");
+        assert_eq!(plan.response_model(), "MiniMax-M3");
+    }
+
+    #[test]
+    fn parse_once_materializes_a_different_upstream_model() {
+        let parsed = parse_client_request(
+            ApiFormat::ChatCompletions,
+            bytes(json!({
+                "model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+        )
+        .unwrap();
+        let go = materialize_parsed_request(
+            &parsed,
+            &MaterializeSpec {
+                client_model: parsed.requested_model.clone(),
+                upstream_model: "deepseek-v4-flash".into(),
+                channel: UpstreamChannel::Go,
+                upstream_base_override: None,
+                original_model: None,
+                allow_go_fallback: false,
+            },
+        )
+        .unwrap();
+        let free = materialize_parsed_request(
+            &parsed,
+            &MaterializeSpec {
+                client_model: parsed.requested_model.clone(),
+                upstream_model: "deepseek-v4-flash-free".into(),
+                channel: UpstreamChannel::Free,
+                upstream_base_override: Some("https://opencode.ai/zen".into()),
+                original_model: Some("deepseek-v4-flash".into()),
+                allow_go_fallback: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(go.model, "deepseek-v4-flash");
+        assert_eq!(go.client_model, "deepseek-v4-flash");
+        assert_eq!(go.channel, UpstreamChannel::Go);
+        assert_eq!(free.model, "deepseek-v4-flash-free");
+        assert_eq!(free.client_model, "deepseek-v4-flash");
+        assert_eq!(free.channel, UpstreamChannel::Free);
+        assert_eq!(free.original_model.as_deref(), Some("deepseek-v4-flash"));
+        let go_body: Value = serde_json::from_slice(&go.body).unwrap();
+        let free_body: Value = serde_json::from_slice(&free.body).unwrap();
+        assert_eq!(go_body["model"], "deepseek-v4-flash");
+        assert_eq!(free_body["model"], "deepseek-v4-flash-free");
+    }
+
+    #[test]
+    fn transform_response_rewrites_model_to_client_name() {
+        let mut plan = plan_with_model(
+            ApiFormat::ChatCompletions,
+            ApiFormat::ChatCompletions,
+            "deepseek-v4-flash-free",
+        );
+        plan.client_model = "deepseek-v4-flash".into();
+        let converted = transform_response(
+            &plan,
+            &json!({
+                "id": "chatcmpl-1",
+                "model": "upstream-should-not-leak",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+            }),
+        )
+        .unwrap();
+        assert_eq!(converted["model"], "deepseek-v4-flash");
+
+        let mut messages_plan =
+            plan_with_model(ApiFormat::Messages, ApiFormat::Messages, "glm-5.2");
+        messages_plan.client_model = "claude-sonnet-4-6".into();
+        let converted = transform_response(
+            &messages_plan,
+            &json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "glm-5.2",
+                "content": [{"type": "text", "text": "hi"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }),
+        )
+        .unwrap();
+        assert_eq!(converted["model"], "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn format_error_exposes_ambiguous_model_id() {
+        let message = "ambiguous_model_id: send a preferred alias instead of this raw id";
+        let code = Some(crate::alias::AMBIGUOUS_MODEL_ID);
+        let chat = format_error_with_code(
+            ApiFormat::ChatCompletions,
+            StatusCode::BAD_REQUEST,
+            message,
+            None,
+            code,
+        );
+        assert_eq!(chat["error"]["type"], crate::alias::AMBIGUOUS_MODEL_ID);
+        assert!(chat["error"]["message"].as_str().unwrap().contains("alias"));
+
+        let messages = format_error_with_code(
+            ApiFormat::Messages,
+            StatusCode::BAD_REQUEST,
+            message,
+            None,
+            code,
+        );
+        assert_eq!(messages["error"]["type"], crate::alias::AMBIGUOUS_MODEL_ID);
+
+        let responses = format_error_with_code(
+            ApiFormat::Responses,
+            StatusCode::BAD_REQUEST,
+            message,
+            None,
+            code,
+        );
+        assert_eq!(responses["error"]["type"], crate::alias::AMBIGUOUS_MODEL_ID);
+        assert_eq!(responses["error"]["code"], crate::alias::AMBIGUOUS_MODEL_ID);
+
+        let gemini = format_error_with_code(
+            ApiFormat::Gemini,
+            StatusCode::BAD_REQUEST,
+            message,
+            None,
+            code,
+        );
+        assert_eq!(gemini["error"]["status"], "INVALID_ARGUMENT");
+        assert_eq!(gemini["error"]["reason"], crate::alias::AMBIGUOUS_MODEL_ID);
+        assert_eq!(
+            gemini["error"]["details"][0]["reason"],
+            crate::alias::AMBIGUOUS_MODEL_ID
+        );
     }
 }

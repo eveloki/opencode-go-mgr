@@ -3,6 +3,7 @@ pub mod forwarder;
 pub mod free_models;
 pub mod handler;
 pub mod limit;
+pub mod materialize;
 pub mod protocol;
 pub mod protocol_stream;
 pub mod provider_adapter;

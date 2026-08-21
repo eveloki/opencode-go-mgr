@@ -1,3 +1,14 @@
+//! Provider offering adapters: endpoint, auth, and capability checks.
+//!
+//! Authentication belongs to the provider/offering, not the wire protocol.
+//! [`resolve_route`] is the seam later GOAT / SCNet / Custom adapters should
+//! implement. Alias and PinnedRaw candidates both materialize a [`RequestPlan`]
+//! then call this seam. They must not probe a billable inference path to
+//! discover protocol support.
+//!
+//! Production Command Code GOAT, SCNet, and Custom stay fail-closed here.
+//! The GOAT loopback helper exists only for gateway integration tests.
+
 use crate::gateway::free_models::{is_free_model, resolve_upstream_base};
 use crate::gateway::protocol::{ApiFormat, RequestPlan, opencode_supports_upstream};
 use crate::models::{Account, AppConfig, UpstreamChannel};
