@@ -2,10 +2,12 @@
 
 # OCG Manager
 
-OCG Manager 是一个本地 OpenCode-Go 多账号运维控制台。它把账号 Key 保存在
-SQLite，并在 `http://127.0.0.1:9042` 上同时提供多协议 Gateway 与管理面板。
-客户端可以使用 OpenAI、Anthropic、Gemini 或 Claude Desktop 协议；Gateway 把
-请求转换到模型的 OpenCode-Go 原生协议，再把响应转回客户端。
+OCG Manager 是一个本地多 Plan 运维控制台。每张账号卡绑定一个
+Plan（provider/offering），并在该 Plan 需要时于 SQLite 中保存一份凭据；它在
+`http://127.0.0.1:9042` 同时提供多协议
+Gateway 与管理面板。客户端使用 OpenAI、Anthropic、Gemini 或 Claude Desktop
+协议并发送本地别名；Gateway 把请求转换到所选 Plan 支持的上游协议，再把响应
+转回客户端。当前可路由的是 OpenCode Go 与 Zen Free。
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
@@ -17,7 +19,7 @@ SQLite，并在 `http://127.0.0.1:9042` 上同时提供多协议 Gateway 与管�
 
 - **一个端口，四类客户端协议**：OpenAI Chat Completions / Responses、
   Anthropic Messages、Gemini `generateContent` / `streamGenerateContent`、
-  模型列表与 Claude Desktop 别名入口。
+  本地 Alias 列表与 Claude Desktop 别名入口。
 - **本地多账号轮询**：拖动账号卡片即可持久调整优先级；Gateway 自动跳过已禁用、
   冷却中或本次请求已失败的账号。
 - **额度条只是警告**：5 小时 / 本周 / 本月用量是本地估算。满格不会停流量；只有
@@ -54,12 +56,13 @@ Gateway: http://127.0.0.1:9042/v1
 鉴权:    Authorization: Bearer <key>
 ```
 
-面板里的 **Key** 是客户端唯一需要配置的密钥；Gateway 会在上游侧注入已保存的
-OpenCode-Go 账号 Key。
+面板里的 **Key** 是客户端唯一需要配置的密钥。实时流量可导入 OpenCode Go 账号
+Key；Zen Free 不发送上游凭据。
 
 1. 安装并启动 OCG Manager。Gateway 就绪后管理面板会在系统浏览器中打开；之后可
    通过托盘图标重新打开。
-2. 在 **账号** 视图导入已有 Key，或用托管向导注册（Beta）。复制 Key。
+2. 在 **账号** 视图导入 OpenCode Go 账号 Key、选择无需凭据的 Zen Free，或用托管
+   向导注册（Beta）。复制 Key。
 3. 把客户端指向 `http://127.0.0.1:9042/v1`。**应用** 视图提供各客户端配置教程。
 
 ```bash
@@ -73,7 +76,7 @@ curl http://127.0.0.1:9042/v1/chat/completions \
 
 ## Docker
 
-公开镜像：`ghcr.io/klarkxy/opencode-go-mgr`（当前只发布 `linux/amd64`，匿名即可
+公开镜像：`ghcr.io/klarkxy/opencode-go-mgr`（`linux/amd64, linux/arm64`，匿名即可
 拉取）。把 [`compose.example.yaml`](compose.example.yaml)（每个 Release 也会附带）
 保存为 `compose.yaml` 后运行：
 
@@ -99,8 +102,9 @@ docker compose up -d --no-build
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
 
 Gemini 只是客户端格式（请求不会发往 Google）。Claude Desktop 别名会改写为
-**应用** 视图里保存的映射。Chat / Messages 上的未知模型保留请求自身协议；
-Responses、Gemini 或未知 Claude Desktop 别名直接 `400`。
+**应用** 视图里保存的映射。客户端应发送已公布别名；带鉴权的 `GET /v1/models`
+从本地注册表列出当前可路由别名（不发现上游，也不依赖账号）。未知模型名在所有
+受支持的客户端格式上返回 `400`。
 
 透传矩阵、上下文 / 输入 / 推理 / 工具、转换边界，以及真/假熔断见
 [用户指南 · 模型能力](docs/USER.zh-CN.md#模型能力)与

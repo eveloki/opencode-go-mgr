@@ -5,20 +5,20 @@
 
 ## 项目事实
 
-- 产品：OCG Manager，OpenCode-Go 多账号本地管理器。
+- 产品：OCG Manager，本地多 Plan 运维控制台。当前可路由的是 OpenCode Go 与 Zen Free；Command Code GOAT、SCNet Token Plans、Custom API 仅为 schema/UI 草稿（禁用 `pending`，verify 返回 `501`，不可路由），不得写成已上线路由、用量、计价、验证或供应商教程。
 - 前端：Vue 3 + TypeScript + naive-ui，源码在 `src/`。
 - 前端 API：`src/api/tauri.ts` 是历史命名，当前封装 HTTP `/dashboard/api`，不是 Tauri `invoke()`。
 - 面板视图（侧栏顺序）：Dashboard / Access Keys / Accounts / Pricing / Applications / Logs / Settings。
 - UI 文案：接入凭证在面板上显示为 **Key**（不要写 “Gateway Key”）；设计系统以 `DESIGN.md` + `src/theme.ts` 为准。
 - Rust workspace：`crates/ocg-core`、`crates/ocg-cli`（二进制名 `ocg-manager-cli`）、`src-tauri`。
-- 核心 Gateway：Axum + Tokio + reqwest，默认监听 `127.0.0.1:9042`；同一端口提供 OpenAI Chat Completions / Responses、Anthropic Messages、Gemini `generateContent` 客户端入口与 Claude Desktop 别名入口。
+- 核心 Gateway：Axum + Tokio + reqwest，默认监听 `127.0.0.1:9042`；同一端口提供 OpenAI Chat Completions / Responses、Anthropic Messages、Gemini `generateContent` 客户端入口与 Claude Desktop 别名入口。带鉴权的 `GET /v1/models` 列出当前可路由 Alias（OpenCode Go 与 Zen Free），受保护的 `GET /dashboard/api/application-models` 是 **Go 可路由 Alias ∩ 当前价格快照**（highspeed 继承基价行，空交集为 `[]`）。两条路径都只返回 Alias、不含原始 ID，**零上游发现、不选账号**；不要重新引入上游模型目录抓取。未知模型名在所有受支持客户端格式上 `400`。
 - 接入凭证分两层：主 Key 是遗留 `AppConfig.gateway_key` 标量（`AppConfig::validate` 强制 trim 后非空，永不可禁用/删除，日志归因固定 `gateway_keys::PRIMARY_KEY_ID`，名称快照 "Primary"）；子 Key 存于 SQLite `sub_gateway_keys` 表（schema v20，活跃上限 64，软删保留名称、清除明文），仅经 `/dashboard/api/settings/keys*` 生命周期 API 变更，每次成功变更 bump settings_revision。主/子 Key 值互斥由统一闸口 `gateway_keys::ensure_primary_value_allowed` 在 dashboard、Tauri settings 与子 Key 启用路径强制；config JSON 不再内嵌 Key 列表。
 - 鉴权收集 Bearer / x-api-key / x-goog-api-key 全部非空候选头，任一命中凭证快照（`CoreStateInner.credential_snapshot`，含主 Key 与启用子 Key）即通过，首个命中按候选头顺序归因；快照同源供 forward log 名称快照。`GET /dashboard/api/connection` 返回接入中心专用轻量 `ConnectionInfo`（含明文 Key，处于 dashboard 会话保护层），Dashboard 不持有完整 settings 形状。
-- 持久化：SQLite。GUI 数据目录为 Windows `%USERPROFILE%\.ocg-mgr` 或 macOS/Linux `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
+- 持久化：SQLite（当前 schema v23）。首次迁到 v23 前在 `data.sqlite` 同目录写一份不覆盖的 `data.sqlite.pre-v23.<timestamp>.bak`；源库早于 v22 时还会保留 `data.sqlite.pre-v22.<timestamp>.bak`。GUI 数据目录为 Windows `%USERPROFILE%\.ocg-mgr` 或 macOS/Linux `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
 - 桌面端：Tauri v2 跨平台托盘应用，主窗口默认隐藏；托盘/单实例逻辑用系统浏览器打开 `http://127.0.0.1:<port>/dashboard/`，回环监听自动跳过登录。
 - Tauri commands 仍注册在 `src-tauri/src/commands/`，但不是当前 Vue dashboard 的主调用路径。
 - 每个节点都由自己的 dashboard 管理；项目不提供远端同步或 Admin API。
-- 全局出站代理保存在 `AppConfig`，模式为自动（系统/环境）、手动 HTTP、强制直连；模型、账号测试、用量、价格与已安装桌面版的签名升级下载必须遵守同一套策略。reqwest 路径复用 `http_client.rs`，Tauri updater 用其 `proxy` / `no_proxy` 对齐，不得按账号配置或绕过。
+- 全局出站代理保存在 `AppConfig`，模式为自动（系统/环境）、手动 HTTP、强制直连；模型转发、账号测试、用量、价格与已安装桌面版的签名升级下载必须遵守同一套策略。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/application-models` 是本地 Alias 列表，不走出站发现。reqwest 路径复用 `http_client.rs`，Tauri updater 用其 `proxy` / `no_proxy` 对齐，不得按账号配置或绕过。Custom Phase-1 HTTP（`custom_http.rs`）只允许 Direct 与 Manual；Auto 明确不可用。
 - 非回环监听使用单管理员登录。Docker 可通过 `OCG_ADMIN_USERNAME` 和 `OCG_ADMIN_PASSWORD` 首次初始化（两个必须同时设置，只设一个会启动报错）；未提供时由首个注册者创建管理员。
 - 设置页通过受保护的 `/dashboard/api/settings/check-update` 手动检查 GitHub 最新 Release。内置升级公钥的已安装桌面版可继续下载、校验签名并原位安装；开发构建、CLI、Docker 与尚未进入升级通道的旧版保留发布页/手动覆盖路径。
 - 价格表通过受保护的 `GET /dashboard/api/pricing`、`PUT /dashboard/api/pricing/multipliers`、`POST /dashboard/api/pricing/refresh` 管理；只在用户点击刷新时访问 `https://opencode.ai/docs/go/`，不得自动轮询。
@@ -26,8 +26,10 @@
 - `.github/workflows/quality.yml` 在 PR / `main` 上拆成三个并行 job：Web 测试/类型/lint、Linux workspace Rust 测试/Clippy（占位 `dist/`，编译含 Tauri crate）、Windows Tauri 定向测试（占位 `dist/`，不跑 Vite）。`release.yml` 的手动候选（即使选择 tag ref）始终无签名且可只构建指定平台；只有 `v*` tag 的 push 事件才构建三平台并读取 repository signing secrets。tag push 视为单维护者的明确发布授权：工作流在校验附件集合与组装产物逐名一致（数量由产物推导，不硬编码）、升级签名、公钥连续性与 GitHub 服务端 digest 后自动公开同一个未变更 draft。
 - 容器固定以 UID/GID `10001` 运行并内置 `LICENSE`；Compose 透传可选的 `OCG_MANAGER_ENCRYPTION_KEY` 以支持显式密钥恢复，正常部署仍优先保留卷内 `.encryption-key`。
 - 下游访问根地址优先级：非空 `OCG_CLIENT_ROOT_URL` > SQLite 手工值 > 前端按生产 origin / 开发 Gateway 端口自动推导。环境变量覆盖只读且不得写回 SQLite。
-- Gemini 客户端使用 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`（也接受 `/v1/models/...`），可用 `x-goog-api-key` 鉴权；Gemini 只是客户端格式，Gateway 始终转换到已知模型的推荐上游协议。
-- 模型协议能力在 `protocol.rs` 的 `MODEL_PROTOCOLS` 硬编码：`preferred` 对齐官方 Go docs endpoint 表，`supported` 为测试账号探测结论。客户端协议 ∈ supported 时透传，否则转到 preferred；请求路径禁止试探协议（防双计费）。`grok-4.5` 仅 `supported = Responses`（Chat 入口须转换）。`gpt-5.6-luna` preferred 仍是 Responses，但 Chat 已可透传。
+- Gemini 客户端使用 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`（也接受 `/v1/models/...`），可用 `x-goog-api-key` 鉴权；Gemini 只是客户端格式，Gateway 始终转换到已知模型的推荐上游协议。未知模型名在 Chat / Responses / Messages / Gemini 上均 `400`，禁止靠试探选协议。
+- 模型协议能力在 `protocol.rs` 的 `MODEL_PROTOCOLS` 硬编码：`preferred` 对齐官方 Go docs endpoint 表，`supported` 为测试账号探测结论。客户端协议 ∈ supported 时透传，否则转到 preferred；请求路径禁止试探协议（防双计费）。`grok-4.5` 仅 `supported = Responses`（Chat 入口须转换）。`gpt-5.6-luna` preferred 仍是 Responses，但 Chat 已可透传。`MODEL_PROTOCOLS` 仍只服务 OpenCode Go。
+- Plan 目录在 `provider.rs` 的 `BUILTIN_PLANS`：OpenCode Go、Zen Free、Command Code GOAT、SCNet Token Plans（`token-plan-basic|standard|premium`，Key 前缀 `sk-tp-`，官方交互式使用限制）、Custom API。内部身份是 `provider_id` + `offering_id`。GOAT/SCNet/Custom 创建为禁用 `pending` 草稿（`routable=false`）；`POST /dashboard/api/accounts/{id}/verify` 本切片返回 `501`。所有持久化变更路径（DB / dashboard / CLI / Tauri）都会在写入、revision 或时间戳变更前拒绝为目录内 `routable=false` offering 设置 `enabled=true`。每次 `Database::open` 都会禁用遗留的 GOAT、全部三个 SCNet tier 与 Custom 的 `enabled` 行，且不改 `updated_at`；保留验证/config，只有既有未验证 GOAT 会重置为 `pending`。Go、Zen Free 和未知 pair 不受影响。SCNet 官方可用模型表与 endpoint 快照只作适配器输入，不得当作客户端别名公布。Custom 是 Phase-1 休眠草稿：base URL 校验（非回环 HTTPS、禁凭据、禁私网/metadata）加 Direct/Manual HTTP 基础，Auto 明确不可用；`custom_http` 无生产调用方（未接线到推理 / verify / 用量 / selector）；代理侧 DNS 残留风险阻止启用，不得写成已上线 HTTP 适配器。
+- 客户端别名在 `alias.rs`：首选稳定小写 kebab-case（沿用 Go 模型 ID）；大小写折叠可接受；含 `/`、`_` 或空白视为原始 ID，不得折成 kebab。恰好一个注册表 mapping 的原始 ID 钉在该 mapping，之后才检查可路由性；不可路由 mapping 会被识别但不能产出生产路由。重叠原始 ID 返回 `ambiguous_model_id` 且不调用上游。公布的 kebab 别名 `deepseek-v4-flash` 仍归 Go；原始 ID `deepseek/deepseek-v4-flash` 钉在不可路由的 GOAT。转发日志区分 `requested_model`（客户端请求的 Alias/模型名）、`resolved_alias`、`upstream_model`；`native_cost_*` 可选；不要发明 `requested_alias` 字段。Claude Desktop 三个角色别名仍先改写再进入 Alias 解析，`/claude-desktop/v1/models` 只公布这三个角色。
 - Free 模型策略：`AppConfig.free_model_routing` 为 `deny` / `explicit`（默认）/ `prefer`；Zen free 与 Go 使用独立 `cooldown_free_until`。Zen free 额度按出口 IP 共享，429 后整条 free 通道冷却，不换 Key 重试；401/403 仍按账号故障切换。prefer 仅映射 `deepseek-v4-flash`/`mimo-v2.5`，上下文粗估装得下才降级，free 耗尽回落 Go。free 通道成功行记 `cost_state=free`，不计入 Go 额度。
 - Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`；`sonnet`、`opus`、`haiku` 映射保存在 `AppConfig.claude_desktop_models`，由受保护的 `GET/PUT /dashboard/api/claude-desktop/models` 管理。
 - 托管账号（Beta）：`setup_step` 为 `google_account`（UI：登录身份，可跳过）→ `opencode_registration` → `payment` → `key_verification` → `ready`。`PATCH .../setup` 允许前进一格或回退更早步骤，禁止跳步与直接 `ready`。创建草稿可编辑邀请链接并写回 `opencode_invite_url`（`DEFAULT_OPENCODE_INVITE_URL` 为演示默认）。浏览器目标含 Google/GitHub 注册与登录、邀请 URL、控制台 `https://opencode.ai/auth`。
@@ -35,7 +37,10 @@
 
 ## 关键文件
 
-- `crates/ocg-core/src/gateway/`：OpenAI / Anthropic / Gemini 客户端协议路由与转换、Claude Desktop 别名改写、转发、选择器、冷却、费用统计。
+- `crates/ocg-core/src/gateway/`：OpenAI / Anthropic / Gemini 客户端协议路由与转换、Claude Desktop 别名改写、转发、选择器、冷却、费用统计。`materialize.rs` 先解析客户端协议再按 Alias mapping 物化候选；适配器不得用可计费路径试探协议。
+- `crates/ocg-core/src/alias.rs`：客户端 Alias 注册表与原始 ID 解析；改 `/v1/models`、未知模型 `400` 或日志身份时从这里入手。
+- `crates/ocg-core/src/provider.rs`：`BUILTIN_PLANS`、SCNet 官方快照与交互式使用限制、Custom URL/模型 ID 校验；改 Plan 目录或 fail-closed 草稿时从这里入手。
+- `crates/ocg-core/src/custom_http.rs`：Custom Phase-1 休眠 HTTP 基础（Direct/Manual，Auto 不可用，connect-time DNS 预检）；无生产调用方，不得接线到推理 / verify / 用量 / selector。
 - `crates/ocg-core/src/gateway_keys.rs`：子 Key 生命周期门面（`sub_gateway_keys` CRUD 封装、凭证快照构建/重建、`PRIMARY_KEY_ID` 常量、跨层值唯一闸口）；改 Key 存储或鉴权快照时从这里入手。
 - `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略。
 - `crates/ocg-core/src/dashboard.rs`：当前 Vue 面板使用的 `/dashboard/api`。
@@ -112,7 +117,8 @@ git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json s
 - 不要重新引入远端同步；远端节点通过自己的 dashboard 管理。
 - `auto_start` 仅在 Windows release/安装版 Tauri 桌面进程中可用；HTTP dashboard 依据运行时能力显示开关，开发构建、CLI、Docker、macOS 和 Linux 不暴露该设置。
 - `show_dock_icon` 仅在 macOS Tauri 桌面进程中可用；关闭后保留菜单栏托盘图标。Windows、Linux、CLI 与 Docker 不暴露该设置。
-- 改文档时保持中英对、路径与 TOC 一致；用户可见事实以代码与 `docs/USER*.md` 为准。协议表跟 `protocol.rs`，能力表跟 `application-guides.ts`，由 USER 镜像。不要把透传矩阵、能力表或熔断长文再写回 README。
+- 改文档时保持中英对、路径与 TOC 一致；用户可见事实以代码与 `docs/USER*.md` 为准。协议表跟 `protocol.rs`，能力表跟 `application-guides.ts`，别名跟 `alias.rs`，Plan 目录跟 `provider.rs`，由 USER 镜像。不要把透传矩阵、能力表或熔断长文再写回 README。不要把 GOAT/SCNet/Custom 写成已上线路由。
+- 不要为 `GET /v1/models` 或 dashboard `application-models` 重新引入上游发现；前者是当前可路由 Alias，后者是 Go 可路由 Alias ∩ 当前价格快照，都不含原始 ID、不选账号。
 - 改 UI 外观时遵循 `DESIGN.md`：六档字号、七主题、接入中心首屏、Key 命名；主题实现以 `src/theme.ts` 为准。
 
 ## 测试策略
@@ -131,3 +137,4 @@ git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json s
 - Tauri 隔离浏览器 command 存在，但当前 HTTP dashboard 没有按钮调用它。
 - `src-tauri/src/commands/*` 与 `crates/ocg-core/src/dashboard.rs` 有部分重复逻辑；当前不要大拆，除非同时迁移缺失行为并补验证。
 - 当前不发布 Windows/Linux ARM64、32 位 x86、RPM、Snap 或应用商店包，也没有 Windows Authenticode 正式签名或 Apple notarization。v1.4.1 需要最后一次直接覆盖安装首个 updater-enabled Release；不要先卸载，之后的已安装桌面版可在设置页完成签名升级。
+- Command Code GOAT、SCNet Token Plans、Custom API 保持禁用 pending / 不可路由 / verify `501`。Custom Phase-1 安全基础（URL 校验 + Direct/Manual HTTP，Auto 不可用）不是已上线支持；`custom_http` 无生产调用方，代理侧 DNS 残留阻止启用。SCNet Token Plan Key 仅限 AI 工具内交互使用，禁止共享账号或当自定义后端/自动化/非交互批量调用。

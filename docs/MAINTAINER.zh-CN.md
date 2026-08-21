@@ -26,7 +26,7 @@
 ```
 ocg-manager/
 ├── crates/
-│   ├── ocg-core/      Gateway、面板 HTTP API、SQLite、models、crypto、selector、cooldown、pricing
+│   ├── ocg-core/      Gateway、面板 HTTP API、SQLite、Plan 目录、Alias 注册表、休眠 Custom HTTP、models、crypto、selector、cooldown、pricing
 │   ├── ocg-cli/       无头 CLI 与 Gateway 入口
 │   └── ocg-browser-worker/  Linux Chromium Sidecar 控制服务
 ├── browser/           Xvfb、Openbox、x11vnc、noVNC 启动脚本
@@ -168,19 +168,69 @@ Desktop 三个角色模型的持久化行为。
   `/v1/models`。Claude Desktop 使用 `/claude-desktop/v1/messages` 和
   `/claude-desktop/v1/models`；Gemini 同时接受 `/v1beta/models/{model}:*` 与
   `/v1/models/{model}:*`，其中 `generateContent`、`streamGenerateContent` 进入
-  转换链，`countTokens`、`embedContent` 返回 `501`。
+  转换链，`countTokens`、`embedContent` 返回 `501`。带鉴权的 `GET /v1/models`
+  是当前可路由别名（OpenCode Go 与 Zen Free）的本地读取，**零上游发现、不选账号**。
+  受保护的 `GET /dashboard/api/application-models` 是另一份本地列表：当前可路由
+  的 OpenCode Go 别名与当前 Go 价格快照求交（highspeed 变体继承基价行；空交集为
+  `[]`）。两条路径都只返回 Alias，不含原始 ID。不要在这两条路径上重新引入上游
+  目录抓取、按上游过滤或可用性探测。Claude Desktop `/claude-desktop/v1/models`
+  仍然只公布三个角色别名。
+- `alias.rs` 是硬编码的客户端 Alias 注册表。首选别名是稳定的小写 kebab-case
+  （沿用现有 OpenCode Go ID）。大小写折叠的 kebab 拼写可接受；含 `/`、`_` 或
+  空白的名称视为原始 ID，不得折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个
+  mapping 时钉在该 mapping；之后才检查可路由性，因此不可路由 mapping 会被识别但
+  不能产出生产路由。重叠的原始 ID 返回 `400`，错误码 `ambiguous_model_id`，且不得
+  调用上游。未知名称在 Chat Completions、Responses、Messages 以及 Gemini
+  generateContent / streamGenerateContent 上返回 `400`。已公布 kebab 别名
+  `deepseek-v4-flash` 仍归 Go；原始 ID `deepseek/deepseek-v4-flash` 钉在不可路由
+  的 GOAT。转发日志持久化 `requested_model`（客户端请求的 Alias/模型名）、
+  `resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`。没有
+  `requested_alias` 字段。`native_cost_value` / `native_cost_unit` /
+  `native_cost_currency` 可选。
 - `protocol.rs`、`protocol_stream.rs` 在 Chat Completions、Responses、
   Anthropic Messages 与客户端 Gemini generateContent 之间转换。Gemini 不能成为
   上游格式。已知模型用硬编码 `MODEL_PROTOCOLS`（`preferred` + `supported`）：
-  客户端协议在 `supported` 内则透传，否则转到 `preferred`；Responses/Gemini
-  未知模型直接 `400`，请求路径禁止试探协议。
+  客户端协议在 `supported` 内则透传，否则转到 `preferred`；未知模型在所有受支持
+  的客户端格式上直接 `400`，请求路径禁止试探协议。
   非空 `safetySettings` 必须 `400` 拒绝，不能静默丢弃安全策略；空数组可以接受。
   `topK`、`thinkingConfig` 这两个 Gemini 专属字段只作为跨协议兼容提示，不得在
   文档或测试中宣称与 Google Gemini 等价。
-- Claude Desktop handler 在进入既有 Messages 准备流程前，把服务端公布的
-  Sonnet、Opus、Haiku 别名改写为 `AppConfig.claude_desktop_models` 中的实际模
-  型。模型配置由受保护的 `/dashboard/api/claude-desktop/models` 读写；常规
+- Claude Desktop handler 在进入 Alias 解析与既有 Messages 准备流程前，把服务端
+  公布的 Sonnet、Opus、Haiku 别名改写为 `AppConfig.claude_desktop_models` 中的
+  实际模型。模型配置由受保护的 `/dashboard/api/claude-desktop/models` 读写；常规
   settings 更新必须保留它。
+- `provider.rs` 持有 `BUILTIN_PLANS`。五个家族是 OpenCode Go（`opencode`/`go`，
+  可路由）、Zen Free（`opencode-zen-free`/`anonymous-free`，无凭据单例，可路由）、
+  Command Code GOAT（`command-code`/`goat`，不可路由）、SCNet Token Plans
+  （`scnet`/`token-plan-basic|standard|premium`，不可路由，`sk-tp-` 前缀，带版本
+  的交互式使用确认）以及 Custom API（`custom`/`api`，不可路由）。GOAT / SCNet /
+  Custom 创建为禁用的 `pending` 草稿（`routable=false`）；本切片中
+  `POST /dashboard/api/accounts/{id}/verify` 返回 `501`。所有持久化变更路径
+  （Database、dashboard、CLI、Tauri）都会在改动行、revision 或时间戳之前，拒绝为
+  目录内 `routable=false` offering 设置 `enabled=true`。不要宣称这些家族已上线
+  路由、用量、计价、验证或供应商教程。Custom Phase 1 是休眠安全基础：
+  `provider.rs` 的语法 URL 校验（非回环必须 HTTPS、禁止凭据、禁止私网/链路本地
+  /metadata 目标）加上 `custom_http.rs`（只允许 Direct 与 Manual）。Auto 明确不
+  可用，因为 connect-time DNS 校验无法区分有效系统代理与 origin。`custom_http`
+  **没有生产调用方**——未接线到推理、verify、用量或 selector。手动代理下由代理
+  自己做 DNS；那次残留查找不是 CONNECT-to-pinned-IP，因此阻止启用。只接受官方
+  分发的 API Key：不要把消费者订阅、Cookie 或反向代理凭据当账号。不得把
+  Command Code / GOAT 或 SCNet 别名到 OpenCode，也不得把这些 Key 发到 OpenCode
+  endpoint。
+- SCNet 官方可用模型快照 `2026-08-21`（大小写与顺序必须与代码一致，只作适配器
+  输入，不得作为 `model_aliases`）：`GLM-5.2`、`GLM-5`、`GLM-5.1`、`Kimi-K3`、
+  `Kimi-K2.7-Code`、`Kimi-K2.6`、`Kimi-K2.5`、`DeepSeek-V4-Flash`、
+  `DeepSeek-V3.2`、`MiniMax-M3`、`MiniMax-M2.7`、`MiniMax-M2.5`、
+  `MiMo-V2.5-Pro`。价格表 / FAQ 里 **不在** 该表的额外名称：`DeepSeek-V4-Pro`、
+  `DeepSeek-V4-Flash-0731`、`Qwen3.8-max`、`Qwen3-235B-A22B`。文档记载的 base 是
+  `https://api.scnet.cn/api/llm/v1`（Chat Completions `/chat/completions`）与
+  `https://api.scnet.cn/api/llm/anthropic`（Messages `/v1/messages`）。风险确认
+  id `scnet-token-plan-restrictions`，版本 `2026-08-21`，来源
+  `https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html`。本
+  crate 不得对 Token Plan 发真实请求。
+- `gateway/materialize.rs` 只解析一次客户端协议，解析 Alias，再按候选物化
+  model / protocol / endpoint / auth。适配器不得用可计费推理路径试探协议支持。
+  OpenCode `MODEL_PROTOCOLS` 表仍只服务 Go。
 - `selector.rs` 选下一个账号并跳过禁用、冷却、本次已失败的账号。Zen free 额度
   按出口 IP 共享：任一账号存在有效 `cooldown_free_until` 即视为整条 free 通道
   耗尽，不换 Key。`limit.rs` 解析上游 429 中的重置时长；`pricing.rs` 从当前
@@ -222,7 +272,14 @@ Desktop 三个角色模型的持久化行为。
   WorkBuddy、OpenClaw、Hermes、Cherry Studio、VS Code Copilot Chat、Cline、Roo
   Code、Continue、Chatbox。Claude Desktop 的复制动作还会保存三个角色模型；其他
   教程只生成客户端配置，不修改 Gateway 设置。**价格表** 视图通过受保护的定价
-  API 读取并刷新当前 OpenCode Go 快照。
+  API 读取并刷新当前 OpenCode Go 快照。账号卡是 Plan / 凭据 / 额度单位。Zen Free
+  由数据库持有：可启用、停用、排序，但不能通过通用账号 API 创建或删除。GOAT /
+  SCNet / Custom 草稿保持禁用且不可路由，直到后续切片提供生产路由。日志持久化
+  provider、offering、route-account、credential-account、`requested_model`、
+  `resolved_alias`、`upstream_model`、可选的 `native_cost_*`、原始成本、额度扣减
+  与实际付费成本。没有 `requested_alias` 字段。现有模型筛选会对任一存储身份
+  （`model`、`requested_model`、`resolved_alias` 或 `upstream_model`）做精确匹配。
+  侧栏保持现有七个视图；不要新增供应商页或模型路由页。
 
 ### 账号生命周期与浏览器运行时
 
@@ -287,6 +344,18 @@ Desktop 三个角色模型的持久化行为。
 - `crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询；
   `crates/ocg-core/src/models.rs` 定义共享 serde 类型和 `AppConfig`；
   `crates/ocg-core/src/crypto.rs` 提供 Key 混淆与 `.encryption-key` 管理。
+- schema v22 为每张账号卡建立不可变的 provider/offering 绑定、按供应商区分的价格
+  与用量状态、额度窗口和供应商感知的转发日志字段。schema v23 增加 Plan 验证状态、
+  别名 / 上游日志身份（`requested_model`、`resolved_alias`、`upstream_model`）、
+  可选原生成本（`native_cost_value`、`native_cost_unit`、`native_cost_currency`）、
+  Custom API 配置表与 SCNet 确认。首次把早于 v23 的磁盘数据库迁到 v23 时，
+  `Database::open` 会在任何 v23 写入前创建并校验一份不会覆盖的同目录回滚副本
+  `data.sqlite.pre-v23.<timestamp>.bak`。源库早于 v22 时还会保留
+  `data.sqlite.pre-v22.<timestamp>.bak`。请与常规备份一起保存；它们只是回滚点，
+  不是完整备份，也不是允许旧二进制打开已迁移数据库的许可。每次
+  `Database::open` 都会禁用遗留的已启用 Command Code GOAT、全部三个 SCNet Token
+  Plan tier 与 Custom API，且不改 `updated_at`。验证与配置保持不变，只有既有未验证
+  的 GOAT 行会重置为 `pending`；Go、Zen Free 和未知 provider/offering pair 不受影响。
 - `crates/ocg-core/src/state.rs` 是 `CoreStateInner`，由 Gateway、面板、CLI
   共享。
 - `AppConfig` 使用 serde 默认值做向后兼容加载。1.3 之前没有
@@ -309,7 +378,9 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。升级前备份完整数据
 存在时的 `.encryption-key` 与 `browser-profiles/`；Docker 同时备份
 `ocg-data` 和 `ocg-browser-profiles`。直接/手动升级时先停止进程，签名桌面升级器会自
 行停止并重启。项目不保证降级兼容；如需回滚，恢复对应旧版本升级前的数据备份，
-不要让旧二进制直接打开已迁移的数据库。
+不要让旧二进制直接打开已迁移的数据库。schema v23 还会在任何 v23 写入前生成
+已校验的同目录副本 `data.sqlite.pre-v23.<timestamp>.bak`；在确认新安装可用前
+请与常规备份一起保留。
 
 v1.4.1 既没有升级运行时，也没有内置签名校验公钥。Windows 的一次性过渡需要明
 确指导用户：退出托盘程序，运行首个支持升级的 setup，在“升级方式”页选择第二
@@ -689,10 +760,20 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
       会话时映射 API 返回 `401`。
 - [ ] 打开 **应用** 视图，确认 16 个教程完整可选；逐项抽查复制结果不含掩码
       Key，并实际启动 Claude Desktop 与 Gemini CLI 各完成一次文本和工具调用。
-- [ ] 覆盖 schema v16 迁移、旧账号 `key + ready`、托管状态机（前进一格 / 回退更
-      早步骤、禁止跳步）、Pending 路由隔离、邀请 URL 白名单与演示默认写回，以及
-      Key 验证的 `2xx`/`429`/`401`/`403`/网络/`5xx` 分支；确认任何 DTO 和日志都
-      没有明文 Key。
+- [ ] 覆盖 schema v16 迁移、schema v23（`data.sqlite.pre-v23.*.bak` 回滚、别名 /
+      上游日志身份、可选原生成本、未 `verified` 的 GOAT 行保持禁用 `pending`）、旧账号 `key + ready`、托管状态机
+      （前进一格 / 回退更早步骤、禁止跳步）、Pending 路由隔离、邀请 URL 白名单与
+      演示默认写回，以及 Key 验证的 `2xx`/`429`/`401`/`403`/网络/`5xx` 分支；确认
+      任何 DTO 和日志都没有明文 Key。
+- [ ] 确认带鉴权的 `GET /v1/models` 与受保护的
+      `GET /dashboard/api/application-models` 是本地 Alias 列表（无上游发现、不选
+      账号）。`/v1/models` 是当前可路由别名；`application-models` 是 Go 可路由别名 ∩
+      当前价格快照（highspeed 继承基价行）。未知模型在 Chat / Responses / Messages /
+      Gemini 上返回 `400`。Command Code GOAT / SCNet Token Plan / Custom API
+      草稿保持禁用、不可路由（`routable=false`）、验证 `501`。Custom Phase 1 只允许
+      Direct+Manual（Auto 不可用）；`custom_http` 没有生产调用方；代理侧 DNS 残留
+      阻止启用。不要把这三个家族当作已上线路由、用量、计价或供应商教程做冒烟。
+      这些本地列表与 fail-closed 检查不需要真实供应商 Key。
 - [ ] 在 Windows 验证 Edge/Chrome 优先级，在 macOS/Linux 验证浏览器发现；用两个
       账号确认 Profile 隔离和重启后 Cookie 保留。确认重置会退出控制台但保留完成
       账号 Key，删除会同时清理新旧 Profile，旧 WebView Profile 不会被导入。
@@ -746,6 +827,11 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
   须明确映射或返回 `400`，不得静默丢弃。
 - Claude Desktop 只公布三个固定 Claude 别名，再映射到受支持的实际模型；它不代
   表 OCG Manager 提供了原生 Claude 4.6 模型或完整 Anthropic Models API。
+- Command Code GOAT、SCNet Token Plans 与 Custom API 只是 schema/UI 草稿。它们
+  创建禁用的 `pending` 账号；验证为 `501`；不会被 Alias 路由选中。Custom Phase 1
+  是休眠基础（`custom_http.rs`）：只允许 Direct+Manual，Auto 不可用，没有生产
+  调用方，代理侧 DNS 残留阻止启用。SCNet 官方可用模型表与 endpoint 快照只作
+  适配器输入，不得作为客户端别名公布。不要把这些家族写成或发成已上线支持。
 
 ## 编码约定
 
@@ -758,6 +844,9 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 - **不要重新引入远端同步**。每个节点由自己的面板管理。
 - **`auto_start` 受能力门控**。只有 Windows release / 已安装的 Tauri 进程注入
   注册表同步钩子；开发构建、CLI、Docker、macOS、Linux 面板必须保持隐藏。
+- **本地 Alias 列表保持本地**。带鉴权的 `GET /v1/models` 与面板
+  `application-models` 不得再增加上游发现路径。不要把两份列表写成同一份；不要
+  发明 `requested_alias` 日志字段。
 - **不要重新发明 `cargo test` 体验**。CLI 用 `parking_lot::Mutex`，不可重入。
   函数需要调用另一个持锁函数时，先 `drop` 掉外层 guard。
 - **风格与周围一致**。修改某段代码时，新代码要像旧代码：注释密度、命名风格、

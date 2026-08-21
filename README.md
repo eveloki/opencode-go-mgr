@@ -2,12 +2,14 @@
 
 # OCG Manager
 
-OCG Manager is a local operations console for provider API-key accounts. It
-stores one provider/offering credential per account card in SQLite and serves a
-multi-protocol gateway — plus the management dashboard — at
+OCG Manager is a local operations console for provider API-key accounts. Each
+account card binds one Plan (provider/offering) and, when that Plan requires
+one, one credential in SQLite. It
+serves a multi-protocol gateway — plus the management dashboard — at
 `http://127.0.0.1:9042`. Clients speak OpenAI, Anthropic, Gemini, or Claude
-Desktop; the gateway converts each request to the selected offering's supported
-upstream protocol and converts the response back.
+Desktop and send local aliases; the gateway converts each request to the
+selected Plan's supported upstream protocol and converts the response back.
+Live routing is OpenCode Go and Zen Free.
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
@@ -19,7 +21,7 @@ upstream protocol and converts the response back.
 
 - **One port, four client families** — OpenAI Chat Completions / Responses,
   Anthropic Messages, Gemini `generateContent` / `streamGenerateContent`,
-  model discovery, and Claude Desktop aliases.
+  a local Alias list, and Claude Desktop aliases.
 - **Local multi-account routing** — drag account cards to persist one global
   order; strict priority, sticky, and round-robin reuse it after capability
   filtering.
@@ -60,13 +62,13 @@ Gateway: http://127.0.0.1:9042/v1
 Auth:    Authorization: Bearer <key>
 ```
 
-The dashboard **Key** is the only secret a client needs. The gateway injects
-the stored OpenCode-Go account key on the upstream side.
+The dashboard **Key** is the only secret a client needs. For live traffic,
+import an OpenCode Go account key; Zen Free sends no upstream credential.
 
 1. Install and launch OCG Manager. The dashboard opens in your system browser
    once the gateway is ready; use the tray icon to reopen it.
-2. Import an existing key in **Accounts**, or use managed onboarding (Beta).
-   Copy the Key.
+2. In **Accounts**, import an OpenCode Go account key, choose credential-free
+   Zen Free, or use managed onboarding (Beta). Copy the Key.
 3. Point your client at `http://127.0.0.1:9042/v1`. **Applications** has
    per-client configuration guides.
 
@@ -109,9 +111,11 @@ double-bill.
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
 Gemini is a client format only (requests never go to Google). Claude Desktop
-aliases are rewritten to the mapping saved in **Applications**. Unknown models
-on Chat / Messages keep the request protocol; unknown Responses, Gemini, or
-Claude Desktop aliases return `400`.
+aliases are rewritten to the mapping saved in **Applications**. Clients should
+send published aliases; authenticated `GET /v1/models` lists currently
+routeable aliases from the local registry (no upstream discovery, no account
+dependency). Unknown model names return `400` on every supported client
+format.
 
 Passthrough matrix, context / input / reasoning / tools, conversion limits,
 and true vs false circuit breakers:
