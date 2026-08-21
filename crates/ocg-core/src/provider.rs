@@ -13,6 +13,24 @@ pub const CUSTOM_PROVIDER_ID: &str = "custom";
 pub const GO_OFFERING_ID: &str = "go";
 pub const GOAT_OFFERING_ID: &str = "goat";
 pub const ANONYMOUS_FREE_OFFERING_ID: &str = "anonymous-free";
+
+/// Official Command Code Provider API v1 base. Catalog `routable` stays false;
+/// this constant is the transport contract, not a production enablement flag.
+pub const COMMAND_CODE_GOAT_BASE_URL: &str = "https://api.commandcode.ai/provider/v1";
+pub const COMMAND_CODE_GOAT_HOST: &str = "api.commandcode.ai";
+/// Relative to [`COMMAND_CODE_GOAT_BASE_URL`].
+pub const COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+/// Relative to [`COMMAND_CODE_GOAT_BASE_URL`]. Documented official endpoint;
+/// the first supported GOAT model still converts client Messages to Chat.
+pub const COMMAND_CODE_GOAT_MESSAGES_PATH: &str = "/messages";
+/// Documented official discovery path. Billing/schema is unproven; must not be
+/// used for connection verification or model enablement.
+pub const COMMAND_CODE_GOAT_MODELS_PATH: &str = "/models";
+/// Client-facing Alias. Go still owns the published kebab alias; GOAT maps it
+/// internally to the slash raw ID and stays non-routeable.
+pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS: &str = "deepseek-v4-flash";
+/// Unique exact upstream raw ID for Command Code GOAT.
+pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM: &str = "deepseek/deepseek-v4-flash";
 pub const SCNET_TOKEN_PLAN_BASIC_OFFERING_ID: &str = "token-plan-basic";
 pub const SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID: &str = "token-plan-standard";
 pub const SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID: &str = "token-plan-premium";
@@ -577,7 +595,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         pricing_availability: "unavailable",
         usage_availability: "unavailable",
         quota_unit: "credits",
-        model_source: "pending_runtime",
+        model_source: "builtin_command_code_protocol_table",
         key_prefix: None,
         auth_schemes: &BEARER_AUTH,
         upstream_protocols: &GOAT_PROTOCOLS,
@@ -722,6 +740,10 @@ pub fn scnet_token_plan_model_snapshot(
     offering_id: &str,
 ) -> Option<ScnetTokenPlanModelSnapshot> {
     is_scnet_token_plan(provider_id, offering_id).then_some(SCNET_TOKEN_PLAN_MODEL_SNAPSHOT)
+}
+
+pub fn is_command_code_goat(provider_id: &str, offering_id: &str) -> bool {
+    provider_id == COMMAND_CODE_PROVIDER_ID && offering_id == GOAT_OFFERING_ID
 }
 
 pub fn acknowledgement_content_hash(body: &str) -> String {
@@ -1110,8 +1132,35 @@ mod tests {
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert!(!goat.routable);
         assert_eq!(goat.verification_policy, VerificationPolicy::Required);
+        assert_eq!(goat.verification_runtime_availability, "unavailable");
+        assert_eq!(goat.creation_availability, CreationAvailability::Available);
         assert_eq!(goat.pricing_availability, "unavailable");
         assert_eq!(goat.usage_availability, "unavailable");
+        assert_eq!(goat.auth_schemes, &BEARER_AUTH);
+        assert_eq!(goat.upstream_protocols, &GOAT_PROTOCOLS);
+        assert!(
+            !goat
+                .upstream_protocols
+                .contains(&UpstreamProtocolKind::Responses)
+        );
+        assert_eq!(goat.model_source, "builtin_command_code_protocol_table");
+        assert_eq!(
+            COMMAND_CODE_GOAT_BASE_URL,
+            "https://api.commandcode.ai/provider/v1"
+        );
+        assert_eq!(COMMAND_CODE_GOAT_HOST, "api.commandcode.ai");
+        assert_eq!(COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, "/chat/completions");
+        assert_eq!(COMMAND_CODE_GOAT_MESSAGES_PATH, "/messages");
+        assert_eq!(COMMAND_CODE_GOAT_MODELS_PATH, "/models");
+        assert_eq!(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            "deepseek/deepseek-v4-flash"
+        );
+        assert!(is_command_code_goat(
+            COMMAND_CODE_PROVIDER_ID,
+            GOAT_OFFERING_ID
+        ));
+        assert!(!is_command_code_goat(OPENCODE_PROVIDER_ID, GO_OFFERING_ID));
 
         let basic = builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
         assert!(!basic.routable);
@@ -1318,7 +1367,7 @@ mod tests {
             "/v1/messages"
         );
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert_eq!(goat.model_source, "pending_runtime");
+        assert_eq!(goat.model_source, "builtin_command_code_protocol_table");
         assert!(
             scnet_token_plan_model_snapshot(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none()
         );
