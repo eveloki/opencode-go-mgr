@@ -224,7 +224,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, toRef, watch } from "vue";
 import type { FormInst, FormRules } from "naive-ui";
 import {
   NAlert,
@@ -243,6 +243,7 @@ import { MinusCircleOutlined, PlusOutlined } from "@vicons/antd";
 import type { Account, AccountInput } from "../api/tauri";
 import type { ProviderCatalogEntry, ProviderCatalogFormField } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
+import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import { localDateString } from "../views/account-lifecycle";
 import { findCatalogEntry, findPlanDefinition, planFamilyLabel } from "../views/plans.ts";
 import type { PlanDefinition } from "../views/plans.ts";
@@ -303,6 +304,8 @@ const emit = defineEmits<{
   (e: "save", payload: AccountInput | AccountFormPayload): void;
   (e: "resetCooldown"): void;
 }>();
+
+useLocalizedModalCloseLabel(toRef(props, "show"), "account-modal");
 
 const formRef = ref<FormInst | null>(null);
 const form = ref<FormModel>(blankForm());

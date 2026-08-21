@@ -870,4 +870,6 @@ export const deDEMessages = {
   "请求模型": "Angefordertes Modell",
   "添加 {plan} 账号": "{plan}-Konto hinzufügen",
   "无法确定账号方案，请关闭后重试": "Der Kontoplan konnte nicht ermittelt werden. Schließen Sie den Dialog und versuchen Sie es erneut.",
+  "关闭对话框": "Dialog schließen",
+  "已创建账号 {name}": "Konto {name} erstellt",
 } satisfies Messages;

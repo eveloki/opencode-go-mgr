@@ -871,4 +871,6 @@ export const ptBRMessages = {
   "请求模型": "Modelo solicitado",
   "添加 {plan} 账号": "Adicionar conta {plan}",
   "无法确定账号方案，请关闭后重试": "Não foi possível determinar o plano da conta. Feche a caixa de diálogo e tente novamente.",
+  "关闭对话框": "Fechar diálogo",
+  "已创建账号 {name}": "Conta {name} criada",
 } satisfies Messages;

@@ -299,6 +299,7 @@ import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
 import type { TimePreset } from "./log-time-range.ts";
+import { gatewayLogMessage } from "./gateway-log-message.ts";
 import { providerOfferingLabel } from "./account-providers.ts";
 import { providerApi, type ProviderCatalogEntry } from "../api/providers.ts";
 import {
@@ -721,7 +722,7 @@ const gatewayColumns = computed(() => [
   { title: t("请求 ID"), key: "request_id", width: 170, render: renderRequestId },
   { title: t("级别"), key: "level", width: 80 },
   { title: t("分类"), key: "category", width: 100 },
-  { title: t("消息"), key: "message", minWidth: 480, ellipsis: { tooltip: true } },
+  { title: t("消息"), key: "message", minWidth: 480, ellipsis: { tooltip: true }, render: (row: GatewayLog) => gatewayLogMessage(row.message) },
 ]);
 const forwardColumns = computed(() => [
   {

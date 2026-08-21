@@ -131,7 +131,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, toRef, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -149,6 +149,7 @@ import type {
   BrowserTarget,
 } from "../api/tauri";
 import { t } from "../i18n/index.ts";
+import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import { MANAGED_SETUP_STEPS, setupStepIndex } from "../views/managed-account";
 
 const props = defineProps<{
@@ -158,6 +159,8 @@ const props = defineProps<{
   openingTarget: BrowserTarget | null;
   busy: boolean;
 }>();
+
+useLocalizedModalCloseLabel(toRef(props, "show"), "managed-wizard-modal");
 
 const emit = defineEmits<{
   (event: "update:show", value: boolean): void;

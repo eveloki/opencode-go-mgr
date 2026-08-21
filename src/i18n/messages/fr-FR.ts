@@ -871,4 +871,6 @@ export const frFRMessages = {
   "请求模型": "Modèle demandé",
   "添加 {plan} 账号": "Ajouter un compte {plan}",
   "无法确定账号方案，请关闭后重试": "Impossible de déterminer le plan du compte. Fermez la boîte de dialogue et réessayez.",
+  "关闭对话框": "Fermer la boîte de dialogue",
+  "已创建账号 {name}": "Compte {name} créé",
 } satisfies Messages;

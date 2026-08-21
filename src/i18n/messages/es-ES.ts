@@ -870,4 +870,6 @@ export const esESMessages = {
   "启用 {name} 的 Free 别名": "Activar el alias Free de {name}",
   "禁用 {name} 的 Free 别名": "Desactivar el alias Free de {name}",
   "Free 别名设置已保存": "Se guardó la configuración del alias Free",
+  "关闭对话框": "Cerrar diálogo",
+  "已创建账号 {name}": "Cuenta {name} creada",
 } satisfies Messages;

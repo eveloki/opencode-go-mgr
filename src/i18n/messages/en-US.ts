@@ -712,6 +712,8 @@ export const enUSMessages = {
   "请求模型": "Requested model",
   "添加 {plan} 账号": "Add {plan} account",
   "无法确定账号方案，请关闭后重试": "Unable to determine the account plan. Close this dialog and try again.",
+  "关闭对话框": "Close dialog",
+  "已创建账号 {name}": "Created account {name}",
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

@@ -198,6 +198,12 @@ const activeCatalog = shallowRef<Messages>(
   catalogs.get(locale.value) ?? zhCNMessages,
 );
 
+// The effective translation catalog behind `t()`. Besides locale switches it
+// also swaps when a lazy startup catalog finishes loading while `locale`
+// itself stays put, so translation-driven side effects (e.g. imperative DOM
+// patches) must track this signal rather than `locale`.
+export const effectiveCatalog = computed(() => activeCatalog.value);
+
 function applyLocale(value: Locale): void {
   locale.value = value;
   const catalog = catalogs.get(value);

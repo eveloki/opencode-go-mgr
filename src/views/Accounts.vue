@@ -159,6 +159,7 @@
       :show="showManagedCreate"
       preset="card"
       :title="t('注册新账号')"
+      class="account-managed-modal"
       style="width: 520px; max-width: calc(100vw - 32px)"
       :mask-closable="false"
       :close-on-esc="!busy"
@@ -282,6 +283,7 @@ import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
+import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import {
   reconcileEditingAccount,
   withFreshAccountRevision,
@@ -310,6 +312,7 @@ const showModal = ref(false);
 const showAddModal = ref(false);
 const showManagedCreate = ref(false);
 const showManagedWizard = ref(false);
+useLocalizedModalCloseLabel(showManagedCreate, "account-managed-modal");
 const editingAccount = ref<Account | null>(null);
 const managedWizardAccountId = ref<string | null>(null);
 const managedDraft = ref({

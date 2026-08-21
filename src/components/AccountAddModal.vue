@@ -125,7 +125,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, toRef } from "vue";
 import {
   NAlert,
   NButton,
@@ -147,6 +147,7 @@ import {
 } from "@vicons/antd";
 import type { Component } from "vue";
 import { t } from "../i18n/index.ts";
+import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import { buildPlanOptions, type PlanOption } from "../views/account-plan-options.ts";
 import type { PlanDefinition } from "../views/plans.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
@@ -167,6 +168,8 @@ const emit = defineEmits<{
   (event: "openSettings"): void;
   (event: "selectPlan", plan: PlanDefinition): void;
 }>();
+
+useLocalizedModalCloseLabel(toRef(props, "show"), "account-add-modal");
 
 const planOptions = computed(() => buildPlanOptions(props.catalog));
 
