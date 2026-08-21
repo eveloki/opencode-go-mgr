@@ -957,9 +957,8 @@ struct ProviderCatalogEntry {
     model_aliases: Vec<String>,
 }
 
-/// Built-in provider/offering pairs only. Command Code GOAT, SCNet, and Custom
-/// are catalogued for persistence but remain unroutable until a later slice
-/// wires a verified runtime.
+/// Built-in provider/offering pairs only. Command Code GOAT and SCNet remain
+/// unroutable. Custom API is routable after explicit verification.
 async fn provider_catalog() -> Json<Vec<ProviderCatalogEntry>> {
     Json(
         crate::provider::BUILTIN_PLANS
@@ -2338,7 +2337,119 @@ async fn verify_account_connection(
             "connection verification runtime is not available for this Plan in this slice",
         ));
     }
+    if crate::provider::is_custom_api(&account.provider_id, &account.offering_id) {
+        let verification = state
+            .db
+            .lock()
+            .account_verification_state(&id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("account not found"))?;
+        if verification.status == crate::provider::ConnectionVerificationStatus::Verified {
+            drop(_settings_update);
+            return Ok(Json(dashboard_account(&state, account)));
+        }
+        let job = capture_custom_verification_job(&state, &account)?;
+        drop(_settings_update);
+        return complete_custom_verification(&state, job).await;
+    }
     Ok(Json(dashboard_account(&state, account)))
+}
+
+struct CustomVerificationJob {
+    account: Account,
+    contract: crate::custom::CustomVerificationContract,
+    custom_config: AccountCustomConfig,
+    first_capability: AccountModelCapability,
+    api_key: String,
+}
+
+fn capture_custom_verification_job(
+    state: &CoreState,
+    account: &Account,
+) -> Result<CustomVerificationJob, ApiError> {
+    let db = state.db.lock();
+    let custom_config = db
+        .account_custom_config(&account.id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "Custom API accounts require a persisted base URL, protocol, and auth scheme",
+            )
+        })?;
+    let capabilities = db
+        .list_account_model_capabilities_declared(&account.id)
+        .map_err(ApiError::internal)?;
+    let first_capability = crate::custom::first_declared_capability(&capabilities)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::bad_request("Custom API accounts require at least one model capability")
+        })?;
+    let contract = db
+        .capture_custom_verification_contract(&account.id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    drop(db);
+    let api_key = state
+        .decrypt_key(&account.key_cipher)
+        .map_err(ApiError::internal)?;
+    Ok(CustomVerificationJob {
+        account: account.clone(),
+        contract,
+        custom_config,
+        first_capability,
+        api_key,
+    })
+}
+
+async fn complete_custom_verification(
+    state: &CoreState,
+    job: CustomVerificationJob,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let config = state.config();
+    let result = crate::custom::probe_custom_connection(
+        &config,
+        &job.custom_config,
+        &job.first_capability,
+        &job.api_key,
+    )
+    .await;
+    let _settings_update = state.settings_update.lock();
+    let (status, error) = match result {
+        Ok(()) => (
+            crate::provider::ConnectionVerificationStatus::Verified,
+            None,
+        ),
+        Err(failure) => (
+            crate::provider::ConnectionVerificationStatus::Failed,
+            Some(failure.message),
+        ),
+    };
+    let verified_at =
+        (status == crate::provider::ConnectionVerificationStatus::Verified).then(Utc::now);
+    let committed = state
+        .db
+        .lock()
+        .commit_custom_verification_if_contract_matches(
+            &job.contract,
+            status,
+            verified_at,
+            error.as_deref(),
+        )
+        .map_err(ApiError::internal)?;
+    if !committed {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            crate::custom::CUSTOM_VERIFICATION_CONFLICT_MESSAGE,
+        ));
+    }
+    let account = state
+        .db
+        .lock()
+        .get_account(&job.account.id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    state.bump_settings_revision();
+    Ok(Json(dashboard_account(state, account)))
 }
 
 async fn get_account_custom_config(
@@ -6407,7 +6518,8 @@ mod tests {
                     && entry.offering_id == crate::provider::CUSTOM_API_OFFERING_ID
             })
             .unwrap();
-        assert!(!custom.routable);
+        assert!(custom.routable);
+        assert_eq!(custom.verification_runtime_availability, "available");
         assert!(custom.model_aliases.is_empty());
     }
 
@@ -6760,14 +6872,16 @@ mod tests {
         );
         assert_eq!(custom.model_capabilities[0].model_id, "org/model");
 
-        let verify = super::verify_account_connection(
-            State(state.clone()),
-            AxumPath(custom.id.clone()),
-            None,
-        )
-        .await
-        .expect_err("Custom verification runtime is not in this slice");
-        assert_eq!(verify.status, StatusCode::NOT_IMPLEMENTED);
+        assert!(custom.plan_routable);
+        assert_eq!(
+            crate::provider::builtin_plan(
+                crate::provider::CUSTOM_PROVIDER_ID,
+                crate::provider::CUSTOM_API_OFFERING_ID
+            )
+            .unwrap()
+            .verification_runtime_availability,
+            "available"
+        );
 
         for (account_id, experimental) in [
             (goat.id.as_str(), true),

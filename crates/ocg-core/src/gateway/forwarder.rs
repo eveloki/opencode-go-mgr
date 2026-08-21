@@ -1,3 +1,4 @@
+use crate::custom_http::{build_custom_http_client, json_content_headers};
 use crate::db::{Database, ForwardLogDiagnosticUpdate};
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, RequestTrace, api_format_name, emit_failure, redact_known_secret,
@@ -17,7 +18,7 @@ use crate::models::{
     Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
 };
 use crate::pricing::PricingSnapshot;
-use crate::provider::is_command_code_goat;
+use crate::provider::{is_command_code_goat, is_custom_api};
 use crate::state::CoreState;
 use anyhow::Result;
 use axum::body::Body;
@@ -297,7 +298,9 @@ async fn forward_request_impl(
         }
     };
     attempt_context.set_provider_route(account, &provider_route);
-    ensure_safe_upstream_base_url(&provider_route.base_url)?;
+    if plan.custom_route.is_none() {
+        ensure_safe_upstream_base_url(&provider_route.base_url)?;
+    }
     let key = if provider_route.auth == UpstreamAuth::None {
         None
     } else {
@@ -453,24 +456,72 @@ async fn forward_request_impl(
         upstream_path
     );
 
-    let goat_client;
-    let send_client = if !provider_route.follow_redirects {
-        goat_client = crate::http_client::build_no_redirect(config)?;
-        &goat_client
+    let model = plan.model.clone();
+    let custom_client = if plan.custom_route.is_some() {
+        Some(build_custom_http_client(config).map_err(|error| anyhow::anyhow!(error))?)
     } else {
-        client
+        None
+    };
+    let goat_client = if plan.custom_route.is_none() && !provider_route.follow_redirects {
+        Some(crate::http_client::build_no_redirect(config)?)
+    } else {
+        None
+    };
+    let custom_url = if plan.custom_route.is_some() {
+        Some(reqwest::Url::parse(&url).map_err(|error| anyhow::anyhow!(error))?)
+    } else {
+        None
+    };
+    let custom_headers = if let Some(custom_route) = plan.custom_route.as_ref() {
+        let api_key = key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Custom route requires a decrypted key"))?;
+        let mut headers =
+            crate::custom_http::isolated_custom_headers(custom_route.auth_scheme, api_key)
+                .map_err(|error| anyhow::anyhow!(error))?;
+        let extra = json_content_headers(plan.upstream == ApiFormat::Messages)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        for (name, value) in &extra {
+            headers.insert(name.clone(), value.clone());
+        }
+        Some(headers)
+    } else {
+        None
     };
 
-    let model = plan.model.clone();
-    let upstream_req = send_client
-        .post(&url)
-        .headers(upstream_headers)
-        .body(plan.body.clone());
     let upstream_started = Instant::now();
+    let send_future = async {
+        if let (Some(custom_client), Some(custom_url), Some(headers)) =
+            (custom_client.as_ref(), custom_url, custom_headers)
+        {
+            let mut request = custom_client
+                .request(reqwest::Method::POST, custom_url)
+                .headers(headers)
+                .body(plan.body.clone());
+            if !plan.stream {
+                request = request.timeout(StdDuration::from_secs(config.non_stream_timeout_secs));
+            }
+            request.send().await
+        } else {
+            let send_client = goat_client.as_ref().unwrap_or(client);
+            let request = send_client
+                .post(&url)
+                .headers(upstream_headers)
+                .body(plan.body.clone());
+            if plan.stream {
+                request.send().await
+            } else {
+                request
+                    .timeout(StdDuration::from_secs(config.non_stream_timeout_secs))
+                    .send()
+                    .await
+            }
+        }
+    };
     let upstream_resp = if plan.stream {
         match tokio::time::timeout(
             StdDuration::from_secs(config.stream_idle_timeout_secs),
-            upstream_req.send(),
+            send_future,
         )
         .await
         {
@@ -523,10 +574,7 @@ async fn forward_request_impl(
             }
         }
     } else {
-        upstream_req
-            .timeout(StdDuration::from_secs(config.non_stream_timeout_secs))
-            .send()
-            .await
+        send_future.await
     };
 
     let upstream_resp = match upstream_resp {
@@ -699,8 +747,10 @@ async fn forward_request_impl(
             // downgrade an IP-shared Free 429 into per-account key rotation.
             // Command Code GOAT 429 is a generic provider-key cooldown: never parse
             // OpenCode Go limit windows and never schedule Go usage sync.
-            let goat = is_command_code_goat(&account.provider_id, &account.offering_id);
-            let (window, cooldown) = rate_limit_window_and_cooldown(goat, plan.channel, &text);
+            let generic_limit = is_command_code_goat(&account.provider_id, &account.offering_id)
+                || is_custom_api(&account.provider_id, &account.offering_id);
+            let (window, cooldown) =
+                rate_limit_window_and_cooldown(generic_limit, plan.channel, &text);
             let until = Utc::now() + cooldown;
             let sanitized = attempt_context.sanitize_upstream_error(&text);
             let error_message = format!(
@@ -747,7 +797,7 @@ async fn forward_request_impl(
             }
             // Schedule (never inline) an official usage reconciliation shortly
             // after a real inference 429. Does not alter cooldown/failover.
-            if !goat && plan.channel != UpstreamChannel::Free {
+            if !generic_limit && plan.channel != UpstreamChannel::Free {
                 crate::usage_sync::schedule_after_inference_429(state, &account.id);
             }
             return Ok(ForwardResult {

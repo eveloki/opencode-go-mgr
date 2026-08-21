@@ -2,14 +2,13 @@
 //!
 //! These tests drive public Gateway and dashboard HTTP/JSON. They are the
 //! independent acceptance slice for the accepted unified-alias / multi-Plan
-//! contracts. POST `/accounts/{id}/verify` is intentionally unavailable in
-//! this slice and must fail closed. Live GOAT / SCNet / Custom stay
-//! unroutable; overlapping raw IDs are covered by the synthetic runtime test
-//! rather than a dashboard-invented Custom route.
+//! contracts. POST `/accounts/{id}/verify` stays 501 for GOAT/SCNet. Custom
+//! is catalog-routable with an available verification runtime; live Custom
+//! network coverage lives in `custom_trusted_admin.rs`.
 //!
 //! Requirement map: `fixtures/v2/requirement_map.md`.
 //!
-//! Out of scope: live GOAT / SCNet / Custom network calls.
+//! Out of scope: live GOAT / SCNet network calls.
 
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -429,10 +428,9 @@ async fn unique_raw_upstream_id_pins_to_one_provider_and_skips_go() {
 /// A raw upstream ID mapped to more than one Plan is rejected as
 /// `ambiguous_model_id` and never reaches an upstream.
 ///
-/// Live catalog/registry currently has no overlapping raw IDs. Custom is
-/// catalogued as `custom/api` and stays unroutable, so dashboard create
-/// cannot manufacture a live ambiguous route. Structured
-/// `ambiguous_model_id` coverage lives in
+/// Live catalog/registry currently has no overlapping raw IDs unless an
+/// eligible Custom capability collides with a distinct provider mapping.
+/// Structured `ambiguous_model_id` coverage lives in
 /// `v2_alias_runtime::ambiguous_model_id_is_structured_across_client_formats`.
 #[tokio::test]
 async fn ambiguous_raw_upstream_id_is_rejected() {
@@ -443,17 +441,17 @@ async fn ambiguous_raw_upstream_id_is_rejected() {
     let custom = catalog_entry(&catalog, CUSTOM_PROVIDER_ID, CUSTOM_OFFERING_ID)
         .expect("catalog must include custom/api");
     assert_eq!(
-        custom["routable"], false,
-        "v2-contract: custom/api must stay unroutable in this slice: {custom}"
+        custom["routable"], true,
+        "v2-contract: custom/api is catalog-routable: {custom}"
     );
     assert_eq!(
         custom["verification_runtime_availability"].as_str(),
-        Some("unavailable"),
-        "v2-contract: custom/api verification runtime is unavailable: {custom}"
+        Some("available"),
+        "v2-contract: custom/api verification runtime is available: {custom}"
     );
 
     if overlaps.is_empty() {
-        // Do not invent a routable Custom path just to manufacture overlap.
+        // Disabled pending Custom drafts do not publish overlapping raw IDs.
         let (status, body) = harness.chat(CUSTOM_OVERLAP_RAW_ID).await;
         assert_ne!(
             status,
@@ -658,8 +656,8 @@ async fn goat_and_scnet_create_disabled_pending_drafts() {
         "Custom draft verification_status: {body}"
     );
     assert_eq!(
-        body["plan_routable"], false,
-        "Custom must remain unroutable: {body}"
+        body["plan_routable"], true,
+        "Custom is catalog-routable but create stays a disabled pending draft: {body}"
     );
     assert_eq!(
         body["custom_config"]["base_url"]

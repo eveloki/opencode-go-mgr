@@ -92,9 +92,9 @@
       "provider_id": "custom",
       "offering_id": "api",
       "verification_policy": "required",
-      "verification_runtime_availability": "unavailable",
+      "verification_runtime_availability": "available",
       "creation_availability": "available",
-      "routable": false,
+      "routable": true,
       "model_aliases_empty": true,
       "required_form_field_ids": [
         "base_url",

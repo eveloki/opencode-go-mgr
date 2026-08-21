@@ -6,7 +6,8 @@ use crate::gateway::forwarder::{
     ForwardAction, UpstreamPayloadTooLargeResponse, forward_request, rate_limited_response,
 };
 use crate::gateway::materialize::{
-    materialize_account_routes, protocol_error_from_resolve, resolved_alias_from_model,
+    diagnostic_forced_upstream, materialize_account_routes, protocol_error_from_resolve,
+    resolved_alias_from_model,
 };
 use crate::gateway::protocol::{
     ApiFormat, MaterializeSpec, ProtocolError, RequestPlan, format_error, format_protocol_error,
@@ -234,10 +235,10 @@ pub async fn gemini_model_action(
 
 /// GET /v1/models — authenticated local Alias registry list.
 ///
-/// Returns OpenAI list JSON for routeable published client aliases only, in
-/// deterministic registry order. Does not select or decrypt accounts, call
-/// upstream `/v1/models`, write forward logs, or mutate cooldown / round-robin
-/// state. Non-routeable GOAT / SCNet / Custom mappings stay unpublished.
+/// Returns OpenAI list JSON for routeable published client aliases union
+/// eligible enabled+verified Custom capability IDs, de-duplicated, in
+/// deterministic order. Does not call upstream `/v1/models`. Zero eligible
+/// Custom accounts returns the published alias list unchanged.
 pub async fn models(
     State(state): State<CoreState>,
     headers: HeaderMap,
@@ -250,12 +251,13 @@ pub async fn models(
             None,
         );
     }
-    published_alias_models_response()
+    published_alias_models_response(&state)
 }
 
-fn published_alias_models_response() -> axum::response::Response {
-    let data: Vec<serde_json::Value> = alias::published_routeable_aliases()
-        .into_iter()
+fn published_alias_models_response(state: &CoreState) -> axum::response::Response {
+    let published = alias::published_routeable_aliases();
+    let mut data: Vec<serde_json::Value> = published
+        .iter()
         .map(|item| {
             serde_json::json!({
                 "id": item.alias,
@@ -265,11 +267,40 @@ fn published_alias_models_response() -> axum::response::Response {
             })
         })
         .collect();
+    let custom_ids = eligible_custom_model_ids(state);
+    for id in custom_ids {
+        if published
+            .iter()
+            .any(|item| crate::custom::custom_model_id_matches(item.alias, &id))
+            || data.iter().any(|item| {
+                item.get("id")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|existing| crate::custom::custom_model_id_matches(existing, &id))
+            })
+        {
+            continue;
+        }
+        data.push(serde_json::json!({
+            "id": id,
+            "object": "model",
+            "created": 0,
+            "owned_by": crate::provider::CUSTOM_PROVIDER_ID
+        }));
+    }
     axum::Json(serde_json::json!({
         "object": "list",
         "data": data
     }))
     .into_response()
+}
+
+fn eligible_custom_model_ids(state: &CoreState) -> Vec<String> {
+    state
+        .db
+        .lock()
+        .list_custom_account_runtimes()
+        .map(|runtimes| crate::custom::eligible_custom_model_ids(&runtimes))
+        .unwrap_or_default()
 }
 
 async fn proxy_handler(
@@ -340,7 +371,8 @@ async fn proxy_handler_inner(
     } else {
         parsed.requested_model.clone()
     };
-    let resolved = match alias::resolve(&routing_model) {
+    let custom_model_ids = eligible_custom_model_ids(&state);
+    let resolved = match alias::resolve_with_custom(&routing_model, &custom_model_ids) {
         Ok(resolved) => resolved,
         Err(error) => {
             return local_protocol_failure(
@@ -431,7 +463,8 @@ async fn gemini_proxy_handler(
     };
     let client_model = parsed.requested_model.clone();
     let routing_model = parsed.requested_model.clone();
-    let resolved = match alias::resolve(&routing_model) {
+    let custom_model_ids = eligible_custom_model_ids(&state);
+    let resolved = match alias::resolve_with_custom(&routing_model, &custom_model_ids) {
         Ok(resolved) => resolved,
         Err(error) => {
             return local_protocol_failure(
@@ -502,7 +535,11 @@ async fn execute_plan(
             )
         }
         alias::ResolvedModel::PinnedRaw { mapping, .. } => (
-            mapping.upstream_model.to_string(),
+            if mapping.upstream_model.is_empty() {
+                routing_model.clone()
+            } else {
+                mapping.upstream_model.to_string()
+            },
             if mapping.is_zen_free() {
                 UpstreamChannel::Free
             } else {
@@ -510,6 +547,7 @@ async fn execute_plan(
             },
         ),
     };
+    let diagnostic_forced_upstream = diagnostic_forced_upstream(&resolved, parsed.client);
     let requested_plan = match materialize_parsed_request(
         &parsed,
         &MaterializeSpec {
@@ -520,6 +558,8 @@ async fn execute_plan(
             upstream_base_override: None,
             original_model: None,
             allow_go_fallback: false,
+            forced_upstream: diagnostic_forced_upstream,
+            custom_route: None,
         },
     ) {
         Ok(plan) => plan,
@@ -582,6 +622,18 @@ async fn execute_plan(
         };
         let free_available =
             free_cooldown.is_none() && !AccountSelector::free_channel_exhausted(&accounts);
+        let custom_runtimes = match state.db.lock().list_custom_account_runtimes() {
+            Ok(runtimes) => crate::custom::custom_runtimes_by_account(&runtimes),
+            Err(error) => {
+                let message = format!("failed to load Custom accounts: {error}");
+                return protocol_error_response(
+                    client_format,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &message,
+                    None,
+                );
+            }
+        };
         let route_set = match materialize_account_routes(
             &accounts,
             &config,
@@ -591,6 +643,7 @@ async fn execute_plan(
             &routing_model,
             &client_body,
             free_available,
+            &custom_runtimes,
         ) {
             Ok(route_set) => route_set,
             Err(error) => {
@@ -1261,6 +1314,8 @@ mod tests {
                 upstream_base_override: None,
                 original_model: None,
                 allow_go_fallback: false,
+                forced_upstream: None,
+                custom_route: None,
             },
         )
         .expect("Claude Desktop keeps the original alias as client_model");

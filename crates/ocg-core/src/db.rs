@@ -2163,12 +2163,6 @@ impl Database {
                 requires_verification,
             ],
         )?;
-        if key_replaced && requires_verification {
-            tx.execute(
-                "DELETE FROM account_model_capabilities WHERE account_id = ?1",
-                [id],
-            )?;
-        }
         tx.commit()?;
         Ok(())
     }
@@ -2303,6 +2297,90 @@ impl Database {
         Ok(changed == 1)
     }
 
+    /// Snapshot the Custom verification contract, including the raw account
+    /// revision token and encrypted key identity. `None` if the account row is
+    /// gone. Missing config is `Ok(None)` only when the account itself is gone;
+    /// a row without config returns an error so callers fail closed.
+    pub fn capture_custom_verification_contract(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<crate::custom::CustomVerificationContract>> {
+        let Some((updated_at, key_cipher, _status)) =
+            self.custom_verification_row_identity(account_id)?
+        else {
+            return Ok(None);
+        };
+        let config = self.account_custom_config(account_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Custom API accounts require a persisted base URL, protocol, and auth scheme"
+            )
+        })?;
+        let capabilities = self.list_account_model_capabilities_declared(account_id)?;
+        Ok(Some(crate::custom::CustomVerificationContract::from_parts(
+            account_id,
+            updated_at,
+            key_cipher,
+            &config,
+            &capabilities,
+        )))
+    }
+
+    /// Commit a Custom probe only when the captured contract and unverified
+    /// state still match. Returns `false` for key/config/capability/delete/
+    /// concurrent-verification races without writing.
+    pub fn commit_custom_verification_if_contract_matches(
+        &self,
+        contract: &crate::custom::CustomVerificationContract,
+        status: ConnectionVerificationStatus,
+        verified_at: Option<DateTime<Utc>>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        if !custom_verification_contract_still_matches_on(&tx, contract)? {
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "UPDATE accounts
+             SET verification_status = ?2,
+                 connection_verified_at = ?3,
+                 verification_error = ?4,
+                 updated_at = ?5
+             WHERE id = ?1
+               AND verification_status IN ('pending', 'failed')
+               AND updated_at = ?6
+               AND key_cipher = ?7",
+            params![
+                contract.account_id,
+                status.as_str(),
+                verified_at.map(|value| value.to_rfc3339()),
+                error,
+                Utc::now().to_rfc3339(),
+                contract.account_updated_at,
+                contract.key_cipher,
+            ],
+        )?;
+        if changed != 1 {
+            return Ok(false);
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn custom_verification_row_identity(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<(String, String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT updated_at, key_cipher, verification_status
+                 FROM accounts WHERE id = ?1",
+                [account_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn account_custom_config(&self, account_id: &str) -> Result<Option<AccountCustomConfig>> {
         self.conn
             .query_row(
@@ -2341,6 +2419,92 @@ impl Database {
         )?;
         let rows = stmt.query_map([account_id], account_model_capability_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_account_model_capabilities_declared(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<AccountModelCapability>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT account_id, model_id, protocol, verified_at, source
+             FROM account_model_capabilities
+             WHERE account_id = ?1
+             ORDER BY rowid ASC",
+        )?;
+        let rows = stmt.query_map([account_id], account_model_capability_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Custom accounts in saved account order, with config and declared capabilities.
+    pub fn list_custom_account_runtimes(&self) -> Result<Vec<crate::custom::CustomAccountRuntime>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.enabled, a.verification_status, a.setup_step, a.key_cipher,
+                    c.account_id, c.base_url, c.upstream_protocol, c.auth_scheme,
+                    c.created_at, c.updated_at
+             FROM accounts a
+             INNER JOIN account_custom_configs c ON c.account_id = a.id
+             WHERE a.provider_id = ?1 AND a.offering_id = ?2
+             ORDER BY a.sort_order ASC, a.created_at ASC, a.id ASC",
+        )?;
+        let rows = stmt.query_map(params![CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID], |row| {
+            let account_id: String = row.get(0)?;
+            let enabled = row.get::<_, i32>(1)? != 0;
+            let status_value = row.get::<_, String>(2)?;
+            let verification_status = ConnectionVerificationStatus::try_from(status_value.as_str())
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+                })?;
+            let setup_value = row.get::<_, String>(3)?;
+            let setup_step = AccountSetupStep::try_from(setup_value.as_str()).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    Type::Text,
+                    Box::new(std::io::Error::other(error)),
+                )
+            })?;
+            let key_cipher: String = row.get(4)?;
+            let config = AccountCustomConfig {
+                account_id: row.get(5)?,
+                base_url: row.get(6)?,
+                upstream_protocol: {
+                    let value = row.get::<_, String>(7)?;
+                    UpstreamProtocolKind::try_from(value.as_str()).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
+                    })?
+                },
+                auth_scheme: {
+                    let value = row.get::<_, String>(8)?;
+                    UpstreamAuthScheme::try_from(value.as_str()).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(8, Type::Text, Box::new(error))
+                    })?
+                },
+                created_at: parse_datetime(row.get::<_, String>(9)?),
+                updated_at: parse_datetime(row.get::<_, String>(10)?),
+            };
+            Ok((
+                account_id,
+                enabled,
+                verification_status,
+                setup_step.is_ready(),
+                !key_cipher.is_empty(),
+                config,
+            ))
+        })?;
+        let mut runtimes = Vec::new();
+        for row in rows {
+            let (account_id, enabled, verification_status, setup_ready, has_key, config) = row?;
+            let capabilities = self.list_account_model_capabilities_declared(&account_id)?;
+            runtimes.push(crate::custom::CustomAccountRuntime {
+                account_id,
+                enabled,
+                verification_status,
+                setup_ready,
+                has_key,
+                config,
+                capabilities,
+            });
+        }
+        Ok(runtimes)
     }
 
     pub fn replace_account_model_capabilities(
@@ -4670,6 +4834,63 @@ fn account_verification_from_row(row: &Row<'_>) -> rusqlite::Result<AccountVerif
         connection_verified_at: row.get::<_, Option<String>>(2)?.map(parse_datetime),
         verification_error: row.get(3)?,
     })
+}
+
+fn custom_verification_contract_still_matches_on(
+    conn: &Connection,
+    contract: &crate::custom::CustomVerificationContract,
+) -> Result<bool> {
+    let Some((updated_at, key_cipher, status)): Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT updated_at, key_cipher, verification_status
+             FROM accounts WHERE id = ?1",
+            [&contract.account_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    if updated_at != contract.account_updated_at
+        || key_cipher != contract.key_cipher
+        || !matches!(status.as_str(), "pending" | "failed")
+    {
+        return Ok(false);
+    }
+    let Some((base_url, protocol, auth_scheme)): Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT base_url, upstream_protocol, auth_scheme
+             FROM account_custom_configs WHERE account_id = ?1",
+            [&contract.account_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    if base_url != contract.base_url
+        || protocol != contract.upstream_protocol.as_str()
+        || auth_scheme != contract.auth_scheme.as_str()
+    {
+        return Ok(false);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT model_id, protocol
+         FROM account_model_capabilities
+         WHERE account_id = ?1
+         ORDER BY rowid ASC",
+    )?;
+    let rows = stmt.query_map([&contract.account_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut current = Vec::new();
+    for row in rows {
+        let (model_id, protocol) = row?;
+        let protocol = UpstreamProtocolKind::try_from(protocol.as_str())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        current.push((model_id, protocol));
+    }
+    Ok(current == contract.capabilities)
 }
 
 fn account_custom_config_from_row(row: &Row<'_>) -> rusqlite::Result<AccountCustomConfig> {
@@ -9004,11 +9225,9 @@ mod tests {
         .unwrap();
         let after_key = db.account_verification_state("custom-1").unwrap().unwrap();
         assert_eq!(after_key.status, ConnectionVerificationStatus::Pending);
-        assert!(
-            db.list_account_model_capabilities("custom-1")
-                .unwrap()
-                .is_empty()
-        );
+        let caps_after_key = db.list_account_model_capabilities("custom-1").unwrap();
+        assert_eq!(caps_after_key.len(), 1);
+        assert_eq!(caps_after_key[0].model_id, "deepseek/deepseek-v4-flash");
 
         let unknown = account("unknown");
         let mut unknown = unknown;
@@ -9503,10 +9722,189 @@ mod tests {
         );
         assert!(after_key_state.connection_verified_at.is_none());
         assert!(after_key_state.verification_error.is_none());
+        let caps_after_key = db.list_account_model_capabilities("custom-stale").unwrap();
+        assert_eq!(caps_after_key.len(), 1);
+        assert_eq!(caps_after_key[0].model_id, "org/other");
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn custom_verification_cas_rejects_stale_key_config_caps_and_delete() {
+        let dir = temp_data_dir("custom-verify-cas");
+        let mut db = Database::open(dir.clone()).unwrap();
+        let mut custom = account("custom-cas");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.enabled = false;
+        custom.key_cipher = "cipher-a".into();
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[AccountModelCapabilityInput {
+                model_id: "one".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+            None,
+        )
+        .unwrap();
+
+        let contract = db
+            .capture_custom_verification_contract("custom-cas")
+            .unwrap()
+            .unwrap();
+        assert_eq!(contract.key_cipher, "cipher-a");
+        assert_eq!(contract.capabilities[0].0, "one");
+
+        db.update_account(
+            "custom-cas",
+            &AccountUpdate {
+                key: Some("rotated".into()),
+                ..AccountUpdate::default()
+            },
+            Some("cipher-b"),
+            None,
+        )
+        .unwrap();
         assert!(
-            db.list_account_model_capabilities("custom-stale")
+            !db.commit_custom_verification_if_contract_matches(
+                &contract,
+                ConnectionVerificationStatus::Verified,
+                Some(Utc::now()),
+                None,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            db.account_verification_state("custom-cas")
                 .unwrap()
-                .is_empty()
+                .unwrap()
+                .status,
+            ConnectionVerificationStatus::Pending
+        );
+
+        let after_key = db
+            .capture_custom_verification_contract("custom-cas")
+            .unwrap()
+            .unwrap();
+        db.upsert_account_custom_config(
+            "custom-cas",
+            &AccountCustomConfigInput {
+                base_url: "https://api.example.net/v2".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(
+            !db.commit_custom_verification_if_contract_matches(
+                &after_key,
+                ConnectionVerificationStatus::Verified,
+                Some(Utc::now()),
+                None,
+            )
+            .unwrap()
+        );
+
+        let after_config = db
+            .capture_custom_verification_contract("custom-cas")
+            .unwrap()
+            .unwrap();
+        db.replace_account_model_capabilities(
+            "custom-cas",
+            &[AccountModelCapabilityInput {
+                model_id: "two".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+        )
+        .unwrap();
+        assert!(
+            !db.commit_custom_verification_if_contract_matches(
+                &after_config,
+                ConnectionVerificationStatus::Verified,
+                Some(Utc::now()),
+                None,
+            )
+            .unwrap()
+        );
+
+        let matching = db
+            .capture_custom_verification_contract("custom-cas")
+            .unwrap()
+            .unwrap();
+        assert!(
+            db.commit_custom_verification_if_contract_matches(
+                &matching,
+                ConnectionVerificationStatus::Verified,
+                Some(Utc::now()),
+                None,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            db.account_verification_state("custom-cas")
+                .unwrap()
+                .unwrap()
+                .status,
+            ConnectionVerificationStatus::Verified
+        );
+        assert!(
+            !db.commit_custom_verification_if_contract_matches(
+                &matching,
+                ConnectionVerificationStatus::Failed,
+                None,
+                Some("stale"),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            db.account_verification_state("custom-cas")
+                .unwrap()
+                .unwrap()
+                .status,
+            ConnectionVerificationStatus::Verified
+        );
+
+        let mut leftover = account("custom-delete");
+        leftover.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        leftover.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        leftover.enabled = false;
+        db.create_account_with_contract(
+            &leftover,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[AccountModelCapabilityInput {
+                model_id: "one".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+            None,
+        )
+        .unwrap();
+        let deleted_contract = db
+            .capture_custom_verification_contract("custom-delete")
+            .unwrap()
+            .unwrap();
+        db.delete_account("custom-delete").unwrap();
+        assert!(
+            !db.commit_custom_verification_if_contract_matches(
+                &deleted_contract,
+                ConnectionVerificationStatus::Verified,
+                Some(Utc::now()),
+                None,
+            )
+            .unwrap()
         );
 
         drop(db);
@@ -9658,8 +10056,11 @@ mod tests {
                 (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
                 (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID),
                 (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID),
-                (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
             ]
+        );
+        assert!(
+            builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
+                .is_some_and(|plan| plan.routable)
         );
 
         let dir = temp_data_dir("unroutable-sanitation");
@@ -9738,13 +10139,23 @@ mod tests {
             }
         }
 
+        persist_unroutable_draft(
+            &db,
+            builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap(),
+            "draft-api",
+            "draft-api-notes",
+        );
+        leftover_enable(&db, "draft-api");
+
         let zen_before = sanitation_snapshot(&db, ZEN_FREE_ACCOUNT_ID);
         let go_before = sanitation_snapshot(&db, "go-keep");
         let unknown_before = sanitation_snapshot(&db, "unknown-keep");
         let goat_pending_before = sanitation_snapshot(&db, "goat-pending");
         let goat_verified_before = sanitation_snapshot(&db, "goat-verified");
         let goat_failed_before = sanitation_snapshot(&db, "goat-failed");
+        let custom_before = sanitation_snapshot(&db, "draft-api");
         assert!(go_before.enabled);
+        assert!(custom_before.enabled);
         assert!(unknown_before.enabled);
         assert!(goat_pending_before.enabled);
         assert!(goat_verified_before.enabled);
@@ -9824,6 +10235,13 @@ mod tests {
                 assert_eq!(after.verification, ConnectionVerificationStatus::Pending);
             }
         }
+
+        let custom_after = sanitation_snapshot(&db, "draft-api");
+        assert_eq!(custom_after, custom_before);
+        assert!(
+            custom_after.enabled,
+            "now-routable Custom leftovers must not be disabled at open"
+        );
 
         let first_pass: Vec<_> = [
             ZEN_FREE_ACCOUNT_ID,

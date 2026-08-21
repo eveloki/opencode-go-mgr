@@ -3071,6 +3071,8 @@ mod tests {
             upstream_base_override: None,
             original_model: None,
             allow_go_fallback: false,
+            resolved_alias: None,
+            custom_route: None,
             service_tier: None,
             custom_tools: Vec::new(),
             namespace_tools: Vec::new(),

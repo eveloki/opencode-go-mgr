@@ -3,6 +3,7 @@ use crate::pricing::normalize_model_name;
 use crate::provider::{
     COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_GOAT_MESSAGES_PATH,
+    UpstreamAuthScheme,
 };
 use axum::http::StatusCode;
 use base64::{
@@ -56,6 +57,10 @@ pub struct RequestPlan {
     pub original_model: Option<String>,
     /// When free pool is exhausted, retry once on Go with `original_model`.
     pub allow_go_fallback: bool,
+    /// Canonical resolved identity persisted on forward logs.
+    pub resolved_alias: Option<String>,
+    /// Isolated Custom origin + auth. Presence selects the Custom HTTP path.
+    pub custom_route: Option<CustomRouteSpec>,
     pub(crate) service_tier: Option<String>,
     pub(crate) custom_tools: Vec<String>,
     pub(crate) namespace_tools: Vec<NamespaceToolMapping>,
@@ -112,6 +117,16 @@ pub struct MaterializeSpec {
     pub upstream_base_override: Option<String>,
     pub original_model: Option<String>,
     pub allow_go_fallback: bool,
+    /// Skip OpenCode `MODEL_PROTOCOLS` and convert to this account protocol.
+    pub forced_upstream: Option<ApiFormat>,
+    pub custom_route: Option<CustomRouteSpec>,
+}
+
+/// Isolated Custom origin and auth scheme materialized per account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomRouteSpec {
+    pub base_url: String,
+    pub auth_scheme: UpstreamAuthScheme,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,6 +576,8 @@ fn identity_spec(parsed: &ParsedClientRequest) -> MaterializeSpec {
         upstream_base_override: None,
         original_model: None,
         allow_go_fallback: false,
+        forced_upstream: None,
+        custom_route: None,
     }
 }
 
@@ -581,16 +598,19 @@ pub fn materialize_parsed_request(
         body,
         spec.upstream_model.clone(),
         parsed.stream,
+        spec.forced_upstream,
     )?;
     plan.client_model = spec.client_model.clone();
     plan.channel = spec.channel;
     plan.upstream_base_override = spec.upstream_base_override.clone();
     plan.original_model = spec.original_model.clone();
     plan.allow_go_fallback = spec.allow_go_fallback;
+    plan.resolved_alias = spec.resolved_alias.clone();
+    plan.custom_route = spec.custom_route.clone();
     debug_assert!(
         spec.resolved_alias
             .as_deref()
-            .is_none_or(|alias| !alias.is_empty())
+            .is_none_or(|alias| !alias.is_empty() || spec.custom_route.is_some())
     );
     Ok(plan)
 }
@@ -600,8 +620,12 @@ fn prepare_parsed_request(
     parsed: Value,
     model: String,
     stream: bool,
+    forced_upstream: Option<ApiFormat>,
 ) -> Result<RequestPlan, ProtocolError> {
-    let upstream = resolve_upstream_format(client, &model)?;
+    let upstream = match forced_upstream {
+        Some(forced) => forced,
+        None => resolve_upstream_format(client, &model)?,
+    };
     let aliased_responses_effort = requested_effort_alias(&parsed, &model);
     let parsed = apply_effort_aliases(parsed, &model);
     validate_request_features(client, upstream, &parsed)?;
@@ -643,6 +667,8 @@ fn prepare_parsed_request(
         upstream_base_override: None,
         original_model: None,
         allow_go_fallback: false,
+        resolved_alias: None,
+        custom_route: None,
         service_tier,
         custom_tools: tool_context.custom_tools,
         namespace_tools: tool_context.namespace_tools,
@@ -3790,6 +3816,8 @@ mod tests {
             upstream_base_override: None,
             original_model: None,
             allow_go_fallback: false,
+            resolved_alias: None,
+            custom_route: None,
             service_tier: None,
             custom_tools: Vec::new(),
             namespace_tools: Vec::new(),
@@ -5572,6 +5600,8 @@ mod tests {
                 upstream_base_override: None,
                 original_model: None,
                 allow_go_fallback: false,
+                forced_upstream: None,
+                custom_route: None,
             },
         )
         .unwrap();
@@ -5585,6 +5615,8 @@ mod tests {
                 upstream_base_override: Some("https://opencode.ai/zen".into()),
                 original_model: Some("deepseek-v4-flash".into()),
                 allow_go_fallback: true,
+                forced_upstream: None,
+                custom_route: None,
             },
         )
         .unwrap();
@@ -5788,6 +5820,8 @@ mod tests {
                     upstream_base_override: None,
                     original_model: None,
                     allow_go_fallback: false,
+                    forced_upstream: None,
+                    custom_route: None,
                 },
             )
             .unwrap();
@@ -5819,6 +5853,8 @@ mod tests {
                 upstream_base_override: None,
                 original_model: None,
                 allow_go_fallback: false,
+                forced_upstream: None,
+                custom_route: None,
             },
         )
         .unwrap();
