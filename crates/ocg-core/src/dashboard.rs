@@ -5074,6 +5074,13 @@ mod tests {
                 .iter()
                 .any(|model| model["id"] == "ox-alpha-free" && model["zen_free"] == false)
         );
+        // Suffixless Zen free ids must be flagged too — the exact case the old
+        // ends-with check would have missed.
+        assert!(
+            models
+                .iter()
+                .any(|model| model["id"] == "big-pickle" && model["zen_free"] == true)
+        );
         // Flattened config fields stay at the top level next to the extras.
         assert!(encoded["proxy_mode"].is_string());
         assert!(encoded["proxy_list_direction"].is_string());
