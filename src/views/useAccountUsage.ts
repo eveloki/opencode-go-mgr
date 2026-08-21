@@ -282,8 +282,14 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
 
   async function retryQuotaLimits() {
     if (!await loadQuotaLimits()) return;
+    // Quota windows only exist for OpenCode Go accounts; Custom API usage is
+    // unavailable and Zen Free shares an egress-IP lane.
     await mapWithConcurrency(
-      accounts.value.filter(accountIsReady),
+      accounts.value.filter((account) => (
+        accountIsReady(account)
+        && account.provider_id === "opencode"
+        && account.offering_id === "go"
+      )),
       4,
       (account) => loadAccountUsage(account.id),
     );

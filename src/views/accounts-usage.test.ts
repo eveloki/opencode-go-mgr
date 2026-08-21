@@ -189,8 +189,9 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   );
 
   assert.ok(header.indexOf("accountStatusLabel(account, now)") < header.indexOf('t("购买于 {date}"'));
-  assert.match(header, /<n-tag v-if="!isZen && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
-  assert.match(header, /<n-tag v-if="!isZen && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
+  // Custom accounts have no purchase/expiry fields, so the tags skip them.
+  assert.match(header, /<n-tag v-if="!isZen && !isCustom && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
+  assert.match(header, /<n-tag v-if="!isZen && !isCustom && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
   assert.match(card, /<n-popover[\s\S]*?trigger="click"[\s\S]*?placement="bottom-end"[\s\S]*?:width="320"[\s\S]*?@update:show="\(show: boolean\) => show && emit\('usage-editor-open'\)"/);
   assert.match(editor, /class="usage-editor-popover"/);
   assert.doesNotMatch(card, /:flip="false"/);
@@ -198,7 +199,7 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   assert.ok(card.indexOf("<n-popover") < card.indexOf("<n-dropdown"));
   assert.match(editor, /class="usage-editor-popover"[\s\S]*?class="usage-resets-row"/);
   assert.match(usage, /async function focusUsageEditor\(accountId: string\)[\s\S]*?requestAnimationFrame[\s\S]*?\.n-input-number input[\s\S]*?\.focus\(\)/);
-  assert.match(card, /v-if="!isZen && accountIsReady\(account\)"[\s\S]*?刷新额度/);
+  assert.match(card, /v-if="isGo && accountIsReady\(account\)"[\s\S]*?刷新额度/);
   assert.doesNotMatch(
     card,
     /accountIsReady\(account\) && account\.account_type === 'managed'/,

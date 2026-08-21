@@ -4,6 +4,7 @@ import type { UsageKey } from "./accounts-usage.ts";
 import { daysUntilDate, expiryTagType } from "./account-lifecycle.ts";
 import type { ExpiryTagType } from "./account-lifecycle.ts";
 import { isZenFreeAccount } from "./account-providers.ts";
+import { isCustomApiAccount } from "./custom-account.ts";
 import { t } from "../i18n/index.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
@@ -85,6 +86,10 @@ export function accountStatusLabel(account: Account, now = Date.now()): string {
   if (!accountIsReady(account)) return t("注册中");
   const draftLabel = accountRoutingDraftLabel(account);
   if (draftLabel) return t(draftLabel);
+  // Routable plans with a required verification (Custom API) surface their
+  // verification state instead of a bare enabled/disabled label.
+  if (account.verification_status === "pending") return t("待验证");
+  if (account.verification_status === "failed") return t("验证失败");
   if (account.auth_error) {
     return account.enabled
       ? t("认证失效（401 熔断）")
@@ -103,6 +108,8 @@ export function accountStatusTagType(account: Account, now = Date.now()): Accoun
   if (!accountIsReady(account)) return "warning";
   const draftLabel = accountRoutingDraftLabel(account);
   if (draftLabel) return draftLabel === "验证失败" ? "error" : "warning";
+  if (account.verification_status === "pending") return "warning";
+  if (account.verification_status === "failed") return "error";
   if (account.auth_error) return "error";
   if (!account.enabled) return "default";
   if (isCooling(account, now)) return "warning";
@@ -193,6 +200,28 @@ export function accountMenuOptions(account: Account, now = Date.now()): AccountM
   const options: AccountMenuOption[] = [];
   // The built-in Zen Free singleton has no Key/profile/console actions.
   if (isZenFreeAccount(account)) return options;
+  if (isCustomApiAccount(account)) {
+    // Custom API has no OpenCode console, browser profile, or managed setup;
+    // keep only the generic lifecycle actions.
+    if (accountIsReady(account)) {
+      options.push({ key: "edit", label: t("编辑账号"), accountId: account.id, accountName: account.name });
+    }
+    if (accountIsReady(account) && isCooling(account, now)) {
+      options.push({
+        key: "reset",
+        label: t("重置冷却"),
+        accountId: account.id,
+        accountName: account.name,
+      });
+    }
+    options.push({
+      key: "delete",
+      label: t("删除账号"),
+      accountId: account.id,
+      accountName: account.name,
+    });
+    return options;
+  }
   if (accountIsReady(account)) {
     options.push({
       key: "open-console",

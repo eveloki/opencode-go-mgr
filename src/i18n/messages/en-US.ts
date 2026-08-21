@@ -688,11 +688,14 @@ export const enUSMessages = {
   "请填写 Base URL": "Please enter a Base URL",
   "请阅读并同意条款": "Please read and agree to the terms",
   "请至少添加一个模型能力": "Please add at least one model capability",
+  "模型 ID 不能重复": "Model IDs must be unique",
+  "模型 ID 最多 200 个字符": "Model ID must be at most 200 characters",
+  "模型 ID 不能包含控制字符": "Model ID cannot contain control characters",
+  "模型能力必须与上游协议一致": "Model capabilities must use the upstream protocol",
 
   "创建为禁用草稿；验证与路由尚未就绪": "Creates a disabled draft; verification and routing are not ready yet",
   "选择套餐后创建为禁用草稿；路由尚未就绪": "Choose a tier to create a disabled draft; routing is not ready yet",
   "路由尚未就绪": "Routing is not ready yet",
-  "填写端点与模型能力后创建为禁用草稿；路由尚未就绪": "Fill in the endpoint and model capabilities to create a disabled draft; routing is not ready yet",
 
   "该方案暂不可路由": "This plan is not routable yet",
   "该方案暂不可路由。": "This plan is not routable yet.",
@@ -714,6 +717,19 @@ export const enUSMessages = {
   "无法确定账号方案，请关闭后重试": "Unable to determine the account plan. Close this dialog and try again.",
   "关闭对话框": "Close dialog",
   "已创建账号 {name}": "Created account {name}",
+  "验证连接": "Verify connection",
+  "连接验证成功，账号保持禁用，可手动启用。": "Connection verified. The account stays disabled; enable it manually.",
+  "连接验证失败: {error}": "Connection verification failed: {error}",
+  "验证连接成功后才能启用": "Verify the connection before enabling",
+  "目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；验证连接会发送一次最小真实请求，可能产生服务商费用。": "The administrator chooses and is responsible for the destination: with http:// the Key is sent without TLS; verification sends one minimal real request that may incur provider charges.",
+  "Base URL 格式无效": "Invalid Base URL format",
+  "Base URL 必须是 http:// 或 https:// URL": "The Base URL must be an http:// or https:// URL",
+  "Base URL 不能包含用户名或密码": "The Base URL cannot contain a username or password",
+  "创建为禁用账号，验证连接成功后手动启用。": "Created as a disabled account; verify the connection, then enable it manually.",
+  "{count} 个模型": "{count} models",
+  "连接已验证：{time}": "Connection verified at {time}",
+  "连接已验证": "Connection verified",
+  "上次验证失败，请检查 Key 与端点配置后重试。": "The last verification failed. Check the Key and endpoint configuration, then retry.",
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

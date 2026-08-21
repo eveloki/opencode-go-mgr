@@ -104,7 +104,9 @@ test("status buckets mirror the card status labels", () => {
   assert.equal(
     accountStatusKey(account({
       enabled: false,
-      plan_routable: false,
+      provider_id: "custom",
+      offering_id: "api",
+      plan_routable: true,
       verification_status: "pending",
     }), NOW),
     "verifying",
@@ -112,10 +114,32 @@ test("status buckets mirror the card status labels", () => {
   assert.equal(
     accountStatusKey(account({
       enabled: false,
+      provider_id: "custom",
+      offering_id: "api",
       plan_routable: false,
       verification_status: "failed",
     }), NOW),
     "verification-failed",
+  );
+  assert.equal(
+    accountStatusKey(account({
+      enabled: false,
+      provider_id: "custom",
+      offering_id: "api",
+      plan_routable: true,
+      verification_status: "failed",
+    }), NOW),
+    "verification-failed",
+  );
+  assert.equal(
+    accountStatusKey(account({
+      enabled: false,
+      provider_id: "custom",
+      offering_id: "api",
+      plan_routable: false,
+      verification_status: "pending",
+    }), NOW),
+    "verifying",
   );
   assert.equal(
     accountStatusKey(account({ cooldown_until: "2026-08-21T13:00:00Z" }), NOW),

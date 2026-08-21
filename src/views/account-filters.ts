@@ -3,6 +3,7 @@ import type { PlanDefinition } from "./plans.ts";
 import { planForAccount } from "./plans.ts";
 import { isCooling, isFreeCooling } from "./accounts-usage.ts";
 import { isZenFreeAccount } from "./account-providers.ts";
+import { isCustomApiAccount } from "./custom-account.ts";
 
 /**
  * Plan/status filters for the Accounts workbench. Both filters are pure and
@@ -29,8 +30,8 @@ export function accountStatusKey(account: Account, now: number = Date.now()): Ac
     return isFreeCooling(account, now) ? "cooling" : "available";
   }
   if (account.setup_step !== "ready") return "registering";
-  if (!account.plan_routable && account.verification_status === "pending") return "verifying";
-  if (!account.plan_routable && account.verification_status === "failed") return "verification-failed";
+  if (isCustomApiAccount(account) && account.verification_status === "pending") return "verifying";
+  if (isCustomApiAccount(account) && account.verification_status === "failed") return "verification-failed";
   if (account.auth_error) return "auth-error";
   if (!account.enabled) return "disabled";
   return isCooling(account, now) ? "cooling" : "available";
