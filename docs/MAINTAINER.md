@@ -27,7 +27,7 @@ matrix, the CI flow, and the things that are explicitly out of scope.
 ```
 ocg-manager/
 ├── crates/
-│   ├── ocg-core/      Gateway, dashboard HTTP API, SQLite, Plan catalog, Alias registry, dormant Custom HTTP, models, crypto, selector, cooldown, pricing
+│   ├── ocg-core/      Gateway, dashboard HTTP API, SQLite, Plan catalog, Alias registry, Custom HTTP, models, crypto, selector, cooldown, pricing
 │   ├── ocg-cli/       Headless CLI and gateway entrypoint
 │   └── ocg-browser-worker/  Linux Chromium sidecar control service
 ├── browser/           Xvfb, Openbox, x11vnc, and noVNC startup script
@@ -184,12 +184,14 @@ difference, and the Claude Desktop three-role persistence behavior.
   accepts both `/v1beta/models/{model}:*` and `/v1/models/{model}:*`;
   `generateContent` and `streamGenerateContent` enter the conversion chain,
   while `countTokens` and `embedContent` return `501`. Authenticated
-  `GET /v1/models` is a local reader of currently routeable aliases (OpenCode
-  Go and Zen Free) with **zero upstream discovery and no account selection**.
+  `GET /v1/models` is a local reader of currently routeable published aliases
+  (OpenCode Go and Zen Free) plus eligible Custom declared IDs, with **zero
+  upstream discovery**. Published Go/Zen aliases do not depend on Go accounts;
+  Custom IDs come from enabled+verified+ready+key Custom capabilities.
   Protected `GET /dashboard/api/application-models` is a different local list:
   currently routeable OpenCode Go aliases intersected with the active Go
   pricing snapshot (highspeed variants inherit the base row; empty
-  intersection is `[]`). Both are Alias-only: no raw IDs. Do not reintroduce
+  intersection is `[]`). It never includes Custom IDs. Do not reintroduce
   an upstream catalog fetch, filter-from-upstream, or availability probe on
   those paths. Claude Desktop `/claude-desktop/v1/models` still advertises
   only the three role aliases.
@@ -199,10 +201,13 @@ difference, and the Claude Desktop three-role persistence behavior.
   and must never fold onto a kebab alias. A raw ID with exactly one registry
   mapping pins to that mapping; routability is checked afterward, so an
   unroutable mapping is recognized but cannot produce a production route.
-  Overlapping raw IDs return `400` with `ambiguous_model_id` and must not call
-  upstream. Unknown names return `400` on Chat Completions, Responses,
-  Messages, and Gemini generateContent / streamGenerateContent. The published
-  kebab alias `deepseek-v4-flash` stays Go-owned; raw
+  Overlapping raw IDs (including an eligible Custom capability colliding with
+  another Plan mapping) return `400` with `ambiguous_model_id` and must not
+  call upstream. Unknown names — not a published alias and not an eligible
+  Custom ID — return `400` on Chat Completions, Responses, Messages, and
+  Gemini generateContent / streamGenerateContent. Eligible Custom IDs overlay
+  resolution and `/v1/models` but must not steal published Go/Zen aliases.
+  The published kebab alias `deepseek-v4-flash` stays Go-owned; raw
   `deepseek/deepseek-v4-flash` pins to unroutable GOAT. Forward
   logs persist `requested_model` (the client-requested alias or model name),
   `resolved_alias`, `upstream_model`, `provider_id`, and `offering_id`. There
@@ -229,24 +234,36 @@ difference, and the Claude Desktop three-role persistence behavior.
   credentialless singleton, routable), Command Code GOAT (`command-code`/`goat`,
   unroutable), SCNet Token Plans (`scnet`/`token-plan-basic|standard|premium`,
   unroutable, `sk-tp-` prefix, versioned interactive-use acknowledgement), and
-  Custom API (`custom`/`api`, unroutable). GOAT / SCNet / Custom create as
+  Custom API (`custom`/`api`, routable). GOAT and all SCNet offerings create as
   disabled `pending` drafts (`routable=false`); `POST /dashboard/api/accounts/{id}/verify`
-  returns `501` in this slice. Every persistent mutation path (Database,
+  returns `501` for those offerings. Every persistent mutation path (Database,
   dashboard, CLI, and Tauri) rejects `enabled=true` for a catalogued
   `routable=false` offering before mutating the row, revision, or timestamps.
-  Do not claim live GOAT / SCNet / Custom routing,
-  usage, pricing, verification, or provider guides. Custom Phase 1 is a
-  dormant security foundation: syntactic URL validation in `provider.rs`
-  (HTTPS except loopback HTTP, no credentials, no private/link-local/metadata
-  targets) plus `custom_http.rs` (Direct and Manual only). Auto is explicitly
-  unavailable because connect-time DNS validation cannot distinguish the
-  effective system proxy from the origin. `custom_http` has **no production
-  caller** — it is not wired into inference, verify, usage, or the selector.
-  Under Manual proxy the proxy performs its own DNS; that residual lookup is
-  not CONNECT-to-pinned-IP and blocks enablement. Accept only officially
-  distributable API keys: never add consumer subscriptions, cookies, or
-  reverse-proxy credentials as accounts. Never alias Command Code / GOAT or
-  SCNet onto OpenCode or send those keys to an OpenCode endpoint.
+  Do not claim live GOAT / SCNet routing, usage, pricing, verification, or
+  provider guides. Custom API is a trusted-administrator destination:
+  `validate_custom_base_url` accepts any syntactically valid HTTP or HTTPS
+  origin (LAN, loopback, and self-selected destinations included) and rejects
+  URL-embedded credentials, queries, and fragments. `custom.rs` plus
+  `custom_http.rs` are the production callers for verify and inference. Direct,
+  Manual, and Auto inherit the process-wide proxy. The client never follows
+  redirects, never forwards dashboard or client auth, and constructs only the
+  configured Bearer or `x-api-key`. Joined endpoints must preserve scheme,
+  host, port, and base-path containment. Timeouts clamp `connect_timeout_secs`
+  to 5–60 seconds. Create/update leave Custom disabled and `pending`.
+  Verification sends one protocol-correct minimal non-stream request to the
+  first declared model; only a `2xx` JSON object succeeds; it does not
+  discover or mutate capabilities and never auto-enables. Explicit enable after
+  verification is required. Eligible declared IDs become dynamically routable.
+  Custom costs/usage are unpriced/unknown with no provider quota debit.
+  Key, base URL, or capability changes re-pend verification and disable the
+  account; protocol and auth scheme are fixed at create. Keep GOAT/SCNet
+  anti-abuse boundaries separate from this trusted-admin Custom path. For
+  OpenCode Go, Command Code GOAT, and SCNet supplier plans, accept only
+  officially distributable API keys: never add consumer subscriptions,
+  cookies, or reverse-proxy credentials as accounts for those plans. That
+  restriction does not constrain administrator-configured Custom Bearer or
+  `x-api-key` credentials. Never alias Command Code / GOAT, SCNet, or Custom
+  onto OpenCode or send those keys to an OpenCode endpoint.
 - SCNet official usable-model snapshot `2026-08-21` (exact case and order,
   adapter input only, never `model_aliases`): `GLM-5.2`, `GLM-5`, `GLM-5.1`,
   `Kimi-K3`, `Kimi-K2.7-Code`, `Kimi-K2.6`, `Kimi-K2.5`, `DeepSeek-V4-Flash`,
@@ -262,7 +279,9 @@ difference, and the Claude Desktop three-role persistence behavior.
 - `gateway/materialize.rs` parses the client protocol once, resolves the
   Alias, then materializes model / protocol / endpoint / auth per candidate.
   Adapters must not probe a billable inference path to discover protocol
-  support. The OpenCode `MODEL_PROTOCOLS` table stays Go-specific.
+  support. The OpenCode `MODEL_PROTOCOLS` table stays Go-specific. Custom
+  rematerializes per account to that card's declared protocol, isolated
+  origin, and auth scheme.
 - `selector.rs` filters account cards by capability, enabled/ready state,
   credential validity, cooldown, and request-local failures before applying
   the persisted global manual order. Strict priority, global sticky, and
@@ -328,9 +347,9 @@ difference, and the Claude Desktop three-role persistence behavior.
   OpenCode Go snapshot through the protected pricing API.
 - Account cards are the Plan / credential / quota unit. Zen Free is
   database-owned: it can be enabled, disabled, and reordered, but cannot be
-  created or deleted through generic account APIs. GOAT / SCNet / Custom
-  drafts are disabled and unroutable until a later slice ships a production
-  route. Logs persist provider, offering, route-account, credential-account,
+  created or deleted through generic account APIs. GOAT / SCNet drafts stay
+  disabled and unroutable. Custom API is catalog-routable after verify-then-
+  enable; create/update still leave the card disabled `pending`. Logs persist provider, offering, route-account, credential-account,
   `requested_model`, `resolved_alias`, `upstream_model`, optional
   `native_cost_*`, raw-cost, quota-debit, and effective-paid-cost. There is
   no `requested_alias` field. The existing model filter exact-matches any
@@ -432,11 +451,11 @@ difference, and the Claude Desktop three-role persistence behavior.
   than v22 also keeps `data.sqlite.pre-v22.<timestamp>.bak`. Preserve those
   files with the normal backup; they are rollback points, not a general backup
   or a license to run an older binary on the migrated database. On every
-  `Database::open`, enabled leftovers for Command Code GOAT, all three SCNet
-  Token Plan tiers, and Custom API are disabled without changing `updated_at`.
-  Verification and configuration remain intact, except an existing unverified
-  GOAT row is reset to `pending`; Go, Zen Free, and unknown provider/offering
-  pairs are untouched.
+  `Database::open`, enabled leftovers for Command Code GOAT and all three SCNet
+  Token Plan tiers are disabled without changing `updated_at`. Custom API
+  enabled state is preserved. Verification and configuration remain intact,
+  except an existing unverified GOAT row is reset to `pending`; Go, Zen Free,
+  and unknown provider/offering pairs are untouched.
 - `crates/ocg-core/src/state.rs` is the `CoreStateInner` shared by the
   gateway, dashboard, and CLI.
 - `AppConfig` uses serde defaults for backward-compatible loading. A pre-1.3
@@ -958,18 +977,24 @@ most of them; the manual parts need a real desktop.
       `2xx`/`429`/`401`/`403`/network/`5xx` key-verification branches. Confirm
       that no DTO or log contains a plaintext key.
 - [ ] Confirm authenticated `GET /v1/models` and protected
-      `GET /dashboard/api/application-models` are local Alias lists (no
-      upstream discovery, no account selection). `/v1/models` is currently
-      routeable aliases; `application-models` is Go routeable aliases ∩ the
-      active pricing snapshot (highspeed inherits the base row). Unknown
-      models return `400` on Chat / Responses / Messages / Gemini. Command
-      Code GOAT / SCNet Token Plan / Custom API drafts stay disabled,
-      unroutable (`routable=false`), and `501` on verify. Custom Phase 1 is
-      Direct+Manual only (Auto unavailable); `custom_http` has no production
-      caller; proxy-side DNS residual blocks enablement. Do not smoke those
-      three families as live routing, usage, pricing, or provider guides.
-      These local-list and fail-closed checks do not require live provider
-      keys.
+      `GET /dashboard/api/application-models` are local lists (no upstream
+      discovery). `/v1/models` is currently routeable published aliases plus
+      eligible Custom IDs; `application-models` is Go routeable aliases ∩ the
+      active pricing snapshot (highspeed inherits the base row) and must not
+      include Custom. Unknown models return `400` on Chat / Responses /
+      Messages / Gemini unless they match that `/v1/models` list. Command
+      Code GOAT / SCNet Token Plan drafts stay disabled, unroutable
+      (`routable=false`), and `501` on verify. Do not smoke GOAT or SCNet as
+      live routing, usage, pricing, or provider guides. These local-list and
+      fail-closed checks do not require live provider keys.
+- [ ] Bounded fake-upstream Custom API smoke (no live provider key): URL
+      credentials are rejected; a `2xx` JSON object verifies; the card stays
+      disabled; explicit enable is required; declared model/protocol
+      forwarding succeeds; redirects are denied; dashboard/client auth is not
+      forwarded and only the configured Bearer or `x-api-key` is sent;
+      successful logs are unpriced/`cost_state=unknown` with no quota debit;
+      editing the URL, key, or capabilities re-pends verification and disables
+      the account. Confirm Direct/Manual/Auto inherit the process-wide proxy.
 - [ ] Verify Edge/Chrome priority on Windows and browser discovery on
       macOS/Linux. With two accounts, prove profile isolation and cookie
       persistence across restart. Reset must sign out of the console but keep a
@@ -1042,14 +1067,13 @@ most of them; the manual parts need a real desktop.
 - Claude Desktop only advertises three fixed Claude aliases, mapped to the
   supported actual models; it does not mean OCG Manager provides native
   Claude 4.6 models or the full Anthropic Models API.
-- Command Code GOAT, SCNet Token Plans, and Custom API are schema/UI drafts
-  only. They create disabled `pending` accounts; verification is `501`; they
-  are not selected for Alias routing. Custom Phase 1 is a dormant foundation
-  (`custom_http.rs`): Direct+Manual only, Auto unavailable, no production
-  caller, proxy-side DNS residual that blocks enablement. SCNet official
-  usable-model and endpoint snapshots are adapter input only and must not be
-  published as client aliases. Do not document or ship those families as live
-  support.
+- Command Code GOAT and SCNet Token Plans are schema/UI drafts only. They
+  create disabled `pending` accounts; verification is `501`; they are not
+  selected for Alias routing. SCNet official usable-model and endpoint
+  snapshots are adapter input only and must not be published as client
+  aliases. Do not document or ship those families as live support. Custom API
+  is live under the trusted-administrator boundary (`custom.rs` +
+  `custom_http.rs`); keep that path out of GOAT/SCNet anti-abuse wording.
 
 ## Coding Conventions
 

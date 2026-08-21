@@ -40,10 +40,12 @@ the true / false circuit breakers, and protocol conversion actually work.
 
 ## What It Does
 
-OCG Manager keeps officially distributable provider API keys in a local SQLite
-database and exposes a loopback gateway at `http://127.0.0.1:9042/v1`. Each
+OCG Manager keeps provider API keys in a local SQLite database — officially
+distributable OpenCode Go keys, plus trusted Custom API destinations — and
+exposes a loopback gateway at `http://127.0.0.1:9042/v1`. Each
 account card is one **Plan** (provider + offering). Clients send **aliases**
-from the local registry; live routing is OpenCode Go and OpenCode Zen Free.
+from the local registry or eligible Custom model IDs; live routing is
+OpenCode Go, OpenCode Zen Free, and Custom API.
 The same gateway also serves the Vue 3 dashboard at `/dashboard/` and its JSON
 API at `/dashboard/api`. Every node is independent: there is no remote sync,
 no Admin API, and no telemetry.
@@ -51,8 +53,9 @@ no Admin API, and no telemetry.
 The gateway does four jobs:
 
 1. Authenticate the client with the **Key** issued by the dashboard.
-2. Resolve the requested model against the local Alias registry, then pick a
-   usable account card after capability filtering.
+2. Resolve the requested model against the local Alias registry (and eligible
+   Custom declared IDs), then pick a usable account card after capability
+   filtering.
 3. Convert the request to the selected Plan's supported upstream protocol,
    and the response back to the client protocol.
 4. Log the request (`requested_model`, `resolved_alias`, `upstream_model`),
@@ -205,11 +208,11 @@ backup; never open the migrated database with an older build.
 
 If the source database was older than schema v22, the same startup also keeps
 `data.sqlite.pre-v22.<timestamp>.bak` as the earlier rollback point. On every
-`Database::open`, enabled leftovers for Command Code GOAT, all three SCNet
-Token Plan tiers, and Custom API are disabled without changing `updated_at`.
-Their verification and configuration remain intact, except that an existing
-unverified GOAT row is reset to `pending`. OpenCode Go, Zen Free, and unknown
-provider/offering pairs are untouched.
+`Database::open`, enabled leftovers for Command Code GOAT and all three SCNet
+Token Plan tiers are disabled without changing `updated_at`. Custom API
+enabled state is preserved. Their verification and configuration remain
+intact, except that an existing unverified GOAT row is reset to `pending`.
+OpenCode Go, Zen Free, and unknown provider/offering pairs are untouched.
 
 ### Backup
 
@@ -430,10 +433,11 @@ The Applications picker list is the protected
 Go aliases intersected with the active OpenCode Go pricing snapshot. Highspeed
 variants inherit the base model's pricing row. An empty intersection is `[]`,
 not an error. That list is **not** the same as authenticated `GET /v1/models`,
-which publishes every currently routeable alias (OpenCode Go and Zen Free).
-Both endpoints are local Alias lists only: no raw upstream IDs, no SCNet
-official table spellings, no unpublished Command Code GOAT / Custom names, no
-upstream discovery, and no account selection. An accepted pricing refresh can
+which publishes currently routeable Go and Zen Free aliases plus eligible
+Custom declared IDs. `application-models` stays Go-only. Both endpoints are
+local lists: no SCNet official table spellings, no unpublished Command Code
+GOAT names, no upstream discovery, and no account selection to fetch a
+catalog. An accepted pricing refresh can
 change which Go aliases `application-models` returns. The view reloads this
 local list whenever you return to it. Model selections and edited snippets are
 cached separately per application while the current dashboard page remains
@@ -511,17 +515,25 @@ The built-in Plan families are:
 | Zen Free | `opencode-zen-free` / `anonymous-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
 | Command Code GOAT | `command-code` / `goat` | No | Saved as a disabled `pending` draft; connection verification returns `501`; not a production inference, pricing, usage, or provider-guide path |
 | SCNet Token Plans | `scnet` / `token-plan-basic`, `token-plan-standard`, `token-plan-premium` | No | Keys must start with `sk-tp-`; saved as disabled `pending` drafts; verification returns `501`; official interactive-use restriction below |
-| Custom API | `custom` / `api` | No | Disabled `pending` draft (`routable=false`); verification returns `501`; Phase 1 stores base URL, upstream protocol, auth scheme, and model capabilities; no production HTTP caller |
+| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; create/update stay disabled `pending`; verify then explicit enable; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
 Every persistent mutation path (Database, dashboard, CLI, and Tauri) rejects
-`enabled=true` for a catalogued `routable=false` offering before it mutates the
-row, revision, or timestamps. Disabled drafts remain saveable.
+`enabled=true` for a catalogued `routable=false` offering (GOAT and all SCNet
+tiers) before it mutates the row, revision, or timestamps. Custom is
+catalog-routable, but create/update still leave the card disabled and
+`pending`; enable is rejected until verification status is `verified`.
+Disabled drafts remain saveable.
 
-Do not add consumer subscription credentials, browser cookies, or reverse
-proxies as account keys. Command Code GOAT, SCNet Token Plans, and Custom API
-must not be aliased onto OpenCode, must not send their keys to an OpenCode
-endpoint, and must not be described as live routing, usage, pricing, or
-verification.
+For OpenCode Go, Command Code GOAT, and SCNet Token Plans, do not add consumer
+subscription credentials, browser cookies, or reverse-proxy credentials as
+account keys. This restriction does not constrain administrator-configured
+Custom Bearer or `x-api-key` credentials. Command Code GOAT and SCNet Token
+Plans must not be
+aliased onto OpenCode, must not send their keys to an OpenCode endpoint, and
+must not be described as live routing, usage, pricing, or verification.
+Custom API must not be aliased onto OpenCode or send its key to an OpenCode
+endpoint; it is a separate trusted-administrator destination, not an
+OpenCode offering.
 
 SCNet Token Plan keys (`sk-tp-`) are limited to interactive use inside AI
 tools. Account sharing and using the API as a custom application backend,
@@ -532,14 +544,37 @@ versioned acknowledgement of that restriction (`scnet-token-plan-restrictions`
 official usable-model table and endpoint snapshot are adapter input only and
 are never published as client aliases.
 
-Custom API is Phase 1 only. Drafts store a base URL, upstream protocol, auth
-scheme, and model capabilities. URL validation (HTTPS except loopback HTTP, no
-credentials, no private / link-local / metadata hosts) is a security
-foundation, not live support. There is no production caller: verify, usage,
-selector, and inference never send Custom traffic. The dormant HTTP
-foundation, when constructed, allows Direct and Manual proxy only; Auto is
-explicitly unavailable. Under Manual proxy the proxy performs its own DNS;
-that residual lookup is not pinned and blocks enablement.
+Custom API is a live trusted-administrator destination. The card stores a
+base URL, one upstream protocol (Chat Completions, Responses, or Messages),
+one auth scheme (Bearer or `x-api-key`), and at least one model capability.
+A trusted administrator may configure any syntactically valid HTTP or HTTPS
+origin, including LAN, loopback, and other self-selected destinations.
+URL-embedded credentials, query strings, and fragments are rejected. The
+gateway never follows redirects, never forwards dashboard or client
+authentication, and constructs only the configured Bearer or `x-api-key`
+credential. Joined endpoints stay inside the configured scheme, host, port,
+and base-path prefix. Custom HTTP uses the same process-wide Direct / Manual
+/ Auto proxy policy; connect and request timeouts are bounded from the
+configured connect timeout (clamped 5–60 seconds).
+
+Create and update leave the card disabled and `pending`. Verification sends
+one protocol-correct, non-stream, token-bounded JSON request to the first
+declared model; only a `2xx` JSON object succeeds. Verification does not
+discover or mutate capabilities and never auto-enables the account. You must
+enable the card explicitly after a successful verify. Eligible accounts
+(enabled + verified + ready + non-empty key) expose their declared model IDs
+on authenticated `GET /v1/models` and can be selected for those IDs.
+Declared capability IDs are both the client-facing names and the upstream
+model names; matching is case-insensitive for kebab IDs, and names with `/`,
+`_`, or whitespace never fold onto a kebab alias. Custom overlay never
+steals a published Go or Zen Free alias. Overlap with another Plan's unique
+raw ID returns `ambiguous_model_id` and does not call upstream. Undeclared
+names stay unknown (`400`). Changing the base URL, key, or declared
+capabilities re-pends verification and disables the account. Upstream
+protocol and auth scheme are fixed at create. Custom traffic is unpriced:
+logs record `cost_state=unknown` with no quota debit, and Custom has no
+provider usage refresh. `MODEL_PROTOCOLS` remains Go-specific; Custom
+converts the client protocol to the account's declared upstream protocol.
 
 The **Accounts** view splits creation into **Import existing Key** and
 **Register new account (Beta)**:
@@ -669,8 +704,9 @@ limits, token rates, `Usage`, and the quota-debit multiplier. The allowance is
 not a quota pool and does not route requests: it only derives that debit
 multiplier (`monthly limit / Usage`). Saving a temporary override creates a
 new persistent revision for later estimates. There is no model-level quota
-pool. Command Code GOAT, SCNet Token Plans, and Custom API have no live
-pricing or usage path and are not presented as priced support.
+pool. Command Code GOAT and SCNet Token Plans have no live pricing or usage
+path. Custom API is catalogued as unpriced: successful forwards log
+`cost_state=unknown` with no quota debit and no official usage refresh.
 
 ### Logs
 
@@ -701,7 +737,8 @@ a model or provider routable.
   still finished without one. A usage chunk makes token counts accurate; quota
   use is still estimated from the active OpenCode Go pricing snapshot. Zen free
   models (`*-free`, `big-pickle`) record tokens with `cost_state=free` and do
-  not enter Go quota totals. Expand a row to see the request ID and diagnostic
+  not enter Go quota totals. Custom API rows record `cost_state=unknown` with
+  no quota debit. Expand a row to see the request ID and diagnostic
   detail.
 - An `outcome_unknown` row means the upstream may already have completed and
   charged the request, but the gateway lost the response or timed out. Such a
@@ -731,10 +768,11 @@ The **Settings** view exposes the persistent gateway configuration:
   `http://127.0.0.1:7890`; a proxy failure never silently falls back to a direct
   connection. `Force direct connection` ignores system and environment proxy
   configuration. Proxy URLs cannot contain credentials. The policy covers core
-  HTTP requests including model forwarding, account-key tests, official
-  OpenCode Go usage API, pricing refreshes, release checks, and signed desktop
-  installer downloads; authenticated `GET /v1/models` and protected
-  `GET /dashboard/api/application-models` are local Alias lists and do not use
+  HTTP requests including model forwarding (OpenCode Go, Zen Free, and Custom
+  API), account-key tests and Custom verification, official OpenCode Go usage
+  API, pricing refreshes, release checks, and signed desktop installer
+  downloads; authenticated `GET /v1/models` and protected
+  `GET /dashboard/api/application-models` are local lists and do not use
   this outbound path. The browser sidecar is outside its scope. **Test
   connection** uses the unsaved form values against the current upstream. Any
   HTTP status proves network reachability, without running model inference or
@@ -778,7 +816,7 @@ The gateway is served at `http://<bind>:<port>` and exposes:
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET`  | `/v1/models` | Authenticated local routeable Alias list (no upstream discovery, no account selection) |
+| `GET`  | `/v1/models` | Authenticated local list: published Go/Zen aliases plus eligible Custom IDs (no upstream discovery) |
 | `POST` | `/v1beta/models/{model}:generateContent` | Gemini non-stream generation (`/v1/models/...` is also accepted) |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini SSE generation (`/v1/models/...` is also accepted) |
 | `POST` | `/v1beta/models/{model}:countTokens` | Returns `501`; Gemini CLI can fall back to local estimation |
@@ -799,9 +837,10 @@ Docker checks container-internal TCP port `9042`.
 Gateway API endpoints require the **Key** in one of three header
 forms: `Authorization: Bearer <key>`, `x-api-key: <key>`, or
 `x-goog-api-key: <key>`. Before forwarding, the gateway strips the client
-auth header and injects the selected OpenCode-Go account key instead:
-`x-api-key` for Messages upstreams and `Authorization: Bearer` for Chat
-Completions / Responses upstreams.
+auth header and injects the selected account credential instead. OpenCode Go
+uses `x-api-key` for Messages upstreams and `Authorization: Bearer` for Chat
+Completions / Responses. Custom API constructs only the configured Bearer or
+`x-api-key` header and never forwards dashboard or client credentials.
 
 Dashboard authentication depends on the listener bind:
 
@@ -825,32 +864,38 @@ local registry. Existing OpenCode Go model IDs are the preferred aliases;
 case-folded spellings such as `GLM-5.2` are accepted.
 
 Authenticated `GET /v1/models` lists currently routeable published aliases
-only (OpenCode Go and Zen Free), in deterministic registry order. It is served
-from the local registry and does **not** discover, proxy, or cache an upstream
-catalog, select or decrypt an account, write a forward log, or mutate routing
-state. Zero Go accounts is enough.
+(OpenCode Go and Zen Free) in deterministic registry order, then appends
+eligible Custom capability IDs that do not match those aliases (`owned_by` is
+`custom`). It does **not** discover, proxy, or cache an upstream catalog,
+write a forward log, or mutate routing state. Published Go and Zen Free
+aliases do not depend on whether any Go account exists. Eligible Custom IDs
+come from enabled + verified + ready Custom accounts that have a key.
 
 Protected `GET /dashboard/api/application-models` is a different local list:
 currently routeable OpenCode Go aliases intersected with the active OpenCode
 Go pricing snapshot. Highspeed variants inherit the base row. Empty
-intersection is `[]`. It also never selects an account or calls upstream.
+intersection is `[]`. It never includes Custom IDs, never selects an account,
+and never calls upstream.
 
-Neither list advertises raw upstream IDs, SCNet official usable-model
-spellings, unpublished Command Code GOAT / Custom names, or vendor-prefixed
-IDs that contain `/`.
+Neither list advertises SCNet official usable-model spellings or unpublished
+Command Code GOAT names. Eligible Custom declared IDs may appear on
+`/v1/models` even when they contain `/`; they are not folded onto kebab
+aliases.
 
 A raw upstream ID with exactly one registry mapping is pinned to that mapping
 (no cross-Plan fallback or Zen prefer overlay); routability is checked
 afterward. An unroutable mapping is therefore recognized but cannot produce a
 production route. Names containing `/`, `_`, or whitespace are treated as raw
 IDs and never folded onto a kebab alias (`glm/5.2` is not `glm-5.2`). A raw ID
-that matches more than one mapping returns `400` with code
-`ambiguous_model_id` and does not call upstream. Unknown names return `400` on
-every supported client format: Chat Completions, Responses, Messages, and
-Gemini `generateContent` / `streamGenerateContent`. The published kebab alias
-`deepseek-v4-flash` stays Go-owned; the unique raw ID
-`deepseek/deepseek-v4-flash` pins to Command Code GOAT and is not
-production-selectable.
+that matches more than one mapping, including an eligible Custom capability
+and another Plan, returns `400` with code `ambiguous_model_id` and does not
+call upstream. Unknown names — not a published alias and not an eligible
+Custom ID — return `400` on every supported client format: Chat Completions,
+Responses, Messages, and Gemini `generateContent` / `streamGenerateContent`.
+The published kebab alias `deepseek-v4-flash` stays Go-owned; the unique raw
+ID `deepseek/deepseek-v4-flash` pins to Command Code GOAT and is not
+production-selectable unless a colliding eligible Custom ID makes the name
+ambiguous instead.
 
 Forward logs keep the request identity separate from the upstream identity.
 There is no `requested_alias` field:
@@ -869,12 +914,13 @@ aliases, not the Plan model union.
 
 ### Protocol Conversion
 
-Each known model has a hardcoded **preferred** OpenCode-Go protocol and a
+Each known OpenCode Go model has a hardcoded **preferred** protocol and a
 **supported** set (maintained after test-account probes; not discovered at
 request time). When the client protocol is supported, the gateway passthroughs
 the request and response. Otherwise it converts the **request body** to the
 preferred upstream protocol and the **response body** (or SSE stream) back to
-the client protocol. Conversion covers text, system instructions, images, tool
+the client protocol. `MODEL_PROTOCOLS` remains Go-specific. Custom API
+converts the client protocol to that account's declared upstream protocol. Conversion covers text, system instructions, images, tool
 calls and tool results, reasoning content, completion status, errors, and
 usage fields. Example: `glm-5.2` passthroughs Chat Completions, Responses, and
 Messages; `grok-4.5` is Responses-only and converts Chat / Messages / Gemini
@@ -1043,6 +1089,8 @@ Edge cases in the log:
   `success_unpriced`, display no quota cost, and do not enter quota totals.
 - Zen free models finish as `success` with `cost_state=free`: tokens are
   recorded, quota cost stays empty, and they do not enter Go quota totals.
+- Custom API forwards finish with `cost_state=unknown`, display no quota
+  cost, and do not debit any provider quota.
 - Pre-snapshot successful rows retain their old value and are marked as a
   legacy estimate; they are never recalculated.
 - A manually saved percentage becomes the baseline for that window. Official
@@ -1390,6 +1438,11 @@ and browser profiles.
 - **Administrator password.** The single administrator password is stored as
   an Argon2 hash in SQLite. There is no self-service password recovery —
   protect the data directory.
+- **Custom API destinations.** Custom base URLs are administrator-trusted.
+  Any syntactically valid HTTP or HTTPS origin is allowed, including LAN and
+  loopback. URL-embedded credentials are rejected; redirects are never
+  followed; dashboard and client credentials are never forwarded. Choose
+  destinations you intend to reach from this node.
 
 ## Limits
 
@@ -1445,16 +1498,15 @@ and browser profiles.
   publish `linux/amd64` and `linux/arm64`. Updater-enabled installed desktop
   builds can install signed releases from Settings; 1.4.1, development
   builds, the CLI, and Docker use the direct/manual upgrade path.
-- Command Code GOAT, SCNet Token Plans, and Custom API can be saved as
-  disabled `pending` drafts (`routable=false`). Connection verification
-  returns `501`. They have no live inference, usage, pricing, verification
-  runtime, or provider guides. Custom API is Phase 1 only: URL validation plus
-  a Direct/Manual HTTP foundation, Auto explicitly unavailable, no production
-  caller, and proxy-side DNS residual risk that blocks enablement.
+- Command Code GOAT and SCNet Token Plans can be saved as disabled `pending`
+  drafts (`routable=false`). Connection verification returns `501`. They have
+  no live inference, usage, pricing, verification runtime, or provider
+  guides. Custom API is live under the trusted-administrator boundary in
+  [Accounts](#accounts); it is unpriced and has no official usage path.
 - Unknown model names return `400` on every supported client format. Clients
-  should send published aliases from authenticated `GET /v1/models`.
-  Protected `GET /dashboard/api/application-models` is Go aliases ∩ active
-  pricing, not that full client list.
+  should send published aliases or eligible Custom IDs from authenticated
+  `GET /v1/models`. Protected `GET /dashboard/api/application-models` is Go
+  aliases ∩ active pricing, not that full client list.
 
 ## Troubleshooting
 
@@ -1476,13 +1528,18 @@ and browser profiles.
 - **Gateway returns `429` with "all accounts cooling down".** Every enabled
   account is in cooldown. Either wait for the soonest reset, or add / enable
   another account.
-- **Gateway returns `400` for a model name.** Send a published alias from
-  authenticated `GET /v1/models`. Names with `/`, `_`, or whitespace are raw
-  IDs, not kebab aliases. Unknown names and overlapping raw IDs fail closed
-  and never call upstream.
-- **Saving Command Code GOAT, SCNet, or Custom does not start routing.**
-  Those Plans stay disabled `pending` drafts; verification returns `501`.
-  Use an OpenCode Go key (or Zen Free) for live traffic.
+- **Gateway returns `400` for a model name.** Send a published alias or an
+  eligible Custom ID from authenticated `GET /v1/models`. Names with `/`,
+  `_`, or whitespace are raw IDs, not kebab aliases. Unknown names and
+  overlapping raw IDs fail closed and never call upstream.
+- **Saving Command Code GOAT or SCNet does not start routing.** Those Plans
+  stay disabled `pending` drafts; verification returns `501`. Use an
+  OpenCode Go key, Zen Free, or a verified-then-enabled Custom API card for
+  live traffic.
+- **Saving Custom API does not start routing.** Create/update stay disabled
+  `pending`. Verify with a `2xx` JSON response, then enable explicitly.
+  Changing the URL, key, or declared models re-pends verification and
+  disables the card.
 - **Gemini requests fail with `400` over `safetySettings`.** The gateway
   cannot apply Google's safety thresholds equivalently on a Chat/Messages
   upstream, so it rejects non-empty arrays. Remove the field and retry; do

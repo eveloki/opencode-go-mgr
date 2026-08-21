@@ -39,17 +39,18 @@
 
 ## 产品定位
 
-OCG Manager 把可由官方分发的供应商 API Key 保存在本地 SQLite，并通过回环 Gateway
-`http://127.0.0.1:9042/v1` 暴露给客户端。每张账号卡对应一个 **Plan**（provider +
-offering）。客户端发送本地注册表里的 **别名**；当前可路由的是 OpenCode Go 与
-OpenCode Zen Free。同一个 Gateway 同时承载 Vue 3 管理面板（路径 `/dashboard/`）
-和面板的 JSON API（路径 `/dashboard/api`）。每个节点都独立运行——项目不提供远端
-同步、Admin API、遥测。
+OCG Manager 把供应商 API Key 保存在本地 SQLite（官方分发的 OpenCode Go Key，以及
+受信的 Custom API 目的地），并通过回环 Gateway `http://127.0.0.1:9042/v1` 暴露给
+客户端。每张账号卡对应一个 **Plan**（provider + offering）。客户端发送本地注册表里的
+**别名** 或合格 Custom 模型 ID；当前可路由的是 OpenCode Go、OpenCode Zen Free 与
+Custom API。同一个 Gateway 同时承载 Vue 3 管理面板（路径 `/dashboard/`）和面板的
+JSON API（路径 `/dashboard/api`）。每个节点都独立运行——项目不提供远端同步、
+Admin API、遥测。
 
 Gateway 的四件事：
 
 1. 用面板签发的 **Key** 验证客户端。
-2. 用本地 Alias 注册表解析客户端模型名，再经能力过滤后挑一张可用账号卡。
+2. 用本地 Alias 注册表（以及合格 Custom 声明 ID）解析客户端模型名，再经能力过滤后挑一张可用账号卡。
 3. 把请求转换到所选 Plan 支持的上游协议，再把响应转回客户端协议。
 4. 把请求日志（`requested_model`、`resolved_alias`、`upstream_model`）、用量、
    冷却全部写回 SQLite，并在面板里呈现。
@@ -187,10 +188,10 @@ schema v23 保存 Plan 验证状态、别名 / 上游日志身份（`requested_m
 
 若源库还早于 schema v22，同一次启动还会额外保留
 `data.sqlite.pre-v22.<timestamp>.bak` 作为更早的回滚点。每次
-`Database::open` 都会禁用遗留的已启用 Command Code GOAT、全部三个 SCNet Token
-Plan tier 与 Custom API，且不改 `updated_at`。其验证与配置保持不变，只有既有未
-验证的 GOAT 行会重置为 `pending`。OpenCode Go、Zen Free 和未知 provider/offering
-pair 不受影响。
+`Database::open` 都会禁用遗留的已启用 Command Code GOAT 与全部三个 SCNet Token
+Plan tier，且不改 `updated_at`。Custom API 的 enabled 状态予以保留。其验证与配置
+保持不变，只有既有未验证的 GOAT 行会重置为 `pending`。OpenCode Go、Zen Free 和未知
+provider/offering pair 不受影响。
 
 ### 备份
 
@@ -365,9 +366,10 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 应用选择器列表来自受保护的 `GET /dashboard/api/application-models`：当前可路由
 的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。
 空交集是 `[]`，不是错误。这份列表 **不是** 带鉴权的 `GET /v1/models`：后者公布
-当前全部可路由别名（OpenCode Go 与 Zen Free）。两条路径都只返回 Alias：不含原始
-上游 ID、SCNet 官方可用模型表拼写、未公布的 Command Code GOAT / Custom 名称，
-也不发现上游、不选账号。确认价格刷新后，`application-models` 返回的 Go 别名
+当前可路由的 Go 与 Zen Free 别名，并并入合格 Custom 声明 ID。`application-models`
+仍只含 Go。两条路径都是本地列表：不含 SCNet 官方可用模型表拼写、未公布的
+Command Code GOAT 名称，也不发现上游、不选账号去抓目录。确认价格刷新后，
+`application-models` 返回的 Go 别名
 可能变化。每次返回应用页都会重新加载这份本地列表。模型选择和编辑过的代码片段
 按应用分别缓存在当前页面里，刷新页面后重置。
 **恢复默认** 会重置当前应用的模型选择与片段草稿。
@@ -434,14 +436,20 @@ Claude Desktop 是例外，它的模型映射是持久化的：复制配置前�
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 一张不带鉴权头、无需凭据的匿名单例卡；可排序、可启停，不可删除；额度按出口 IP 共享 |
 | Command Code GOAT | `command-code` / `goat` | 否 | 保存为禁用的 `pending` 草稿；连接验证返回 `501`；不是生产推理、计价、用量或供应商教程路径 |
 | SCNet Token Plans | `scnet` / `token-plan-basic`、`token-plan-standard`、`token-plan-premium` | 否 | Key 必须以 `sk-tp-` 开头；保存为禁用的 `pending` 草稿；验证返回 `501`；官方交互式使用限制见下 |
-| Custom API | `custom` / `api` | 否 | 禁用的 `pending` 草稿（`routable=false`）；验证返回 `501`；Phase 1 保存 base URL、上游协议、鉴权方案与模型能力；没有生产 HTTP 调用方 |
+| Custom API | `custom` / `api` | 是 | 受信管理员目的地；创建/更新后仍为禁用 `pending`；先验证再显式启用；合格声明 ID 会出现在 `/v1/models`；费用 unpriced/unknown，不扣额度 |
 
 所有持久化变更路径（Database、dashboard、CLI、Tauri）都会在改动行、revision 或时间戳
-之前，拒绝为目录内 `routable=false` offering 设置 `enabled=true`。禁用草稿仍可保存。
+之前，拒绝为目录内 `routable=false` offering（GOAT 与全部 SCNet tier）设置
+`enabled=true`。Custom 在目录中可路由，但创建/更新后仍为禁用 `pending`；验证状态
+不是 `verified` 时拒绝启用。禁用草稿仍可保存。
 
-不要把消费者订阅凭据、浏览器 Cookie 或反向代理当作账号 Key。不得把 Command Code
-GOAT、SCNet Token Plans 或 Custom API 别名为 OpenCode，也不得向任何 OpenCode
-endpoint 发送这些 Key，更不得把它们写成已上线的路由、用量、计价或验证。
+对于 OpenCode Go、Command Code GOAT 和 SCNet Token Plans，不要把消费者订阅凭据、
+浏览器 Cookie 或反向代理凭据当作账号 Key。该限制不约束管理员配置的 Custom Bearer 或
+`x-api-key` 凭据。不得把 Command Code GOAT 或 SCNet Token Plans 别名为 OpenCode，
+也不得向任何 OpenCode endpoint 发送这些 Key，更不得把它们写成已上线的路由、用量、
+计价或验证。Custom API 也不得别名为
+OpenCode 或把其 Key 发到 OpenCode endpoint；它是独立的受信管理员目的地，不是
+OpenCode offering。
 
 SCNet Token Plan Key（`sk-tp-`）仅限在 AI 工具内交互使用。禁止账号共享，也禁止把
 该 API 当作自定义应用后端、自动化脚本或非交互批量调用；否则可能停用订阅或吊销
@@ -449,11 +457,26 @@ Key。保存草稿会记录对该限制的带版本确认（`scnet-token-plan-re
 `2026-08-21`）；确认本身不会打开路由。官方可用模型表与 endpoint 快照只作适配器
 输入，不会作为客户端别名公布。
 
-Custom API 目前只到 Phase 1。草稿保存 base URL、上游协议、鉴权方案与模型能力。
-URL 校验（非回环必须 HTTPS、禁止凭据、禁止私网 / 链路本地 / metadata 主机）只是
-安全基础，不是已上线支持。没有生产调用方：验证、用量、选择器与推理都不会发送
-Custom 流量。休眠 HTTP 基础在构造时只允许 Direct 与 Manual 代理；Auto 明确不可
-用。手动代理下由代理自己做 DNS；那次残留查找无法钉死，因此阻止启用。
+Custom API 是已上线的受信管理员目的地。账号卡保存 base URL、一种上游协议
+（Chat Completions、Responses 或 Messages）、一种鉴权方案（Bearer 或
+`x-api-key`），以及至少一条模型能力。受信管理员可配置任意语法合法的 HTTP 或
+HTTPS 源，包括局域网、回环与其他自选目的地。URL 内嵌凭据、query 与 fragment 会被
+拒绝。Gateway 永不跟随重定向，永不转发 dashboard 或客户端鉴权，只构造已配置的
+Bearer 或 `x-api-key`。拼接后的 endpoint 必须保持已配置的 scheme、host、port 与
+base-path 前缀。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；
+连接与请求超时按配置的连接超时夹到 5–60 秒。
+
+创建与更新后账号仍为禁用 `pending`。验证对第一个声明模型发送一次协议正确、非流式、
+token 受限的 JSON 请求；只有 `2xx` JSON object 才算成功。验证不会发现或改写能力，
+也永不自动启用账号。验证成功后必须显式启用。合格账号（enabled + verified + ready +
+非空 Key）会把声明的模型 ID 暴露在带鉴权的 `GET /v1/models` 上，并可为这些 ID
+被选中。声明的能力 ID 既是客户端名称也是上游模型名；kebab ID 按大小写折叠匹配，
+含 `/`、`_` 或空白的名称不会折成 kebab 别名。Custom overlay 不得抢走已公布的
+Go 或 Zen Free 别名。与另一 Plan 的唯一原始 ID 重叠时返回 `ambiguous_model_id`，
+且不调用上游。未声明名称仍视为未知（`400`）。更改 base URL、Key 或声明能力会使
+验证失效并禁用账号。上游协议与鉴权方案在创建后不可改。Custom 流量不计价：日志
+记 `cost_state=unknown`，不扣额度，也没有官方用量刷新。`MODEL_PROTOCOLS` 仍只服务
+OpenCode Go；Custom 把客户端协议转换到该账号声明的上游协议。
 
 **账号** 视图把新增入口分为 **导入已有 Key** 与 **注册新账号（Beta）**：
 
@@ -542,8 +565,9 @@ offering 会保持 unavailable，不能刷新。抓取或校验失败时继续�
 对 OpenCode Go，页面展示 revision、文档更新时间、窗口额度、token 单价、`Usage` 和
 额度扣减倍率。allowance 不是额度池、不会参与路由，只用于推导扣减倍率（“月额度 /
 Usage”）。临时覆盖会创建新的持久化 revision，供后续估算使用；不存在按模型划分的
-额度池。Command Code GOAT、SCNet Token Plans 与 Custom API 没有已上线的计价或
-用量路径，不得作为已计价支持展示。
+额度池。Command Code GOAT 与 SCNet Token Plans 没有已上线的计价或用量路径。
+Custom API 在目录中为 unpriced：成功转发记 `cost_state=unknown`，不扣额度，也
+没有官方用量刷新。
 
 ### 日志
 
@@ -569,7 +593,8 @@ account、模型、状态、时间范围与客户端 Key 筛选。每条存储�
   usage chunk。仍然没有 usage chunk 的行会标 `success_no_usage`。usage chunk
   只会让 token 数量准确；Go 费用仍按当前 OpenCode Go 价格快照估算。Zen free
   模型（`*-free`、`big-pickle`）会记录 token，但 `cost_state=free`，不计入 Go
-  额度。展开行可查看请求 ID 与诊断详情。
+  额度。Custom API 行记 `cost_state=unknown`，不扣额度。展开行可查看请求 ID 与
+  诊断详情。
 - `outcome_unknown` 表示上游可能已经完成并扣额，但 Gateway 超时或丢失响应；
   这类请求不会自动重试，且本地额度消耗保持未知。
 - **Key** 筛选把行与汇总统计限定到单个客户端 Key。选项来自日志表本身，因此
@@ -590,10 +615,11 @@ account、模型、状态、时间范围与客户端 Key 筛选。每条存储�
   代理；没有代理时直接连接。`手动 HTTP 代理` 将所有 HTTP/HTTPS 目标严格送往
   一个 `http://` 或 `https://` 代理（例如 `http://127.0.0.1:7890`），代理失败时
   不会静默回退直连；`强制直连` 则忽略系统和环境代理。代理 URL 不能包含账号密码。
-  该策略覆盖模型转发、账号 Key 测试、OpenCode Go 官方用量接口、价格刷新、
-  Release 检查以及已安装桌面版的签名升级下载等核心 HTTP 请求；带鉴权的
-  `GET /v1/models` 与受保护的 `GET /dashboard/api/application-models` 是本地
-  Alias 列表，不走这条出站路径。浏览器 Sidecar 不在此设置范围内。**测试连接**
+  该策略覆盖模型转发（OpenCode Go、Zen Free 与 Custom API）、账号 Key 测试与
+  Custom 验证、OpenCode Go 官方用量接口、价格刷新、Release 检查以及已安装桌面版
+  的签名升级下载等核心 HTTP 请求；带鉴权的 `GET /v1/models` 与受保护的
+  `GET /dashboard/api/application-models` 是本地列表，不走这条出站路径。浏览器
+  Sidecar 不在此设置范围内。**测试连接**
   使用尚未保存的表单值访问当前上游，收到任意 HTTP 状态都表示网络链路可用，且不会
   发起模型推理或产生模型费用。
 - **OpenCode Go 邀请链接**：托管账号注册向导使用的受限 HTTPS 邀请 URL。新安装
@@ -628,7 +654,7 @@ Gateway 监听 `http://<bind>:<port>`，暴露：
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET`  | `/v1/models` | 带鉴权的本地可路由 Alias 列表（不发现上游、不选账号） |
+| `GET`  | `/v1/models` | 带鉴权的本地列表：已公布 Go/Zen 别名加上合格 Custom ID（不发现上游） |
 | `POST` | `/v1beta/models/{model}:generateContent` | Gemini 非流式生成；`/v1/...` 同样可用 |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini SSE 生成；`/v1/...` 同样可用 |
 | `POST` | `/v1beta/models/{model}:countTokens` | 返回 `501`，Gemini CLI 可回退到本地估算 |
@@ -647,9 +673,10 @@ TCP `9042` 端口。
 
 Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 `x-api-key: <key>` 或 `x-goog-api-key: <key>` 三种请求头。转发前 Gateway 会
-移除客户端鉴权头，再按实际上游协议注入所选 OpenCode-Go 账号 Key：Messages 上
-游使用 `x-api-key`，Chat Completions 与 Responses 上游使用
-`Authorization: Bearer`。
+移除客户端鉴权头，再注入所选账号凭据。OpenCode Go 在 Messages 上游使用
+`x-api-key`，Chat Completions 与 Responses 上游使用 `Authorization: Bearer`。
+Custom API 只构造已配置的 Bearer 或 `x-api-key`，永不转发 dashboard 或客户端
+凭据。
 
 管理面板的鉴权模式取决于监听地址：
 
@@ -667,25 +694,30 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 客户端应发送 **别名**：本地注册表中的稳定小写 kebab-case 名称。现有 OpenCode Go
 模型 ID 就是首选别名；大小写折叠的拼写如 `GLM-5.2` 也可接受。
 
-带鉴权的 `GET /v1/models` 只列出当前可路由的已公布别名（OpenCode Go 与 Zen
-Free），顺序由注册表决定。该列表来自本地注册表，**不会** 发现、代理或缓存上游
-目录，也不会选择或解密账号、写转发日志或改路由状态。没有 Go 账号也足够。
+带鉴权的 `GET /v1/models` 先按注册表顺序列出当前可路由的已公布别名（OpenCode Go
+与 Zen Free），再并入不与这些别名冲突的合格 Custom 能力 ID（`owned_by` 为
+`custom`）。该列表 **不会** 发现、代理或缓存上游目录，也不会写转发日志或改路由
+状态。已公布的 Go 与 Zen Free 别名不依赖是否存在 Go 账号。合格 Custom ID 来自
+enabled + verified + ready 且有 Key 的 Custom 账号。
 
 受保护的 `GET /dashboard/api/application-models` 是另一份本地列表：当前可路由
 的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。
-空交集是 `[]`。它同样不选账号、不调用上游。
+空交集是 `[]`。它不含 Custom ID，也不选账号、不调用上游。
 
-两份列表都不会公布原始上游 ID、SCNet 官方可用模型表拼写、未公布的 Command Code
-GOAT / Custom 名称，或带 `/` 的供应商前缀 ID。
+两份列表都不会公布 SCNet 官方可用模型表拼写或未公布的 Command Code GOAT 名称。
+合格 Custom 声明 ID 即使含 `/` 也可以出现在 `/v1/models` 上；它们不会折成 kebab
+别名。
 
 原始上游 ID 在注册表中恰好对应一个 mapping 时，会钉在该 mapping 上（不跨 Plan 回退，
 也不做 Zen prefer 覆盖）；之后才检查可路由性。因此不可路由 mapping 会被识别，但不能
 产出生产路由。名称里含 `/`、`_` 或空白时一律视为原始 ID，不会折叠成 kebab 别名
-（`glm/5.2` 不是 `glm-5.2`）。映射到多个 Plan 的原始 ID 返回 `400`，错误码
-`ambiguous_model_id`，且不会调用上游。未知名称在所有受支持的客户端格式上返回 `400`：
-Chat Completions、Responses、Messages，以及 Gemini `generateContent` /
-`streamGenerateContent`。已公布的 kebab 别名 `deepseek-v4-flash` 仍归 Go；唯一原始
-ID `deepseek/deepseek-v4-flash` 钉在 Command Code GOAT，不可作为生产路由。
+（`glm/5.2` 不是 `glm-5.2`）。映射到多个 Plan 的原始 ID（含合格 Custom 能力与另一
+Plan）返回 `400`，错误码 `ambiguous_model_id`，且不会调用上游。未知名称——既非已公布
+别名也非合格 Custom ID——在所有受支持的客户端格式上返回 `400`：Chat Completions、
+Responses、Messages，以及 Gemini `generateContent` / `streamGenerateContent`。已公布
+的 kebab 别名 `deepseek-v4-flash` 仍归 Go；唯一原始 ID `deepseek/deepseek-v4-flash`
+钉在 Command Code GOAT，不可作为生产路由，除非与合格 Custom ID 冲突而变为
+`ambiguous_model_id`。
 
 转发日志把请求身份与上游身份分开记录。没有 `requested_alias` 字段：
 
@@ -702,10 +734,11 @@ Claude Desktop 仍是独立的三角色别名层（`claude-sonnet-4-6`、`claude
 
 ### 协议转换
 
-每个已知模型有硬编码的 **推荐协议** 与 **已验证可用协议集合**（由维护者测试账号
+每个已知 OpenCode Go 模型有硬编码的 **推荐协议** 与 **已验证可用协议集合**（由维护者测试账号
 探测后写入代码，请求路径不做协议试探）。客户端协议在集合内时透传；否则把
 **请求体** 转到推荐上游协议，再把 **响应体**（或 SSE 流）转回客户端协议，覆盖
 文本、system、图像、工具调用与工具结果、推理内容、完成状态、错误、usage 字段。
+`MODEL_PROTOCOLS` 仍只服务 OpenCode Go。Custom API 把客户端协议转换到该账号声明的上游协议。
   例如 `glm-5.2` 对 Chat Completions / Responses / Messages 均透传；
   `grok-4.5` 仅 Responses，Chat / Messages / Gemini 入口会转到 Responses；
   `gpt-5.6-luna` 推荐 Responses，Chat 也可透传；`glm-5.3` 仅 Chat。
@@ -850,6 +883,7 @@ Go 快照。
   不进入累计。
 - Zen free 模型成功时记 `success` 且 `cost_state=free`：token 会记录，额度消耗
   显示为免费，不进入 Go 额度累计。
+- Custom API 转发记 `cost_state=unknown`，额度消耗为空，不扣任何供应商额度。
 - 快照功能上线前的成功记录保留原值、标记为“旧口径”，不会回算。
 - 手动保存的百分比会成为对应窗口的基线；已完成 Key 或托管账号的官方刷新（手动
   或自适应同步）会用 OpenCode 官方用量百分比覆盖基线。此后有价格的成功请求继
@@ -1136,6 +1170,9 @@ ocg.example.com {
   传输到网络中。请使用 HTTPS 或仅在可信局域网使用。
 - **管理员密码**：唯一的管理员密码以 Argon2 哈希保存在 SQLite 中，没有自助找回
   流程——请保护好数据目录。
+- **Custom API 目的地**：Custom base URL 由管理员显式信任。任意语法合法的 HTTP
+  或 HTTPS 源都允许，包括局域网与回环。URL 内嵌凭据会被拒绝；永不跟随重定向；
+  永不转发 dashboard 或客户端凭据。请只填写本节点确实要访问的目的地。
 
 ## 限制
 
@@ -1178,13 +1215,14 @@ ocg.example.com {
   （`ghcr.io/klarkxy/opencode-go-mgr` 及其 `-browser` 侧车）发布
   `linux/amd64` 与 `linux/arm64`。支持升级的已安装桌面版可在设置页
   安装签名 Release；v1.4.1、开发构建、CLI、Docker 使用直接/手动升级路径。
-- Command Code GOAT、SCNet Token Plans 与 Custom API 可以保存为禁用的 `pending`
-  草稿（`routable=false`）。连接验证返回 `501`。它们没有已上线的推理、用量、计价、
-  验证运行时或供应商教程。Custom API 目前只到 Phase 1：URL 校验加上 Direct/Manual
-  HTTP 基础，Auto 明确不可用，没有生产调用方，代理侧 DNS 残留风险阻止启用。
+- Command Code GOAT 与 SCNet Token Plans 可以保存为禁用的 `pending` 草稿
+  （`routable=false`）。连接验证返回 `501`。它们没有已上线的推理、用量、计价、
+  验证运行时或供应商教程。Custom API 已在 [账号](#账号) 的受信管理员边界下上线路由；
+  不计价，也没有官方用量路径。
 - 未知模型名在所有受支持的客户端格式上返回 `400`。客户端应发送带鉴权的
-  `GET /v1/models` 公布的别名。受保护的 `GET /dashboard/api/application-models`
-  是 Go 别名 ∩ 当前价格快照，不是那份完整客户端列表。
+  `GET /v1/models` 公布的别名或合格 Custom ID。受保护的
+  `GET /dashboard/api/application-models` 是 Go 别名 ∩ 当前价格快照，不是那份
+  完整客户端列表。
 
 ## 常见问题
 
@@ -1200,12 +1238,14 @@ ocg.example.com {
   到期，或在 **账号** 视图手动解除冷却。
 - **Gateway 返回 `429` 并提示 "all accounts cooling down"。**所有已启用账号都
   在冷却。等最近的恢复时间，或新增/启用其他账号。
-- **Gateway 因模型名返回 `400`。**请发送带鉴权的 `GET /v1/models` 公布的别名。
-  含 `/`、`_` 或空白的名称是原始 ID，不是 kebab 别名。未知名称和重叠的原始 ID
-  会 fail-closed，且不会调用上游。
-- **保存 Command Code GOAT、SCNet 或 Custom 不会开始路由。**这些 Plan 保持禁用
-  的 `pending` 草稿；验证返回 `501`。实时流量请使用 OpenCode Go Key（或 Zen
-  Free）。
+- **Gateway 因模型名返回 `400`。**请发送带鉴权的 `GET /v1/models` 公布的别名或
+  合格 Custom ID。含 `/`、`_` 或空白的名称是原始 ID，不是 kebab 别名。未知名称和
+  重叠的原始 ID 会 fail-closed，且不会调用上游。
+- **保存 Command Code GOAT 或 SCNet 不会开始路由。**这些 Plan 保持禁用的
+  `pending` 草稿；验证返回 `501`。实时流量请使用 OpenCode Go Key、Zen Free，或
+  先验证再启用的 Custom API 账号。
+- **保存 Custom API 不会开始路由。**创建/更新后仍为禁用 `pending`。用 `2xx` JSON
+  验证成功后再显式启用。更改 URL、Key 或声明模型会使验证失效并禁用该卡。
 - **Gemini 请求因 `safetySettings` 返回 `400`。**Gateway 不能把 Google 的安全
   阈值等价施加到 Chat/Messages 上游，因此拒绝非空数组。删除该字段后重试；不要
   假设删除后仍执行了同一套 Google 内容安全策略。

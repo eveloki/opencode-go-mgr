@@ -9,7 +9,7 @@ serves a multi-protocol gateway — plus the management dashboard — at
 `http://127.0.0.1:9042`. Clients speak OpenAI, Anthropic, Gemini, or Claude
 Desktop and send local aliases; the gateway converts each request to the
 selected Plan's supported upstream protocol and converts the response back.
-Live routing is OpenCode Go and Zen Free.
+Live routing is OpenCode Go, Zen Free, and Custom API.
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
@@ -64,11 +64,13 @@ Auth:    Authorization: Bearer <key>
 
 The dashboard **Key** is the only secret a client needs. For live traffic,
 import an OpenCode Go account key; Zen Free sends no upstream credential.
+Custom API is a trusted-administrator destination: save, verify, then enable.
 
 1. Install and launch OCG Manager. The dashboard opens in your system browser
    once the gateway is ready; use the tray icon to reopen it.
 2. In **Accounts**, import an OpenCode Go account key, choose credential-free
-   Zen Free, or use managed onboarding (Beta). Copy the Key.
+   Zen Free, add a Custom API destination (verify, then enable), or use
+   managed onboarding (Beta). Copy the Key.
 3. Point your client at `http://127.0.0.1:9042/v1`. **Applications** has
    per-client configuration guides.
 
@@ -112,10 +114,11 @@ double-bill.
 
 Gemini is a client format only (requests never go to Google). Claude Desktop
 aliases are rewritten to the mapping saved in **Applications**. Clients should
-send published aliases; authenticated `GET /v1/models` lists currently
-routeable aliases from the local registry (no upstream discovery, no account
-dependency). Unknown model names return `400` on every supported client
-format.
+send published aliases or eligible Custom IDs; authenticated `GET /v1/models`
+lists currently routeable published aliases (OpenCode Go and Zen Free) plus
+eligible Custom IDs from enabled, verified, ready accounts with a key (no
+upstream discovery). Unknown names return `400` unless they match that list.
+The Applications picker stays Go aliases ∩ the active pricing snapshot.
 
 Passthrough matrix, context / input / reasoning / tools, conversion limits,
 and true vs false circuit breakers:
