@@ -57,9 +57,7 @@ pub const MIXED_UPSTREAM_MODELS_BODY: &str = r#"{"object":"list","data":[{"id":"
 pub const CATALOG_CONTRACT: &str = include_str!("catalog_contract.json");
 pub const ALIAS_CONTRACT: &str = include_str!("alias_contract.json");
 
-const CHAT_STREAM_HEAD: &str = concat!(
-    "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n"
-);
+const CHAT_STREAM_HEAD: &str = "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n";
 
 pub fn loopback_client() -> reqwest::Client {
     reqwest::Client::builder()
