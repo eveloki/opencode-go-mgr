@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn goat_alias_does_not_steal_go_requests_even_with_loopback() {
         let config = AppConfig::default();
-        let goat = goat_account("goat-loop");
+        let goat = goat_account("goat-loop-alias");
         let _guard =
             install_goat_loopback_route_for_test(goat.id.clone(), "http://127.0.0.1:9").unwrap();
         let set = routes_for(
@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn goat_slash_raw_pins_through_loopback_as_chat() {
         let config = AppConfig::default();
-        let goat = goat_account("goat-loop");
+        let goat = goat_account("goat-loop-raw");
         let _guard =
             install_goat_loopback_route_for_test(goat.id.clone(), "http://127.0.0.1:9").unwrap();
         let set = routes_for(
@@ -768,7 +768,7 @@ mod tests {
             true,
         );
         assert_eq!(set.routes.len(), 1);
-        assert_eq!(set.routes[0].routing.account.id, "goat-loop");
+        assert_eq!(set.routes[0].routing.account.id, "goat-loop-raw");
         assert_eq!(
             set.routes[0].plan.model,
             COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
