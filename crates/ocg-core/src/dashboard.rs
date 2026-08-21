@@ -1,3 +1,4 @@
+use crate::alias;
 use crate::auth;
 use crate::browser::{
     BrowserCapabilities, BrowserOpenResult, BrowserProfileOperationKind, StagedBrowserProfiles,
@@ -5,7 +6,6 @@ use crate::browser::{
 use crate::db::{ForwardLogQueryOptions, ReorderAccountsError};
 use crate::gateway::{
     diagnostics::{redact_known_secret, sanitize_upstream_error_value_with_known_secret},
-    forwarder::forward_get,
     limit::{parse_reset, parse_usage_limit_window},
     protocol::supported_model_ids,
 };
@@ -17,7 +17,7 @@ use crate::pricing::{
 use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
 use axum::{
     Json, Router,
-    body::{Body, to_bytes},
+    body::Body,
     extract::{
         Path, Query, Request, State, WebSocketUpgrade,
         rejection::JsonRejection,
@@ -964,61 +964,59 @@ async fn provider_catalog() -> Json<Vec<ProviderCatalogEntry>> {
     Json(
         crate::provider::BUILTIN_PLANS
             .iter()
-            .map(|plan| {
-                let is_go = plan.offering.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-                    && plan.offering.offering_id == crate::provider::GO_OFFERING_ID;
-                ProviderCatalogEntry {
-                    provider_id: plan.offering.provider_id.to_string(),
-                    offering_id: plan.offering.offering_id.to_string(),
-                    display_name: plan.display_name,
-                    display_family: plan.display_family,
-                    credential_kind: plan.offering.credential_kind,
-                    quota_scope: plan.offering.quota_scope,
-                    singleton: plan.offering.singleton_account_id.is_some(),
-                    creation_availability: plan.creation_availability,
-                    creation_unavailable_reason: plan.creation_unavailable_reason,
-                    verification_policy: plan.verification_policy,
-                    verification_runtime_availability: plan.verification_runtime_availability,
-                    routable: plan.routable,
-                    managed_registration: plan.managed_registration,
-                    pricing_availability: plan.pricing_availability,
-                    usage_availability: plan.usage_availability,
-                    quota_unit: plan.quota_unit,
-                    model_source: plan.model_source,
-                    key_prefix: plan.key_prefix,
-                    auth_schemes: plan
-                        .auth_schemes
-                        .iter()
-                        .map(|value| value.as_str())
-                        .collect(),
-                    upstream_protocols: plan
-                        .upstream_protocols
-                        .iter()
-                        .map(|value| value.as_str())
-                        .collect(),
-                    form_fields: plan
-                        .form_fields
-                        .iter()
-                        .map(|field| ProviderCatalogFormField {
-                            id: field.id,
-                            kind: field.kind,
-                            required: field.required,
-                            immutable_after_create: field.immutable_after_create,
-                        })
-                        .collect(),
-                    risk_notice: plan.risk_notice.map(|notice| ProviderCatalogRiskNotice {
-                        acknowledgement_id: notice.acknowledgement_id,
-                        version: notice.version,
-                        source_url: notice.source_url,
-                        body: notice.body,
-                        content_hash: notice.content_hash(),
-                    }),
-                    model_aliases: if is_go {
-                        supported_model_ids().map(str::to_string).collect()
-                    } else {
-                        Vec::new()
-                    },
-                }
+            .map(|plan| ProviderCatalogEntry {
+                provider_id: plan.offering.provider_id.to_string(),
+                offering_id: plan.offering.offering_id.to_string(),
+                display_name: plan.display_name,
+                display_family: plan.display_family,
+                credential_kind: plan.offering.credential_kind,
+                quota_scope: plan.offering.quota_scope,
+                singleton: plan.offering.singleton_account_id.is_some(),
+                creation_availability: plan.creation_availability,
+                creation_unavailable_reason: plan.creation_unavailable_reason,
+                verification_policy: plan.verification_policy,
+                verification_runtime_availability: plan.verification_runtime_availability,
+                routable: plan.routable,
+                managed_registration: plan.managed_registration,
+                pricing_availability: plan.pricing_availability,
+                usage_availability: plan.usage_availability,
+                quota_unit: plan.quota_unit,
+                model_source: plan.model_source,
+                key_prefix: plan.key_prefix,
+                auth_schemes: plan
+                    .auth_schemes
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect(),
+                upstream_protocols: plan
+                    .upstream_protocols
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect(),
+                form_fields: plan
+                    .form_fields
+                    .iter()
+                    .map(|field| ProviderCatalogFormField {
+                        id: field.id,
+                        kind: field.kind,
+                        required: field.required,
+                        immutable_after_create: field.immutable_after_create,
+                    })
+                    .collect(),
+                risk_notice: plan.risk_notice.map(|notice| ProviderCatalogRiskNotice {
+                    acknowledgement_id: notice.acknowledgement_id,
+                    version: notice.version,
+                    source_url: notice.source_url,
+                    body: notice.body,
+                    content_hash: notice.content_hash(),
+                }),
+                model_aliases: alias::routeable_aliases_for(
+                    plan.offering.provider_id,
+                    plan.offering.offering_id,
+                )
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             })
             .collect(),
     )
@@ -3912,54 +3910,35 @@ async fn gateway_status(State(state): State<CoreState>) -> Json<GatewayStatus> {
     Json(status_from_state(&state))
 }
 
-async fn application_models(State(state): State<CoreState>) -> Result<Json<Vec<String>>, ApiError> {
-    let (config, client) = state.upstream_context();
-    let response = forward_get(&client, &state, &config, "/v1/models")
-        .await
-        .map_err(|_| {
-            ApiError::status(
-                StatusCode::BAD_GATEWAY,
-                "failed to load upstream model list",
-            )
-        })?;
-    if !response.status().is_success() {
-        return Err(ApiError::status(
-            StatusCode::BAD_GATEWAY,
-            "upstream model discovery failed",
-        ));
-    }
-    let body = to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .map_err(|_| ApiError::status(StatusCode::BAD_GATEWAY, "upstream model list is invalid"))?;
-    let payload: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|_| ApiError::status(StatusCode::BAD_GATEWAY, "upstream model list is invalid"))?;
-    let data = payload
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            ApiError::status(StatusCode::BAD_GATEWAY, "upstream model list is invalid")
-        })?;
-    let supported = supported_model_ids().collect::<Vec<_>>();
-    let pricing = state.pricing_snapshot();
-    let priced = pricing
+/// Local Applications picker: currently routeable OpenCode Go aliases
+/// intersected with the active Go pricing table. Highspeed variants inherit
+/// the base row. Empty intersection is `[]`, not an error. Never selects an
+/// account, calls upstream, writes logs, or advances routing state.
+fn local_application_models(snapshot: &crate::pricing::PricingSnapshot) -> Vec<String> {
+    let priced = snapshot
         .models
         .iter()
         .map(|model| model.model_id.as_str())
         .collect::<HashSet<_>>();
-    let mut models = Vec::new();
-    for id in data
-        .iter()
-        .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
-    {
-        let priced_model = priced.contains(id)
-            || id
-                .strip_suffix("-highspeed")
-                .is_some_and(|base| priced.contains(base));
-        if supported.contains(&id) && priced_model && !models.iter().any(|model| model == id) {
-            models.push(id.to_string());
-        }
-    }
-    Ok(Json(models))
+    alias::routeable_aliases_for(
+        crate::provider::OPENCODE_PROVIDER_ID,
+        crate::provider::GO_OFFERING_ID,
+    )
+    .into_iter()
+    .filter(|alias| application_alias_is_priced(alias, &priced))
+    .map(str::to_string)
+    .collect()
+}
+
+fn application_alias_is_priced(alias: &str, priced: &HashSet<&str>) -> bool {
+    priced.contains(alias)
+        || alias
+            .strip_suffix("-highspeed")
+            .is_some_and(|base| priced.contains(base))
+}
+
+async fn application_models(State(state): State<CoreState>) -> Json<Vec<String>> {
+    Json(local_application_models(&state.pricing_snapshot()))
 }
 
 #[derive(Deserialize)]
@@ -4323,15 +4302,16 @@ mod tests {
         MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
         OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
         ProxyTestRequest, SemverVersion, SettingsUpdateRequest, VerifyManagedKeyInput,
-        advance_account_setup, apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path,
-        create_account, create_account_inner, create_managed_account, dashboard_account,
-        dashboard_summary, format_error_chain, is_update_available,
-        load_ready_account_for_official_go_usage, map_official_usage_refresh_error,
-        open_account_browser, parse_semver_version, pricing_multiplier_changes,
-        pricing_semantically_equal, provider_account_usage, read_managed_key_verification_response,
-        redact_diagnostic, redact_known_secrets, reorder_accounts, test_proxy, update_account,
-        update_account_usage, update_pricing_multipliers, update_settings,
-        validate_forward_log_query, validate_websocket_origin, verify_managed_account_key,
+        advance_account_setup, application_models, apply_official_go_usage_snapshot,
+        apply_pricing_refresh, asset_path, create_account, create_account_inner,
+        create_managed_account, dashboard_account, dashboard_summary, format_error_chain,
+        is_update_available, load_ready_account_for_official_go_usage, local_application_models,
+        map_official_usage_refresh_error, open_account_browser, parse_semver_version,
+        pricing_multiplier_changes, pricing_semantically_equal, provider_account_usage,
+        read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
+        reorder_accounts, test_proxy, update_account, update_account_usage,
+        update_pricing_multipliers, update_settings, validate_forward_log_query,
+        validate_websocket_origin, verify_managed_account_key,
     };
     use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
@@ -6312,7 +6292,50 @@ mod tests {
             .unwrap();
         assert!(go.routable);
         assert_eq!(go.pricing_availability, "available");
-        assert!(!go.model_aliases.is_empty());
+        assert_eq!(
+            go.model_aliases,
+            crate::alias::routeable_aliases_for(
+                crate::provider::OPENCODE_PROVIDER_ID,
+                crate::provider::GO_OFFERING_ID
+            )
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+        assert!(go.model_aliases.contains(&"glm-5.2".to_string()));
+        assert!(!go.model_aliases.iter().any(|alias| alias.contains('/')));
+        assert!(
+            !go.model_aliases
+                .iter()
+                .any(|alias| alias == "deepseek-v4-flash-free")
+        );
+        assert!(!go.model_aliases.iter().any(|alias| {
+            alias == crate::provider::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
+        }));
+
+        let zen = catalog
+            .iter()
+            .find(|entry| {
+                entry.provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+                    && entry.offering_id == crate::provider::ANONYMOUS_FREE_OFFERING_ID
+            })
+            .unwrap();
+        assert!(zen.routable);
+        assert_eq!(
+            zen.model_aliases,
+            crate::alias::routeable_aliases_for(
+                crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+                crate::provider::ANONYMOUS_FREE_OFFERING_ID
+            )
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+        assert!(
+            zen.model_aliases
+                .contains(&"deepseek-v4-flash-free".to_string())
+        );
+        assert!(!zen.model_aliases.iter().any(|alias| alias.contains('/')));
 
         let goat = catalog
             .iter()
@@ -6322,6 +6345,7 @@ mod tests {
             })
             .unwrap();
         assert!(!goat.routable);
+        assert!(goat.model_aliases.is_empty());
         assert_eq!(goat.pricing_availability, "unavailable");
         assert_eq!(goat.usage_availability, "unavailable");
         assert_eq!(
@@ -6337,11 +6361,101 @@ mod tests {
             })
             .unwrap();
         assert!(!scnet.routable);
+        assert!(scnet.model_aliases.is_empty());
         assert!(scnet.risk_notice.is_some());
         assert_eq!(
             scnet.key_prefix,
             Some(crate::provider::SCNET_TOKEN_PLAN_KEY_PREFIX)
         );
+
+        for offering_id in crate::provider::SCNET_TOKEN_PLAN_OFFERING_IDS {
+            let entry = catalog
+                .iter()
+                .find(|entry| {
+                    entry.provider_id == crate::provider::SCNET_PROVIDER_ID
+                        && entry.offering_id == offering_id
+                })
+                .unwrap();
+            assert!(entry.model_aliases.is_empty());
+        }
+        let custom = catalog
+            .iter()
+            .find(|entry| {
+                entry.provider_id == crate::provider::CUSTOM_PROVIDER_ID
+                    && entry.offering_id == crate::provider::CUSTOM_API_OFFERING_ID
+            })
+            .unwrap();
+        assert!(!custom.routable);
+        assert!(custom.model_aliases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn application_models_are_local_priced_go_aliases() {
+        let dir = temp_data_dir("application-models-local");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let default_list = application_models(State(state.clone())).await.0;
+        let expected_default = local_application_models(&state.pricing_snapshot());
+        assert_eq!(default_list, expected_default);
+        assert!(
+            !expected_default.is_empty(),
+            "seed Go pricing should intersect published Go aliases"
+        );
+        assert!(expected_default.contains(&"deepseek-v4-flash".to_string()));
+        assert!(expected_default.contains(&"minimax-m2.7-highspeed".to_string()));
+        assert!(!expected_default.iter().any(|id| id.contains('/')));
+        assert!(!expected_default.iter().any(|id| id.ends_with("-free")));
+        assert_eq!(
+            expected_default.iter().find(|id| *id == "glm-5"),
+            None,
+            "unpriced Go aliases must stay out of Applications"
+        );
+        let mut sorted = expected_default.clone();
+        sorted.sort();
+        assert_eq!(
+            expected_default, sorted,
+            "application-models must keep registry order"
+        );
+
+        let mut pricing = state.pricing_snapshot().as_ref().clone();
+        let mut raw_row = pricing
+            .models
+            .iter()
+            .find(|model| model.model_id == "grok-4.5")
+            .cloned()
+            .expect("seed snapshot includes grok-4.5");
+        raw_row.model_id = "vendor-raw-not-an-alias".into();
+        pricing
+            .models
+            .retain(|model| matches!(model.model_id.as_str(), "grok-4.5" | "minimax-m2.7"));
+        pricing.models.push(raw_row);
+        pricing.revision = format!("test-app-models-{}", Utc::now().timestamp_micros());
+        pricing.activated_at = Utc::now().to_rfc3339();
+        state.activate_pricing_snapshot(pricing).unwrap();
+        assert_eq!(
+            local_application_models(&state.pricing_snapshot()),
+            vec![
+                "grok-4.5".to_string(),
+                "minimax-m2.7".to_string(),
+                "minimax-m2.7-highspeed".to_string()
+            ]
+        );
+
+        let mut empty = state.pricing_snapshot().as_ref().clone();
+        empty.models.clear();
+        empty.revision = format!("test-app-models-empty-{}", Utc::now().timestamp_micros());
+        empty.activated_at = Utc::now().to_rfc3339();
+        state.activate_pricing_snapshot(empty).unwrap();
+        assert!(local_application_models(&state.pricing_snapshot()).is_empty());
+        assert_eq!(
+            application_models(State(state.clone())).await.0,
+            Vec::<String>::new()
+        );
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

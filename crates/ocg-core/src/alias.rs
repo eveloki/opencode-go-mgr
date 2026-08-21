@@ -347,6 +347,10 @@ pub struct PublishedAlias {
 /// Routeable preferred aliases that `GET /v1/models` exposes, in deterministic
 /// registry order. `owned_by` is the first routeable mapping's `provider_id`.
 /// Non-routeable GOAT / SCNet / Custom mappings stay unpublished.
+///
+/// First-wins `owned_by` is only the client list advertisement. Catalog and
+/// application-model discovery use [`routeable_aliases_for`], which keeps an
+/// alias under every offering that currently has a routeable mapping.
 pub fn published_routeable_aliases() -> Vec<PublishedAlias> {
     published_routeable_in(registry())
 }
@@ -368,6 +372,33 @@ fn published_routeable_in(registry: &Registry) -> Vec<PublishedAlias> {
         .collect()
 }
 
+/// Preferred aliases that currently have a routeable mapping for this
+/// provider/offering, in deterministic registry order. Raw upstream IDs are
+/// never returned. Unroutable mappings (GOAT / SCNet / Custom today) yield an
+/// empty list without a hardcoded per-plan alias set.
+pub fn routeable_aliases_for(provider_id: &str, offering_id: &str) -> Vec<&'static str> {
+    routeable_aliases_for_in(registry(), provider_id, offering_id)
+}
+
+fn routeable_aliases_for_in(
+    registry: &Registry,
+    provider_id: &str,
+    offering_id: &str,
+) -> Vec<&'static str> {
+    registry
+        .aliases
+        .values()
+        .filter(|entry| {
+            entry.mappings.iter().any(|mapping| {
+                mapping.routeable
+                    && mapping.provider_id == provider_id
+                    && mapping.offering_id == offering_id
+            })
+        })
+        .map(|entry| entry.alias)
+        .collect()
+}
+
 pub fn is_published_alias(name: &str) -> bool {
     matches!(resolve(name), Ok(ResolvedModel::Alias { .. }))
 }
@@ -376,6 +407,10 @@ pub fn is_published_alias(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::gateway::free_models::free_model_ids;
+    use crate::provider::{
+        CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, SCNET_PROVIDER_ID,
+        SCNET_TOKEN_PLAN_OFFERING_IDS,
+    };
 
     #[test]
     fn go_model_ids_are_preferred_aliases() {
@@ -747,6 +782,81 @@ mod tests {
         assert!(
             published_routeable_in(&registry).is_empty(),
             "fail-closed aliases must stay off GET /v1/models"
+        );
+    }
+
+    #[test]
+    fn catalog_aliases_are_routeable_mappings_in_registry_order() {
+        let go = routeable_aliases_for(OPENCODE_PROVIDER_ID, GO_OFFERING_ID);
+        let zen = routeable_aliases_for(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID);
+        assert!(!go.is_empty());
+        assert!(!zen.is_empty());
+        let mut sorted_go = go.clone();
+        sorted_go.sort_unstable();
+        assert_eq!(go, sorted_go, "catalog aliases must be deterministic");
+        let mut sorted_zen = zen.clone();
+        sorted_zen.sort_unstable();
+        assert_eq!(zen, sorted_zen);
+
+        for alias in go.iter().chain(zen.iter()) {
+            assert!(!looks_raw_shaped(alias));
+            assert_ne!(*alias, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM);
+            assert!(!alias.contains('/'));
+        }
+        assert!(go.contains(&"glm-5.2"));
+        assert!(go.contains(&COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS));
+        assert!(go.contains(&"minimax-m2.7-highspeed"));
+        assert!(!go.contains(&"deepseek-v4-flash-free"));
+        assert!(!zen.contains(&"glm-5.2"));
+        assert!(zen.contains(&"deepseek-v4-flash-free"));
+        for id in free_model_ids() {
+            assert!(zen.contains(&id), "Zen catalog must include `{id}`");
+            assert!(!go.contains(&id), "Go catalog must not include free `{id}`");
+        }
+        for id in supported_model_ids().filter(|id| !is_free_model(id)) {
+            assert!(go.contains(&id), "Go catalog must include `{id}`");
+            assert!(!zen.contains(&id), "Zen catalog must not include Go `{id}`");
+        }
+
+        assert!(routeable_aliases_for(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_empty());
+        assert!(routeable_aliases_for(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).is_empty());
+        for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
+            assert!(
+                routeable_aliases_for(SCNET_PROVIDER_ID, offering_id).is_empty(),
+                "unroutable scnet/{offering_id} must not publish aliases"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_aliases_keep_every_routeable_offering_not_first_wins_owner() {
+        let registry = registry_from_entries(vec![AliasEntry {
+            alias: "shared",
+            mappings: vec![zen_mapping("shared"), go_mapping("shared")],
+            prefer_twin: None,
+        }]);
+        let published = published_routeable_in(&registry);
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].alias, "shared");
+        assert_eq!(
+            published[0].owned_by, OPENCODE_ZEN_FREE_PROVIDER_ID,
+            "GET /v1/models owned_by stays first-wins"
+        );
+        assert_eq!(
+            routeable_aliases_for_in(&registry, OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
+            ["shared"]
+        );
+        assert_eq!(
+            routeable_aliases_for_in(
+                &registry,
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID
+            ),
+            ["shared"]
+        );
+        assert!(
+            routeable_aliases_for_in(&registry, COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID)
+                .is_empty()
         );
     }
 }

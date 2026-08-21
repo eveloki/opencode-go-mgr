@@ -186,15 +186,21 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
         })
         .collect::<Vec<_>>();
     assert_eq!(reordered_ids, [ZEN_FREE_ACCOUNT_ID]);
-    assert_eq!(
-        client
-            .get(format!("{base}/application-models"))
-            .header(reqwest::header::COOKIE, &cookie)
-            .send()
+    let application_models = client
+        .get(format!("{base}/application-models"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(application_models.status(), StatusCode::OK);
+    assert!(
+        application_models
+            .json::<serde_json::Value>()
             .await
             .unwrap()
-            .status(),
-        StatusCode::BAD_GATEWAY
+            .as_array()
+            .is_some(),
+        "authenticated application-models must return a local JSON array"
     );
 
     assert_eq!(

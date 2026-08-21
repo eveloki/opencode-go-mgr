@@ -1,6 +1,7 @@
 use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
+use ocg_core::alias;
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
@@ -8,10 +9,11 @@ use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::{Account, AccountUpdate, ForwardLog, ProxyMode, RoutingMode};
 use ocg_core::provider::{
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
-    COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
+    COMMAND_CODE_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
+    ZEN_FREE_ACCOUNT_ID,
 };
 use ocg_core::state::{CoreStateInner, GatewayHandle};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
@@ -642,35 +644,26 @@ async fn model_discovery_does_not_create_inference_logs() {
     let _ = fs::remove_dir_all(dir);
 }
 
-#[tokio::test]
-async fn application_models_falls_back_after_rate_limit_but_not_5xx() {
-    let replies = HashMap::from([
-        (
-            "key-1".to_string(),
-            VecDeque::from([MockReply {
-                status: 429,
-                body: LIMITED_BODY,
-            }]),
-        ),
-        (
-            "key-2".to_string(),
-            VecDeque::from([MockReply {
-                status: 500,
-                body: r#"{"error":"temporary failure"}"#,
-            }]),
-        ),
-        (
-            "key-3".to_string(),
-            VecDeque::from([MockReply {
-                status: 200,
-                body: r#"{"object":"list","data":[{"id":"deepseek-v4-flash"}]}"#,
-            }]),
-        ),
-    ]);
-    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1", "key-2", "key-3"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+fn expected_local_application_models(state: &Arc<CoreStateInner>) -> Vec<String> {
+    let priced = state
+        .pricing_snapshot()
+        .models
+        .iter()
+        .map(|model| model.model_id.clone())
+        .collect::<HashSet<_>>();
+    alias::routeable_aliases_for(OPENCODE_PROVIDER_ID, GO_OFFERING_ID)
+        .into_iter()
+        .filter(|alias| {
+            priced.contains(*alias)
+                || alias
+                    .strip_suffix("-highspeed")
+                    .is_some_and(|base| priced.contains(base))
+        })
+        .map(str::to_string)
+        .collect()
+}
 
+async fn get_application_models(port: u16) -> (StatusCode, serde_json::Value) {
     let response = loopback_client()
         .get(format!(
             "http://127.0.0.1:{port}/dashboard/api/application-models"
@@ -678,76 +671,65 @@ async fn application_models_falls_back_after_rate_limit_but_not_5xx() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    assert_eq!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|call| call.key.as_str())
-            .collect::<Vec<_>>(),
-        ["key-1", "key-2"]
-    );
-    assert!(
-        state
-            .db
-            .lock()
-            .get_account("acct-1")
-            .unwrap()
-            .unwrap()
-            .cooldown_until
-            .is_some()
-    );
+    let status = response.status();
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    (status, body)
+}
 
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
+fn assert_no_application_model_side_effects(
+    state: &Arc<CoreStateInner>,
+    calls: &Arc<Mutex<Vec<MockCall>>>,
+    before: Option<&Account>,
+    routing_before: &str,
+) {
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "GET /application-models must not call upstream: {:?}",
+        calls.lock().unwrap()
+    );
+    assert!(state.db.lock().list_forward_logs(10).unwrap().is_empty());
+    assert_eq!(format!("{:?}", state.routing), routing_before);
+    if let Some(before) = before {
+        let after = state.db.lock().get_account(&before.id).unwrap().unwrap();
+        assert_eq!(after.cooldown_until, before.cooldown_until);
+        assert_eq!(after.last_error, before.last_error);
+        assert_eq!(after.auth_error, before.auth_error);
+        assert_eq!(after.updated_at, before.updated_at);
+    }
 }
 
 #[tokio::test]
-async fn application_models_skip_accounts_with_unusable_stored_credentials() {
+async fn application_models_is_local_with_zero_accounts() {
     let replies = HashMap::from([(
-        "key-good".to_string(),
+        "key-1".to_string(),
         VecDeque::from([MockReply {
             status: 200,
-            body: r#"{"object":"list","data":[{"id":"deepseek-v4-flash"}]}"#,
+            body: r#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"},{"id":"vendor-raw-not-an-alias"}]}"#,
         }]),
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["placeholder", "bad\nheader", "key-good"]);
-    state
-        .db
-        .lock()
-        .update_account(
-            "acct-1",
-            &AccountUpdate {
-                name: None,
-                username: None,
-                password: None,
-                key: None,
-                enabled: None,
-                referral_code: None,
-                purchase_date: None,
-                notes: None,
-            },
-            Some("not-a-valid-ciphertext"),
-            None,
-        )
-        .unwrap();
-    let (port, gateway_handle) = start_gateway(state).await;
+    let (state, dir) = build_state(base_url, &[]);
+    let routing_before = format!("{:?}", state.routing);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = loopback_client()
-        .get(format!(
-            "http://127.0.0.1:{port}/dashboard/api/application-models"
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].key, "key-good");
-    drop(calls);
+    let (status, body) = get_application_models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids = body
+        .as_array()
+        .expect("application-models must be a JSON array")
+        .iter()
+        .map(|item| item.as_str().expect("alias string").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected_local_application_models(&state));
+    assert!(ids.contains(&"deepseek-v4-flash".to_string()));
+    assert!(ids.contains(&"minimax-m2.7-highspeed".to_string()));
+    assert!(!ids.iter().any(|id| id.contains('/')));
+    assert!(
+        !ids.iter()
+            .any(|id| *id == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
+    );
+    assert!(!ids.iter().any(|id| id.ends_with("-free")));
+    assert_no_application_model_side_effects(&state, &calls, None, &routing_before);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -755,7 +737,35 @@ async fn application_models_skip_accounts_with_unusable_stored_credentials() {
 }
 
 #[tokio::test]
-async fn application_models_intersects_upstream_models_in_upstream_order() {
+async fn application_models_does_not_select_accounts_or_hit_upstream() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 429,
+            body: LIMITED_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let before = state.db.lock().get_account("acct-1").unwrap().unwrap();
+    let routing_before = format!("{:?}", state.routing);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = get_application_models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        serde_json::to_value(expected_local_application_models(&state)).unwrap()
+    );
+    assert_no_application_model_side_effects(&state, &calls, Some(&before), &routing_before);
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn application_models_intersects_priced_go_aliases_in_registry_order() {
     let replies = HashMap::from([(
         "key-1".to_string(),
         VecDeque::from([MockReply {
@@ -766,58 +776,43 @@ async fn application_models_intersects_upstream_models_in_upstream_order() {
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
     let mut pricing = state.pricing_snapshot().as_ref().clone();
-    pricing.models.retain(|model| model.model_id != "glm-5.1");
+    pricing.models.retain(|model| {
+        matches!(
+            model.model_id.as_str(),
+            "grok-4.5" | "kimi-k3" | "minimax-m2.7" | "glm-5.1"
+        )
+    });
     pricing.revision = format!("test-priced-models-{}", Utc::now().timestamp_micros());
     pricing.activated_at = Utc::now().to_rfc3339();
     state.activate_pricing_snapshot(pricing).unwrap();
+    let before = state.db.lock().get_account("acct-1").unwrap().unwrap();
+    let routing_before = format!("{:?}", state.routing);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = loopback_client()
-        .get(format!(
-            "http://127.0.0.1:{port}/dashboard/api/application-models"
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let (status, body) = get_application_models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        response.json::<serde_json::Value>().await.unwrap(),
+        body,
         serde_json::json!([
+            "glm-5.1",
             "grok-4.5",
             "kimi-k3",
-            "minimax-m2.7-highspeed",
             "minimax-m2.7",
-            "deepseek-v4-flash",
-            "qwen3.7-plus"
+            "minimax-m2.7-highspeed"
         ])
     );
-    assert_eq!(calls.lock().unwrap()[0].path, "/v1/models");
     assert_eq!(
-        state
-            .db
-            .lock()
-            .query_forward_logs(ForwardLogQueryOptions {
-                limit: 10,
-                offset: 0,
-                status: None,
-                account_id: None,
-                provider_id: None,
-                offering_id: None,
-                route_account_id: None,
-                credential_account_id: None,
-                model: None,
-                key_id: None,
-                request_id: None,
-                start_time: None,
-                end_time: None,
-                sort_by: None,
-                sort_order: None,
-            })
+        body.as_array()
             .unwrap()
-            .summary
-            .total_requests,
-        0
+            .iter()
+            .filter_map(|item| item.as_str())
+            .collect::<Vec<_>>(),
+        expected_local_application_models(&state)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
     );
+    assert_no_application_model_side_effects(&state, &calls, Some(&before), &routing_before);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -825,7 +820,7 @@ async fn application_models_intersects_upstream_models_in_upstream_order() {
 }
 
 #[tokio::test]
-async fn application_models_maps_upstream_failure_to_bad_gateway() {
+async fn application_models_empty_intersection_returns_empty_list() {
     let replies = HashMap::from([(
         "key-1".to_string(),
         VecDeque::from([MockReply {
@@ -835,17 +830,32 @@ async fn application_models_maps_upstream_failure_to_bad_gateway() {
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state).await;
+    let mut empty = state.pricing_snapshot().as_ref().clone();
+    let mut raw_row = empty.models[0].clone();
+    raw_row.model_id = "vendor-raw-not-an-alias".into();
+    empty.models.clear();
+    empty.revision = format!("test-empty-pricing-{}", Utc::now().timestamp_micros());
+    empty.activated_at = Utc::now().to_rfc3339();
+    state.activate_pricing_snapshot(empty).unwrap();
+    let before = state.db.lock().get_account("acct-1").unwrap().unwrap();
+    let routing_before = format!("{:?}", state.routing);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = loopback_client()
-        .get(format!(
-            "http://127.0.0.1:{port}/dashboard/api/application-models"
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    let (status, body) = get_application_models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!([]));
+    assert_no_application_model_side_effects(&state, &calls, Some(&before), &routing_before);
+
+    let mut disjoint = state.pricing_snapshot().as_ref().clone();
+    disjoint.models = vec![raw_row];
+    disjoint.revision = format!("test-disjoint-pricing-{}", Utc::now().timestamp_micros());
+    disjoint.activated_at = Utc::now().to_rfc3339();
+    state.activate_pricing_snapshot(disjoint).unwrap();
+
+    let (status, body) = get_application_models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!([]));
+    assert!(calls.lock().unwrap().is_empty());
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());

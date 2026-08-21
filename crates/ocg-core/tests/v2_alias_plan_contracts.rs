@@ -161,6 +161,31 @@ async fn providers_catalog_is_the_only_plan_source() {
                 );
             }
         }
+        let published_list = alias_name_list(entry);
+        assert_eq!(
+            published_list,
+            ocg_core::alias::routeable_aliases_for(provider_id, offering_id)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+            "{provider_id}/{offering_id} catalog aliases must match the routeable Alias registry"
+        );
+        assert!(
+            published_list.iter().all(|alias| !alias.contains('/')),
+            "{provider_id}/{offering_id} must not publish raw upstream ids: {published_list:?}"
+        );
+        if provider_id == OPENCODE_PROVIDER_ID && offering_id == GO_OFFERING_ID {
+            assert!(!published_list.iter().any(|alias| alias == FREE_MODEL));
+            assert!(
+                !published_list
+                    .iter()
+                    .any(|alias| alias == GOAT_UNIQUE_RAW_ID)
+            );
+        }
+        if provider_id == ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID {
+            assert!(published_list.iter().any(|alias| alias == FREE_MODEL));
+            assert!(!published_list.iter().any(|alias| alias == GO_ALIAS));
+        }
     }
 
     harness.shutdown();
@@ -273,16 +298,6 @@ async fn client_models_list_exposes_aliases_not_raw_upstream_ids() {
         "GET /v1/models must not write forward logs: {logs}"
     );
 
-    let _go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
-    let (status, again) = harness.list_client_models().await;
-    assert_eq!(status, StatusCode::OK, "{again}");
-    assert_eq!(client_model_ids(&again), ids);
-    assert!(
-        harness.fake_calls().is_empty(),
-        "creating a Go account must not make GET /v1/models call upstream: {:?}",
-        harness.fake_calls()
-    );
-
     let (app_status, app_models) = harness.get_json("/application-models").await;
     assert_eq!(app_status, StatusCode::OK, "{app_models}");
     let app_ids: Vec<String> = match &app_models {
@@ -303,6 +318,33 @@ async fn client_models_list_exposes_aliases_not_raw_upstream_ids() {
     assert!(
         !app_ids.iter().any(|id| id == GOAT_UNIQUE_RAW_ID),
         "Applications must not expose the GOAT raw id: {app_ids:?}"
+    );
+    assert!(
+        !app_ids.iter().any(|id| id == FREE_MODEL),
+        "Applications must not list Zen-free aliases: {app_ids:?}"
+    );
+    assert!(
+        harness.fake_calls().is_empty(),
+        "GET /application-models must not call upstream with zero Go accounts: {:?}",
+        harness.fake_calls()
+    );
+
+    let _go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
+    let (status, again) = harness.list_client_models().await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(client_model_ids(&again), ids);
+    assert!(
+        harness.fake_calls().is_empty(),
+        "creating a Go account must not make GET /v1/models call upstream: {:?}",
+        harness.fake_calls()
+    );
+    let (app_again_status, app_again) = harness.get_json("/application-models").await;
+    assert_eq!(app_again_status, StatusCode::OK, "{app_again}");
+    assert_eq!(app_again, app_models);
+    assert!(
+        harness.fake_calls().is_empty(),
+        "creating a Go account must not make GET /application-models call upstream: {:?}",
+        harness.fake_calls()
     );
 
     harness.shutdown();

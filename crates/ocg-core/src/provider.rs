@@ -73,6 +73,8 @@ pub const SCNET_TOKEN_PLAN_MESSAGES_PATH: &str = "/v1/messages";
 
 /// Official Token Plan usable-model table, 2026-08-21, exact case and order.
 /// Shared by 基础版/标准版/高级版. Do not publish as `model_aliases`.
+/// Catalog aliases come from the Alias registry's currently routeable
+/// mappings; these Plans stay unroutable, so that list stays empty.
 pub const SCNET_TOKEN_PLAN_USABLE_MODELS: &[&str] = &[
     "GLM-5.2",
     "GLM-5",

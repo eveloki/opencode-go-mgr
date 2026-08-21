@@ -409,7 +409,7 @@ pub fn catalog_aliases(entry: &Value) -> Vec<Value> {
     }
 }
 
-pub fn alias_names(entry: &Value) -> HashSet<String> {
+pub fn alias_name_list(entry: &Value) -> Vec<String> {
     catalog_aliases(entry)
         .into_iter()
         .filter_map(|item| {
@@ -418,6 +418,10 @@ pub fn alias_names(entry: &Value) -> HashSet<String> {
                 .map(str::to_string)
         })
         .collect()
+}
+
+pub fn alias_names(entry: &Value) -> HashSet<String> {
+    alias_name_list(entry).into_iter().collect()
 }
 
 pub fn form_field_ids(entry: &Value) -> HashSet<String> {

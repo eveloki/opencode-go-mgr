@@ -40,7 +40,8 @@
       "verification_runtime_availability": "not_applicable",
       "creation_availability": "unavailable",
       "routable": true,
-      "singleton": true
+      "singleton": true,
+      "required_aliases": ["deepseek-v4-flash-free", "mimo-v2.5-free"]
     },
     {
       "provider_id": "command-code",
