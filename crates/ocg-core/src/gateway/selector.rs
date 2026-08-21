@@ -1,9 +1,9 @@
 use crate::db::Database;
 use crate::models::{Account, UpstreamChannel};
 use crate::provider::{
-    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CredentialKind, GO_OFFERING_ID,
-    GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
-    validate_account_binding,
+    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
+    CUSTOM_PROVIDER_ID, CredentialKind, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID, validate_account_binding,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -130,9 +130,9 @@ fn account_matches_channel(account: &Account, channel: UpstreamChannel) -> bool 
         return false;
     }
     match (account.provider_id.as_str(), account.offering_id.as_str()) {
-        (OPENCODE_PROVIDER_ID, GO_OFFERING_ID) | (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => {
-            channel == UpstreamChannel::Go
-        }
+        (OPENCODE_PROVIDER_ID, GO_OFFERING_ID)
+        | (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID)
+        | (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID) => channel == UpstreamChannel::Go,
         (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
             channel == UpstreamChannel::Free
         }

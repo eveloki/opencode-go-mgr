@@ -7,10 +7,8 @@ use std::time::Duration;
 ///
 /// Custom API traffic must compose on this builder via [`crate::custom_http`]
 /// rather than [`build`]. `build()` is the shared Go/Zen client and must not
-/// grow Custom DNS pinning, [`no_redirect_policy`], or preflight. Custom
-/// Direct uses this builder's `no_proxy()` path and Manual uses the explicit
-/// `proxy_url`; Auto is **not** inherited — `custom_http` returns
-/// `ProxyUnavailable` instead of taking this Auto branch.
+/// grow Custom [`no_redirect_policy`]. Custom Direct / Manual / Auto all use
+/// this process-wide proxy policy.
 pub(crate) fn configured_builder(config: &AppConfig) -> crate::Result<reqwest::ClientBuilder> {
     let builder = match config.proxy_mode {
         ProxyMode::Auto => reqwest::Client::builder(),
@@ -57,8 +55,10 @@ mod tests {
 
     #[test]
     fn no_redirect_builder_keeps_global_proxy_and_disables_follow() {
-        let mut config = AppConfig::default();
-        config.proxy_mode = ProxyMode::Direct;
+        let config = AppConfig {
+            proxy_mode: ProxyMode::Direct,
+            ..AppConfig::default()
+        };
         let client = build_no_redirect(&config).expect("no-redirect client");
         let _ = client;
         let auto = AppConfig::default();
@@ -78,8 +78,10 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let mut config = AppConfig::default();
-        config.proxy_mode = ProxyMode::Direct;
+        let config = AppConfig {
+            proxy_mode: ProxyMode::Direct,
+            ..AppConfig::default()
+        };
         let client = build_no_redirect(&config).unwrap();
         let response = client
             .get(format!("http://{addr}/from"))

@@ -943,6 +943,13 @@ impl ForwardMetrics {
             self.quota_debit = Some(0.0);
             self.effective_paid_cost_usd = Some(0.0);
             self.cost_state = "free";
+        } else if crate::provider::is_custom_api(provider_id, offering_id.unwrap_or("")) {
+            self.raw_cost_usd = None;
+            self.quota_debit = None;
+            self.effective_paid_cost_usd = None;
+            if successful || has_cost_outcome {
+                self.cost_state = "unknown";
+            }
         } else {
             self.raw_cost_usd = None;
             self.quota_debit = None;

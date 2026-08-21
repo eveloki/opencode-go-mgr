@@ -11,19 +11,23 @@
 //! Command Code GOAT has one official non-routeable mapping:
 //! Alias `deepseek-v4-flash` → raw `deepseek/deepseek-v4-flash`. The kebab
 //! alias stays Go-owned and published; the unique slash raw ID pins to GOAT
-//! and is not production-selectable. SCNet and Custom stay fail-closed.
+//! and is not production-selectable. SCNet stays fail-closed. Eligible
+//! Custom capabilities overlay published aliases and resolve otherwise
+//! unknown IDs without stealing Go/Zen mappings.
 //! Later provider adapters consume [`ProviderMapping`] from
 //! [`crate::gateway::materialize`]: parse the client protocol once, then
 //! materialize model / protocol / endpoint / auth per candidate. Adapters must
 //! not probe a billable inference path to discover protocol support. The
 //! OpenCode `MODEL_PROTOCOLS` table stays Go-specific.
 
+use crate::custom::custom_model_id_matches;
 use crate::gateway::free_models::{is_free_model, mapped_free_for};
 use crate::gateway::protocol::supported_model_ids;
 use crate::provider::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
-    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, GO_OFFERING_ID,
-    GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
+    CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, is_custom_api,
 };
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -53,6 +57,10 @@ impl ProviderMapping {
 
     pub fn is_command_code_goat(&self) -> bool {
         crate::provider::is_command_code_goat(self.provider_id, self.offering_id)
+    }
+
+    pub fn is_custom_api(&self) -> bool {
+        is_custom_api(self.provider_id, self.offering_id)
     }
 }
 
@@ -218,6 +226,19 @@ fn zen_mapping(upstream_model: &'static str) -> ProviderMapping {
     }
 }
 
+fn custom_mapping(upstream_model: &'static str) -> ProviderMapping {
+    ProviderMapping {
+        provider_id: CUSTOM_PROVIDER_ID,
+        offering_id: CUSTOM_API_OFFERING_ID,
+        upstream_model,
+        routeable: true,
+    }
+}
+
+/// Sentinel upstream id for Custom-only resolutions. Per-candidate materialization
+/// uses the account's declared capability ID instead of this value.
+pub const CUSTOM_DYNAMIC_UPSTREAM: &str = "";
+
 struct Registry {
     aliases: BTreeMap<String, AliasEntry>,
     /// Exact upstream model ID → every mapping that uses it.
@@ -282,6 +303,51 @@ fn pin_or_ambiguous(
 /// Resolve a client-supplied model name against the builtin registry.
 pub fn resolve(requested: &str) -> Result<ResolvedModel, ResolveError> {
     resolve_in(registry(), requested)
+}
+
+/// Resolve against the builtin registry, then overlay eligible Custom
+/// capability IDs. Published aliases keep their Go/Zen mappings and gain
+/// compatible Custom candidates. Distinct provider raw-ID conflicts stay
+/// [`ResolveError::Ambiguous`]. Unknown names resolve from Custom only.
+pub fn resolve_with_custom(
+    requested: &str,
+    custom_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    let custom_hit = custom_model_ids
+        .iter()
+        .any(|id| custom_model_id_matches(id, requested));
+    match resolve(requested) {
+        Ok(ResolvedModel::Alias {
+            requested,
+            alias,
+            mut mappings,
+            prefer_twin,
+        }) => {
+            if custom_hit && !mappings.iter().any(|mapping| mapping.is_custom_api()) {
+                mappings.push(custom_mapping(alias));
+            }
+            Ok(ResolvedModel::Alias {
+                requested,
+                alias,
+                mappings,
+                prefer_twin,
+            })
+        }
+        Ok(ResolvedModel::PinnedRaw { requested, mapping }) => {
+            if custom_hit && !mapping.is_custom_api() {
+                return Err(ResolveError::Ambiguous {
+                    requested,
+                    mappings: vec![mapping, custom_mapping(CUSTOM_DYNAMIC_UPSTREAM)],
+                });
+            }
+            Ok(ResolvedModel::PinnedRaw { requested, mapping })
+        }
+        Err(ResolveError::Unknown { requested }) if custom_hit => Ok(ResolvedModel::PinnedRaw {
+            requested,
+            mapping: custom_mapping(CUSTOM_DYNAMIC_UPSTREAM),
+        }),
+        other => other,
+    }
 }
 
 fn resolve_in(registry: &Registry, requested: &str) -> Result<ResolvedModel, ResolveError> {
@@ -819,7 +885,10 @@ mod tests {
         }
 
         assert!(routeable_aliases_for(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_empty());
-        assert!(routeable_aliases_for(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).is_empty());
+        assert!(
+            routeable_aliases_for(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).is_empty(),
+            "Custom catalog aliases stay empty; client IDs come from account capabilities"
+        );
         for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
             assert!(
                 routeable_aliases_for(SCNET_PROVIDER_ID, offering_id).is_empty(),
@@ -858,5 +927,47 @@ mod tests {
             routeable_aliases_for_in(&registry, COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn custom_overlay_does_not_steal_published_aliases_and_resolves_unknown_ids() {
+        match resolve_with_custom("glm-5.2", &["glm-5.2".into()]).unwrap() {
+            ResolvedModel::Alias {
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, "glm-5.2");
+                assert!(mappings.iter().any(|mapping| mapping.is_opencode_go()));
+                assert!(mappings.iter().any(|mapping| mapping.is_custom_api()));
+                let routeable = mappings
+                    .iter()
+                    .filter(|mapping| mapping.routeable)
+                    .collect::<Vec<_>>();
+                assert!(routeable.iter().any(|mapping| mapping.is_opencode_go()));
+                assert!(routeable.iter().any(|mapping| mapping.is_custom_api()));
+            }
+            other => panic!("expected alias overlay, got {other:?}"),
+        }
+        match resolve_with_custom("my-local-model", &["my-local-model".into()]).unwrap() {
+            ResolvedModel::PinnedRaw { mapping, .. } => {
+                assert!(mapping.is_custom_api());
+                assert!(mapping.routeable);
+            }
+            other => panic!("expected custom-only pin, got {other:?}"),
+        }
+        match resolve_with_custom(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            &[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into()],
+        ) {
+            Err(error) => {
+                assert_eq!(error.code(), Some(AMBIGUOUS_MODEL_ID));
+                assert!(error.message().contains("command-code/goat"));
+                assert!(error.message().contains("custom/api"));
+            }
+            other => panic!("GOAT raw overlapping Custom must be ambiguous, got {other:?}"),
+        }
+        assert!(matches!(
+            resolve_with_custom("definitely-not-a-model", &[]),
+            Err(ResolveError::Unknown { .. })
+        ));
     }
 }

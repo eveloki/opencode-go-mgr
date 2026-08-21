@@ -12,6 +12,7 @@
 //! without live network. The GOAT loopback helper substitutes a loopback
 //! origin only and still uses `/provider/v1/chat/completions`.
 
+use crate::custom::join_custom_protocol_url;
 use crate::gateway::free_models::{is_free_model, resolve_upstream_base};
 use crate::gateway::protocol::{
     ApiFormat, RequestPlan, command_code_model_protocol, command_code_supports_upstream,
@@ -22,8 +23,9 @@ use crate::provider::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_BASE_URL,
     COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_HOST,
     COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, COMMAND_CODE_PROVIDER_ID,
-    CredentialKind, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, QuotaScope, UpstreamAuthScheme, ZEN_FREE_ACCOUNT_ID,
+    CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, CredentialKind, GO_OFFERING_ID, GOAT_OFFERING_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, QuotaScope, UpstreamAuthScheme,
+    ZEN_FREE_ACCOUNT_ID,
 };
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
@@ -245,10 +247,46 @@ pub(crate) fn resolve_route(
                 follow_redirects: false,
             })
         }
+        (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID) => {
+            require_binding(account, CredentialKind::ApiKey, QuotaScope::Key)?;
+            if plan.channel != UpstreamChannel::Go {
+                return Err("Custom API does not serve the Zen free channel".to_string());
+            }
+            let custom = plan.custom_route.as_ref().ok_or_else(|| {
+                "Custom API account is missing a persisted base URL, protocol, and auth scheme"
+                    .to_string()
+            })?;
+            let protocol = protocol_kind_for(plan.upstream)?;
+            let _ = join_custom_protocol_url(&custom.base_url, protocol)
+                .map_err(|error| error.to_string())?;
+            Ok(ResolvedProviderRoute {
+                base_url: custom.base_url.trim_end_matches('/').to_string(),
+                path: format!(
+                    "/{}",
+                    crate::provider::custom_endpoint_relative_path(protocol)
+                ),
+                upstream: plan.upstream,
+                auth: match custom.auth_scheme {
+                    UpstreamAuthScheme::Bearer => UpstreamAuth::Bearer,
+                    UpstreamAuthScheme::XApiKey => UpstreamAuth::XApiKey,
+                },
+                credential_account_id: Some(account.id.clone()),
+                follow_redirects: false,
+            })
+        }
         _ => Err(format!(
             "unsupported provider offering `{}/{}`",
             account.provider_id, account.offering_id
         )),
+    }
+}
+
+fn protocol_kind_for(upstream: ApiFormat) -> Result<crate::provider::UpstreamProtocolKind, String> {
+    match upstream {
+        ApiFormat::ChatCompletions => Ok(crate::provider::UpstreamProtocolKind::ChatCompletions),
+        ApiFormat::Responses => Ok(crate::provider::UpstreamProtocolKind::Responses),
+        ApiFormat::Messages => Ok(crate::provider::UpstreamProtocolKind::Messages),
+        ApiFormat::Gemini => Err("Gemini is a client-only protocol".to_string()),
     }
 }
 

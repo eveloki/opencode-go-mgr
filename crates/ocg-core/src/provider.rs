@@ -671,8 +671,8 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         creation_availability: CreationAvailability::Available,
         creation_unavailable_reason: None,
         verification_policy: VerificationPolicy::Required,
-        verification_runtime_availability: "unavailable",
-        routable: false,
+        verification_runtime_availability: "available",
+        routable: true,
         managed_registration: false,
         pricing_availability: "unpriced",
         usage_availability: "unavailable",
@@ -746,6 +746,20 @@ pub fn scnet_token_plan_model_snapshot(
 
 pub fn is_command_code_goat(provider_id: &str, offering_id: &str) -> bool {
     provider_id == COMMAND_CODE_PROVIDER_ID && offering_id == GOAT_OFFERING_ID
+}
+
+pub fn is_custom_api(provider_id: &str, offering_id: &str) -> bool {
+    provider_id == CUSTOM_PROVIDER_ID && offering_id == CUSTOM_API_OFFERING_ID
+}
+
+/// Relative path appended onto a Custom base URL prefix. Callers must join
+/// without escaping the origin or persisted path prefix.
+pub fn custom_endpoint_relative_path(protocol: UpstreamProtocolKind) -> &'static str {
+    match protocol {
+        UpstreamProtocolKind::ChatCompletions => "chat/completions",
+        UpstreamProtocolKind::Responses => "responses",
+        UpstreamProtocolKind::Messages => "messages",
+    }
 }
 
 pub fn acknowledgement_content_hash(body: &str) -> String {
@@ -825,25 +839,6 @@ pub fn validate_plan_key(plan: BuiltinPlan, key: &str) -> Result<(), ProviderBin
     Ok(())
 }
 
-/// Outcome of the shared Custom IP classifier. Manual prefixes are used because
-/// `Ipv4Addr::is_benchmarking` / `is_reserved` and `Ipv6Addr::is_documentation`
-/// are still unstable on the workspace MSRV.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CustomIpClass {
-    Loopback,
-    Public,
-    Blocked,
-}
-
-/// How resolved addresses of a Custom URL must be classified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CustomHostPolicy {
-    /// Literal loopback or `localhost` / `*.localhost`: every address must be loopback.
-    LoopbackOnly,
-    /// Public hostname or public literal: every address must be public.
-    PublicOnly,
-}
-
 /// Structured Custom URL host taken from [`reqwest::Url::host`], not `host_str`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CustomUrlHost {
@@ -851,16 +846,15 @@ pub enum CustomUrlHost {
     Domain(String),
 }
 
-/// Syntactic Custom URL inspection shared by persistence and connect-time preflight.
+/// Syntactic Custom URL inspection shared by persistence and HTTP joining.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomUrlTarget {
     pub host: CustomUrlHost,
-    pub policy: CustomHostPolicy,
-    pub allows_http: bool,
 }
 
-/// Syntactic Custom base-URL gate. DNS / connected-IP revalidation belongs to
-/// [`crate::custom_http`] and is intentionally not performed here.
+/// Syntactic Custom base-URL gate. Administrators explicitly trust Custom
+/// destinations, so any http/https origin is accepted. Credentials and
+/// non-HTTP(S) schemes stay rejected; DNS / IP / hostname policy is not applied.
 pub fn validate_custom_base_url(value: &str) -> Result<String, ProviderBindingError> {
     let value = value.trim();
     if value.is_empty() {
@@ -901,31 +895,8 @@ pub fn inspect_custom_url(parsed: &reqwest::Url) -> Result<CustomUrlTarget, Prov
             "base URL must not include credentials".to_string(),
         ));
     }
-    let host = custom_url_host(parsed)?;
-    let (policy, allows_http) = match &host {
-        CustomUrlHost::Ip(ip) => match classify_custom_ip(*ip) {
-            CustomIpClass::Blocked => {
-                return Err(ProviderBindingError::InvalidCustomBaseUrl(
-                    "base URL host is not a permitted public or loopback address".to_string(),
-                ));
-            }
-            CustomIpClass::Loopback => (CustomHostPolicy::LoopbackOnly, true),
-            CustomIpClass::Public => (CustomHostPolicy::PublicOnly, false),
-        },
-        CustomUrlHost::Domain(domain) => match custom_origin_host_policy(domain)? {
-            CustomHostPolicy::LoopbackOnly => (CustomHostPolicy::LoopbackOnly, true),
-            CustomHostPolicy::PublicOnly => (CustomHostPolicy::PublicOnly, false),
-        },
-    };
-    if parsed.scheme() == "http" && !allows_http {
-        return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "non-loopback Custom base URLs must use https".to_string(),
-        ));
-    }
     Ok(CustomUrlTarget {
-        host,
-        policy,
-        allows_http,
+        host: custom_url_host(parsed)?,
     })
 }
 
@@ -949,261 +920,6 @@ fn custom_url_host(parsed: &reqwest::Url) -> Result<CustomUrlHost, ProviderBindi
         return Ok(CustomUrlHost::Ip(IpAddr::V4(ip)));
     }
     Ok(CustomUrlHost::Domain(rendered.to_ascii_lowercase()))
-}
-
-pub fn is_declared_loopback_hostname(host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    host == "localhost" || host.ends_with(".localhost")
-}
-
-/// Connect-time host-kind policy for an origin name or literal.
-///
-/// Literal IPs use [`classify_custom_ip`]. `localhost` / `*.localhost` after
-/// trailing-dot normalization are [`CustomHostPolicy::LoopbackOnly`]. Blocked
-/// hostnames fail. Every other allowed name is [`CustomHostPolicy::PublicOnly`].
-/// Callers must not apply this to a configured Manual proxy hostname.
-pub fn custom_origin_host_policy(host: &str) -> Result<CustomHostPolicy, ProviderBindingError> {
-    let host = host.trim();
-    if let Some(ip) = parse_ip_literal(host) {
-        return match classify_custom_ip(ip) {
-            CustomIpClass::Blocked => Err(ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL host is not a permitted public or loopback address".to_string(),
-            )),
-            CustomIpClass::Loopback => Ok(CustomHostPolicy::LoopbackOnly),
-            CustomIpClass::Public => Ok(CustomHostPolicy::PublicOnly),
-        };
-    }
-    if is_declared_loopback_hostname(host) {
-        return Ok(CustomHostPolicy::LoopbackOnly);
-    }
-    if is_blocked_custom_hostname(host) {
-        return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL host is not a permitted Custom target".to_string(),
-        ));
-    }
-    Ok(CustomHostPolicy::PublicOnly)
-}
-
-fn parse_ip_literal(host: &str) -> Option<IpAddr> {
-    let host = host.trim_end_matches('.');
-    if let Some(inside) = host
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-    {
-        return inside.parse::<IpAddr>().ok();
-    }
-    host.parse::<IpAddr>().ok()
-}
-
-pub fn classify_custom_ip(ip: IpAddr) -> CustomIpClass {
-    match ip {
-        IpAddr::V4(addr) => classify_ipv4(addr),
-        IpAddr::V6(addr) => classify_ipv6(addr),
-    }
-}
-
-fn classify_ipv4(addr: Ipv4Addr) -> CustomIpClass {
-    if addr.is_loopback() {
-        return CustomIpClass::Loopback;
-    }
-    if is_blocked_ipv4(addr) {
-        CustomIpClass::Blocked
-    } else {
-        CustomIpClass::Public
-    }
-}
-
-fn classify_ipv6(addr: Ipv6Addr) -> CustomIpClass {
-    if addr.is_loopback() {
-        return CustomIpClass::Loopback;
-    }
-    if addr.is_unspecified() {
-        return CustomIpClass::Blocked;
-    }
-    if let Some(v4) = addr.to_ipv4_mapped() {
-        return classify_ipv4(v4);
-    }
-    // Deprecated IPv4-compatible (::/96), IPv4-translated/SIIT
-    // (::ffff:0:0:0/96), 6to4, Teredo, and deprecated site-local addresses are
-    // never globally admissible. IPv4-mapped addresses are handled explicitly
-    // above; standard NAT64 remains subject to its embedded IPv4 class below.
-    if is_ipv4_compatible(addr)
-        || is_ipv4_translated_siit(addr)
-        || is_sixto4(addr)
-        || is_teredo(addr)
-        || is_deprecated_site_local(addr)
-    {
-        return CustomIpClass::Blocked;
-    }
-    if let Some(v4) = nat64_embedded(addr) {
-        return classify_tunneled_ipv4(v4);
-    }
-    if addr.is_multicast()
-        || is_unique_local_ipv6(addr)
-        || is_ipv6_link_local(addr)
-        || is_non_global_special_ipv6(addr)
-    {
-        CustomIpClass::Blocked
-    } else if is_allocated_global_unicast_ipv6(addr) {
-        CustomIpClass::Public
-    } else {
-        // The currently allocated global-unicast space is 2000::/3. Treat
-        // future/unallocated space as unavailable until it is deliberately
-        // classified instead of assuming every other unicast address is
-        // Internet-routable.
-        CustomIpClass::Blocked
-    }
-}
-
-fn classify_tunneled_ipv4(addr: Ipv4Addr) -> CustomIpClass {
-    match classify_ipv4(addr) {
-        CustomIpClass::Public => CustomIpClass::Public,
-        CustomIpClass::Loopback | CustomIpClass::Blocked => CustomIpClass::Blocked,
-    }
-}
-
-fn is_blocked_ipv4(addr: Ipv4Addr) -> bool {
-    addr.is_unspecified()
-        || addr.is_private()
-        || addr.is_link_local()
-        || addr.is_broadcast()
-        || addr.is_documentation()
-        || addr.is_multicast()
-        || is_carrier_grade_nat(addr)
-        || is_benchmarking_ipv4(addr)
-        || is_reserved_ipv4(addr)
-        || addr.octets()[0] == 0
-}
-
-fn is_carrier_grade_nat(addr: Ipv4Addr) -> bool {
-    let octets = addr.octets();
-    octets[0] == 100 && (octets[1] & 0b1100_0000) == 64
-}
-
-fn is_benchmarking_ipv4(addr: Ipv4Addr) -> bool {
-    let octets = addr.octets();
-    octets[0] == 198 && (octets[1] & 0b1111_1110) == 18
-}
-
-fn is_reserved_ipv4(addr: Ipv4Addr) -> bool {
-    addr.octets()[0] >= 240
-}
-
-fn is_unique_local_ipv6(addr: Ipv6Addr) -> bool {
-    (addr.segments()[0] & 0xfe00) == 0xfc00
-}
-
-fn is_ipv6_link_local(addr: Ipv6Addr) -> bool {
-    (addr.segments()[0] & 0xffc0) == 0xfe80
-}
-
-fn is_allocated_global_unicast_ipv6(addr: Ipv6Addr) -> bool {
-    is_ipv6_prefix(addr, Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0), 3)
-}
-
-/// IANA IPv6 special-purpose entries that are not globally reachable, plus
-/// the default non-global part of 2001::/23. More-specific IANA entries whose
-/// registry value is globally reachable remain allowed.
-fn is_non_global_special_ipv6(addr: Ipv6Addr) -> bool {
-    is_ipv6_prefix(addr, Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x100, 0, 0, 0, 0, 0, 0, 0), 64)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x100, 0, 0, 1, 0, 0, 0, 0), 64)
-        || is_non_global_ietf_protocol_assignment(addr)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x5f00, 0, 0, 0, 0, 0, 0, 0), 16)
-}
-
-fn is_non_global_ietf_protocol_assignment(addr: Ipv6Addr) -> bool {
-    if !is_ipv6_prefix(addr, Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 23) {
-        return false;
-    }
-
-    let globally_reachable_exception = addr == Ipv6Addr::new(0x2001, 1, 0, 0, 0, 0, 0, 1)
-        || addr == Ipv6Addr::new(0x2001, 1, 0, 0, 0, 0, 0, 2)
-        || addr == Ipv6Addr::new(0x2001, 1, 0, 0, 0, 0, 0, 3)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x2001, 3, 0, 0, 0, 0, 0, 0), 32)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x2001, 4, 0x112, 0, 0, 0, 0, 0), 48)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x2001, 0x20, 0, 0, 0, 0, 0, 0), 28)
-        || is_ipv6_prefix(addr, Ipv6Addr::new(0x2001, 0x30, 0, 0, 0, 0, 0, 0), 28);
-    !globally_reachable_exception
-}
-
-fn is_ipv6_prefix(addr: Ipv6Addr, network: Ipv6Addr, prefix_len: u32) -> bool {
-    debug_assert!(prefix_len <= 128);
-    let addr = u128::from_be_bytes(addr.octets());
-    let network = u128::from_be_bytes(network.octets());
-    let mask = if prefix_len == 0 {
-        0
-    } else {
-        u128::MAX << (128 - prefix_len)
-    };
-    addr & mask == network & mask
-}
-
-fn is_ipv4_translated_siit(addr: Ipv6Addr) -> bool {
-    let segments = addr.segments();
-    segments[0] == 0
-        && segments[1] == 0
-        && segments[2] == 0
-        && segments[3] == 0
-        && segments[4] == 0xffff
-        && segments[5] == 0
-}
-
-fn is_teredo(addr: Ipv6Addr) -> bool {
-    let segments = addr.segments();
-    segments[0] == 0x2001 && segments[1] == 0
-}
-
-fn is_deprecated_site_local(addr: Ipv6Addr) -> bool {
-    (addr.segments()[0] & 0xffc0) == 0xfec0
-}
-
-fn is_ipv4_compatible(addr: Ipv6Addr) -> bool {
-    let segments = addr.segments();
-    segments[0] == 0
-        && segments[1] == 0
-        && segments[2] == 0
-        && segments[3] == 0
-        && segments[4] == 0
-        && segments[5] == 0
-}
-
-fn is_sixto4(addr: Ipv6Addr) -> bool {
-    addr.segments()[0] == 0x2002
-}
-
-fn nat64_embedded(addr: Ipv6Addr) -> Option<Ipv4Addr> {
-    let segments = addr.segments();
-    if segments[0] == 0x64
-        && segments[1] == 0xff9b
-        && segments[2] == 0
-        && segments[3] == 0
-        && segments[4] == 0
-        && segments[5] == 0
-    {
-        Some(ipv4_from_segments(segments[6], segments[7]))
-    } else {
-        None
-    }
-}
-
-fn ipv4_from_segments(hi: u16, lo: u16) -> Ipv4Addr {
-    Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
-}
-
-fn is_blocked_custom_hostname(host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    matches!(
-        host.as_str(),
-        "metadata.google.internal"
-            | "metadata"
-            | "kubernetes"
-            | "kubernetes.default"
-            | "kubernetes.default.svc"
-    ) || host.ends_with(".internal")
-        || host.ends_with(".local")
 }
 
 pub fn validate_custom_model_id(model_id: &str) -> Result<String, ProviderBindingError> {
@@ -1499,10 +1215,14 @@ mod tests {
         assert!(validate_plan_key(basic, "sk-tp-live").is_ok());
 
         let custom = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
-        assert!(!custom.routable);
+        assert!(custom.routable);
+        assert_eq!(custom.verification_runtime_availability, "available");
+        assert_eq!(custom.verification_policy, VerificationPolicy::Required);
         assert_eq!(custom.pricing_availability, "unpriced");
         assert_eq!(custom.usage_availability, "unavailable");
         assert!(plan_requires_custom_config(custom));
+        assert!(is_custom_api(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID));
+        assert!(!is_custom_api(OPENCODE_PROVIDER_ID, GO_OFFERING_ID));
 
         let go = builtin_plan(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
         assert!(go.routable);
@@ -1568,17 +1288,21 @@ mod tests {
     }
 
     #[test]
-    fn custom_base_url_and_model_ids_fail_closed_without_dns() {
+    fn custom_base_url_trusts_administrator_http_origins_and_rejects_credentials() {
         assert!(validate_custom_base_url("https://api.example.com/v1").is_ok());
         assert!(validate_custom_base_url("http://127.0.0.1:8080/v1").is_ok());
         assert!(validate_custom_base_url("http://localhost:3000").is_ok());
         assert!(validate_custom_base_url("http://app.localhost/v1").is_ok());
+        assert!(validate_custom_base_url("http://api.example.com/v1").is_ok());
+        assert!(validate_custom_base_url("https://192.168.1.8/v1").is_ok());
+        assert!(validate_custom_base_url("http://10.0.0.1:9000/v1").is_ok());
+        assert!(validate_custom_base_url("https://169.254.169.254/latest").is_ok());
+        assert!(validate_custom_base_url("http://metadata.google.internal/").is_ok());
+        assert!(validate_custom_base_url("https://[::ffff:169.254.169.254]/").is_ok());
+        assert!(validate_custom_base_url("https://[2001:db8::1]/v1").is_ok());
         assert!(validate_custom_base_url("https://user:pass@api.example.com").is_err());
         assert!(validate_custom_base_url("https://api.example.com/v1?x=1").is_err());
         assert!(validate_custom_base_url("https://api.example.com/v1#frag").is_err());
-        assert!(validate_custom_base_url("https://192.168.1.8/v1").is_err());
-        assert!(validate_custom_base_url("https://169.254.169.254/latest").is_err());
-        assert!(validate_custom_base_url("http://api.example.com/v1").is_err());
         assert!(validate_custom_base_url("javascript:alert(1)").is_err());
         assert!(validate_custom_base_url("ftp://api.example.com/v1").is_err());
         assert_eq!(
@@ -1586,268 +1310,42 @@ mod tests {
             "deepseek/deepseek-v4-flash"
         );
         assert!(validate_custom_model_id("").is_err());
+        assert_eq!(
+            custom_endpoint_relative_path(UpstreamProtocolKind::ChatCompletions),
+            "chat/completions"
+        );
+        assert_eq!(
+            custom_endpoint_relative_path(UpstreamProtocolKind::Responses),
+            "responses"
+        );
+        assert_eq!(
+            custom_endpoint_relative_path(UpstreamProtocolKind::Messages),
+            "messages"
+        );
     }
 
     #[test]
     fn custom_url_host_uses_url_host_not_bracketed_host_str() {
-        assert_eq!(
-            classify_custom_ip("::ffff:169.254.169.254".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("::ffff:127.0.0.1".parse().unwrap()),
-            CustomIpClass::Loopback
-        );
-        assert!(validate_custom_base_url("https://[::ffff:169.254.169.254]/").is_err());
-        assert!(validate_custom_base_url("http://[::ffff:169.254.169.254]/").is_err());
         assert!(validate_custom_base_url("http://[::ffff:127.0.0.1]/v1").is_ok());
         assert!(validate_custom_base_url("http://[::1]/v1").is_ok());
         let mapped_loopback = validate_custom_base_url("http://[::ffff:127.0.0.1]/v1").unwrap();
         let parsed = reqwest::Url::parse(&mapped_loopback).unwrap();
         match inspect_custom_url(&parsed).unwrap().host {
             CustomUrlHost::Ip(ip) => {
-                assert_eq!(classify_custom_ip(ip), CustomIpClass::Loopback);
+                assert_eq!(ip, "::ffff:127.0.0.1".parse::<IpAddr>().unwrap());
             }
             CustomUrlHost::Domain(domain) => {
                 panic!("mapped loopback must stay an IP host, got {domain}")
             }
         }
-    }
-
-    #[test]
-    fn custom_ip_classifier_rejects_docs_benchmark_reserved_and_tunnels() {
-        assert_eq!(
-            classify_custom_ip("192.0.2.1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("198.51.100.1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("203.0.113.1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("198.18.0.1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("198.19.255.255".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("240.0.0.1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("255.255.255.255".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("100.64.0.1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("0.0.0.0".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("224.0.0.1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("2001:db8::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("fc00::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("fe80::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("ff02::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("::".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("2002:c0a8:101::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("64:ff9b::c0a8:101".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("2002:7f00:1::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("8.8.8.8".parse().unwrap()),
-            CustomIpClass::Public
-        );
-        assert_eq!(
-            classify_custom_ip("::ffff:0:169.254.169.254".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("::ffff:0:8.8.8.8".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("2001::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("2001:0:4136:e378:8000:63bf:3fff:fdd2".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("fec0::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert_eq!(
-            classify_custom_ip("feff::1".parse().unwrap()),
-            CustomIpClass::Blocked
-        );
-        assert!(validate_custom_base_url("https://[2001:db8::1]/v1").is_err());
-        assert!(validate_custom_base_url("https://198.18.0.1/v1").is_err());
-        assert!(validate_custom_base_url("https://240.1.2.3/v1").is_err());
-        assert!(validate_custom_base_url("https://[2002:c0a8:101::1]/v1").is_err());
-        assert!(validate_custom_base_url("https://[64:ff9b::c0a8:101]/v1").is_err());
-        assert!(validate_custom_base_url("https://[::ffff:0:8.8.8.8]/v1").is_err());
-        assert!(validate_custom_base_url("https://[2001::1]/v1").is_err());
-        assert!(validate_custom_base_url("https://[fec0::1]/v1").is_err());
-    }
-
-    #[test]
-    fn custom_ipv6_classifier_uses_a_global_routability_allow_policy() {
-        for blocked in [
-            "2002:0808:0808::1",
-            "::8.8.8.8",
-            "64:ff9b:1::808:808",
-            "64:ff9b:1::c0a8:101",
-            "100::1",
-            "100:0:0:1::1",
-            "2001:2::1",
-            "2001:10::1",
-            "3fff::1",
-            "5f00::1",
-            "4000::1",
-        ] {
-            assert_eq!(
-                classify_custom_ip(blocked.parse().unwrap()),
-                CustomIpClass::Blocked,
-                "{blocked} must not be treated as globally routable"
-            );
+        let metadata = validate_custom_base_url("https://[::ffff:169.254.169.254]/latest").unwrap();
+        let parsed = reqwest::Url::parse(&metadata).unwrap();
+        match inspect_custom_url(&parsed).unwrap().host {
+            CustomUrlHost::Ip(_) => {}
+            CustomUrlHost::Domain(domain) => {
+                panic!("mapped metadata IP must stay an IP host, got {domain}")
+            }
         }
-
-        for public in [
-            "2606:4700:4700::1111",
-            "2001:4860:4860::8888",
-            "2001:1::1",
-            "2001:3::1",
-            "2001:4:112::1",
-            "2001:20::1",
-            "2001:30::1",
-            "64:ff9b::808:808",
-            "::ffff:8.8.8.8",
-        ] {
-            assert_eq!(
-                classify_custom_ip(public.parse().unwrap()),
-                CustomIpClass::Public,
-                "{public} is an explicitly supported globally routable form"
-            );
-        }
-
-        for tunneled_or_local in [
-            "64:ff9b::c0a8:101",
-            "::ffff:192.168.1.1",
-            "::ffff:0:8.8.8.8",
-            "2001::1",
-            "fec0::1",
-        ] {
-            assert_eq!(
-                classify_custom_ip(tunneled_or_local.parse().unwrap()),
-                CustomIpClass::Blocked,
-                "{tunneled_or_local} must preserve its non-global classification"
-            );
-        }
-    }
-
-    #[test]
-    fn custom_base_url_rejects_non_global_ipv6_special_ranges() {
-        for blocked in [
-            "https://[2002:0808:0808::1]/v1",
-            "https://[::8.8.8.8]/v1",
-            "https://[64:ff9b:1::808:808]/v1",
-            "https://[64:ff9b:1::c0a8:101]/v1",
-            "https://[100::1]/v1",
-            "https://[100:0:0:1::1]/v1",
-            "https://[2001:2::1]/v1",
-            "https://[3fff::1]/v1",
-            "https://[5f00::1]/v1",
-            "https://[4000::1]/v1",
-        ] {
-            assert!(
-                validate_custom_base_url(blocked).is_err(),
-                "{blocked} must fail base URL validation"
-            );
-        }
-
-        for allowed in [
-            "https://[2606:4700:4700::1111]/v1",
-            "https://[64:ff9b::808:808]/v1",
-            "https://[::ffff:8.8.8.8]/v1",
-        ] {
-            assert!(
-                validate_custom_base_url(allowed).is_ok(),
-                "{allowed} must remain a supported public form"
-            );
-        }
-    }
-
-    #[test]
-    fn custom_origin_host_policy_matches_classifier_and_localhost_rules() {
-        assert_eq!(
-            custom_origin_host_policy("127.0.0.1").unwrap(),
-            CustomHostPolicy::LoopbackOnly
-        );
-        assert_eq!(
-            custom_origin_host_policy("[::1]").unwrap(),
-            CustomHostPolicy::LoopbackOnly
-        );
-        assert_eq!(
-            custom_origin_host_policy("8.8.8.8").unwrap(),
-            CustomHostPolicy::PublicOnly
-        );
-        assert!(custom_origin_host_policy("169.254.169.254").is_err());
-        assert!(custom_origin_host_policy("10.0.0.1").is_err());
-        assert_eq!(
-            custom_origin_host_policy("localhost").unwrap(),
-            CustomHostPolicy::LoopbackOnly
-        );
-        assert_eq!(
-            custom_origin_host_policy("localhost.").unwrap(),
-            CustomHostPolicy::LoopbackOnly
-        );
-        assert_eq!(
-            custom_origin_host_policy("APP.LOCALHOST.").unwrap(),
-            CustomHostPolicy::LoopbackOnly
-        );
-        assert_eq!(
-            custom_origin_host_policy("api.example.test").unwrap(),
-            CustomHostPolicy::PublicOnly
-        );
-        assert!(custom_origin_host_policy("metadata.google.internal").is_err());
-        assert!(custom_origin_host_policy("proxy.local").is_err());
-        assert!(custom_origin_host_policy("svc.internal.").is_err());
     }
 
     #[test]
@@ -1861,10 +1359,7 @@ mod tests {
             "http://127.0.0.1/v1"
         );
         let parsed = reqwest::Url::parse("http://127.1/v1").unwrap();
-        let target = inspect_custom_url(&parsed).unwrap();
-        assert_eq!(target.policy, CustomHostPolicy::LoopbackOnly);
-        assert!(target.allows_http);
-        match target.host {
+        match inspect_custom_url(&parsed).unwrap().host {
             CustomUrlHost::Ip(ip) => assert_eq!(ip, "127.0.0.1".parse::<IpAddr>().unwrap()),
             CustomUrlHost::Domain(domain) => panic!("127.1 must not stay a domain: {domain}"),
         }
