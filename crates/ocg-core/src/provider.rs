@@ -982,17 +982,17 @@ fn classify_ipv6(addr: Ipv6Addr) -> CustomIpClass {
     if let Some(v4) = addr.to_ipv4_mapped() {
         return classify_ipv4(v4);
     }
-    if let Some(v4) = ipv4_compatible(addr) {
-        return classify_ipv4(v4);
-    }
-    // IPv4-translated/SIIT (::ffff:0:0:0/96), Teredo, and deprecated site-local
-    // are non-global. Do not let them fall through as Public next to mapped
-    // ::ffff:0:0/96 addresses.
-    if is_ipv4_translated_siit(addr) || is_teredo(addr) || is_deprecated_site_local(addr) {
+    // Deprecated IPv4-compatible (::/96), IPv4-translated/SIIT
+    // (::ffff:0:0:0/96), 6to4, Teredo, and deprecated site-local addresses are
+    // never globally admissible. IPv4-mapped addresses are handled explicitly
+    // above; standard NAT64 remains subject to its embedded IPv4 class below.
+    if is_ipv4_compatible(addr)
+        || is_ipv4_translated_siit(addr)
+        || is_sixto4(addr)
+        || is_teredo(addr)
+        || is_deprecated_site_local(addr)
+    {
         return CustomIpClass::Blocked;
-    }
-    if let Some(v4) = sixto4_embedded(addr) {
-        return classify_tunneled_ipv4(v4);
     }
     if let Some(v4) = nat64_embedded(addr) {
         return classify_tunneled_ipv4(v4);
@@ -1119,24 +1119,18 @@ fn is_deprecated_site_local(addr: Ipv6Addr) -> bool {
     (addr.segments()[0] & 0xffc0) == 0xfec0
 }
 
-fn ipv4_compatible(addr: Ipv6Addr) -> Option<Ipv4Addr> {
+fn is_ipv4_compatible(addr: Ipv6Addr) -> bool {
     let segments = addr.segments();
-    if segments[0] == 0
+    segments[0] == 0
         && segments[1] == 0
         && segments[2] == 0
         && segments[3] == 0
         && segments[4] == 0
         && segments[5] == 0
-    {
-        Some(ipv4_from_segments(segments[6], segments[7]))
-    } else {
-        None
-    }
 }
 
-fn sixto4_embedded(addr: Ipv6Addr) -> Option<Ipv4Addr> {
-    let segments = addr.segments();
-    (segments[0] == 0x2002).then(|| ipv4_from_segments(segments[1], segments[2]))
+fn is_sixto4(addr: Ipv6Addr) -> bool {
+    addr.segments()[0] == 0x2002
 }
 
 fn nat64_embedded(addr: Ipv6Addr) -> Option<Ipv4Addr> {
@@ -1630,6 +1624,8 @@ mod tests {
     #[test]
     fn custom_ipv6_classifier_uses_a_global_routability_allow_policy() {
         for blocked in [
+            "2002:0808:0808::1",
+            "::8.8.8.8",
             "64:ff9b:1::808:808",
             "64:ff9b:1::c0a8:101",
             "100::1",
@@ -1657,7 +1653,6 @@ mod tests {
             "2001:30::1",
             "64:ff9b::808:808",
             "::ffff:8.8.8.8",
-            "::8.8.8.8",
         ] {
             assert_eq!(
                 classify_custom_ip(public.parse().unwrap()),
@@ -1684,6 +1679,8 @@ mod tests {
     #[test]
     fn custom_base_url_rejects_non_global_ipv6_special_ranges() {
         for blocked in [
+            "https://[2002:0808:0808::1]/v1",
+            "https://[::8.8.8.8]/v1",
             "https://[64:ff9b:1::808:808]/v1",
             "https://[64:ff9b:1::c0a8:101]/v1",
             "https://[100::1]/v1",
