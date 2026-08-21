@@ -38,9 +38,9 @@ When docs disagree, prefer the source below and fix the other side.
 | User-visible product behavior / 用户可见行为 | Code + [USER.md](USER.md) / [USER.zh-CN.md](USER.zh-CN.md) |
 | Plan catalog / Plan 目录 | `crates/ocg-core/src/provider.rs` (`BUILTIN_PLANS`); USER Accounts mirrors live vs pending families |
 | Client aliases / 客户端别名 | `crates/ocg-core/src/alias.rs`; USER Aliases / 别名 mirrors the contract |
-| Local `GET /v1/models` / 本地客户端模型列表 | `crates/ocg-core/src/gateway/handler.rs` (`published_routeable_aliases`); authenticated, Alias-only, zero upstream/account |
-| Applications picker list / 应用选择器列表 | `crates/ocg-core/src/dashboard.rs` (`GET /dashboard/api/application-models`); Go routeable aliases ∩ active pricing |
-| Custom Phase-1 HTTP / Custom 第一阶段 HTTP | `crates/ocg-core/src/custom_http.rs`; Direct+Manual only, Auto unavailable, no production caller |
+| Local `GET /v1/models` / 本地客户端模型列表 | `crates/ocg-core/src/gateway/handler.rs`; authenticated published Go/Zen aliases ∪ eligible Custom IDs; no upstream discovery |
+| Applications picker list / 应用选择器列表 | `crates/ocg-core/src/dashboard.rs` (`GET /dashboard/api/application-models`); Go routeable aliases ∩ active pricing; no Custom |
+| Custom API HTTP / Custom API HTTP | `crates/ocg-core/src/custom.rs` + `custom_http.rs`; trusted-admin destinations, Direct/Manual/Auto, no redirects, isolated auth |
 | SCNet official snapshot / SCNet 官方快照 | `crates/ocg-core/src/provider.rs` (`SCNET_TOKEN_PLAN_*`); adapter input only, never client aliases |
 | Model preferred/supported protocols / 模型协议表 | `crates/ocg-core/src/gateway/protocol.rs` (`MODEL_PROTOCOLS`); USER Protocol Conversion mirrors the table |
 | Model context/input/reasoning capabilities / 模型能力表 | `src/views/application-guides.ts` (`APPLICATION_MODEL_METADATA`); USER Model capabilities mirrors the table |
@@ -90,10 +90,12 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
 - Prefer short absolute facts over marketing language.
 - Do not invent remote sync, Admin API, embeddings, or unsupported Gemini
   fields; known gaps live in USER Limits and MAINTAINER Known Debt / AGENTS.
-  Do not claim live Command Code GOAT, SCNet Token Plan, or Custom API
-  routing, usage, pricing, verification, or provider guides. Do not invent a
+  Do not claim live Command Code GOAT or SCNet Token Plan routing, usage,
+  pricing, verification, or provider guides. Custom API is live under the
+  trusted-administrator boundary in USER; do not revive Phase-1 / SSRF-denylist
+  wording. Do not invent a
   `requested_alias` log field. Do not equate `GET /v1/models` with
-  `application-models`. Do not claim browser, live-provider-key, or
+  `application-models` (the latter is Go ∩ pricing only). Do not claim browser, live-provider-key, or
   installed-desktop proof unless those checks were actually run.
 - After release version bumps, update Docker clone tags and image pins in
   USER, `.env.example`, and `compose.example.yaml` together
@@ -107,10 +109,11 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
 - 优先写短而可核验的事实，少写宣传句。
 - 不要编造远端同步、Admin API、embeddings 或未支持的 Gemini 字段；已知缺口见
   用户指南「限制」、维护者指南「已知缺口」与 `AGENTS.md`。不要把 Command Code
-  GOAT、SCNet Token Plans 或 Custom API 写成已上线路由、用量、计价、验证或
-  供应商教程。不要发明 `requested_alias` 日志字段。不要把 `GET /v1/models`
-  与 `application-models` 写成同一份列表。除非实际做过检查，不要宣称浏览器、
-  真实供应商 Key 或已安装桌面版实测。
+  GOAT 或 SCNet Token Plans 写成已上线路由、用量、计价、验证或供应商教程。
+  Custom API 已在受信管理员边界下上线路由，以 USER 为准，不要再写回 Phase-1
+  休眠或 SSRF denylist。不要发明 `requested_alias` 日志字段。不要把
+  `GET /v1/models` 与 `application-models` 写成同一份列表（后者只是 Go ∩ 价格）。
+  除非实际做过检查，不要宣称浏览器、真实供应商 Key 或已安装桌面版实测。
 - 发版升版后，同步更新 USER、`.env.example`、`compose.example.yaml` 中的
   clone tag 与镜像钉（`pnpm run release:check` 会核对 compose/package
   版本一致性）。

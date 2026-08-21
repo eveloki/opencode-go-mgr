@@ -7,7 +7,7 @@ Plan（provider/offering），并在该 Plan 需要时于 SQLite 中保存一份
 `http://127.0.0.1:9042` 同时提供多协议
 Gateway 与管理面板。客户端使用 OpenAI、Anthropic、Gemini 或 Claude Desktop
 协议并发送本地别名；Gateway 把请求转换到所选 Plan 支持的上游协议，再把响应
-转回客户端。当前可路由的是 OpenCode Go 与 Zen Free。
+转回客户端。当前可路由的是 OpenCode Go、Zen Free 与 Custom API。
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
@@ -57,12 +57,13 @@ Gateway: http://127.0.0.1:9042/v1
 ```
 
 面板里的 **Key** 是客户端唯一需要配置的密钥。实时流量可导入 OpenCode Go 账号
-Key；Zen Free 不发送上游凭据。
+Key；Zen Free 不发送上游凭据。Custom API 是受信管理员目的地：先保存、再验证、
+然后启用。
 
 1. 安装并启动 OCG Manager。Gateway 就绪后管理面板会在系统浏览器中打开；之后可
    通过托盘图标重新打开。
-2. 在 **账号** 视图导入 OpenCode Go 账号 Key、选择无需凭据的 Zen Free，或用托管
-   向导注册（Beta）。复制 Key。
+2. 在 **账号** 视图导入 OpenCode Go 账号 Key、选择无需凭据的 Zen Free、添加
+   Custom API 目的地（先验证再启用），或用托管向导注册（Beta）。复制 Key。
 3. 把客户端指向 `http://127.0.0.1:9042/v1`。**应用** 视图提供各客户端配置教程。
 
 ```bash
@@ -102,9 +103,10 @@ docker compose up -d --no-build
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
 
 Gemini 只是客户端格式（请求不会发往 Google）。Claude Desktop 别名会改写为
-**应用** 视图里保存的映射。客户端应发送已公布别名；带鉴权的 `GET /v1/models`
-从本地注册表列出当前可路由别名（不发现上游，也不依赖账号）。未知模型名在所有
-受支持的客户端格式上返回 `400`。
+**应用** 视图里保存的映射。客户端应发送已公布别名或合格 Custom ID；带鉴权的 `GET /v1/models`
+列出当前可路由的已公布别名（OpenCode Go 与 Zen Free），并并入已启用、已验证、
+ready 且有 Key 的 Custom ID（不发现上游）。未知名称若不在该列表中，所有受支持
+的客户端格式都返回 `400`。应用选择器仍是 Go 别名 ∩ 当前价格快照。
 
 透传矩阵、上下文 / 输入 / 推理 / 工具、转换边界，以及真/假熔断见
 [用户指南 · 模型能力](docs/USER.zh-CN.md#模型能力)与
