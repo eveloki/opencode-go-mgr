@@ -294,7 +294,9 @@ difference, and the Claude Desktop three-role persistence behavior.
   contracts. For OpenCode Go, an allowance derives the account quota-debit
   multiplier (`monthly limit / Usage`) only; it is not a routable quota pool.
   A protected multiplier update may persist temporary overrides under a new
-  immutable revision.
+  immutable revision. Official Go rows whose Input/Output/Usage cells are all dashes
+  (currently Ox Alpha Free / `ox-alpha-free`) are skipped as unpriced Go
+  promos — they are not Zen free and must not fail a pricing refresh.
 - Pricing refresh is user-triggered through protected
   `GET /dashboard/api/pricing`, `PUT /dashboard/api/pricing/multipliers`, and
   `POST /dashboard/api/pricing/refresh`. A refresh whose official multipliers
@@ -310,7 +312,10 @@ difference, and the Claude Desktop three-role persistence behavior.
   never trigger a supplier-site request.
 - `forwarder.rs` returns an explicit action to `handler.rs`: only a pre-send
   DNS/TCP/TLS connection failure can retry once on the same account;
-  `401`/`403` and Go-channel `429` can select another account. A free-channel
+  `403` and Go-channel `429` can select another account. Inference `401` is
+  returned as-is without rotating accounts or persisting `auth_error` (Go uses
+  401 for `ModelError` as well as invalid keys). Dashboard ping / key
+  verification still record `auth_error` on 401. A free-channel
   `429` cools the IP-shared free pool and does not rotate keys; prefer mode
   then falls back to Go. `408`, `5xx`, post-connect failures, body timeouts,
   and stream interruptions are never replayed, and ambiguous results are
@@ -387,7 +392,7 @@ difference, and the Claude Desktop three-role persistence behavior.
   hourly; inactive ones about daily. Disabled / non-ready / empty-key accounts
   are excluded. Startup must not stampede: global concurrency 1, pacing, and
   bounded jitter with injectable clock/jitter/fetch seams. Manual refresh has
-  a 60s per-account throttle after any attempt, in-flight dedupe, and
+  a 15s per-account throttle after any attempt, in-flight dedupe, and
   Retry-After / `next_allowed_at`. Local max Go usage ≥80% may expedite at most
   once per 15 minutes. Real inference `429` keeps existing cooldown/selector
   writes and additionally schedules an official sync ~1–2 minutes later

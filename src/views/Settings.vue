@@ -552,7 +552,7 @@ const freeModelRoutingOptions: Array<{
   {
     value: "deny",
     label: "禁止 Free 模型",
-    behavior: "拒绝所有 free / big-pickle 请求，也不会把 Go 模型改写到 free。",
+    behavior: "拒绝已登记的 Zen free 模型（如 big-pickle），不拦截 Go 上名字带 free 的模型（如 ox-alpha-free），也不把 Go 模型改写到 Zen。",
   },
   {
     value: "explicit",

@@ -634,6 +634,10 @@ async fn model_discovery_does_not_create_inference_logs() {
     assert_eq!(status, StatusCode::OK);
     assert_local_openai_alias_list(&body);
     assert!(
+        body.contains("big-pickle"),
+        "registered Zen models must appear in the local Alias list: {body}"
+    );
+    assert!(
         calls.lock().unwrap().is_empty(),
         "GET /v1/models must not call upstream: {:?}",
         calls.lock().unwrap()
@@ -2031,8 +2035,8 @@ async fn manual_order_drives_fallback_while_ineligible_accounts_are_skipped() {
         (
             "key-2".to_string(),
             VecDeque::from([MockReply {
-                status: 401,
-                body: r#"{"error":{"message":"expired key"}}"#,
+                status: 403,
+                body: r#"{"error":{"message":"forbidden key"}}"#,
             }]),
         ),
         (
@@ -2337,7 +2341,7 @@ async fn upstream_5xx_is_returned_without_same_account_retry_or_fallback() {
 }
 
 #[tokio::test]
-async fn auth_403_breaker_fails_over_and_skips_the_key_on_later_requests() {
+async fn inference_403_fails_over_without_persisting_an_auth_breaker() {
     let replies = HashMap::from([
         (
             "key-1".to_string(),
@@ -2369,7 +2373,10 @@ async fn auth_403_breaker_fails_over_and_skips_the_key_on_later_requests() {
         .iter()
         .map(|c| c.key.clone())
         .collect::<Vec<_>>();
-    assert_eq!(call_keys, ["key-1", "key-2", "key-2"].map(str::to_string));
+    assert_eq!(
+        call_keys,
+        ["key-1", "key-2", "key-1", "key-2"].map(str::to_string)
+    );
     assert!(
         state
             .db
@@ -2378,8 +2385,8 @@ async fn auth_403_breaker_fails_over_and_skips_the_key_on_later_requests() {
             .unwrap()
             .unwrap()
             .auth_error
-            .as_deref()
-            .is_some_and(|error| error.contains("403"))
+            .is_none(),
+        "inference 403 must not permanently break an account"
     );
 
     gateway::stop_gateway(gateway_handle);
@@ -2388,7 +2395,7 @@ async fn auth_403_breaker_fails_over_and_skips_the_key_on_later_requests() {
 }
 
 #[tokio::test]
-async fn auth_401_breaker_skips_account_on_later_inference_requests() {
+async fn inference_401_is_returned_without_failover_or_breaker() {
     let replies = HashMap::from([
         (
             "key-1".to_string(),
@@ -2411,7 +2418,11 @@ async fn auth_401_breaker_skips_account_on_later_inference_requests() {
 
     for _ in 0..2 {
         let (status, body) = chat(port).await;
-        assert_eq!(status, 200, "{body}");
+        assert_eq!(status, 401, "{body}");
+        assert!(
+            body.contains("expired key") || body.contains("401"),
+            "{body}"
+        );
     }
     assert_eq!(
         calls
@@ -2420,7 +2431,7 @@ async fn auth_401_breaker_skips_account_on_later_inference_requests() {
             .iter()
             .map(|call| call.key.as_str())
             .collect::<Vec<_>>(),
-        ["key-1", "key-2", "key-2"]
+        ["key-1", "key-1"]
     );
     assert!(
         state
@@ -2430,8 +2441,166 @@ async fn auth_401_breaker_skips_account_on_later_inference_requests() {
             .unwrap()
             .unwrap()
             .auth_error
-            .as_deref()
-            .is_some_and(|error| error.contains("401"))
+            .is_none(),
+        "inference 401 must not permanently break an account"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn unknown_model_is_rejected_before_any_upstream_attempt() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 401,
+                body: r#"{"error":{"message":"model does not exist"}}"#,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "totally-made-up-xyz").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("unknown model"), "{body}");
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(
+        state
+            .db
+            .lock()
+            .get_account("acct-1")
+            .unwrap()
+            .unwrap()
+            .auth_error
+            .is_none(),
+        "a rejected unknown model must not touch account state"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn registered_zen_promo_routes_to_zen_not_go() {
+    let replies = HashMap::from([(
+        String::new(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    for model in ["big-pickle", "mimo-v2.5-free"] {
+        let (status, body) = protocol_call(port, "/v1/chat/completions", model).await;
+        assert_eq!(status, StatusCode::OK, "{model} {body}");
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/zen/v1/chat/completions", "/zen/v1/chat/completions"]
+    );
+    assert!(calls.lock().unwrap().iter().all(|call| call.key.is_empty()));
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn go_named_free_stays_on_go() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "ox-alpha-free").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "brand-new-promo-free").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/zen/go/v1/chat/completions"]
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn registered_zen_model_401_is_returned_without_credential_fallback_or_breaker() {
+    let replies = HashMap::from([
+        (
+            String::new(),
+            VecDeque::from([MockReply {
+                status: 401,
+                body: r#"{"error":{"message":"expired key"}}"#,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        [""]
+    );
+    assert!(
+        state
+            .db
+            .lock()
+            .get_account("acct-1")
+            .unwrap()
+            .unwrap()
+            .auth_error
+            .is_none(),
+        "inference 401 must not permanently break an account"
     );
 
     gateway::stop_gateway(gateway_handle);
@@ -2505,7 +2674,7 @@ async fn zen_free_429_is_anonymous_and_cools_the_singleton_egress_route() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(
         calls
@@ -2539,7 +2708,12 @@ async fn zen_free_429_is_anonymous_and_cools_the_singleton_egress_route() {
     assert!(captured.x_goog_api_key.is_none());
 
     set_account_enabled(&state, "acct-1", false);
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    state.db.lock().delete_account("acct-1").unwrap();
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 1);
 
@@ -2576,10 +2750,10 @@ async fn zen_free_is_anonymous_across_all_client_formats_and_logs_route_identity
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
-        let (status, body) = protocol_call(port, path, "deepseek-v4-flash-free").await;
+        let (status, body) = protocol_call(port, path, "mimo-v2.5-free").await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
     }
-    let (status, body) = gemini_call(port, "deepseek-v4-flash-free").await;
+    let (status, body) = gemini_call(port, "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let captured = calls.lock().unwrap().clone();
@@ -2630,8 +2804,7 @@ async fn zen_free_non_stream_success_without_usage_is_still_zero_cost_free() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, body) =
-        protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.status, "success");
@@ -2659,8 +2832,7 @@ async fn zen_free_stream_success_without_usage_is_still_zero_cost_free() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, body) =
-        protocol_stream_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, body) = protocol_stream_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.status, "success");
@@ -2703,12 +2875,16 @@ async fn zen_free_401_and_403_stop_without_touching_a_normal_credential() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    for expected in [401_u16, 403] {
-        let (status, body) =
-            protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-        assert!(body.to_string().contains(&expected.to_string()));
-    }
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(
+        body.to_string().contains("anonymous route disabled"),
+        "{body}"
+    );
+
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.to_string().contains("403"), "{body}");
     let captured = calls.lock().unwrap().clone();
     assert_eq!(captured.len(), 2);
     assert!(captured.iter().all(|call| call.key.is_empty()));
@@ -2753,7 +2929,7 @@ async fn prefer_mode_zen_429_falls_through_to_the_next_normal_card() {
     state.set_config(config).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, body) = chat(port).await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
     assert_eq!(status, 200, "{body}");
     let captured = calls.lock().unwrap().clone();
     assert_eq!(
@@ -2763,9 +2939,9 @@ async fn prefer_mode_zen_429_falls_through_to_the_next_normal_card() {
             .collect::<Vec<_>>(),
         ["", "normal-key"]
     );
-    assert!(captured[0].body.contains("deepseek-v4-flash-free"));
-    assert!(captured[1].body.contains("deepseek-v4-flash"));
-    assert!(!captured[1].body.contains("deepseek-v4-flash-free"));
+    assert!(captured[0].body.contains("mimo-v2.5-free"));
+    assert!(captured[1].body.contains("mimo-v2.5"));
+    assert!(!captured[1].body.contains("mimo-v2.5-free"));
     let logs = state.db.lock().list_forward_logs(10).unwrap();
     assert_eq!(logs.len(), 2);
     assert!(logs.iter().any(|log| {
@@ -2811,7 +2987,7 @@ async fn prefer_mode_round_robin_includes_zen_in_the_global_card_order() {
     let (port, gateway_handle) = start_gateway(state).await;
 
     for _ in 0..3 {
-        let (status, body) = chat(port).await;
+        let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
         assert_eq!(status, 200, "{body}");
     }
     assert_eq!(
@@ -3478,8 +3654,8 @@ async fn conversation_failover_rebinds_to_the_successful_account() {
         (
             "key-1".to_string(),
             VecDeque::from([MockReply {
-                status: 401,
-                body: r#"{"error":{"message":"expired key"}}"#,
+                status: 403,
+                body: r#"{"error":{"message":"forbidden key"}}"#,
             }]),
         ),
         (

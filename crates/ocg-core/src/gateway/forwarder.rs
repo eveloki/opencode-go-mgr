@@ -18,7 +18,9 @@ use crate::models::{
     Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
 };
 use crate::pricing::PricingSnapshot;
-use crate::provider::{is_command_code_goat, is_custom_api};
+use crate::provider::{
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, is_command_code_goat, is_custom_api,
+};
 use crate::state::CoreState;
 use anyhow::Result;
 use axum::body::Body;
@@ -853,19 +855,119 @@ async fn forward_request_impl(
             });
         }
 
-        // Key-level auth failures may be isolated to this account; fail over.
-        if matches!(status.as_u16(), 401 | 403) {
+        // OpenCode uses 401 for ModelError ("model is not supported") as well
+        // as invalid keys. Return it as-is so the client/CLI stops; do not
+        // rotate accounts or persist an auth breaker. Other provider adapters
+        // retain normal credential failover semantics for a 401.
+        let opencode_inference = matches!(
+            account.provider_id.as_str(),
+            OPENCODE_PROVIDER_ID | OPENCODE_ZEN_FREE_PROVIDER_ID
+        );
+        if status == StatusCode::UNAUTHORIZED && opencode_inference {
+            let error_message = format!(
+                "upstream auth error 401: {}",
+                attempt_context.sanitize_upstream_error(&text)
+            );
+            let sanitized = attempt_context.sanitize_upstream_error(&text);
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "upstream",
+                error_stage: "upstream_http",
+                downstream_status: Some(status.as_u16()),
+                upstream_status: Some(status.as_u16()),
+                upstream_wait_ms: Some(upstream_wait_ms),
+                retry_action: Some("return"),
+                upstream_headers: Some(&error_headers),
+                upstream_error: Some(&text),
+                request_body: Some(client_body),
+            });
+            {
+                let db = state.db.lock();
+                log_forward(
+                    &db,
+                    account,
+                    &model,
+                    "client_error",
+                    Some(401),
+                    metadata_metrics(
+                        &pricing_snapshot,
+                        plan.service_tier.as_deref(),
+                        "not_applicable",
+                    ),
+                    Some(&sanitized),
+                    &attempt_context,
+                    Some(failure),
+                )?;
+            }
+            let upstream_error = Some(sanitize_upstream_error_value_with_known_secret(
+                &text,
+                key.as_deref().unwrap_or_default(),
+            ));
+            let body = format_error(plan.client, status, &sanitized, upstream_error.as_ref());
+            return Ok(ForwardResult {
+                response: (status, axum::Json(body)).into_response(),
+                action: ForwardAction::Return,
+                error_message: Some(error_message),
+            });
+        }
+
+        if status == StatusCode::UNAUTHORIZED {
+            let error_message = format!(
+                "upstream auth error 401: {}",
+                attempt_context.sanitize_upstream_error(&text)
+            );
+            let sanitized = attempt_context.sanitize_upstream_error(&text);
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "upstream",
+                error_stage: "upstream_http",
+                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                upstream_status: Some(status.as_u16()),
+                upstream_wait_ms: Some(upstream_wait_ms),
+                retry_action: Some("try_next_account"),
+                upstream_headers: Some(&error_headers),
+                upstream_error: Some(&text),
+                request_body: Some(client_body),
+            });
+            {
+                let db = state.db.lock();
+                log_forward(
+                    &db,
+                    account,
+                    &model,
+                    "client_error",
+                    Some(401),
+                    metadata_metrics(
+                        &pricing_snapshot,
+                        plan.service_tier.as_deref(),
+                        "not_applicable",
+                    ),
+                    Some(&sanitized),
+                    &attempt_context,
+                    Some(failure),
+                )?;
+                db.set_account_auth_error_if_key_matches(
+                    &account.id,
+                    &account.key_cipher,
+                    Some(&error_message),
+                )?;
+            }
+            return Ok(ForwardResult {
+                response: error_response(plan.client, &error_message, None),
+                action: ForwardAction::TryNextAccount,
+                error_message: Some(error_message),
+            });
+        }
+
+        // 403 may still be isolated to this account; fail over without a breaker.
+        if status == StatusCode::FORBIDDEN {
             let anonymous_route = provider_route.auth == UpstreamAuth::None;
             let error_message = if anonymous_route {
                 format!(
-                    "anonymous provider route was rejected with {}; no credential fallback was attempted: {}",
-                    status.as_u16(),
+                    "anonymous provider route was rejected with 403; no credential fallback was attempted: {}",
                     attempt_context.sanitize_upstream_error(&text)
                 )
             } else {
                 format!(
-                    "upstream auth error {}: {}",
-                    status.as_u16(),
+                    "upstream auth error 403: {}",
                     attempt_context.sanitize_upstream_error(&text)
                 )
             };
@@ -893,7 +995,7 @@ async fn forward_request_impl(
                     account,
                     &model,
                     "client_error",
-                    Some(status.as_u16() as i32),
+                    Some(403),
                     metadata_metrics(
                         &pricing_snapshot,
                         plan.service_tier.as_deref(),
@@ -903,13 +1005,6 @@ async fn forward_request_impl(
                     &attempt_context,
                     Some(failure),
                 )?;
-                if !anonymous_route {
-                    db.set_account_auth_error_if_key_matches(
-                        &account.id,
-                        &account.key_cipher,
-                        Some(&error_message),
-                    )?;
-                }
             }
             return Ok(ForwardResult {
                 response: error_response(plan.client, &error_message, None),
@@ -2110,17 +2205,11 @@ pub async fn forward_get(
                 crate::usage_sync::schedule_after_inference_429(state, &account.id);
             }
             if status == StatusCode::UNAUTHORIZED {
-                let auth_error = format!(
-                    "upstream auth error 401: {}",
-                    sanitize_upstream_error(&body, &key)
-                );
-                state.db.lock().set_account_auth_error_if_key_matches(
-                    &account.id,
-                    &account.key_cipher,
-                    Some(&auth_error),
-                )?;
+                let mut headers = HeaderMap::new();
+                headers.insert("content-type", HeaderValue::from_static("application/json"));
+                return Ok((status, headers, downstream_body).into_response());
             }
-            if matches!(status.as_u16(), 401 | 403 | 429) {
+            if matches!(status.as_u16(), 403 | 429) {
                 last_http_error = Some((status, downstream_body));
                 failed_ids.push(account.id.clone());
                 break;
