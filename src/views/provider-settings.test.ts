@@ -139,7 +139,7 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.match(accountForm, /label: entry\.display_name/);
   assert.match(accountForm, /t\("添加 \{plan\} 账号"/);
   assert.match(accountForm, /'aria-label': `\$\{t\('模型 ID'\)\} \$\{index \+ 1\}`/);
-  assert.match(accountForm, /:aria-label="`\$\{t\('协议'\)\} \$\{index \+ 1\}`"/);
+  assert.match(accountForm, /<n-tag size="small" :bordered="false">\{\{ capabilityProtocol \}\}<\/n-tag>/);
   assert.match(accountForm, /:aria-label="`\$\{t\('删除'\)\} \$\{t\('模型能力'\)\} \$\{index \+ 1\}`"/);
   assert.match(accountForm, /:disabled="fieldImmutableAfterCreate\('upstream_protocol'\)"/);
   assert.match(accountForm, /:disabled="fieldImmutableAfterCreate\('auth_scheme'\)"/);

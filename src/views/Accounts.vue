@@ -109,6 +109,7 @@
           :usage-load-error="usageLoadErrors[account.id] ?? null"
           :usage-refresh-loading="!!usageRefreshLoading[account.id]"
           :free-alias-saving="!!freeAliasSaving[account.id]"
+          :verifying="!!verifying[account.id]"
           :quota-limits-failed="!!quotaLimitsError"
           :menu-options="accountMenuOptions(account, now)"
           @order-keydown="handleOrderKeydown($event, account.id)"
@@ -116,6 +117,7 @@
           @ping="pingAccount(account.id)"
           @toggle="toggleAccount(account.id)"
           @toggle-free-alias="toggleFreeAlias(account.id)"
+          @verify="verifyCustomAccount(account.id)"
           @refresh-usage="refreshAccountUsage(account.id)"
           @reload-usage="loadAccountUsage(account.id)"
           @open-wizard="openManagedWizard(account.id)"
@@ -264,6 +266,10 @@ import type {
 import { isCooling } from "./accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "./account-display.ts";
 import { isZenFreeAccount } from "./account-providers.ts";
+import {
+  executeCustomAccountEdit,
+  isCustomApiAccount,
+} from "./custom-account.ts";
 import { toggleZenFreeAlias, toggleZenFreeEnabled } from "./zen-free-settings.ts";
 import { useAccountUsage } from "./useAccountUsage.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
@@ -304,6 +310,7 @@ const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
 const pinging = ref<Record<string, boolean>>({});
+const verifying = ref<Record<string, boolean>>({});
 const freeAliasSaving = ref<Record<string, boolean>>({});
 const providerSettingsSaving = ref<Record<string, boolean>>({});
 /** Settings revision from `GET /settings`, used for conditional Zen writes. */
@@ -698,6 +705,7 @@ function removeAccountState(id: string): void {
   delete usageLoading.value[id];
   delete usageLoadErrors.value[id];
   delete pinging.value[id];
+  delete verifying.value[id];
   delete freeAliasSaving.value[id];
   delete providerSettingsSaving.value[id];
 }
@@ -809,6 +817,11 @@ async function initializeAccounts() {
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
   const editing = editingAccount.value;
   if (editing) {
+    if (isCustomApiAccount(editing)) {
+      // The edit form always emits the AccountFormPayload shape.
+      await saveCustomAccountEdit(editing, payload as AccountFormPayload);
+      return;
+    }
     const update: AccountUpdate = {
       name: payload.name,
       username: payload.username ?? "",
@@ -848,7 +861,13 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       message.success(t("账号已添加"));
       addAccount(created);
       settingsRevision.value = created.revision ?? settingsRevision.value;
-      if (!isZenFreeAccount(created)) {
+      // Only OpenCode Go exposes per-account quota windows; Custom API usage
+      // is unavailable and Zen Free shares an egress-IP lane.
+      if (
+        created.provider_id === "opencode"
+        && created.offering_id === "go"
+        && accountIsReady(created)
+      ) {
         await loadAccountUsage(created.id);
       }
       showModal.value = false;
@@ -877,6 +896,82 @@ async function pingAccount(id: string) {
     } catch (e) {
       message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(e) }));
     }
+  }
+}
+
+/**
+ * Billable protocol-correct connection check for Custom API accounts. The
+ * backend returns the account with a refreshed verification state and never
+ * enables it — enabling stays an explicit toggle action after verification.
+ */
+async function verifyCustomAccount(id: string) {
+  const account = accounts.value.find((item) => item.id === id);
+  if (!account || !isCustomApiAccount(account) || verifying.value[id]) return;
+  verifying.value[id] = true;
+  try {
+    const updated = await runWithFreshSettingsRevision((revision) => (
+      tauriApi.verifyAccountConnection(id, revision)
+    ));
+    replaceAccount(updated);
+    message.success(t("连接验证成功，账号保持禁用，可手动启用。"));
+  } catch (e) {
+    if (await recoverAccountMutationConflict(e)) return;
+    message.error(t("连接验证失败: {error}", { error: dashboardErrorDetail(e) }));
+    try {
+      await refreshAccountState(id);
+    } catch {
+      // The verification error already reached the user; the next explicit
+      // refresh can retry the state reconciliation.
+    }
+  } finally {
+    verifying.value[id] = false;
+  }
+}
+
+/**
+ * Custom edits validate the whole form before any mutation, then write only
+ * the sections that changed. This preserves a verified connection for a
+ * metadata-only edit and avoids unnecessary verification invalidation.
+ */
+async function saveCustomAccountEdit(
+  editing: Account,
+  payload: AccountFormPayload,
+): Promise<void> {
+  busy.value = true;
+  try {
+    await executeCustomAccountEdit(editing, payload, {
+      account: async (update) => {
+        replaceAccount(await runWithFreshSettingsRevision((revision) => tauriApi.updateAccount(editing.id, {
+          ...update,
+          expected_revision: revision,
+        })));
+      },
+      customConfig: async (config) => {
+        replaceAccount(await runWithFreshSettingsRevision((revision) => tauriApi.updateAccountCustomConfig(
+          editing.id,
+          config,
+          revision,
+        )));
+      },
+      capabilities: async (capabilities) => {
+        replaceAccount(await runWithFreshSettingsRevision((revision) => (
+          tauriApi.updateAccountModelCapabilities(editing.id, capabilities, revision)
+        )));
+      },
+    });
+
+    message.success(t("账号已更新"));
+    showModal.value = false;
+  } catch (e) {
+    if (await recoverAccountMutationConflict(e)) return;
+    message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
+    try {
+      await refreshAccountState(editing.id);
+    } catch {
+      // Keep the original save error; the next explicit refresh reconciles.
+    }
+  } finally {
+    busy.value = false;
   }
 }
 

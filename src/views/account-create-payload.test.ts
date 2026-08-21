@@ -116,7 +116,7 @@ test("Custom payload includes custom_config and model_capabilities", () => {
       base_url: "https://api.example.com/v1",
       upstream_protocol: "chat_completions",
       auth_scheme: "x-api-key",
-      model_capabilities: [{ model_id: "my-model", protocol: "responses" }],
+      model_capabilities: [{ model_id: "my-model", protocol: "chat_completions" }],
     },
     catalogEntry("custom", "api"),
   );
@@ -128,7 +128,7 @@ test("Custom payload includes custom_config and model_capabilities", () => {
     auth_scheme: "x-api-key",
   });
   assert.deepEqual(payload.model_capabilities, [
-    { model_id: "my-model", protocol: "responses", source: "manual" },
+    { model_id: "my-model", protocol: "chat_completions", source: "manual" },
   ]);
   assert.deepEqual(payload.acknowledgements, undefined);
 });
@@ -274,4 +274,95 @@ test("payload validation exposes stable codes that map to localized message keys
     ));
   }
   assert.equal(accountCreatePayloadErrorKey(new Error("internal English detail")), "账号创建失败，请重试");
+});
+
+test("Custom payload accepts administrator-trusted LAN, localhost, and metadata HTTP URLs", () => {
+  const trusted = [
+    "http://192.168.1.10:8080/v1",
+    "http://10.0.0.2/openai",
+    "http://localhost:3000",
+    "http://127.0.0.1:11434/v1",
+    "http://169.254.169.254/latest",
+    "https://api.example.com/v1",
+  ];
+  for (const base_url of trusted) {
+    const payload = buildCreateAccountPayload(
+      customPlan,
+      undefined,
+      {
+        name: "Custom",
+        key: "custom-key",
+        base_url,
+        upstream_protocol: "chat_completions",
+        auth_scheme: "bearer",
+        model_capabilities: [{ model_id: "m", protocol: "chat_completions" }],
+      },
+      catalogEntry("custom", "api"),
+    );
+    assert.equal(payload.custom_config?.base_url, base_url);
+  }
+});
+
+test("Custom payload rejects malformed, non-http(s), and credentialed base URLs", () => {
+  const baseValues = {
+    name: "Custom",
+    key: "custom-key",
+    upstream_protocol: "chat_completions" as const,
+    auth_scheme: "bearer" as const,
+    model_capabilities: [{ model_id: "m", protocol: "chat_completions" as const }],
+  };
+  const cases: Array<{ base_url: string; code: AccountCreatePayloadErrorCode }> = [
+    { base_url: "not-a-url", code: "invalid_base_url" },
+    { base_url: "ftp://api.example.com", code: "base_url_not_http" },
+    { base_url: "https://user:pass@api.example.com", code: "base_url_with_credentials" },
+  ];
+  for (const { base_url, code } of cases) {
+    assert.throws(
+      () => buildCreateAccountPayload(
+        customPlan,
+        undefined,
+        { ...baseValues, base_url },
+        catalogEntry("custom", "api"),
+      ),
+      (error) => error instanceof AccountCreatePayloadError && error.code === code,
+    );
+  }
+});
+
+test("Custom payload rejects duplicate normalized IDs, backend ID limits, and protocol mismatches", () => {
+  const values = {
+    name: "Custom",
+    key: "custom-key",
+    base_url: "https://api.example.com/v1",
+    upstream_protocol: "responses" as const,
+    auth_scheme: "bearer" as const,
+  };
+  const cases: Array<{ capabilities: Array<{ model_id: string; protocol: "responses" | "messages" }>; code: AccountCreatePayloadErrorCode }> = [
+    {
+      capabilities: [
+        { model_id: " model-a ", protocol: "responses" },
+        { model_id: "model-a", protocol: "responses" },
+      ],
+      code: "duplicate_model_id",
+    },
+    {
+      capabilities: [{ model_id: "a".repeat(201), protocol: "responses" }],
+      code: "model_id_too_long",
+    },
+    {
+      capabilities: [{ model_id: "model-a", protocol: "messages" }],
+      code: "capability_protocol_mismatch",
+    },
+  ];
+  for (const { capabilities, code } of cases) {
+    assert.throws(
+      () => buildCreateAccountPayload(
+        customPlan,
+        undefined,
+        { ...values, model_capabilities: capabilities },
+        catalogEntry("custom", "api"),
+      ),
+      (error) => error instanceof AccountCreatePayloadError && error.code === code,
+    );
+  }
 });

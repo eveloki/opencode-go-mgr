@@ -60,14 +60,14 @@
             <n-tag v-else :type="accountStatusTagType(account, now)" size="small">
               {{ accountStatusLabel(account, now) }}
             </n-tag>
-            <n-tag v-if="!isZen && accountIsReady(account)" size="small" :bordered="false">
+            <n-tag v-if="!isZen && !isCustom && accountIsReady(account)" size="small" :bordered="false">
               {{ t("购买于 {date}", { date: account.purchase_date }) }}
             </n-tag>
-            <n-tag v-if="!isZen && accountIsReady(account)" size="small" :bordered="false">
+            <n-tag v-if="!isZen && !isCustom && accountIsReady(account)" size="small" :bordered="false">
               {{ t("到期于 {date}", { date: account.expires_on }) }}
             </n-tag>
             <n-tag
-              v-if="!isZen && accountIsReady(account)"
+              v-if="!isZen && !isCustom && accountIsReady(account)"
               :type="accountExpiryTagType(account, now)"
               size="small"
               :bordered="false"
@@ -101,14 +101,14 @@
           <template #trigger>
             <n-switch
               :value="account.enabled"
-              :disabled="!account.plan_routable"
+              :disabled="!!toggleBlockedReason"
               :aria-label="account.enabled ? t('禁用账号 {name}', { name: account.name }) : t('启用账号 {name}', { name: account.name })"
               @update:value="emit('toggle')"
             />
           </template>
-          {{ account.plan_routable
-            ? (account.enabled ? t("禁用账号 {name}", { name: account.name }) : t("启用账号 {name}", { name: account.name }))
-            : t("该方案暂不可路由") }}
+          {{ toggleBlockedReason || (account.enabled
+            ? t("禁用账号 {name}", { name: account.name })
+            : t("启用账号 {name}", { name: account.name })) }}
         </n-tooltip>
 
         <n-tooltip v-if="isZen && accountIsReady(account) && account.enabled" trigger="hover">
@@ -243,6 +243,28 @@
     <div v-else-if="isDraft" class="provider-unconfigured" role="status">
       {{ draftDescription }}
     </div>
+    <div v-else-if="isCustom" class="custom-endpoint">
+      <div class="custom-endpoint__meta">
+        <span v-if="account.custom_config?.base_url" class="custom-endpoint__url">
+          {{ account.custom_config.base_url }}
+        </span>
+        <span class="custom-endpoint__models">
+          {{ t("{count} 个模型", { count: account.model_capabilities.length }) }}
+        </span>
+      </div>
+      <p v-if="verificationCaption" class="custom-endpoint__status">{{ verificationCaption }}</p>
+      <n-button
+        v-if="customNeedsVerification"
+        size="small"
+        type="primary"
+        secondary
+        :loading="verifying"
+        :aria-label="t('验证连接')"
+        @click="emit('verify')"
+      >
+        {{ t("验证连接") }}
+      </n-button>
+    </div>
     <div v-else-if="isGo && !quotaLimitsFailed">
       <div v-if="usageLoadError" class="usage-load-error" role="alert">
         <span>{{ t("用量加载失败") }}</span>
@@ -313,6 +335,11 @@ import {
 } from "../views/account-display.ts";
 import type { AccountMenuOption } from "../views/account-display.ts";
 import { isZenFreeAccount } from "../views/account-providers.ts";
+import {
+  customAccountNeedsVerification,
+  customAccountToggleBlocked,
+  isCustomApiAccount,
+} from "../views/custom-account.ts";
 import { accountPlanWarning, planLabel } from "../views/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../views/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
@@ -333,6 +360,8 @@ const props = defineProps<{
   usageLoadError: string | null;
   usageRefreshLoading: boolean;
   freeAliasSaving: boolean;
+  /** Connection verification in flight for a pending/failed Custom account. */
+  verifying: boolean;
   quotaLimitsFailed: boolean;
   menuOptions: AccountMenuOption[];
 }>();
@@ -343,6 +372,7 @@ const emit = defineEmits<{
   ping: [];
   toggle: [];
   "toggle-free-alias": [];
+  verify: [];
   "refresh-usage": [];
   "reload-usage": [];
   "open-wizard": [];
@@ -358,6 +388,26 @@ const isZen = computed(() => isZenFreeAccount(props.account));
 const isGo = computed(() => (
   props.account.provider_id === "opencode" && props.account.offering_id === "go"
 ));
+const isCustom = computed(() => isCustomApiAccount(props.account));
+const customNeedsVerification = computed(() => customAccountNeedsVerification(props.account));
+const toggleBlockedReason = computed(() => {
+  if (!props.account.plan_routable) return t("该方案暂不可路由");
+  if (customAccountToggleBlocked(props.account)) return t("验证连接成功后才能启用");
+  return "";
+});
+const verificationCaption = computed(() => {
+  const status = props.account.verification_status;
+  if (status === "pending") return t("账号待验证，验证通过前保持禁用。");
+  if (status === "failed") return t("上次验证失败，请检查 Key 与端点配置后重试。");
+  if (status === "verified") {
+    const at = props.account.connection_verified_at;
+    const ts = at ? Date.parse(at) : NaN;
+    return Number.isFinite(ts)
+      ? t("连接已验证：{time}", { time: new Date(ts).toLocaleString() })
+      : t("连接已验证");
+  }
+  return "";
+});
 const isDraft = computed(() => (
   accountIsReady(props.account)
   && !props.account.plan_routable
@@ -384,9 +434,9 @@ const planWarning = computed(() => {
   }
   if (warning === "endpoint-risk") {
     return {
-      type: "default" as const,
+      type: "warning" as const,
       title: t("自定义端点"),
-      message: t("自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。"),
+      message: t("目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；验证连接会发送一次最小真实请求，可能产生服务商费用。"),
     };
   }
   return null;
@@ -422,6 +472,37 @@ const usageEditorAvailable = computed(() => {
 
 .provider-unconfigured {
   color: var(--ocg-warning);
+  font-size: var(--ocg-font-sm);
+}
+
+.custom-endpoint {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+
+.custom-endpoint__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.custom-endpoint__url {
+  overflow-wrap: anywhere;
+  color: var(--ocg-ink);
+  font-size: var(--ocg-font-sm);
+}
+
+.custom-endpoint__models {
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
+}
+
+.custom-endpoint__status {
+  margin: 0;
+  color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
 }
 

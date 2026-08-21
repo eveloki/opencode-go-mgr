@@ -31,7 +31,7 @@ export interface PlanOption {
 function planCreationHint(plan: PlanDefinition): MessageKey | "" {
   if (plan.id === "command-code-goat") return "创建为禁用草稿；验证与路由尚未就绪";
   if (plan.id === "scnet") return "选择套餐后创建为禁用草稿；路由尚未就绪";
-  if (plan.id === "custom-endpoint") return "填写端点与模型能力后创建为禁用草稿；路由尚未就绪";
+  if (plan.id === "custom-endpoint") return "创建为禁用账号，验证连接成功后手动启用。";
   return "";
 }
 

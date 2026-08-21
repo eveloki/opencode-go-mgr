@@ -17,6 +17,14 @@
       <n-alert v-if="formError" type="error" class="form-error" role="alert">
         {{ formError }}
       </n-alert>
+      <n-alert
+        v-if="isCustomPlan"
+        type="warning"
+        :show-icon="false"
+        class="form-error"
+      >
+        {{ t("目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；验证连接会发送一次最小真实请求，可能产生服务商费用。") }}
+      </n-alert>
       <div class="modal-grid">
         <n-form-item v-if="!isEdit && offeringOptions.length > 1" path="offeringId" :label="t('服务套餐')">
           <n-select
@@ -162,12 +170,7 @@
                 :input-props="{ 'aria-label': `${t('模型 ID')} ${index + 1}` }"
                 :placeholder="t('模型 ID')"
               />
-              <n-select
-                v-model:value="cap.protocol"
-                :options="upstreamProtocolOptions"
-                :placeholder="t('协议')"
-                :aria-label="`${t('协议')} ${index + 1}`"
-              />
+              <n-tag size="small" :bordered="false">{{ capabilityProtocol }}</n-tag>
               <n-button
                 circle
                 quaternary
@@ -238,6 +241,7 @@ import {
   NModal,
   NSelect,
   NSpace,
+  NTag,
 } from "naive-ui";
 import { MinusCircleOutlined, PlusOutlined } from "@vicons/antd";
 import type { Account, AccountInput } from "../api/tauri";
@@ -257,6 +261,10 @@ import {
   type AccountCreateCapability,
   type AccountCreateFormValues,
 } from "../views/account-create-payload.ts";
+import {
+  CUSTOM_BASE_URL_ISSUE_KEYS,
+  customBaseUrlIssue,
+} from "../views/custom-account.ts";
 
 export type AccountFormPayload = {
   name: string;
@@ -266,6 +274,10 @@ export type AccountFormPayload = {
   offering_id?: string;
   purchase_date?: string;
   notes: string;
+  /** Custom API edit only; persisted via the dedicated custom-config route. */
+  base_url?: string;
+  /** Custom API edit only; persisted via the dedicated capabilities route. */
+  model_capabilities?: AccountCreateCapability[];
 };
 
 type FormModel = {
@@ -329,6 +341,8 @@ const effectivePlan = computed<PlanDefinition | null>(() => {
   return props.plan;
 });
 
+const isCustomPlan = computed(() => effectivePlan.value?.id === "custom-endpoint");
+
 const offeringOptions = computed(() => {
   const plan = effectivePlan.value;
   if (!plan) return [];
@@ -386,6 +400,8 @@ const upstreamProtocolOptions = computed(() => {
   return protocols.map((value) => ({ value, label: value }));
 });
 
+const capabilityProtocol = computed(() => form.value.upstreamProtocol ?? "—");
+
 const authSchemeOptions = computed(() => {
   const schemes = catalogEntry.value?.auth_schemes ?? ["bearer"];
   return schemes.map((value) => ({ value, label: value }));
@@ -434,8 +450,10 @@ const rules = computed<FormRules>(() => {
   if (hasField("base_url") && fieldRequired("base_url")) {
     base.baseUrl = {
       required: true,
-      whitespace: true,
-      message: t("请填写 Base URL"),
+      validator: (_rule: unknown, value: string) => {
+        const issue = customBaseUrlIssue(value ?? "");
+        return issue ? new Error(t(CUSTOM_BASE_URL_ISSUE_KEYS[issue])) : true;
+      },
       trigger: ["input", "blur"],
     };
   }
@@ -542,7 +560,7 @@ function formFromAccount(account: Account): FormModel {
     acknowledgementAccepted: account.acknowledgements.length > 0,
     modelCapabilities: account.model_capabilities.map((cap) => ({
       model_id: cap.model_id,
-      protocol: cap.protocol,
+      protocol: account.custom_config?.upstream_protocol ?? cap.protocol,
     })),
   };
 }
@@ -559,11 +577,21 @@ function isPurchaseDateDisabled(timestamp: number): boolean {
 }
 
 function addCapability() {
+  const protocol = form.value.upstreamProtocol;
+  if (!protocol) return;
   form.value.modelCapabilities.push({
     model_id: "",
-    protocol: catalogEntry.value?.upstream_protocols[0] ?? "chat_completions",
+    protocol,
   });
 }
+
+watch(
+  () => form.value.upstreamProtocol,
+  (protocol) => {
+    if (!protocol) return;
+    for (const capability of form.value.modelCapabilities) capability.protocol = protocol;
+  },
+);
 
 function removeCapability(index: number) {
   form.value.modelCapabilities.splice(index, 1);
@@ -580,11 +608,22 @@ async function handleSave() {
     const payload: AccountFormPayload = {
       name: form.value.name.trim(),
       username: form.value.username.trim(),
-      purchase_date: form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate),
       notes: form.value.notes,
     };
+    if (!isCustomPlan.value) {
+      // Custom forms have no purchase-date field; sending today's date would
+      // silently reset the account's monthly window.
+      payload.purchase_date = form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate);
+    }
     if (form.value.key.trim()) {
       payload.key = form.value.key.trim();
+    }
+    if (isCustomPlan.value) {
+      payload.base_url = form.value.baseUrl.trim();
+      payload.model_capabilities = form.value.modelCapabilities.map((cap) => ({
+        model_id: cap.model_id.trim(),
+        protocol: cap.protocol,
+      }));
     }
     emit("save", payload);
     return;

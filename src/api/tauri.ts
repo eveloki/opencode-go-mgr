@@ -591,6 +591,41 @@ export const tauriApi = {
           : { expected_revision: expectedRevision }),
       }),
     }),
+  verifyAccountConnection: (id: string, expectedRevision?: number | null) =>
+    request<Account>(`/accounts/${id}/verify`, {
+      method: "POST",
+      ...(expectedRevision === null || expectedRevision === undefined
+        ? {}
+        : { body: jsonBody({ expected_revision: expectedRevision }) }),
+    }),
+  updateAccountCustomConfig: (
+    id: string,
+    config: AccountCustomConfigInput,
+    expectedRevision?: number | null,
+  ) =>
+    request<Account>(`/accounts/${id}/custom-config`, {
+      method: "PUT",
+      body: jsonBody({
+        ...config,
+        ...(expectedRevision === null || expectedRevision === undefined
+          ? {}
+          : { expected_revision: expectedRevision }),
+      }),
+    }),
+  updateAccountModelCapabilities: (
+    id: string,
+    capabilities: AccountModelCapabilityInput[],
+    expectedRevision?: number | null,
+  ) =>
+    request<Account>(`/accounts/${id}/model-capabilities`, {
+      method: "PUT",
+      body: jsonBody({
+        capabilities,
+        ...(expectedRevision === null || expectedRevision === undefined
+          ? {}
+          : { expected_revision: expectedRevision }),
+      }),
+    }),
   getBrowserCapabilities: () => request<BrowserCapabilities>("/browser/capabilities"),
   openAccountBrowser: (id: string, target: BrowserTarget) =>
     request<BrowserLaunchResult>(`/accounts/${id}/browser`, {
