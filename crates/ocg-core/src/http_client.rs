@@ -4,6 +4,13 @@ use std::time::Duration;
 
 /// Applies the process-wide outbound proxy policy while leaving callers free to
 /// choose their own redirect, total-timeout, and response-size policies.
+///
+/// Custom API traffic must compose on this builder via [`crate::custom_http`]
+/// rather than [`build`]. `build()` is the shared Go/Zen client and must not
+/// grow Custom DNS pinning, [`no_redirect_policy`], or preflight. Custom
+/// Direct uses this builder's `no_proxy()` path and Manual uses the explicit
+/// `proxy_url`; Auto is **not** inherited — `custom_http` returns
+/// `ProxyUnavailable` instead of taking this Auto branch.
 pub(crate) fn configured_builder(config: &AppConfig) -> crate::Result<reqwest::ClientBuilder> {
     let builder = match config.proxy_mode {
         ProxyMode::Auto => reqwest::Client::builder(),
