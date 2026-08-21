@@ -1,0 +1,69 @@
+{
+  "comment": "Black-box Plan catalog contract for OCG Manager v2.0. GET /dashboard/api/providers/catalog is the only Plan source. Internal identity stays provider_id + offering_id.",
+  "catalog_paths": [
+    "/dashboard/api/providers/catalog",
+    "/dashboard/api/providers"
+  ],
+  "required_entry_fields": [
+    "provider_id",
+    "offering_id",
+    "display_name",
+    "creation_availability",
+    "verification_required",
+    "credential_kind",
+    "quota_scope",
+    "pricing_availability",
+    "usage_availability",
+    "aliases"
+  ],
+  "alias_entry_fields": ["alias", "upstream_model_id", "upstream_protocol"],
+  "plans": [
+    {
+      "provider_id": "opencode",
+      "offering_id": "go",
+      "verification_required": false,
+      "creation_availability": "available",
+      "required_aliases": ["deepseek-v4-flash", "minimax-m2.7", "grok-4.5"]
+    },
+    {
+      "provider_id": "opencode-zen-free",
+      "offering_id": "anonymous-free",
+      "verification_required": false,
+      "singleton": true
+    },
+    {
+      "provider_id": "command-code",
+      "offering_id": "goat",
+      "verification_required": true,
+      "creation_availability_allowed": ["available", "unavailable"]
+    },
+    {
+      "provider_id": "scnet",
+      "offering_id": "basic",
+      "verification_required": true,
+      "requires_risk_acknowledgement": true,
+      "key_prefix": "sk-tp-"
+    },
+    {
+      "provider_id": "scnet",
+      "offering_id": "standard",
+      "verification_required": true,
+      "requires_risk_acknowledgement": true,
+      "key_prefix": "sk-tp-"
+    },
+    {
+      "provider_id": "scnet",
+      "offering_id": "premium",
+      "verification_required": true,
+      "requires_risk_acknowledgement": true,
+      "key_prefix": "sk-tp-"
+    },
+    {
+      "provider_id": "custom",
+      "offering_id": "api",
+      "verification_required": true,
+      "creation_availability_allowed": ["available", "unavailable"]
+    }
+  ],
+  "risk_acknowledgement_fields": ["id", "version", "content_hash"]
+}
