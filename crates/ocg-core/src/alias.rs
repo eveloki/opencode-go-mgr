@@ -327,12 +327,44 @@ fn resolve_in(registry: &Registry, requested: &str) -> Result<ResolvedModel, Res
     })
 }
 
-/// Preferred aliases that live `GET /v1/models` exposes.
+/// Preferred aliases present in the registry, including fail-closed-only names.
+/// Client `GET /v1/models` uses [`published_routeable_aliases`] instead.
 pub fn published_aliases() -> Vec<&'static str> {
     registry()
         .aliases
         .values()
         .map(|entry| entry.alias)
+        .collect()
+}
+
+/// A routeable preferred alias advertised by `GET /v1/models`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishedAlias {
+    pub alias: &'static str,
+    pub owned_by: &'static str,
+}
+
+/// Routeable preferred aliases that `GET /v1/models` exposes, in deterministic
+/// registry order. `owned_by` is the first routeable mapping's `provider_id`.
+/// Non-routeable GOAT / SCNet / Custom mappings stay unpublished.
+pub fn published_routeable_aliases() -> Vec<PublishedAlias> {
+    published_routeable_in(registry())
+}
+
+fn published_routeable_in(registry: &Registry) -> Vec<PublishedAlias> {
+    registry
+        .aliases
+        .values()
+        .filter_map(|entry| {
+            entry
+                .mappings
+                .iter()
+                .find(|mapping| mapping.routeable)
+                .map(|mapping| PublishedAlias {
+                    alias: entry.alias,
+                    owned_by: mapping.provider_id,
+                })
+        })
         .collect()
 }
 
@@ -454,6 +486,54 @@ mod tests {
         assert!(!aliases.iter().any(|alias| alias.contains("goat")));
         assert!(!aliases.iter().any(|alias| alias.contains("scnet")));
         assert!(!aliases.iter().any(|alias| alias.contains("custom")));
+    }
+
+    #[test]
+    fn published_routeable_aliases_use_routeable_provider_ownership() {
+        let published = published_routeable_aliases();
+        assert!(!published.is_empty());
+        let ids: Vec<&str> = published.iter().map(|item| item.alias).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "GET /v1/models order must be deterministic");
+        assert_eq!(
+            published.len(),
+            published_aliases().len(),
+            "builtin aliases currently all have a routeable mapping"
+        );
+        for item in &published {
+            assert!(!looks_raw_shaped(item.alias));
+            assert_ne!(item.alias, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM);
+            match resolve(item.alias).unwrap() {
+                ResolvedModel::Alias { mappings, .. } => {
+                    let routeable = mappings
+                        .iter()
+                        .find(|mapping| mapping.routeable)
+                        .expect("published alias must have a routeable mapping");
+                    assert_eq!(item.owned_by, routeable.provider_id);
+                    assert_ne!(item.owned_by, COMMAND_CODE_PROVIDER_ID);
+                    assert_ne!(item.owned_by, crate::provider::SCNET_PROVIDER_ID);
+                    assert_ne!(item.owned_by, crate::provider::CUSTOM_PROVIDER_ID);
+                }
+                other => panic!("published id must be an alias, got {other:?}"),
+            }
+        }
+        let go = published
+            .iter()
+            .find(|item| item.alias == "glm-5.2")
+            .expect("Go alias");
+        assert_eq!(go.owned_by, OPENCODE_PROVIDER_ID);
+        let zen = published
+            .iter()
+            .find(|item| item.alias == "deepseek-v4-flash-free")
+            .expect("Zen alias");
+        assert_eq!(zen.owned_by, OPENCODE_ZEN_FREE_PROVIDER_ID);
+        let goat_alias = published
+            .iter()
+            .find(|item| item.alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS)
+            .expect("Go still owns the kebab alias");
+        assert_eq!(goat_alias.owned_by, OPENCODE_PROVIDER_ID);
+        assert!(!published.iter().any(|item| item.alias.contains('/')));
     }
 
     #[test]
@@ -664,5 +744,9 @@ mod tests {
             }
             other => panic!("expected alias, got {other:?}"),
         }
+        assert!(
+            published_routeable_in(&registry).is_empty(),
+            "fail-closed aliases must stay off GET /v1/models"
+        );
     }
 }

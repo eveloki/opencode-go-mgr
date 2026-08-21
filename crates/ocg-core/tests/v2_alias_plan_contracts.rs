@@ -194,8 +194,8 @@ async fn unknown_offering_create_fails_closed() {
     harness.shutdown();
 }
 
-/// `/v1/models` exposes aliases, not raw upstream IDs, even if a fake
-/// upstream still lists vendor-prefixed names.
+/// `/v1/models` is a local Alias registry list. Zero Go accounts is enough;
+/// a fake upstream catalog cannot add raw IDs or hide published aliases.
 #[tokio::test]
 async fn client_models_list_exposes_aliases_not_raw_upstream_ids() {
     let mut replies = go_success_replies(&[GO_ACCOUNT_KEY]);
@@ -207,11 +207,32 @@ async fn client_models_list_exposes_aliases_not_raw_upstream_ids() {
         }]),
     );
     let harness = V2Harness::start_with_upstream(Some(replies)).await;
-    let _go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
 
     let (status, body) = harness.list_client_models().await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        harness.fake_calls().is_empty(),
+        "GET /v1/models must not call upstream with zero accounts: {:?}",
+        harness.fake_calls()
+    );
     let ids = client_model_ids(&body);
+    let expected = ocg_core::alias::published_routeable_aliases();
+    assert_eq!(
+        ids,
+        expected
+            .iter()
+            .map(|item| item.alias.to_string())
+            .collect::<Vec<_>>(),
+        "client model list must be the deterministic routeable Alias registry"
+    );
+    for (item, published) in body["data"]
+        .as_array()
+        .expect("OpenAI list data")
+        .iter()
+        .zip(&expected)
+    {
+        assert_eq!(item["owned_by"].as_str(), Some(published.owned_by));
+    }
     assert!(
         ids.iter().any(|id| id == GO_ALIAS),
         "client model list must include preferred Go alias {GO_ALIAS}: {ids:?}"
@@ -227,6 +248,39 @@ async fn client_models_list_exposes_aliases_not_raw_upstream_ids() {
     assert!(
         ids.iter().all(|id| !id.contains('/')),
         "aliases are kebab-case and must not include provider-prefixed raw ids: {ids:?}"
+    );
+    let go_owned = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == GO_ALIAS)
+        .unwrap();
+    assert_eq!(go_owned["owned_by"], OPENCODE_PROVIDER_ID);
+    let zen_owned = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == FREE_MODEL)
+        .unwrap();
+    assert_eq!(
+        zen_owned["owned_by"],
+        ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+    );
+    let logs = harness.forward_logs().await;
+    assert_eq!(
+        logs["items"].as_array().map(Vec::len).unwrap_or(0),
+        0,
+        "GET /v1/models must not write forward logs: {logs}"
+    );
+
+    let _go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
+    let (status, again) = harness.list_client_models().await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(client_model_ids(&again), ids);
+    assert!(
+        harness.fake_calls().is_empty(),
+        "creating a Go account must not make GET /v1/models call upstream: {:?}",
+        harness.fake_calls()
     );
 
     let (app_status, app_models) = harness.get_json("/application-models").await;

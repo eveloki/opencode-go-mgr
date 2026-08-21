@@ -29,7 +29,6 @@ use fake_upstream::{
 
 const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
 const OPAQUE_ACCOUNT_KEY: &str = "opaque/account+key=42";
-const LIMITED_BODY_WITH_ECHOED_KEY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached for opaque/account+key=42. Resets in 3 days.","detail":"opaque/account+key=42"}}"#;
 const ERROR_BODY_WITH_ECHOED_KEY: &str = r#"{"error":{"message":"provider rejected opaque/account+key=42","detail":"opaque/account+key=42"}}"#;
 const SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
 const SUCCESS_BODY_WITHOUT_USAGE: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
@@ -537,23 +536,78 @@ fn chat_stream_text(body: &str) -> String {
         .collect()
 }
 
+fn assert_local_openai_alias_list(body: &str) {
+    let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(payload["object"], "list", "{body}");
+    let expected = ocg_core::alias::published_routeable_aliases();
+    let data = payload["data"].as_array().expect("OpenAI list data");
+    assert_eq!(data.len(), expected.len(), "{body}");
+    for (item, published) in data.iter().zip(&expected) {
+        assert_eq!(item["id"], published.alias);
+        assert_eq!(item["object"], "model");
+        assert_eq!(item["owned_by"], published.owned_by);
+        assert!(!published.alias.contains('/'));
+    }
+    assert!(!body.contains(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM));
+}
+
+#[tokio::test]
+async fn model_discovery_returns_local_list_with_zero_accounts() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: r#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"}]}"#,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &[]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let unauthorized = loopback_client()
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_local_openai_alias_list(&body);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "GET /v1/models must not call upstream: {:?}",
+        calls.lock().unwrap()
+    );
+    assert!(state.db.lock().list_forward_logs(10).unwrap().is_empty());
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[tokio::test]
 async fn model_discovery_does_not_create_inference_logs() {
     let replies = HashMap::from([(
         "key-1".to_string(),
         VecDeque::from([MockReply {
             status: 200,
-            body: r#"{"object":"list","data":[{"id":"deepseek-v4-flash"}]}"#,
+            body: r#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"},{"id":"vendor-raw-not-an-alias"}]}"#,
         }]),
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
+    let before = state.db.lock().get_account("acct-1").unwrap().unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, body) = models(port).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("deepseek-v4-flash"));
-    assert_eq!(calls.lock().unwrap()[0].path, "/v1/models");
+    assert_local_openai_alias_list(&body);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "GET /v1/models must not call upstream: {:?}",
+        calls.lock().unwrap()
+    );
     let logs = state
         .db
         .lock()
@@ -577,146 +631,11 @@ async fn model_discovery_does_not_create_inference_logs() {
         .unwrap();
     assert!(logs.items.is_empty());
     assert_eq!(logs.summary.total_requests, 0);
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn model_discovery_redacts_success_values_without_changing_json_keys() {
-    let replies = HashMap::from([(
-        "data".to_string(),
-        VecDeque::from([MockReply {
-            status: 200,
-            body: r#"{"object":"list","data":[{"id":"metadata"},{"echo":"data"}]}"#,
-        }]),
-    )]);
-    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["data"]);
-    let (port, gateway_handle) = start_gateway(state).await;
-
-    let (status, body) = models(port).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(body.get("data").is_some(), "schema key was changed: {body}");
-    assert_eq!(body["data"][1]["echo"], "<redacted>");
-    assert_eq!(body["data"][0]["id"], "meta<redacted>");
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn model_discovery_keeps_rate_limit_cooldown_without_logging() {
-    let replies = HashMap::from([(
-        "key-1".to_string(),
-        VecDeque::from([MockReply {
-            status: 429,
-            body: LIMITED_BODY,
-        }]),
-    )]);
-    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-
-    let (status, _) = models(port).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    let stored = state.db.lock().get_account("acct-1").unwrap().unwrap();
-    let remaining = stored.cooldown_until.unwrap() - Utc::now();
-    assert!(remaining > Duration::days(2) && remaining <= Duration::days(3));
-    let logs = state
-        .db
-        .lock()
-        .query_forward_logs(ForwardLogQueryOptions {
-            limit: 10,
-            offset: 0,
-            status: None,
-            account_id: None,
-            provider_id: None,
-            offering_id: None,
-            route_account_id: None,
-            credential_account_id: None,
-            model: None,
-            key_id: None,
-            request_id: None,
-            start_time: None,
-            end_time: None,
-            sort_by: None,
-            sort_order: None,
-        })
-        .unwrap();
-    assert_eq!(logs.summary.total_requests, 0);
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn model_discovery_falls_back_once_for_429() {
-    let replies = HashMap::from([
-        (
-            OPAQUE_ACCOUNT_KEY.to_string(),
-            VecDeque::from([MockReply {
-                status: 429,
-                body: LIMITED_BODY_WITH_ECHOED_KEY,
-            }]),
-        ),
-        (
-            "key-2".to_string(),
-            VecDeque::from([MockReply {
-                status: 200,
-                body: r#"{"object":"list","data":[{"id":"deepseek-v4-flash"}]}"#,
-            }]),
-        ),
-    ]);
-    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY, "key-2"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-
-    let (status, body) = models(port).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|call| call.key.as_str())
-            .collect::<Vec<_>>(),
-        [OPAQUE_ACCOUNT_KEY, "key-2"]
-    );
-    let stored = state.db.lock().get_account("acct-1").unwrap().unwrap();
-    let last_error = stored
-        .last_error
-        .expect("429 should persist a sanitized error");
-    assert!(!last_error.contains(OPAQUE_ACCOUNT_KEY));
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn model_discovery_error_response_never_echoes_the_selected_account_key() {
-    let replies = HashMap::from([(
-        OPAQUE_ACCOUNT_KEY.to_string(),
-        VecDeque::from([MockReply {
-            status: 500,
-            body: ERROR_BODY_WITH_ECHOED_KEY,
-        }]),
-    )]);
-    let (base_url, _calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
-    let (port, gateway_handle) = start_gateway(state).await;
-
-    let (status, body) = models(port).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(
-        !body.contains(OPAQUE_ACCOUNT_KEY),
-        "response leaked key: {body}"
-    );
+    let after = state.db.lock().get_account("acct-1").unwrap().unwrap();
+    assert_eq!(after.cooldown_until, before.cooldown_until);
+    assert_eq!(after.last_error, before.last_error);
+    assert_eq!(after.auth_error, before.auth_error);
+    assert_eq!(after.updated_at, before.updated_at);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -927,191 +846,6 @@ async fn application_models_maps_upstream_failure_to_bad_gateway() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(calls.lock().unwrap().len(), 1);
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn model_discovery_408_is_returned_without_replay_or_fallback() {
-    let replies = HashMap::from([
-        (
-            "key-1".to_string(),
-            VecDeque::from([MockReply {
-                status: 408,
-                body: r#"{"error":"request timed out"}"#,
-            }]),
-        ),
-        (
-            "key-2".to_string(),
-            VecDeque::from([MockReply {
-                status: 200,
-                body: r#"{"object":"list","data":[]}"#,
-            }]),
-        ),
-    ]);
-    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
-    let (port, gateway_handle) = start_gateway(state).await;
-
-    let (status, body) = models(port).await;
-    assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "{body}");
-    assert_eq!(calls.lock().unwrap().len(), 1);
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn model_discovery_auth_failure_falls_back_without_same_account_replay() {
-    let replies = HashMap::from([
-        (
-            "key-1".to_string(),
-            VecDeque::from([MockReply {
-                status: 403,
-                body: r#"{"error":"expired key"}"#,
-            }]),
-        ),
-        (
-            "key-2".to_string(),
-            VecDeque::from([MockReply {
-                status: 200,
-                body: r#"{"object":"list","data":[]}"#,
-            }]),
-        ),
-    ]);
-    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-
-    let (status, body) = models(port).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = models(port).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|call| call.key.as_str())
-            .collect::<Vec<_>>(),
-        ["key-1", "key-2", "key-1", "key-2"]
-    );
-    assert!(
-        state
-            .db
-            .lock()
-            .get_account("acct-1")
-            .unwrap()
-            .unwrap()
-            .auth_error
-            .is_none(),
-        "403 must not permanently break an account"
-    );
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn model_discovery_401_breaker_skips_account_on_later_requests() {
-    let replies = HashMap::from([
-        (
-            "key-1".to_string(),
-            VecDeque::from([MockReply {
-                status: 401,
-                body: r#"{"error":"expired key"}"#,
-            }]),
-        ),
-        (
-            "key-2".to_string(),
-            VecDeque::from([MockReply {
-                status: 200,
-                body: r#"{"object":"list","data":[]}"#,
-            }]),
-        ),
-    ]);
-    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-
-    for _ in 0..2 {
-        let (status, body) = models(port).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-    }
-    assert_eq!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|call| call.key.as_str())
-            .collect::<Vec<_>>(),
-        ["key-1", "key-2", "key-2"]
-    );
-    assert!(
-        state
-            .db
-            .lock()
-            .get_account("acct-1")
-            .unwrap()
-            .unwrap()
-            .auth_error
-            .as_deref()
-            .is_some_and(|error| error.contains("401"))
-    );
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn model_discovery_body_timeout_is_not_replayed_or_failed_over() {
-    let (base_url, calls, stop_mock) = start_delayed_upstream(
-        StatusCode::OK,
-        "application/json",
-        vec![(StdDuration::from_secs(10), r#"{"object":"list","data":[]}"#)],
-    )
-    .await;
-    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
-    let mut config = state.config();
-    config.non_stream_timeout_secs = 1;
-    state.set_config(config).unwrap();
-    let (port, gateway_handle) = start_gateway(state).await;
-
-    let (status, body) = tokio::time::timeout(StdDuration::from_secs(5), models(port))
-        .await
-        .expect("model body read should honor the non-stream timeout");
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn truncated_model_discovery_body_is_not_replayed_or_failed_over() {
-    let raw_response = concat!(
-        "HTTP/1.1 200 OK\r\n",
-        "content-type: application/json\r\n",
-        "content-length: 4096\r\n",
-        "connection: close\r\n",
-        "\r\n",
-        "{\"object\":\"list\",\"data\":["
-    )
-    .as_bytes()
-    .to_vec();
-    let (base_url, calls, stop_mock) = start_raw_disconnect_upstream(raw_response).await;
-    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
-    let (port, gateway_handle) = start_gateway(state).await;
-
-    let (status, body) = models(port).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -2463,50 +2197,6 @@ async fn upstream_payload_too_large_is_not_mislabeled_as_client_body_limit() {
 }
 
 #[tokio::test]
-async fn model_discovery_payload_too_large_is_not_mislabeled_as_client_body_limit() {
-    let replies = HashMap::from([(
-        "key-1".to_string(),
-        VecDeque::from([MockReply {
-            status: 413,
-            body: r#"{"error":{"message":"provider model response too large"}}"#,
-        }]),
-    )]);
-    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-
-    let response = loopback_client()
-        .get(format!("http://127.0.0.1:{port}/v1/models"))
-        .bearer_auth("gw-test")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let request_id = response
-        .headers()
-        .get("x-ocg-request-id")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(calls.lock().unwrap().len(), 1);
-    assert!(state.db.lock().list_forward_logs(10).unwrap().is_empty());
-    assert!(
-        state
-            .db
-            .lock()
-            .query_gateway_logs(10, Some(&request_id))
-            .unwrap()
-            .is_empty(),
-        "model discovery upstream 413 must not create a client/body_limit diagnostic"
-    );
-
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
 async fn falls_back_past_five_limited_accounts_to_sixth_success() {
     let replies = (1..=6)
         .map(|i| {
@@ -3827,7 +3517,9 @@ async fn model_discovery_does_not_advance_round_robin_generation_cursor() {
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     assert_eq!(chat(port).await.0, 200);
-    assert_eq!(models(port).await.0, StatusCode::OK);
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_local_openai_alias_list(&body);
     assert_eq!(chat(port).await.0, 200);
 
     let calls = calls.lock().unwrap();
@@ -3838,7 +3530,6 @@ async fn model_discovery_does_not_advance_round_robin_generation_cursor() {
             .collect::<Vec<_>>(),
         [
             ("key-1", "/v1/chat/completions"),
-            ("key-1", "/v1/models"),
             ("key-2", "/v1/chat/completions"),
         ]
     );

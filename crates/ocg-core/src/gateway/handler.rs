@@ -3,8 +3,7 @@ use crate::gateway::diagnostics::{
     ErrorDiagnostic, REQUEST_ID_HEADER, RequestTrace, emit_failure, serialize_diagnostic,
 };
 use crate::gateway::forwarder::{
-    ForwardAction, UpstreamPayloadTooLargeResponse, forward_get, forward_request,
-    rate_limited_response,
+    ForwardAction, UpstreamPayloadTooLargeResponse, forward_request, rate_limited_response,
 };
 use crate::gateway::materialize::{
     materialize_account_routes, protocol_error_from_resolve, resolved_alias_from_model,
@@ -20,7 +19,7 @@ use crate::models::{
     AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
 };
 use crate::state::CoreState;
-use axum::body::{Body, Bytes, to_bytes};
+use axum::body::{Body, Bytes};
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
@@ -233,16 +232,14 @@ pub async fn gemini_model_action(
     }
 }
 
-/// GET /v1/models — authenticated discovery that never advertises raw IDs
-/// inference would reject.
+/// GET /v1/models — authenticated local Alias registry list.
 ///
-/// The request still uses an enabled OpenCode Go account so availability,
-/// cooldown, redaction, and upstream error behavior stay aligned with the
-/// rest of the gateway. On a successful catalog, `data[].id` is restricted to
-/// hardcoded Alias registry names.
+/// Returns OpenAI list JSON for routeable published client aliases only, in
+/// deterministic registry order. Does not select or decrypt accounts, call
+/// upstream `/v1/models`, write forward logs, or mutate cooldown / round-robin
+/// state. Non-routeable GOAT / SCNet / Custom mappings stay unpublished.
 pub async fn models(
     State(state): State<CoreState>,
-    Extension(trace): Extension<RequestTrace>,
     headers: HeaderMap,
 ) -> axum::response::Response {
     if !check_auth(&headers, &state) {
@@ -253,77 +250,18 @@ pub async fn models(
             None,
         );
     }
-
-    let (config, client) = state.upstream_context();
-    match forward_get(&client, &state, &config, "/v1/models").await {
-        Ok(resp) if resp.status().is_success() => {
-            restrict_models_list_to_published_aliases(resp).await
-        }
-        Ok(resp) => resp,
-        Err(e) => local_failure_response(
-            &state,
-            &trace,
-            ApiFormat::ChatCompletions,
-            StatusCode::BAD_GATEWAY,
-            &format!("models error: {}", e),
-            "transport",
-            "connect",
-            None,
-            None,
-        ),
-    }
-}
-
-async fn restrict_models_list_to_published_aliases(
-    response: axum::response::Response,
-) -> axum::response::Response {
-    let status = response.status();
-    let headers = response.headers().clone();
-    let bytes = match to_bytes(response.into_body(), 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(_) => return published_alias_models_response(),
-    };
-    let Ok(mut payload) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return restore_models_response(status, headers, bytes);
-    };
-    let Some(data) = payload.get("data").and_then(serde_json::Value::as_array) else {
-        return restore_models_response(status, headers, bytes);
-    };
-    let filtered: Vec<serde_json::Value> = data
-        .iter()
-        .filter(|item| {
-            item.get("id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(alias::is_published_alias)
-        })
-        .cloned()
-        .collect();
-    if filtered.is_empty() {
-        return restore_models_response(status, headers, bytes);
-    }
-    payload["data"] = serde_json::Value::Array(filtered);
-    axum::Json(payload).into_response()
-}
-
-fn restore_models_response(
-    status: StatusCode,
-    headers: HeaderMap,
-    bytes: Bytes,
-) -> axum::response::Response {
-    let mut response = (status, bytes).into_response();
-    *response.headers_mut() = headers;
-    response
+    published_alias_models_response()
 }
 
 fn published_alias_models_response() -> axum::response::Response {
-    let data: Vec<serde_json::Value> = alias::published_aliases()
+    let data: Vec<serde_json::Value> = alias::published_routeable_aliases()
         .into_iter()
-        .map(|id| {
+        .map(|item| {
             serde_json::json!({
-                "id": id,
+                "id": item.alias,
                 "object": "model",
                 "created": 0,
-                "owned_by": "opencode"
+                "owned_by": item.owned_by
             })
         })
         .collect();

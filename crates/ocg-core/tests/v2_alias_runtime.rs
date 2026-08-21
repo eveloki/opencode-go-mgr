@@ -109,26 +109,73 @@ fn stop(
     let _ = fs::remove_dir_all(dir);
 }
 
+fn assert_local_openai_alias_list(body: &Value) {
+    assert_eq!(body["object"], "list");
+    let expected = alias::published_routeable_aliases();
+    let data = body["data"].as_array().expect("OpenAI list data");
+    assert_eq!(data.len(), expected.len(), "{body}");
+    for (item, published) in data.iter().zip(&expected) {
+        assert_eq!(item["id"], published.alias);
+        assert_eq!(item["object"], "model");
+        assert_eq!(item["owned_by"], published.owned_by);
+        assert_eq!(item["created"], 0);
+        assert!(
+            alias::is_published_alias(published.alias),
+            "advertised `{}` is not an alias",
+            published.alias
+        );
+        assert!(!published.alias.contains('/'));
+        assert!(!published.alias.contains('_'));
+        assert!(!published.alias.contains(' '));
+    }
+    let go = data
+        .iter()
+        .find(|item| item["id"] == "deepseek-v4-flash")
+        .expect("Go alias");
+    assert_eq!(go["owned_by"], ocg_core::provider::OPENCODE_PROVIDER_ID);
+    let zen = data
+        .iter()
+        .find(|item| item["id"] == "deepseek-v4-flash-free")
+        .expect("Zen alias");
+    assert_eq!(
+        zen["owned_by"],
+        ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+    );
+    assert!(
+        data.iter()
+            .all(|item| item["id"]
+                != ocg_core::provider::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
+    );
+}
+
 #[tokio::test]
-async fn models_list_exposes_published_aliases_not_raw_upstream_ids() {
+async fn models_list_is_local_registry_with_zero_accounts_and_no_upstream() {
     let replies = HashMap::from([(
         "key-1".to_string(),
         VecDeque::from([FakeReply {
             status: 200,
-            body: r#"{"object":"list","data":[{"id":"not-a-real-upstream-model"},{"id":"deepseek-v4-flash"}]}"#,
+            body: r#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"},{"id":"not-a-real-upstream-model"}]}"#,
         }]),
     )]);
     let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (state, dir) = build_state(base_url, &[]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
     let client = loopback_client();
 
-    let unauthorized = client
+    let missing = client
         .get(format!("http://127.0.0.1:{port}/v1/models"))
         .send()
         .await
         .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+    let invalid = client
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .bearer_auth("wrong-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
 
     let response = client
         .get(format!("http://127.0.0.1:{port}/v1/models"))
@@ -138,25 +185,64 @@ async fn models_list_exposes_published_aliases_not_raw_upstream_ids() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["object"], "list");
-    let ids: Vec<&str> = body["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|entry| entry["id"].as_str())
-        .collect();
-    assert!(ids.contains(&"deepseek-v4-flash"));
-    assert!(!ids.contains(&"not-a-real-upstream-model"));
-    for id in &ids {
-        assert!(
-            alias::is_published_alias(id),
-            "advertised `{id}` is not an alias"
-        );
-        assert!(!id.contains('/'));
-        assert!(!id.contains('_'));
-        assert!(!id.contains(' '));
+    assert_local_openai_alias_list(&body);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "GET /v1/models must not call upstream with zero accounts: {:?}",
+        calls.lock().unwrap()
+    );
+    assert!(
+        state.db.lock().list_forward_logs(8).unwrap().is_empty(),
+        "GET /v1/models must not write forward logs"
+    );
+
+    stop(state, dir, gateway_handle, stop_mock);
+}
+
+#[tokio::test]
+async fn models_list_ignores_raw_only_and_empty_fake_upstream() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([FakeReply {
+                status: 200,
+                body: r#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"},{"id":"vendor-raw-not-an-alias"}]}"#,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([FakeReply {
+                status: 200,
+                body: r#"{"object":"list","data":[]}"#,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let expected = alias::published_routeable_aliases();
+    let response = loopback_client()
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .bearer_auth("gw-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_local_openai_alias_list(&body);
+    assert_eq!(body["data"].as_array().unwrap().len(), expected.len());
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "GET /v1/models must not probe upstream even when accounts exist: {:?}",
+        calls.lock().unwrap()
+    );
+    assert!(state.db.lock().list_forward_logs(8).unwrap().is_empty());
+    for account in state.db.lock().list_accounts().unwrap() {
+        assert!(account.cooldown_until.is_none());
+        assert!(account.last_error.is_none());
+        assert!(account.auth_error.is_none());
     }
-    assert_eq!(calls.lock().unwrap()[0].path, "/v1/models");
 
     stop(state, dir, gateway_handle, stop_mock);
 }

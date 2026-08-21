@@ -6,7 +6,7 @@ Tests live in `crates/ocg-core/tests/v2_alias_plan_contracts.rs`. They speak pub
 | --- | --- |
 | `providers_catalog_is_the_only_plan_source` | Public catalog is the one Plan source (`GET /dashboard/api/providers/catalog`, same body as `/providers`). Entries publish `display_name`/`display_family`, `creation_availability`, `verification_policy`, `verification_runtime_availability`, `routable`, `form_fields`, `risk_notice` (when required), `model_aliases`, `pricing_availability`, and `usage_availability`. GOAT/SCNet/Custom are `verification_policy=required` and unroutable; SCNet offerings are `token-plan-basic`/`token-plan-standard`/`token-plan-premium`. |
 | `unknown_offering_create_fails_closed` | Unknown provider/offering is rejected; no account is persisted. |
-| `client_models_list_exposes_aliases_not_raw_upstream_ids` | Outbound `/v1/models` exposes aliases only, never raw upstream IDs. |
+| `client_models_list_exposes_aliases_not_raw_upstream_ids` | Outbound `/v1/models` is a local routeable Alias registry list (deterministic order, `owned_by` = routeable `provider_id`). Zero Go accounts is enough; it never calls, filters, or restores upstream `/v1/models`, and never advertises raw IDs. |
 | `claude_desktop_models_remain_role_aliases` | Claude Desktop still advertises only the three role aliases (not the Plan model union). |
 | `alias_request_rewrites_response_model_to_client_name` | Non-stream responses rewrite `model` to the client-requested name. |
 | `unique_raw_upstream_id_pins_to_one_provider_and_skips_go` | A unique raw upstream ID is pinned to that provider and must not fall back to Go. |
