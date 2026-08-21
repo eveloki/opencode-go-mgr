@@ -117,7 +117,7 @@ test("managed account UI isolates pending controls and renders noVNC in a dedica
     accounts.indexOf("async function onFormSave"),
   );
   assert.ok(initialization.indexOf("loadRegistrationOptions()") < initialization.indexOf("await loadQuotaLimits()"));
-  assert.ok(initialization.indexOf("await loadAccounts()") < initialization.indexOf("await registrationOptions"));
+  assert.ok(initialization.indexOf("await loadAccounts()") < initialization.indexOf("Promise.allSettled([registrationOptions"));
   assert.match(accounts, /recoverManagedSetupConflict\(accountId, error\)/);
   assert.match(app, /window\.location\.hash\.slice\(1\)[\s\S]*?sanitizedBrowserUrl\.hash = ""[\s\S]*?history\.replaceState/);
 });

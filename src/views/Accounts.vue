@@ -29,6 +29,43 @@
         <n-button size="small" secondary @click="loadAccounts">{{ t("重试") }}</n-button>
       </n-alert>
 
+      <n-alert
+        v-if="catalogError"
+        type="warning"
+        :title="t('加载服务商目录失败: {error}', { error: catalogError })"
+      >
+        <n-button size="small" secondary :loading="catalogLoading" @click="loadProviderCatalog">
+          {{ t("重试") }}
+        </n-button>
+      </n-alert>
+
+      <template v-else-if="accounts.length > 0">
+        <div class="accounts-filter-bar">
+          <div class="filter-field">
+            <span class="filter-label">{{ t("按方案筛选") }}</span>
+            <n-select
+              v-model:value="planFilter"
+              :options="planFilterOptions"
+              :placeholder="t('按方案筛选')"
+              :aria-label="t('按方案筛选')"
+              :consistent-menu-width="false"
+              size="small"
+            />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("按状态筛选") }}</span>
+            <n-select
+              v-model:value="statusFilter"
+              :options="statusFilterOptions"
+              :placeholder="t('按状态筛选')"
+              :aria-label="t('按状态筛选')"
+              :consistent-menu-width="false"
+              size="small"
+            />
+          </div>
+        </div>
+      </template>
+
       <n-alert v-if="quotaLimitsError" type="warning" :title="t('用量加载失败')">
         <n-button
           size="small"
@@ -38,9 +75,15 @@
         >{{ t("重试") }}</n-button>
       </n-alert>
 
-      <n-empty v-if="!accountListLoading && !accountListError && accounts.length === 0" :description="t('暂无账号')">
+      <n-empty
+        v-if="!accountListLoading && !accountListError && displayedAccounts.length === 0"
+        :description="t('暂无账号')"
+      >
         <template #extra>
-          <n-button type="primary" @click="openAddModal">
+          <n-button v-if="planFilter !== 'all' || statusFilter !== 'all'" @click="resetFilters">
+            {{ t("重置") }}
+          </n-button>
+          <n-button v-else type="primary" @click="openAddModal">
             <template #icon>
               <n-icon :component="PlusOutlined" />
             </template>
@@ -49,11 +92,12 @@
         </template>
       </n-empty>
 
-      <div v-if="!accountListLoading && !accountListError && accounts.length > 0" class="account-list">
+      <div v-if="!accountListLoading && !accountListError && displayedAccounts.length > 0" class="account-list">
         <AccountCard
-          v-for="account in accounts"
+          v-for="account in displayedAccounts"
           :key="account.id"
           :account="account"
+          :catalog="providerCatalog"
           :usage="getUsage(account.id)"
           :limits="usageLimits"
           :edits="usageEdits[account.id]"
@@ -89,12 +133,15 @@
 
     <AccountAddModal
       v-model:show="showAddModal"
+      :catalog="providerCatalog"
+      :catalog-loading="catalogLoading"
       :managed-available="managedRegistrationAvailable"
       :managed-reason="managedRegistrationReason"
       :invite-missing="!opencodeInviteUrl"
-      @import-key="openCreateModal"
+      @import-key="openCreateModal(OPENCODE_GO_PLAN)"
       @register-managed="openManagedCreateModal"
       @open-settings="openSettings"
+      @select-plan="handleSelectPlan"
     />
 
     <AccountFormModal
@@ -102,6 +149,8 @@
       :account="editingAccount"
       :is-cooling="editingAccount ? isCooling(editingAccount, now) : false"
       :busy="busy"
+      :plan="selectedPlanForCreate"
+      :catalog="providerCatalog"
       @save="onFormSave"
       @reset-cooldown="resetCooldown(editingAccount!.id)"
     />
@@ -194,6 +243,7 @@ import {
   NIcon,
   NInput,
   NModal,
+  NSelect,
   NSpin,
   NSpace,
   useDialog,
@@ -216,6 +266,19 @@ import { isZenFreeAccount } from "./account-providers.ts";
 import { toggleZenFreeAlias, toggleZenFreeEnabled } from "./zen-free-settings.ts";
 import { useAccountUsage } from "./useAccountUsage.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
+import {
+  filterAccounts,
+  plansInUse,
+  type AccountPlanFilter,
+  type AccountStatusFilter,
+} from "./account-filters.ts";
+import {
+  OPENCODE_GO_PLAN,
+  PLAN_DEFINITIONS,
+  planFamilyLabel,
+  type PlanDefinition,
+} from "./plans.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -230,7 +293,7 @@ import {
 } from "./managed-account";
 import AccountAddModal from "../components/AccountAddModal.vue";
 import AccountCard from "../components/AccountCard.vue";
-import AccountFormModal from "../components/AccountFormModal.vue";
+import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
 
 const dialog = useDialog();
@@ -262,6 +325,12 @@ const browserCapabilities = ref<BrowserCapabilities>({
 const openingBrowserTarget = ref<BrowserTarget | null>(null);
 const busy = ref(false);
 const now = ref(Date.now());
+const planFilter = ref<AccountPlanFilter>("all");
+const statusFilter = ref<AccountStatusFilter>("all");
+const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
+const catalogLoading = ref(false);
+const catalogError = ref("");
+const selectedPlanForCreate = ref<PlanDefinition | null>(null);
 
 const {
   quotaLimits,
@@ -338,6 +407,31 @@ const canCreateManagedDraft = computed(() => (
   && !managedInvitePreview.value.status
 ));
 
+const displayedAccounts = computed(() => (
+  filterAccounts(accounts.value, planFilter.value, statusFilter.value, now.value)
+));
+
+const planFilterOptions = computed(() => [
+  { value: "all", label: t("全部方案") },
+  ...plansInUse(accounts.value, PLAN_DEFINITIONS).map((plan) => ({
+    value: plan.id,
+    label: planFamilyLabel(plan, providerCatalog.value),
+  })),
+]);
+
+const statusFilterOptions = computed(() => [
+  { value: "all", label: t("全部状态") },
+  { value: "available", label: t("可用") },
+  { value: "verifying", label: t("待验证") },
+  { value: "verification-failed", label: t("验证失败") },
+  { value: "cooling", label: t("冷却中") },
+  { value: "auth-error", label: t("认证失效（401 熔断）") },
+  { value: "disabled", label: t("已禁用") },
+  { value: "registering", label: t("注册中") },
+]);
+
+
+
 function handleMenuSelect(key: string | number, accountId: string) {
   if (key === "open-console") {
     void openAccountBrowser(accountId, "console");
@@ -376,10 +470,20 @@ function openAddModal(): void {
   showAddModal.value = true;
 }
 
-function openCreateModal(): void {
+function openCreateModal(plan?: PlanDefinition): void {
   showAddModal.value = false;
   editingAccount.value = null;
+  selectedPlanForCreate.value = plan ?? null;
   showModal.value = true;
+}
+
+function handleSelectPlan(plan: PlanDefinition): void {
+  openCreateModal(plan);
+}
+
+function resetFilters(): void {
+  planFilter.value = "all";
+  statusFilter.value = "all";
 }
 
 function openManagedCreateModal(): void {
@@ -676,29 +780,37 @@ async function loadRegistrationOptions(): Promise<void> {
   }
 }
 
-async function initializeAccounts() {
-  const registrationOptions = loadRegistrationOptions();
-  await loadQuotaLimits();
-  await loadAccounts();
-  await registrationOptions;
+async function loadProviderCatalog(): Promise<void> {
+  catalogLoading.value = true;
+  catalogError.value = "";
+  try {
+    providerCatalog.value = await providerApi.getProviderCatalog();
+  } catch (e) {
+    providerCatalog.value = null;
+    catalogError.value = dashboardErrorDetail(e);
+    // Fail closed: the add modal will fall back to the legacy OpenCode Go flow
+    // so the primary creation path keeps working even when the catalog is down.
+  } finally {
+    catalogLoading.value = false;
+  }
 }
 
-async function onFormSave(payload: {
-  name: string;
-  username: string;
-  key?: string;
-  provider_id?: string;
-  offering_id?: string;
-  purchase_date?: string;
-  notes: string;
-}) {
+async function initializeAccounts() {
+  const registrationOptions = loadRegistrationOptions();
+  const catalogPromise = loadProviderCatalog();
+  await loadQuotaLimits();
+  await loadAccounts();
+  await Promise.allSettled([registrationOptions, catalogPromise]);
+}
+
+async function onFormSave(payload: AccountInput | AccountFormPayload) {
   const editing = editingAccount.value;
   if (editing) {
     const update: AccountUpdate = {
       name: payload.name,
-      username: payload.username,
+      username: payload.username ?? "",
       purchase_date: payload.purchase_date,
-      notes: payload.notes,
+      notes: payload.notes ?? "",
     };
     if (payload.key !== undefined) update.key = payload.key;
     busy.value = true;
@@ -721,15 +833,9 @@ async function onFormSave(payload: {
       busy.value = false;
     }
   } else {
-    const input: AccountInput = {
-      name: payload.name,
-      username: payload.username,
-      key: payload.key || "",
-      provider_id: payload.provider_id,
-      offering_id: payload.offering_id,
-      purchase_date: payload.purchase_date,
-      notes: payload.notes,
-    };
+    // Preserve every catalog-gated create field (acknowledgements, Custom
+    // config, and capabilities) rather than rebuilding a legacy-only DTO.
+    const input: AccountInput = { ...payload, key: payload.key || "" };
     busy.value = true;
     try {
       const created = await runWithFreshSettingsRevision((revision) => tauriApi.createAccount({
@@ -977,5 +1083,44 @@ onUnmounted(() => {
   min-height: 160px;
   display: grid;
   place-items: center;
+}
+
+.accounts-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.accounts-filter-bar .filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.accounts-filter-bar .filter-label {
+  font-size: var(--ocg-font-xs);
+  color: var(--ocg-subtle);
+  line-height: 1.2;
+}
+
+.accounts-filter-bar .n-select {
+  min-width: 160px;
+}
+
+@media (max-width: 640px) {
+  .accounts-filter-bar {
+    gap: 8px;
+  }
+
+  .accounts-filter-bar .filter-field {
+    flex: 1 1 calc(50% - 4px);
+  }
+
+  .accounts-filter-bar .n-select {
+    width: 100%;
+  }
 }
 </style>

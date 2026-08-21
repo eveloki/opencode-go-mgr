@@ -1204,8 +1204,8 @@ test("account form rejects whitespace-only required credentials", async () => {
   const accountForm = await readFile(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
 
   assert.match(accountForm, /name:\s*\{\s*required: true,\s*whitespace: true,/);
-  assert.match(accountForm, /base\.key = \{\s*required: true,\s*whitespace: true,/);
-  assert.match(accountForm, /purchaseDate: \[\s*\{\s*required: true,\s*type: "number",/);
+  assert.match(accountForm, /hasField\("key"\) && !isEdit\.value/);
+  assert.match(accountForm, /if \(fieldRequired\("purchase_date"\)\)/);
 });
 
 test("account notes live in the edit-account form, not on cards", async () => {
@@ -1219,34 +1219,29 @@ test("account notes live in the edit-account form, not on cards", async () => {
 
   assert.doesNotMatch(accounts, /class="account-notes"|saveNotes\(|notesDrafts/);
   assert.doesNotMatch(managedCreate, /path="notes"|t\(['"]备注['"]\)/);
-  assert.match(template, /v-if="isEdit" path="notes"/);
+  assert.match(template, /v-if="hasField\('notes'\)"/);
   assert.match(accountForm, /type="textarea"/);
-  assert.match(accountForm, /isEdit\.value \? t\("编辑账号"\)/);
+  assert.match(accountForm, /if \(isEdit\.value\) return t\("编辑账号"\)/);
 });
 
 test("account form keeps identity first and does not collect managed password or expiry", async () => {
   const accountForm = await readFile(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
   const template = accountForm.slice(accountForm.indexOf("<template>"), accountForm.indexOf("<script setup"));
 
-  assert.ok(template.indexOf('path="username"') < template.indexOf('path="name"'));
+  assert.ok(template.indexOf('path="name"') < template.indexOf('path="username"'));
   assert.doesNotMatch(template, /path="password"|t\(['"]到期日期['"]\)/);
   assert.doesNotMatch(accountForm, /payload\.password|clearPassword/);
 });
 
-test("new account names follow the login account until the name is edited", async () => {
+test("new account names remain explicit while the catalog controls optional login fields", async () => {
   const accountForm = await readFile(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
 
-  assert.match(accountForm, /@update:value="handleUsernameUpdate"/);
   assert.match(accountForm, /@update:value="handleNameUpdate"/);
   assert.match(
     accountForm,
-    /function handleUsernameUpdate\(value: string\) \{\s*form\.value\.username = value;\s*if \(!isEdit\.value && !nameWasEdited\.value\) \{\s*form\.value\.name = value;/,
+    /function handleNameUpdate\(value: string\) \{\s*form\.value\.name = value;/,
   );
-  assert.match(
-    accountForm,
-    /function handleNameUpdate\(value: string\) \{\s*form\.value\.name = value;\s*if \(!isEdit\.value\) \{\s*nameWasEdited\.value = true;/,
-  );
-  assert.match(accountForm, /nameWasEdited\.value = isEdit\.value/);
+  assert.match(accountForm, /hasField\('username'\)/);
 });
 
 test("settings expose supported Windows auto-start safely", async () => {

@@ -1,6 +1,6 @@
 import type { Account } from "../api/tauri.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
-import { findProviderOffering } from "./account-providers.ts";
+import { planLabel } from "./plans.ts";
 
 export type ProviderCostState = "known" | "free" | "unknown";
 
@@ -9,6 +9,7 @@ export interface ProviderOverview {
   provider_id: string;
   offering_id: string;
   label: string;
+  routable: boolean;
   total: number;
   enabled: number;
   healthy: number;
@@ -43,7 +44,14 @@ const ZEN_FREE_COOLDOWN_FIELDS = [
 ] as const;
 
 export function providerAccountHealthy(account: Account, now: number): boolean {
-  if (!account.enabled || account.setup_step !== "ready" || account.auth_error) {
+  if (
+    !account.enabled
+    || account.setup_step !== "ready"
+    || account.auth_error
+    || !account.plan_routable
+    || account.verification_status === "pending"
+    || account.verification_status === "failed"
+  ) {
     return false;
   }
   if (account.provider_id === "opencode" && account.offering_id === "go") {
@@ -54,9 +62,9 @@ export function providerAccountHealthy(account: Account, now: number): boolean {
     return account.credential_kind === "none"
       && !ZEN_FREE_COOLDOWN_FIELDS.some((field) => cooldownActive(account[field], now));
   }
-  // GOAT and unknown offerings stay fail-closed until a verified runtime
-  // contract is configured.
-  return false;
+  return !["cooldown_until", "cooldown_generic_until"].some((field) => (
+    cooldownActive(account[field as "cooldown_until" | "cooldown_generic_until"], now)
+  ));
 }
 
 export function buildProviderOverviews(
@@ -77,7 +85,9 @@ export function buildProviderOverviews(
       key,
       provider_id: entry.provider_id,
       offering_id: entry.offering_id,
-      label: findProviderOffering(entry.provider_id, entry.offering_id)?.label ?? key,
+      label: entry.display_name.trim()
+        || planLabel({ provider_id: entry.provider_id, offering_id: entry.offering_id }, catalog),
+      routable: entry.routable,
       total: matching.length,
       enabled: matching.filter((account) => account.enabled).length,
       healthy: matching.filter((account) => providerAccountHealthy(account, now)).length,

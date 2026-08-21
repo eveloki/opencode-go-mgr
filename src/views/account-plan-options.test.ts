@@ -1,0 +1,69 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
+import { buildPlanOptions } from "./account-plan-options.ts";
+
+function catalogEntry(
+  provider_id: string,
+  offering_id: string,
+  extra: Partial<ProviderCatalogEntry> = {},
+): ProviderCatalogEntry {
+  return {
+    provider_id,
+    offering_id,
+    display_name: `${provider_id}/${offering_id}`,
+    display_family: provider_id,
+    credential_kind: "api_key",
+    quota_scope: "key",
+    singleton: false,
+    creation_availability: "available",
+    verification_policy: "required",
+    verification_runtime_availability: "unavailable",
+    routable: false,
+    managed_registration: false,
+    pricing_availability: "unavailable",
+    usage_availability: "unavailable",
+    quota_unit: "credits",
+    model_source: "test",
+    auth_schemes: ["bearer"],
+    upstream_protocols: ["chat_completions"],
+    form_fields: [],
+    model_aliases: [],
+    ...extra,
+  };
+}
+
+test("empty or failed catalogs keep the explicit OpenCode Go import option", () => {
+  for (const catalog of [null, undefined, []] as const) {
+    const go = buildPlanOptions(catalog).find(({ plan }) => plan.id === "opencode-go")!;
+    assert.equal(go.disabled, false);
+    assert.equal(go.managed, true);
+    assert.equal(go.label, "OpenCode Go");
+  }
+});
+
+test("plan hints and disabled reasons are translation keys, including SCNet", () => {
+  const catalog = [
+    catalogEntry("opencode", "go", { display_name: "OpenCode Go Catalog" }),
+    catalogEntry("scnet", "token-plan-basic"),
+    catalogEntry("scnet", "token-plan-standard"),
+    catalogEntry("scnet", "token-plan-premium"),
+  ];
+  const options = buildPlanOptions(catalog);
+  const go = options.find(({ plan }) => plan.id === "opencode-go")!;
+  const scnet = options.find(({ plan }) => plan.id === "scnet")!;
+  const custom = options.find(({ plan }) => plan.id === "custom-endpoint")!;
+
+  assert.equal(go.label, "OpenCode Go Catalog");
+  assert.equal(scnet.label, "SCNet");
+  assert.equal(scnet.creationHint, "选择套餐后创建为禁用草稿；路由尚未就绪");
+  assert.equal(custom.disabledReason, "服务商目录未提供该方案");
+
+  const unavailable = buildPlanOptions([
+    catalogEntry("command-code", "goat", {
+      creation_availability: "unavailable",
+      creation_unavailable_reason: "Raw backend English must not leak",
+    }),
+  ]).find(({ plan }) => plan.id === "command-code-goat")!;
+  assert.equal(unavailable.disabledReason, "该方案暂不可用");
+});

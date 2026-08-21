@@ -6,6 +6,7 @@
     :class="{
       'account-card--cooling': isCooling(account, now),
       'account-card--pending': !accountIsReady(account),
+      'account-card--draft': isDraft,
       'account-card--dragging': dragging,
     }"
   >
@@ -42,11 +43,11 @@
             </n-tag>
             <n-tag
               v-else
-              :type="isGoat ? 'warning' : 'default'"
+              :type="isDraft ? 'warning' : 'default'"
               size="small"
               :bordered="false"
             >
-              {{ providerOfferingLabel(account) }}
+              {{ planLabel(account, catalog) }}
             </n-tag>
             <n-tooltip v-if="account.auth_error || isCooling(account, now)">
               <template #trigger>
@@ -100,11 +101,14 @@
           <template #trigger>
             <n-switch
               :value="account.enabled"
+              :disabled="!account.plan_routable"
               :aria-label="account.enabled ? t('禁用账号 {name}', { name: account.name }) : t('启用账号 {name}', { name: account.name })"
               @update:value="emit('toggle')"
             />
           </template>
-          {{ account.enabled ? t("禁用账号 {name}", { name: account.name }) : t("启用账号 {name}", { name: account.name }) }}
+          {{ account.plan_routable
+            ? (account.enabled ? t("禁用账号 {name}", { name: account.name }) : t("启用账号 {name}", { name: account.name }))
+            : t("该方案暂不可路由") }}
         </n-tooltip>
 
         <n-tooltip v-if="isZen && accountIsReady(account) && account.enabled" trigger="hover">
@@ -207,6 +211,26 @@
       </n-space>
     </template>
 
+    <n-alert
+      v-if="planWarning"
+      class="account-plan-warning"
+      :type="planWarning.type"
+      :title="planWarning.title"
+      :show-icon="false"
+    >
+      {{ planWarning.message }}
+    </n-alert>
+
+    <n-alert
+      v-if="verificationError"
+      class="account-plan-warning"
+      type="error"
+      :show-icon="false"
+      :title="t('验证失败')"
+    >
+      {{ verificationError }}
+    </n-alert>
+
     <div v-if="!accountIsReady(account)" class="managed-pending">
       <div>
         <strong>{{ managedStepLabel(account.setup_step) }}</strong>
@@ -215,6 +239,9 @@
       <n-button type="primary" secondary @click="emit('open-wizard')">
         {{ t("继续注册") }}
       </n-button>
+    </div>
+    <div v-else-if="isDraft" class="provider-unconfigured" role="status">
+      {{ draftDescription }}
     </div>
     <div v-else-if="isGo && !quotaLimitsFailed">
       <div v-if="usageLoadError" class="usage-load-error" role="alert">
@@ -243,15 +270,13 @@
         {{ usageSyncCaption(account, now) }}
       </p>
     </div>
-    <div v-else-if="isGoat" class="provider-unconfigured" role="status">
-      {{ t("供应商尚未配置") }}
-    </div>
   </n-card>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
 import {
+  NAlert,
   NButton,
   NCard,
   NDropdown,
@@ -270,12 +295,14 @@ import {
   ThunderboltOutlined,
 } from "@vicons/antd";
 import type { Account, UsageWindow } from "../api/tauri";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { isCooling, isUsageLimitReached } from "../views/accounts-usage.ts";
 import type { UsageKey } from "../views/accounts-usage.ts";
 import {
   accountExpiryLabel,
   accountExpiryTagType,
   accountIsReady,
+  accountRoutingDraftDescription,
   accountStatusLabel,
   accountStatusTagType,
   cooldownDetails,
@@ -285,7 +312,8 @@ import {
   usageSyncCaption,
 } from "../views/account-display.ts";
 import type { AccountMenuOption } from "../views/account-display.ts";
-import { isZenFreeAccount, providerOfferingLabel } from "../views/account-providers.ts";
+import { isZenFreeAccount } from "../views/account-providers.ts";
+import { accountPlanWarning, planLabel } from "../views/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../views/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
@@ -293,6 +321,7 @@ import UsageStrip from "./UsageStrip.vue";
 
 const props = defineProps<{
   account: Account;
+  catalog: readonly ProviderCatalogEntry[] | null;
   usage: UsageWindow;
   limits: UsageLimitView[];
   edits: AccountUsageEdits | undefined;
@@ -329,9 +358,39 @@ const isZen = computed(() => isZenFreeAccount(props.account));
 const isGo = computed(() => (
   props.account.provider_id === "opencode" && props.account.offering_id === "go"
 ));
-const isGoat = computed(() => (
-  props.account.provider_id === "command-code" && props.account.offering_id === "goat"
+const isDraft = computed(() => (
+  accountIsReady(props.account)
+  && !props.account.plan_routable
 ));
+
+const draftDescription = computed(() => {
+  const key = accountRoutingDraftDescription(props.account);
+  return key ? t(key) : "";
+});
+
+const verificationError = computed(() => {
+  if (props.account.verification_status !== "failed") return null;
+  return props.account.verification_error?.trim() || t("验证失败");
+});
+
+const planWarning = computed(() => {
+  const warning = accountPlanWarning(props.account);
+  if (warning === "subscription") {
+    return {
+      type: "warning" as const,
+      title: t("订阅制"),
+      message: t("订阅制方案：额度、计费与续费由服务商订阅条款管理。"),
+    };
+  }
+  if (warning === "endpoint-risk") {
+    return {
+      type: "default" as const,
+      title: t("自定义端点"),
+      message: t("自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。"),
+    };
+  }
+  return null;
+});
 
 const usageEditorAvailable = computed(() => {
   if (props.usageLoading || props.usageLoadError) return false;
@@ -350,7 +409,8 @@ const usageEditorAvailable = computed(() => {
   border-color: color-mix(in srgb, var(--ocg-error) 45%, transparent);
 }
 
-.account-card--pending {
+.account-card--pending,
+.account-card--draft {
   border-color: color-mix(in srgb, var(--ocg-primary) 32%, var(--ocg-divider));
 }
 
@@ -359,9 +419,14 @@ const usageEditorAvailable = computed(() => {
   box-shadow: 0 10px 28px color-mix(in srgb, var(--ocg-primary) 18%, transparent);
   opacity: 0.72;
 }
+
 .provider-unconfigured {
   color: var(--ocg-warning);
   font-size: var(--ocg-font-sm);
+}
+
+.account-plan-warning {
+  margin-bottom: 12px;
 }
 
 .account-title {

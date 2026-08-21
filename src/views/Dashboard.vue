@@ -193,7 +193,7 @@
     <section class="kpi-row" :aria-label="t('用量摘要')" :aria-busy="!summaryLoaded">
       <article class="kpi-card">
         <span class="kpi-badge success"><n-icon aria-hidden="true"><KeyOutlined /></n-icon></span>
-        <div><strong>{{ summaryLoaded ? formatNumber(summary.available_accounts) : "—" }}<small v-if="summaryLoaded">/{{ formatNumber(summary.total_accounts) }}</small></strong><span>{{ t("可用账号") }}</span></div>
+        <div><strong>{{ summaryLoaded ? formatNumber(routableAccounts) : "—" }}</strong><span>{{ t("可路由账号") }}</span></div>
       </article>
       <article class="kpi-card">
         <span class="kpi-badge info"><n-icon aria-hidden="true"><CalendarOutlined /></n-icon></span>
@@ -207,6 +207,42 @@
         <span class="kpi-badge primary"><n-icon aria-hidden="true"><WalletOutlined /></n-icon></span>
         <div><strong>{{ summaryLoaded ? formatCost(summary.month_cost) : "—" }}</strong><span>{{ t("本月") }}</span></div>
       </article>
+    </section>
+
+    <section class="card attention-card" :aria-label="t('需要关注')" :aria-busy="!accountsLoaded">
+      <div class="card-head">
+        <div>
+          <h3 class="card-title">{{ t("需要关注") }}</h3>
+          <span class="card-desc">{{ attentionDesc }}</span>
+        </div>
+        <n-button
+          v-if="accountsLoaded && attentionItems.length > 0"
+          size="small"
+          @click="goToAccounts"
+        >
+          {{ t("前往账号页处理") }}
+        </n-button>
+      </div>
+      <div v-if="!accountsLoaded" class="section-state">
+        {{ loading ? t("加载中…") : t("仪表盘数据加载失败") }}
+      </div>
+      <n-empty v-else-if="attentionItems.length === 0" :description="t('所有账号状态正常')" />
+      <div v-else class="attention-list" role="list">
+        <button
+          v-for="item in attentionItems"
+          :key="item.accountId"
+          type="button"
+          class="attention-item"
+          role="listitem"
+          :aria-label="attentionItemAriaLabel(item)"
+          @click="goToAccounts"
+        >
+          <span class="attention-name">{{ item.accountName }}</span>
+          <n-tag size="small" :type="attentionTagType(item.reason)">
+            {{ attentionLabel(item) }}
+          </n-tag>
+        </button>
+      </div>
     </section>
 
     <section class="card provider-card" :aria-label="t('供应商摘要')" :aria-busy="!providerOverviewLoaded">
@@ -226,10 +262,12 @@
             <strong>{{ provider.label }}</strong>
             <n-tag
               size="small"
-              :type="provider.healthy > 0 ? 'success' : provider.provider_id === 'command-code' ? 'warning' : 'default'"
+              :type="provider.routable ? (provider.healthy > 0 ? 'success' : 'default') : 'warning'"
               :bordered="false"
             >
-              {{ provider.provider_id === "command-code" ? t("未配置") : t("健康 {healthy}/{total}", { healthy: provider.healthy, total: provider.total }) }}
+              {{ provider.routable
+                ? t("健康 {healthy}/{total}", { healthy: provider.healthy, total: provider.total })
+                : t("接入尚未就绪") }}
             </n-tag>
           </div>
           <dl class="provider-metrics">
@@ -315,8 +353,8 @@
           <div v-else-if="isZenAccount(account)" class="account-usage-empty">
             {{ t("免费 · 出口 IP 共享") }}
           </div>
-          <div v-else-if="isUnconfiguredAccount(account)" class="account-usage-empty account-usage-empty--pending">
-            {{ t("供应商尚未配置") }}
+          <div v-else-if="!account.plan_routable" class="account-usage-empty account-usage-empty--pending">
+            {{ routingDraftDescription(account) }}
           </div>
           <div v-else-if="usageMap[account.id]" class="account-usage mono">
             <div v-for="row in getUsageRows(account.id)" :key="row.label" class="account-usage-row">
@@ -368,12 +406,18 @@ import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
 import { userFacingError } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import { daysUntilDate, expiryTagType } from "./account-lifecycle";
+import {
+  accountRoutingDraftDescription,
+  accountRoutingDraftLabel,
+} from "./account-display.ts";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
 import {
   buildProviderOverviews,
   providerPairKey,
 } from "./dashboard-providers.ts";
 import type { ProviderOverview } from "./dashboard-providers.ts";
+import { buildNeedsAttention } from "./dashboard-attention.ts";
+import type { AttentionItem, AttentionReason } from "./dashboard-attention.ts";
 
 type ConnectionTarget = "api" | "key" | "upstream";
 
@@ -485,6 +529,76 @@ const connectionUrls = computed(() => {
 });
 const serviceApiUrl = computed(() => connectionUrls.value.apiBaseUrl);
 
+const routableAccounts = computed(() => (
+  accounts.value.filter((account) => (
+    account.setup_step === "ready"
+    && account.enabled
+    && account.plan_routable
+  )).length
+));
+
+const attentionItems = computed<AttentionItem[]>(() => {
+  if (!accountsLoaded.value) return [];
+  return buildNeedsAttention(
+    accounts.value,
+    usageFailedAccountIds.value,
+    lifecycleNow.value,
+  );
+});
+
+const attentionDesc = computed(() => {
+  if (!accountsLoaded.value) return t("加载中…");
+  const count = attentionItems.value.length;
+  return count > 0
+    ? t("账号数：{count}", { count: formatNumber(count) })
+    : t("所有账号状态正常");
+});
+
+function attentionAccount(item: AttentionItem): Account | undefined {
+  return accounts.value.find((account) => account.id === item.accountId);
+}
+
+function attentionLabel(item: AttentionItem): string {
+  switch (item.reason) {
+    case "auth-error":
+      return t("认证失效（401 熔断）");
+    case "expired": {
+      const account = attentionAccount(item);
+      return account
+        ? accountExpiryLabel(account)
+        : t("已到期 {days} 天", { days: 0 });
+    }
+    case "cooling":
+      return t("冷却中");
+    case "setup-incomplete":
+      return t("注册中");
+    case "usage-load-failed":
+      return t("读取失败");
+    case "verification-failed":
+      return t("验证失败");
+  }
+}
+
+function attentionTagType(
+  reason: AttentionReason,
+): "error" | "warning" | "info" | "default" {
+  switch (reason) {
+    case "auth-error":
+    case "expired":
+    case "usage-load-failed":
+    case "verification-failed":
+      return "error";
+    case "cooling":
+      return "warning";
+    case "setup-incomplete":
+      return "info";
+  }
+}
+
+function attentionItemAriaLabel(item: AttentionItem): string {
+  return `${item.accountName} · ${attentionLabel(item)}`;
+}
+
 function isCoolingDown(account: Account): boolean {
   if (!account.cooldown_until) return false;
   const until = Date.parse(account.cooldown_until);
@@ -493,7 +607,8 @@ function isCoolingDown(account: Account): boolean {
 
 function statusLabel(account: Account): string {
   if (account.setup_step !== "ready") return t("注册中");
-  if (isUnconfiguredAccount(account)) return t("未配置");
+  const draftLabel = accountRoutingDraftLabel(account);
+  if (draftLabel) return t(draftLabel);
   if (account.auth_error) {
     return account.enabled
       ? t("认证失效（401 熔断）")
@@ -503,9 +618,16 @@ function statusLabel(account: Account): string {
   return isCoolingDown(account) ? t("冷却中") : t("可用");
 }
 
+function routingDraftDescription(account: Account): string {
+  const key = accountRoutingDraftDescription(account);
+  return key ? t(key) : t("该方案暂不可路由。");
+}
+
 function accountStatusClass(account: Account): string {
   if (account.setup_step !== "ready") return "pending";
-  if (isUnconfiguredAccount(account)) return "pending";
+  if (!account.plan_routable) {
+    return account.verification_status === "failed" ? "auth-error" : "pending";
+  }
   if (account.auth_error) return "auth-error";
   if (!account.enabled) return "disabled";
   return isCoolingDown(account) ? "cooling" : "active";
@@ -513,10 +635,6 @@ function accountStatusClass(account: Account): string {
 
 function isZenAccount(account: Account): boolean {
   return account.provider_id === "opencode-zen-free" && account.offering_id === "anonymous-free";
-}
-
-function isUnconfiguredAccount(account: Account): boolean {
-  return account.provider_id === "command-code" && account.offering_id === "goat";
 }
 
 function providerCostText(provider: ProviderOverview): string {
@@ -1309,6 +1427,68 @@ onUnmounted(() => {
   .chart-stats {
     display: grid;
     gap: 2px;
+  }
+}
+
+.attention-card {
+  padding-bottom: 16px;
+}
+
+.attention-list {
+  display: grid;
+  gap: 8px;
+  padding: 4px 18px 0;
+}
+
+.attention-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--ocg-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ocg-canvas) 70%, var(--ocg-surface));
+  color: var(--ocg-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.attention-item:hover {
+  border-color: var(--ocg-primary);
+  background: color-mix(in srgb, var(--ocg-primary-soft) 40%, var(--ocg-surface));
+}
+
+.attention-item:focus-visible {
+  outline: 2px solid var(--ocg-primary);
+  outline-offset: 2px;
+}
+
+.attention-name {
+  overflow: hidden;
+  min-width: 0;
+  font-size: var(--ocg-font-md);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attention-item {
+    transition: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .attention-list {
+    padding: 4px 14px 0;
+  }
+
+  .attention-item {
+    padding: 9px 11px;
   }
 }
 </style>

@@ -76,6 +76,26 @@
                   </n-button>
                 </div>
               </div>
+              <div class="access-field access-field--alias">
+                <span>{{ t("模型别名") }}</span>
+                <div class="access-value">
+                  <code>{{ effectiveModelAlias || "<MODEL_ALIAS>" }}</code>
+                  <n-button
+                    circle
+                    quaternary
+                    :aria-label="t('复制 {label}', { label: t('模型别名') })"
+                    :disabled="!settingsLoaded || !effectiveModelAlias"
+                    @click="copyValue('model-alias', effectiveModelAlias, t('模型别名'))"
+                  >
+                    <template #icon>
+                      <n-icon :component="copiedTarget === 'model-alias' ? CheckOutlined : CopyOutlined" />
+                    </template>
+                  </n-button>
+                </div>
+                <p class="alias-explainer">
+                  {{ t("客户端以别名请求模型；上游模型 ID 仅在技术详情中出现。") }}
+                </p>
+              </div>
             </div>
 
             <div class="model-row">
@@ -117,7 +137,7 @@
                           :loading="modelsLoading"
                           :disabled="!settingsLoaded || (activeGuide.id === 'claude-desktop'
                             && (!claudeDesktopModelsLoaded || claudeDesktopModelsSaving))"
-                          :placeholder="t('选择模型 ID')"
+                          :placeholder="t('选择 Alias（模型 ID）')"
                           filterable
                           @update:value="updateModelField(field, $event)"
                         />
@@ -131,7 +151,7 @@
                           :options="activeModelOptions"
                           :loading="modelsLoading"
                           :disabled="!settingsLoaded"
-                          :placeholder="t('选择模型 ID')"
+                          :placeholder="t('选择 Alias（模型 ID）')"
                           max-tag-count="responsive"
                           multiple
                           filterable
@@ -144,7 +164,7 @@
                           :options="primaryModelOptions"
                           :loading="modelsLoading"
                           :disabled="!settingsLoaded"
-                          :placeholder="t('选择模型 ID')"
+                          :placeholder="t('选择 Alias（模型 ID）')"
                           filterable
                         />
                       </label>
@@ -314,6 +334,7 @@ import type { MenuOption, SelectGroupOption, SelectOption } from "naive-ui";
 import { CheckOutlined, CopyOutlined, ExportOutlined } from "@vicons/antd";
 import logoUrl from "../../assets/logo/ocg_logo_final_transparent.png";
 import { PRIMARY_KEY_ID, tauriApi, type ClaudeDesktopModels, type ConnectionSubKey } from "../api/tauri";
+import { selectedApplicationAlias } from "./application-alias.ts";
 import { useClipboard } from "../utils/format.ts";
 import {
   isGeminiCliBaseUrlAllowed,
@@ -487,6 +508,14 @@ const selectedApplicationModelIds = computed(() => {
 const usesMuseContributor = computed(() => (
   selectedApplicationModelIds.value.includes("muse-spark-1.2-contributor")
 ));
+
+const effectiveModelAlias = computed<string>(() => {
+  return selectedApplicationAlias(
+    activeGuide.value.modelFields,
+    modelValues.value,
+    selectedModel.value,
+  );
+});
 
 const connectionUrls = computed(() => {
   try {
@@ -972,6 +1001,17 @@ onUnmounted(() => {
   font: var(--ocg-font-md)/1.5 "Cascadia Mono", Consolas, monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.access-field--alias {
+  grid-column: 1 / -1;
+}
+
+.alias-explainer {
+  margin: 0;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
+  line-height: 1.5;
 }
 
 .guide-head,

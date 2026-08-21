@@ -1,0 +1,165 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { Account } from "../api/tauri.ts";
+import { buildNeedsAttention } from "./dashboard-attention.ts";
+import { accountPlanKey, accountStatusKey, filterAccounts, plansInUse } from "./account-filters.ts";
+import { PLAN_DEFINITIONS } from "./plans.ts";
+
+const NOW = Date.parse("2026-08-21T12:00:00Z");
+
+function account(overrides: Partial<Account>): Account {
+  return {
+    id: "acc-1",
+    name: "Account",
+    username: "",
+    password: "",
+    key: "key",
+    enabled: true,
+    account_type: "key",
+    setup_step: "ready",
+    provider_id: "opencode",
+    offering_id: "go",
+    credential_kind: "api_key",
+    quota_scope: "key",
+    free_alias_enabled: false,
+    purchase_date: "2026-08-01",
+    expires_on: "2026-09-01",
+    cooldown_until: null,
+    cooldown_generic_until: null,
+    cooldown_5h_until: null,
+    cooldown_week_until: null,
+    cooldown_month_until: null,
+    cooldown_free_until: null,
+    last_error: null,
+    auth_error: null,
+    notes: "",
+    usage_sync_last_success_at: null,
+    usage_sync_next_allowed_at: null,
+    verification_status: "not_required",
+    connection_verified_at: null,
+    verification_error: null,
+    plan_routable: true,
+    custom_config: null,
+    model_capabilities: [],
+    acknowledgements: [],
+    created_at: "2026-08-01T00:00:00Z",
+    updated_at: "2026-08-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+test("needs attention orders auth errors, expiry, cooling, drafts, load failures", () => {
+  const accounts = [
+    account({ id: "ok", name: "Fine" }),
+    account({ id: "auth", name: "Broken", auth_error: "401" }),
+    account({ id: "cool", name: "Cooling", cooldown_until: "2026-08-21T13:00:00Z" }),
+    account({ id: "draft", name: "Draft", setup_step: "key_verification" }),
+    account({ id: "gone", name: "Expired", expires_on: "2026-08-01" }),
+    account({ id: "off", name: "Disabled", enabled: false }),
+    account({ id: "usage", name: "Unreadable" }),
+  ];
+  const items = buildNeedsAttention(accounts, new Set(["usage"]), NOW);
+  assert.deepEqual(
+    items.map((item) => [item.accountId, item.reason]),
+    [
+      ["auth", "auth-error"],
+      ["gone", "expired"],
+      ["cool", "cooling"],
+      ["draft", "setup-incomplete"],
+      ["usage", "usage-load-failed"],
+    ],
+  );
+});
+
+test("disabled accounts and expired cooldowns never need attention", () => {
+  const accounts = [
+    account({ id: "off", name: "Off", enabled: false, cooldown_until: "2026-08-21T13:00:00Z" }),
+    account({ id: "past", name: "Past", cooldown_until: "2026-08-21T11:00:00Z" }),
+    account({ id: "offdraft", name: "OffDraft", enabled: false, setup_step: "payment" }),
+  ];
+  const items = buildNeedsAttention(accounts, new Set(), NOW);
+  assert.deepEqual(items.map((item) => item.accountId), ["offdraft"]);
+});
+
+test("zen free cooling is reported through the shared free lane", () => {
+  const zen = account({
+    id: "zen",
+    name: "Zen",
+    provider_id: "opencode-zen-free",
+    offering_id: "anonymous-free",
+    credential_kind: "none",
+    quota_scope: "egress-ip",
+    cooldown_free_until: "2026-08-21T13:00:00Z",
+  });
+  assert.deepEqual(buildNeedsAttention([zen], new Set(), NOW), [
+    { accountId: "zen", accountName: "Zen", reason: "cooling" },
+  ]);
+});
+
+test("status buckets mirror the card status labels", () => {
+  assert.equal(accountStatusKey(account({}), NOW), "available");
+  assert.equal(accountStatusKey(account({ enabled: false }), NOW), "disabled");
+  assert.equal(accountStatusKey(account({ auth_error: "401" }), NOW), "auth-error");
+  assert.equal(accountStatusKey(account({ setup_step: "payment" }), NOW), "registering");
+  assert.equal(
+    accountStatusKey(account({
+      enabled: false,
+      plan_routable: false,
+      verification_status: "pending",
+    }), NOW),
+    "verifying",
+  );
+  assert.equal(
+    accountStatusKey(account({
+      enabled: false,
+      plan_routable: false,
+      verification_status: "failed",
+    }), NOW),
+    "verification-failed",
+  );
+  assert.equal(
+    accountStatusKey(account({ cooldown_until: "2026-08-21T13:00:00Z" }), NOW),
+    "cooling",
+  );
+  assert.equal(
+    accountStatusKey(account({
+      provider_id: "opencode-zen-free",
+      offering_id: "anonymous-free",
+      cooldown_free_until: "2026-08-21T13:00:00Z",
+    }), NOW),
+    "cooling",
+  );
+});
+
+test("plan and status filters keep the existing priority order", () => {
+  const accounts = [
+    account({ id: "a", name: "A" }),
+    account({
+      id: "b",
+      name: "B",
+      provider_id: "opencode-zen-free",
+      offering_id: "anonymous-free",
+    }),
+    account({ id: "c", name: "C", auth_error: "401" }),
+  ];
+  assert.deepEqual(filterAccounts(accounts, "all", "all", NOW).map((a) => a.id), ["a", "b", "c"]);
+  assert.deepEqual(filterAccounts(accounts, "zen-free", "all", NOW).map((a) => a.id), ["b"]);
+  assert.deepEqual(filterAccounts(accounts, "all", "auth-error", NOW).map((a) => a.id), ["c"]);
+  assert.deepEqual(filterAccounts(accounts, "opencode-go", "available", NOW).map((a) => a.id), ["a"]);
+  // Unknown pairs fall back to the raw provider/offering key.
+  assert.equal(
+    accountPlanKey(account({ provider_id: "else", offering_id: "where" })),
+    "else/where",
+  );
+});
+
+test("plansInUse follows registry order, not account order", () => {
+  const accounts = [
+    account({ id: "b", name: "B", provider_id: "opencode-zen-free", offering_id: "anonymous-free" }),
+    account({ id: "a", name: "A" }),
+  ];
+  assert.deepEqual(
+    plansInUse(accounts, PLAN_DEFINITIONS).map((plan) => plan.id),
+    ["opencode-go", "zen-free"],
+  );
+});

@@ -1,0 +1,65 @@
+import type { Account } from "../api/tauri.ts";
+import type { PlanDefinition } from "./plans.ts";
+import { planForAccount } from "./plans.ts";
+import { isCooling, isFreeCooling } from "./accounts-usage.ts";
+import { isZenFreeAccount } from "./account-providers.ts";
+
+/**
+ * Plan/status filters for the Accounts workbench. Both filters are pure and
+ * client-side: the account list is already fully loaded, and filtering must
+ * never change the manually ordered priority sequence.
+ */
+
+export type AccountStatusKey =
+  | "available"
+  | "cooling"
+  | "auth-error"
+  | "disabled"
+  | "registering"
+  | "verifying"
+  | "verification-failed";
+
+export type AccountPlanFilter = "all" | string;
+export type AccountStatusFilter = "all" | AccountStatusKey;
+
+/** The single status bucket an account belongs to right now. */
+export function accountStatusKey(account: Account, now: number = Date.now()): AccountStatusKey {
+  if (isZenFreeAccount(account)) {
+    if (!account.enabled) return "disabled";
+    return isFreeCooling(account, now) ? "cooling" : "available";
+  }
+  if (account.setup_step !== "ready") return "registering";
+  if (!account.plan_routable && account.verification_status === "pending") return "verifying";
+  if (!account.plan_routable && account.verification_status === "failed") return "verification-failed";
+  if (account.auth_error) return "auth-error";
+  if (!account.enabled) return "disabled";
+  return isCooling(account, now) ? "cooling" : "available";
+}
+
+/** The plan family id an account belongs to, or the raw pair for unknown plans. */
+export function accountPlanKey(account: Pick<Account, "provider_id" | "offering_id">): string {
+  const plan: PlanDefinition | null = planForAccount(account);
+  return plan ? plan.id : `${account.provider_id}/${account.offering_id}`;
+}
+
+export function filterAccounts(
+  accounts: readonly Account[],
+  planFilter: AccountPlanFilter,
+  statusFilter: AccountStatusFilter,
+  now: number = Date.now(),
+): Account[] {
+  return accounts.filter((account) => {
+    if (planFilter !== "all" && accountPlanKey(account) !== planFilter) return false;
+    if (statusFilter !== "all" && accountStatusKey(account, now) !== statusFilter) return false;
+    return true;
+  });
+}
+
+/** Plans that have at least one account, in stable registry order. */
+export function plansInUse(
+  accounts: readonly Account[],
+  registry: readonly PlanDefinition[],
+): PlanDefinition[] {
+  const used = new Set(accounts.map((account) => accountPlanKey(account)));
+  return registry.filter((plan) => used.has(plan.id));
+}

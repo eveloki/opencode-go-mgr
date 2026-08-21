@@ -17,8 +17,21 @@ const catalogEntry = (
   credential_kind: "api_key",
   quota_scope: "key",
   singleton: false,
+  display_name: `${provider_id} ${offering_id}`,
+  display_family: provider_id,
+  creation_availability: "available",
+  verification_policy: "not_required",
+  verification_runtime_availability: "optional",
+  routable: true,
+  managed_registration: provider_id === "opencode",
   pricing_availability: "available",
   usage_availability: "available",
+  quota_unit: "usd",
+  model_source: "test",
+  auth_schemes: ["bearer"],
+  upstream_protocols: ["chat_completions"],
+  form_fields: [],
+  model_aliases: [],
 });
 
 test("pricing sections keep the three known offerings in stable order without a catalog", () => {
@@ -95,27 +108,55 @@ test("pricing catalog fetches the provider catalog explicitly and keeps the Go t
   assert.match(catalog, /onMounted\(\(\) => void loadProviderCatalog\(\)\)/);
   // No auto-refresh of the catalog or prices.
   assert.doesNotMatch(catalog, /setInterval|setTimeout/);
-  // Loading / error / empty states with retry.
+  // Loading and error states with retry; every catalog plan has an explicit
+  // unavailable state, so an empty catalog does not need a fabricated card.
   assert.match(catalog, /role="status"/);
   assert.match(catalog, /aria-live="polite"/);
   assert.match(catalog, /加载服务商目录失败: \{error\}/);
   assert.match(catalog, /@click="loadProviderCatalog"/);
-  assert.match(catalog, /服务商目录暂无数据/);
+  // Pricing is grouped by Plan via the pure grouping helper.
+  assert.match(catalog, /buildPlanPricingGroups/);
+  assert.match(catalog, /resolvePlanPricingDisplay/);
+  assert.match(catalog, /v-for="group in planGroups"/);
   // OpenCode Go keeps the full table/edit/manual-refresh flow.
   assert.match(catalog, /onMounted\(\(\) => void loadPricing\(\)\)/);
   assert.match(catalog, /@click="requestPricingRefresh"/);
-  assert.match(catalog, /OpenCode Go 额度价格表/);
-  // GOAT and Zen Free render semantic placeholders, not price tables.
-  assert.match(catalog, /secondaryOfferingSections/);
-  assert.match(catalog, /实验性接入，尚未配置价格目录，不展示价格表。/);
-  assert.match(catalog, /零价格；额度按出口 IP 共享，429 后整条 free 通道冷却。/);
-  const secondaryBlock = catalog.slice(catalog.indexOf("secondaryOfferingSections"));
-  assert.doesNotMatch(secondaryBlock.slice(0, secondaryBlock.indexOf("</template>")), /n-data-table/);
+  const goBlockStart = catalog.indexOf("group.content.kind === 'opencode-go'");
+  assert.notEqual(goBlockStart, -1);
+  const goBlock = catalog.slice(goBlockStart, catalog.indexOf("</template>", goBlockStart));
+  assert.match(goBlock, /n-data-table/);
+  // The exhaustive state copy is behavior-tested in pricing-plans.test.ts;
+  // the only rendered data table still belongs to OpenCode Go.
+  assert.equal(catalog.match(/<n-data-table/g)?.length, 1);
 });
 
-test("GOAT is labeled experimental in the account provider selector", () => {
+test("account form uses the catalog display name and does not invent GOAT availability", () => {
   const accountForm = readFileSync(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
+  const accountCard = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const chooser = readFileSync(new URL("../components/AccountAddModal.vue", import.meta.url), "utf8");
 
-  assert.match(accountForm, /offering\.provider_id === "command-code"/);
-  assert.match(accountForm, /t\("\{label\}（实验性 · 未配置）", \{ label: offering\.label \}\)/);
+  assert.match(accountForm, /label: entry\.display_name/);
+  assert.match(accountForm, /t\("添加 \{plan\} 账号"/);
+  assert.match(accountForm, /'aria-label': `\$\{t\('模型 ID'\)\} \$\{index \+ 1\}`/);
+  assert.match(accountForm, /:aria-label="`\$\{t\('协议'\)\} \$\{index \+ 1\}`"/);
+  assert.match(accountForm, /:aria-label="`\$\{t\('删除'\)\} \$\{t\('模型能力'\)\} \$\{index \+ 1\}`"/);
+  assert.match(accountForm, /:disabled="fieldImmutableAfterCreate\('upstream_protocol'\)"/);
+  assert.match(accountForm, /:disabled="fieldImmutableAfterCreate\('auth_scheme'\)"/);
+  assert.equal(accountForm.match(/t\("创建后不可修改"\)/g)?.length, 2);
+  assert.match(accountForm, /t\(accountCreatePayloadErrorKey\(error\)\)/);
+  assert.doesNotMatch(accountForm, /实验性 · 未配置/);
+  assert.match(accountCard, /planLabel\(account, catalog\)/);
+  assert.doesNotMatch(accountCard, /<n-tag v-if="isDraft"/);
+  assert.match(accounts, /:catalog="providerCatalog"/);
+  assert.match(accounts, /@import-key="openCreateModal\(OPENCODE_GO_PLAN\)"/);
+  assert.match(accounts, /加载服务商目录失败: \{error\}/);
+  assert.match(chooser, /t\(option\.disabledReason\)/);
+  assert.match(chooser, /t\(option\.creationHint\)/);
+});
+
+test("Applications labels all model selectors as Alias-first", () => {
+  const applications = readFileSync(new URL("./Applications.vue", import.meta.url), "utf8");
+  assert.equal(applications.match(/t\('选择 Alias（模型 ID）'\)/g)?.length, 3);
+  assert.doesNotMatch(applications, /t\('选择模型 ID'\)/);
 });

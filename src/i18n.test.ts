@@ -89,6 +89,69 @@ test("managed account copy is localized instead of inheriting English fallbacks"
   }
 });
 
+test("v2 plan, form, draft, pricing, and Alias copy has no English fallback in any non-English locale", () => {
+  const localizedCatalogs = {
+    "zh-TW": zhTWMessages,
+    "ja-JP": jaJPMessages,
+    "ko-KR": koKRMessages,
+    "es-ES": esESMessages,
+    "fr-FR": frFRMessages,
+    "de-DE": deDEMessages,
+    "pt-BR": ptBRMessages,
+    "ru-RU": ruRUMessages,
+  } as const;
+  const keys = [
+    "服务商目录加载失败",
+    "服务套餐",
+    "选择服务套餐",
+    "例如：主号",
+    "Base URL",
+    "上游协议",
+    "选择上游协议",
+    "鉴权方式",
+    "选择鉴权方式",
+    "查看完整条款",
+    "我已阅读并同意上述条款",
+    "模型能力",
+    "模型 ID",
+    "选择 Alias（模型 ID）",
+    "添加模型",
+    "Key 须以 {prefix} 开头",
+    "请填写 Base URL",
+    "请阅读并同意条款",
+    "请至少添加一个模型能力",
+    "创建为禁用草稿；验证与路由尚未就绪",
+    "选择套餐后创建为禁用草稿；路由尚未就绪",
+    "路由尚未就绪",
+    "填写端点与模型能力后创建为禁用草稿；路由尚未就绪",
+    "该方案暂不可路由",
+    "该方案暂不可路由。",
+    "待验证",
+    "等待支持",
+    "接入尚未就绪",
+    "该方案验证功能暂不可用，创建后保持禁用草稿。",
+    "账号待验证，验证通过前保持禁用。",
+    "验证失败，请检查 Key 或等待该方案支持验证。",
+    "验证失败",
+    "验证中",
+    "该方案无需价格表",
+    "该方案未定价",
+    "解析别名",
+    "模型解析",
+    "请求模型",
+    "添加 {plan} 账号",
+    "无法确定账号方案，请关闭后重试",
+    "创建后不可修改",
+    "账号创建失败，请重试",
+  ] satisfies MessageKey[];
+
+  for (const [localeName, catalog] of Object.entries(localizedCatalogs)) {
+    for (const key of keys) {
+      assert.notEqual(catalog[key], enUSMessages[key], `${localeName}: ${key}`);
+    }
+  }
+});
+
 test("translations react to locale changes and preserve interpolation", () => {
   setLocale("en-US");
   assert.equal(t("已复制 {label}", { label: "API Base URL" }), "Copied API Base URL");

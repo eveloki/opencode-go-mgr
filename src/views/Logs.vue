@@ -252,7 +252,7 @@
           :row-key="logRowKey"
           :loading="forwardLoading"
           :pagination="forwardPagination"
-          :scroll-x="1585"
+          :scroll-x="2000"
           remote
           size="small"
           @update:page="changeForwardPage"
@@ -300,6 +300,17 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
 import type { TimePreset } from "./log-time-range.ts";
 import { providerOfferingLabel } from "./account-providers.ts";
+import { providerApi, type ProviderCatalogEntry } from "../api/providers.ts";
+import {
+  forwardLogAlias,
+  forwardLogLatencyMs,
+  forwardLogPlanLabel,
+  forwardLogProtocol,
+  forwardLogRequestedModel,
+  forwardLogResolvedAlias,
+  forwardLogTotalTokens,
+  forwardLogUpstreamModel,
+} from "./forward-log-display.ts";
 
 type LogTab = "gateway" | "forward";
 type SortBy = "timestamp" | "attempt" | "prompt_tokens" | "completion_tokens" | "cached_tokens" | "cost";
@@ -322,6 +333,7 @@ const forwardLogs = ref<ForwardLog[]>([]);
 const accounts = ref<Account[]>([]);
 const models = ref<string[]>([]);
 const clientKeys = ref<ForwardLogClientKey[]>([]);
+const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
 const gatewayLoading = ref(false);
 const gatewayError = ref("");
 const forwardLoading = ref(false);
@@ -579,6 +591,25 @@ function focusRequestChain(requestId: string) {
   sortOrder.value = "asc";
 }
 
+function renderAliasDetail(row: ForwardLog) {
+  const items = (
+    [
+      [t("请求模型"), forwardLogRequestedModel(row)],
+      [t("解析别名"), forwardLogResolvedAlias(row)],
+      [t("上游模型"), forwardLogUpstreamModel(row)],
+      [t("协议"), forwardLogProtocol(row)],
+    ] as Array<[string, string | null]>
+  ).filter((pair): pair is [string, string] => pair[1] !== null);
+  if (!items.length) return null;
+  return h("section", [
+    h("h4", t("模型解析")),
+    h("dl", { class: "diagnostic-meta" }, items.flatMap(([label, value]) => [
+      h("dt", label),
+      h("dd", value),
+    ])),
+  ]);
+}
+
 function renderForwardDetail(row: ForwardLog) {
   const requestId = row.request_id;
   const requestBlock = requestId
@@ -604,6 +635,7 @@ function renderForwardDetail(row: ForwardLog) {
     : null;
   return h("div", { class: "diagnostic-detail" }, [
     requestBlock,
+    renderAliasDetail(row),
     renderProviderCost(row),
     renderDiagnostic(row),
   ]);
@@ -706,7 +738,8 @@ const forwardColumns = computed(() => [
     align: "center" as const,
     render: (row: ForwardLog) => row.attempt ? `#${row.attempt}` : "—",
   },
-  { title: t("模型"), key: "model", width: 200, ellipsis: { tooltip: true } },
+  { title: t("模型别名"), key: "model_alias", width: 180, ellipsis: { tooltip: true }, render: (row: ForwardLog) => forwardLogAlias(row) },
+  { title: t("方案"), key: "plan", width: 160, ellipsis: { tooltip: true }, render: (row: ForwardLog) => forwardLogPlanLabel(row, providerCatalog.value) ?? "—" },
   { title: t("账号"), key: "account_name", width: 120, ellipsis: { tooltip: true } },
   {
     title: t("状态"),
@@ -735,6 +768,8 @@ const forwardColumns = computed(() => [
       return h("div", { class: "status-tags" }, tags);
     },
   },
+  { title: t("总 Tokens"), key: "total_tokens", width: 110, align: "right" as const, render: (row: ForwardLog) => formatNumber(forwardLogTotalTokens(row)) },
+  { title: t("耗时"), key: "latency", width: 100, align: "right" as const, render: (row: ForwardLog) => { const ms = forwardLogLatencyMs(row); return ms === null ? "—" : `${ms} ms`; } },
   { title: "HTTP", key: "http_status", width: 72 },
   { title: t("输入"), key: "prompt_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.prompt_tokens) },
   { title: t("输出"), key: "completion_tokens", width: 92, align: "right" as const, render: (row: ForwardLog) => formatNumber(row.completion_tokens) },
@@ -888,6 +923,15 @@ async function loadForwardLogKeys() {
   }
 }
 
+async function loadProviderCatalog() {
+  try {
+    providerCatalog.value = await providerApi.getProviderCatalog();
+  } catch {
+    // Catalog failure only disables plan labels; logs remain usable.
+    providerCatalog.value = null;
+  }
+}
+
 async function refreshForwardLogs() {
   await Promise.all([loadForwardLogs(), loadForwardLogModels(), loadForwardLogKeys()]);
 }
@@ -947,6 +991,7 @@ onMounted(() => {
   void loadAccounts();
   void loadForwardLogModels();
   void loadForwardLogKeys();
+  void loadProviderCatalog();
 });
 
 onUnmounted(cleanup);
@@ -999,10 +1044,9 @@ onUnmounted(cleanup);
   text-overflow: ellipsis;
 }
 .filter-bar {
-  display: grid;
-  /* request-id, status, account, model, key, time-range, sort, actions */
-  grid-template-columns: 240px 140px 180px 180px 180px 120px auto 1fr;
-  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -1010,7 +1054,21 @@ onUnmounted(cleanup);
   display: flex;
   flex-direction: column;
   gap: 4px;
+  flex: 1 1 160px;
   min-width: 0;
+}
+.filter-field.request-id-field {
+  flex: 2 1 220px;
+  max-width: 320px;
+}
+.filter-field.time-range-field {
+  flex: 1 1 200px;
+}
+.filter-actions {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 .filter-label {
   font-size: var(--ocg-font-xs);
@@ -1018,6 +1076,7 @@ onUnmounted(cleanup);
   line-height: 1.2;
 }
 .time-range-trigger {
+  width: 100%;
   min-width: 120px;
   max-width: 240px;
   justify-content: flex-start;
@@ -1154,18 +1213,6 @@ onUnmounted(cleanup);
   overflow: auto;
 }
 
-@media (max-width: 1200px) {
-  .filter-bar {
-    grid-template-columns: repeat(4, 1fr) auto;
-  }
-  .request-id-field {
-    grid-column: span 2;
-  }
-  .time-range-field {
-    grid-column: span 2;
-  }
-}
-
 @media (max-width: 860px) {
   .time-range-panel {
     flex-direction: column;
@@ -1188,12 +1235,6 @@ onUnmounted(cleanup);
     grid-template-columns: repeat(3, 1fr);
     gap: 8px;
   }
-  .filter-bar {
-    grid-template-columns: 1fr 1fr auto;
-  }
-  .time-range-field {
-    grid-column: span 2;
-  }
 }
 
 @media (max-width: 560px) {
@@ -1203,11 +1244,11 @@ onUnmounted(cleanup);
   .stats-row {
     grid-template-columns: repeat(2, 1fr);
   }
-  .filter-bar {
-    grid-template-columns: 1fr 1fr auto;
+  .filter-field {
+    flex: 1 1 140px;
   }
-  .time-range-field {
-    grid-column: span 2;
+  .filter-actions {
+    margin-left: 0;
   }
 }
 </style>

@@ -4,7 +4,7 @@
     preset="card"
     :title="title"
     class="account-modal"
-    style="width: 560px; max-width: calc(100vw - 32px)"
+    style="width: 600px; max-width: calc(100vw - 32px)"
     :mask-closable="false"
     @update:show="$emit('update:show', $event)"
   >
@@ -14,51 +14,183 @@
       :rules="rules"
       label-placement="top"
     >
+      <n-alert v-if="formError" type="error" class="form-error" role="alert">
+        {{ formError }}
+      </n-alert>
       <div class="modal-grid">
-        <n-form-item path="providerId" :label="t('服务商')">
+        <n-form-item v-if="!isEdit && offeringOptions.length > 1" path="offeringId" :label="t('服务套餐')">
           <n-select
-            v-model:value="form.providerId"
-            :options="providerOptions"
-            :disabled="isEdit"
+            v-model:value="form.offeringId"
+            :options="offeringOptions"
+            :placeholder="t('选择服务套餐')"
           />
         </n-form-item>
-        <n-form-item path="username" :label="t('账号')">
-          <n-input
-            :value="form.username"
-            :input-props="{ 'aria-label': t('登录账号') }"
-            :placeholder="t('OpenCode-Go 账号')"
-            @update:value="handleUsernameUpdate"
-          />
-        </n-form-item>
+
         <n-form-item path="name" :label="t('名称')">
           <n-input
             :value="form.name"
             :input-props="{ 'aria-label': t('名称') }"
-            :placeholder="t('主号')"
+            :placeholder="t('例如：主号')"
             @update:value="handleNameUpdate"
           />
         </n-form-item>
-        <n-form-item path="purchaseDate" :label="t('购买日期')">
+
+        <n-form-item
+          v-if="hasField('username')"
+          path="username"
+          :label="t('账号')"
+        >
+          <n-input
+            :value="form.username"
+            :input-props="{ 'aria-label': t('登录账号') }"
+            :placeholder="t('OpenCode-Go 账号')"
+            @update:value="form.username = $event"
+          />
+        </n-form-item>
+
+        <n-form-item
+          v-if="hasField('purchase_date')"
+          path="purchaseDate"
+          :label="t('购买日期')"
+        >
           <n-date-picker
             v-model:value="form.purchaseDate"
             type="date"
             format="yyyy-MM-dd"
             :actions="['now']"
-            :clearable="false"
+            :clearable="!purchaseDateRequired"
             :is-date-disabled="isPurchaseDateDisabled"
             :input-props="{ 'aria-label': t('购买日期') }"
           />
         </n-form-item>
-        <n-form-item path="key" :label="t('API Key')">
+
+        <n-form-item
+          v-if="hasField('key')"
+          path="key"
+          :label="t('API Key')"
+          class="key-field"
+        >
           <n-input
             v-model:value="form.key"
             :input-props="{ 'aria-label': t('API Key') }"
             type="password"
             show-password-on="click"
-            :placeholder="isEdit ? t('留空不修改') : 'sk-...'"
+            :placeholder="keyPlaceholder"
+          />
+          <p v-if="keyPrefixHint" class="field-hint">{{ keyPrefixHint }}</p>
+        </n-form-item>
+
+        <n-form-item
+          v-if="hasField('base_url')"
+          path="baseUrl"
+          :label="t('Base URL')"
+          class="full-width-field"
+        >
+          <n-input
+            v-model:value="form.baseUrl"
+            :input-props="{ 'aria-label': t('Base URL') }"
+            :placeholder="t('https://api.example.com/v1')"
           />
         </n-form-item>
-        <n-form-item v-if="isEdit" path="notes" :label="t('备注')" class="notes-field">
+
+        <n-form-item
+          v-if="hasField('upstream_protocol')"
+          path="upstreamProtocol"
+          :label="t('上游协议')"
+        >
+          <n-select
+            v-model:value="form.upstreamProtocol"
+            :options="upstreamProtocolOptions"
+            :disabled="fieldImmutableAfterCreate('upstream_protocol')"
+            :placeholder="t('协议')"
+          />
+          <p v-if="fieldImmutableAfterCreate('upstream_protocol')" class="field-hint">
+            {{ t("创建后不可修改") }}
+          </p>
+        </n-form-item>
+
+        <n-form-item
+          v-if="hasField('auth_scheme')"
+          path="authScheme"
+          :label="t('鉴权方式')"
+        >
+          <n-select
+            v-model:value="form.authScheme"
+            :options="authSchemeOptions"
+            :disabled="fieldImmutableAfterCreate('auth_scheme')"
+            :placeholder="t('鉴权方式')"
+          />
+          <p v-if="fieldImmutableAfterCreate('auth_scheme')" class="field-hint">
+            {{ t("创建后不可修改") }}
+          </p>
+        </n-form-item>
+
+        <n-form-item
+          v-if="hasField('acknowledgement')"
+          path="acknowledgementAccepted"
+          class="full-width-field"
+        >
+          <template v-if="riskNotice">
+            <n-alert type="warning" :show-icon="false" class="risk-notice">
+              <p>{{ riskNotice.body }}</p>
+              <a
+                :href="riskNotice.source_url"
+                target="_blank"
+                rel="noopener noreferrer"
+              >{{ t("查看完整条款") }}</a>
+            </n-alert>
+            <n-checkbox v-model:checked="form.acknowledgementAccepted">
+              {{ t("我已阅读并同意上述条款") }}
+            </n-checkbox>
+          </template>
+        </n-form-item>
+
+        <n-form-item
+          v-if="hasField('model_capabilities')"
+          path="modelCapabilities"
+          :label="t('模型能力')"
+          class="full-width-field"
+        >
+          <div class="capability-rows">
+            <div
+              v-for="(cap, index) in form.modelCapabilities"
+              :key="index"
+              class="capability-row"
+            >
+              <n-input
+                v-model:value="cap.model_id"
+                :input-props="{ 'aria-label': `${t('模型 ID')} ${index + 1}` }"
+                :placeholder="t('模型 ID')"
+              />
+              <n-select
+                v-model:value="cap.protocol"
+                :options="upstreamProtocolOptions"
+                :placeholder="t('协议')"
+                :aria-label="`${t('协议')} ${index + 1}`"
+              />
+              <n-button
+                circle
+                quaternary
+                size="small"
+                :aria-label="`${t('删除')} ${t('模型能力')} ${index + 1}`"
+                @click="removeCapability(index)"
+              >
+                <template #icon><n-icon :component="MinusCircleOutlined" /></template>
+              </n-button>
+            </div>
+            <n-button size="small" secondary @click="addCapability">
+              <template #icon><n-icon :component="PlusOutlined" /></template>
+              {{ t("添加模型") }}
+            </n-button>
+          </div>
+        </n-form-item>
+
+        <n-form-item
+          v-if="hasField('notes')"
+          path="notes"
+          :label="t('备注')"
+          class="full-width-field"
+        >
           <n-input
             v-model:value="form.notes"
             type="textarea"
@@ -95,21 +227,37 @@
 import { computed, ref, watch } from "vue";
 import type { FormInst, FormRules } from "naive-ui";
 import {
+  NAlert,
   NButton,
+  NCheckbox,
   NDatePicker,
   NForm,
   NFormItem,
+  NIcon,
   NInput,
   NModal,
   NSelect,
   NSpace,
 } from "naive-ui";
-import type { Account } from "../api/tauri";
+import { MinusCircleOutlined, PlusOutlined } from "@vicons/antd";
+import type { Account, AccountInput } from "../api/tauri";
+import type { ProviderCatalogEntry, ProviderCatalogFormField } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
 import { localDateString } from "../views/account-lifecycle";
-import { PROVIDER_OFFERINGS } from "../views/account-providers.ts";
+import { findCatalogEntry, findPlanDefinition, planFamilyLabel } from "../views/plans.ts";
+import type { PlanDefinition } from "../views/plans.ts";
+import {
+  accountFormFieldIsImmutable,
+  resolveAccountFormFields,
+} from "../views/account-form-fields.ts";
+import {
+  accountCreatePayloadErrorKey,
+  buildCreateAccountPayload,
+  type AccountCreateCapability,
+  type AccountCreateFormValues,
+} from "../views/account-create-payload.ts";
 
-type AccountFormPayload = {
+export type AccountFormPayload = {
   name: string;
   username: string;
   key?: string;
@@ -119,13 +267,18 @@ type AccountFormPayload = {
   notes: string;
 };
 
-type AccountDraft = {
+type FormModel = {
   name: string;
   username: string;
   key: string;
-  providerId: string;
   purchaseDate: number | null;
   notes: string;
+  offeringId: string;
+  baseUrl: string;
+  upstreamProtocol: "chat_completions" | "responses" | "messages" | null;
+  authScheme: "bearer" | "x-api-key" | null;
+  acknowledgementAccepted: boolean;
+  modelCapabilities: AccountCreateCapability[];
 };
 
 const props = withDefaults(defineProps<{
@@ -133,30 +286,109 @@ const props = withDefaults(defineProps<{
   account: Account | null;
   isCooling?: boolean;
   busy?: boolean;
+  /** The selected plan family when creating an account. */
+  plan: PlanDefinition | null;
+  /** Provider catalog; when null, only the legacy OpenCode Go path is supported. */
+  catalog: readonly ProviderCatalogEntry[] | null;
 }>(), {
   account: null,
   isCooling: false,
   busy: false,
+  plan: null,
+  catalog: null,
 });
 
 const emit = defineEmits<{
   (e: "update:show", value: boolean): void;
-  (e: "save", payload: AccountFormPayload): void;
+  (e: "save", payload: AccountInput | AccountFormPayload): void;
   (e: "resetCooldown"): void;
 }>();
 
 const formRef = ref<FormInst | null>(null);
-const form = ref<AccountDraft>(blankAccountDraft());
+const form = ref<FormModel>(blankForm());
 const nameWasEdited = ref(false);
+const formError = ref("");
 
 const isEdit = computed(() => !!props.account);
-const title = computed(() => (isEdit.value ? t("编辑账号") : t("导入已有 Key")));
-const providerOptions = computed(() => PROVIDER_OFFERINGS.map((offering) => ({
-  value: offering.provider_id,
-  label: offering.provider_id === "command-code"
-    ? t("{label}（实验性 · 未配置）", { label: offering.label })
-    : offering.label,
-})));
+const title = computed(() => {
+  if (isEdit.value) return t("编辑账号");
+  const plan = effectivePlan.value;
+  return plan
+    ? t("添加 {plan} 账号", { plan: planFamilyLabel(plan, props.catalog) })
+    : t("导入已有 Key");
+});
+
+const effectivePlan = computed<PlanDefinition | null>(() => {
+  if (isEdit.value) {
+    const account = props.account!;
+    return findPlanDefinition(account.provider_id, account.offering_id) ?? null;
+  }
+  return props.plan;
+});
+
+const offeringOptions = computed(() => {
+  const plan = effectivePlan.value;
+  if (!plan) return [];
+  return plan.offering_ids
+    .map((offeringId) => findCatalogEntry(props.catalog, plan.provider_id, offeringId))
+    .filter((entry): entry is ProviderCatalogEntry => !!entry)
+    .map((entry) => ({ value: entry.offering_id, label: entry.display_name }));
+});
+
+const selectedOfferingId = computed(() => {
+  if (form.value.offeringId) return form.value.offeringId;
+  return offeringOptions.value[0]?.value ?? effectivePlan.value?.offering_ids[0] ?? "";
+});
+
+const catalogEntry = computed<ProviderCatalogEntry | undefined>(() => {
+  const plan = effectivePlan.value;
+  if (!plan) return undefined;
+  return findCatalogEntry(props.catalog, plan.provider_id, selectedOfferingId.value);
+});
+
+const formFields = computed<ProviderCatalogFormField[]>(() => {
+  return resolveAccountFormFields(effectivePlan.value, catalogEntry.value);
+});
+
+const fieldMap = computed(() => new Map(formFields.value.map((field) => [field.id, field])));
+
+function hasField(id: string): boolean {
+  return fieldMap.value.has(id);
+}
+
+function fieldRequired(id: string): boolean {
+  return fieldMap.value.get(id)?.required ?? false;
+}
+
+function fieldImmutableAfterCreate(id: string): boolean {
+  return accountFormFieldIsImmutable(fieldMap.value.get(id), isEdit.value);
+}
+
+const keyPrefixHint = computed(() => {
+  const prefix = catalogEntry.value?.key_prefix;
+  if (!prefix) return "";
+  return t("Key 须以 {prefix} 开头", { prefix });
+});
+
+const keyPlaceholder = computed(() => {
+  const prefix = catalogEntry.value?.key_prefix;
+  if (prefix) return prefix + "...";
+  return "sk-...";
+});
+
+const purchaseDateRequired = computed(() => fieldRequired("purchase_date"));
+
+const upstreamProtocolOptions = computed(() => {
+  const protocols = catalogEntry.value?.upstream_protocols ?? ["chat_completions", "responses", "messages"];
+  return protocols.map((value) => ({ value, label: value }));
+});
+
+const authSchemeOptions = computed(() => {
+  const schemes = catalogEntry.value?.auth_schemes ?? ["bearer"];
+  return schemes.map((value) => ({ value, label: value }));
+});
+
+const riskNotice = computed(() => catalogEntry.value?.risk_notice ?? null);
 
 const rules = computed<FormRules>(() => {
   const base: FormRules = {
@@ -166,7 +398,10 @@ const rules = computed<FormRules>(() => {
       message: t("名称不能为空"),
       trigger: ["input", "blur"],
     },
-    purchaseDate: [
+  };
+
+  if (fieldRequired("purchase_date")) {
+    base.purchaseDate = [
       {
         required: true,
         type: "number",
@@ -181,9 +416,10 @@ const rules = computed<FormRules>(() => {
         message: t("购买日期不能晚于今天"),
         trigger: ["change", "blur"],
       },
-    ],
-  };
-  if (!isEdit.value) {
+    ];
+  }
+
+  if (hasField("key") && !isEdit.value) {
     base.key = {
       required: true,
       whitespace: true,
@@ -191,16 +427,72 @@ const rules = computed<FormRules>(() => {
       trigger: ["input", "blur"],
     };
   }
+
+  if (hasField("base_url") && fieldRequired("base_url")) {
+    base.baseUrl = {
+      required: true,
+      whitespace: true,
+      message: t("请填写 Base URL"),
+      trigger: ["input", "blur"],
+    };
+  }
+
+  if (hasField("upstream_protocol") && fieldRequired("upstream_protocol")) {
+    base.upstreamProtocol = {
+      required: true,
+      type: "string",
+      message: t("协议"),
+      trigger: ["change", "blur"],
+    };
+  }
+
+  if (hasField("auth_scheme") && fieldRequired("auth_scheme")) {
+    base.authScheme = {
+      required: true,
+      type: "string",
+      message: t("鉴权方式"),
+      trigger: ["change", "blur"],
+    };
+  }
+
+  if (hasField("acknowledgement") && riskNotice.value) {
+    base.acknowledgementAccepted = {
+      required: true,
+      type: "boolean",
+      validator: (_rule: unknown, value: boolean) => value === true,
+      message: t("请阅读并同意条款"),
+      trigger: ["change"],
+    };
+  }
+
+  if (hasField("model_capabilities") && fieldRequired("model_capabilities")) {
+    base.modelCapabilities = {
+      required: true,
+      type: "array",
+      validator: (_rule: unknown, value: AccountCreateCapability[]) =>
+        Array.isArray(value) && value.length > 0 && value.every((cap) => cap.model_id.trim() && cap.protocol),
+      message: t("请至少添加一个模型能力"),
+      trigger: ["change"],
+    };
+  }
+
   return base;
 });
 
 watch(() => props.show, (show) => {
   if (show) {
-    form.value = props.account ? draftFromAccount(props.account) : blankAccountDraft();
+    form.value = props.account ? formFromAccount(props.account) : blankForm();
     nameWasEdited.value = isEdit.value;
     formRef.value?.restoreValidation();
+    formError.value = "";
   }
 });
+
+watch(() => props.plan, (plan) => {
+  if (!isEdit.value && plan && !form.value.offeringId) {
+    form.value.offeringId = plan.offering_ids[0] ?? "";
+  }
+}, { immediate: true });
 
 function timestampFromLocalDate(value: string): number | null {
   const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -214,46 +506,64 @@ function timestampFromLocalDate(value: string): number | null {
     : null;
 }
 
-function blankAccountDraft(): AccountDraft {
+function blankForm(): FormModel {
+  const plan = props.plan;
   return {
     name: "",
     username: "",
     key: "",
-    providerId: PROVIDER_OFFERINGS[0].provider_id,
     purchaseDate: timestampFromLocalDate(localDateString()) ?? Date.now(),
     notes: "",
+    offeringId: plan?.offering_ids[0] ?? "",
+    baseUrl: "",
+    upstreamProtocol: null,
+    authScheme: null,
+    acknowledgementAccepted: false,
+    modelCapabilities: [],
   };
 }
 
-function draftFromAccount(account: Account): AccountDraft {
+function formFromAccount(account: Account): FormModel {
   return {
     name: account.name,
     username: account.username,
     key: "",
-    providerId: account.provider_id || PROVIDER_OFFERINGS[0].provider_id,
     purchaseDate: timestampFromLocalDate(account.purchase_date)
       ?? timestampFromLocalDate(localDateString())
       ?? Date.now(),
     notes: account.notes ?? "",
+    offeringId: account.offering_id,
+    baseUrl: account.custom_config?.base_url ?? "",
+    upstreamProtocol: account.custom_config?.upstream_protocol ?? null,
+    authScheme: account.custom_config?.auth_scheme ?? null,
+    acknowledgementAccepted: account.acknowledgements.length > 0,
+    modelCapabilities: account.model_capabilities.map((cap) => ({
+      model_id: cap.model_id,
+      protocol: cap.protocol,
+    })),
   };
 }
 
-function handleUsernameUpdate(value: string) {
-  form.value.username = value;
+function handleNameUpdate(value: string) {
+  form.value.name = value;
   if (!isEdit.value && !nameWasEdited.value) {
     form.value.name = value;
   }
 }
 
-function handleNameUpdate(value: string) {
-  form.value.name = value;
-  if (!isEdit.value) {
-    nameWasEdited.value = true;
-  }
-}
-
 function isPurchaseDateDisabled(timestamp: number): boolean {
   return localDateString(timestamp) > localDateString();
+}
+
+function addCapability() {
+  form.value.modelCapabilities.push({
+    model_id: "",
+    protocol: catalogEntry.value?.upstream_protocols[0] ?? "chat_completions",
+  });
+}
+
+function removeCapability(index: number) {
+  form.value.modelCapabilities.splice(index, 1);
 }
 
 async function handleSave() {
@@ -262,26 +572,48 @@ async function handleSave() {
   } catch {
     return;
   }
-  const payload: AccountFormPayload = {
-    name: form.value.name.trim(),
-    username: form.value.username.trim(),
-    purchase_date: form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate),
-    notes: form.value.notes,
-  };
+
   if (isEdit.value) {
+    const payload: AccountFormPayload = {
+      name: form.value.name.trim(),
+      username: form.value.username.trim(),
+      purchase_date: form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate),
+      notes: form.value.notes,
+    };
     if (form.value.key.trim()) {
       payload.key = form.value.key.trim();
     }
-  } else {
-    payload.key = form.value.key.trim();
-    // Provider is fixed once the account exists; only creation sends the pair.
-    const offering = PROVIDER_OFFERINGS.find(
-      (item) => item.provider_id === form.value.providerId,
-    ) ?? PROVIDER_OFFERINGS[0];
-    payload.provider_id = offering.provider_id;
-    payload.offering_id = offering.offering_id;
+    emit("save", payload);
+    return;
   }
-  emit("save", payload);
+
+  const plan = effectivePlan.value;
+  if (!plan) {
+    formError.value = t("无法确定账号方案，请关闭后重试");
+    return;
+  }
+
+  const values: AccountCreateFormValues = {
+    name: form.value.name,
+    username: form.value.username,
+    key: form.value.key,
+    purchase_date: form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate),
+    notes: form.value.notes,
+    base_url: form.value.baseUrl,
+    upstream_protocol: form.value.upstreamProtocol ?? undefined,
+    auth_scheme: form.value.authScheme ?? undefined,
+    acknowledgement_accepted: form.value.acknowledgementAccepted,
+    model_capabilities: form.value.modelCapabilities.length > 0 ? form.value.modelCapabilities : undefined,
+  };
+
+  try {
+    const payload = buildCreateAccountPayload(plan, form.value.offeringId, values, catalogEntry.value);
+    emit("save", payload);
+  } catch (error) {
+    // Never submit a degraded payload: the backend rejects incomplete Custom
+    // and acknowledgement-gated plans, so keep the draft editable instead.
+    formError.value = t(accountCreatePayloadErrorKey(error));
+  }
 }
 </script>
 
@@ -293,8 +625,40 @@ async function handleSave() {
   align-items: start;
 }
 
+.form-error {
+  margin-bottom: 12px;
+}
+
+.full-width-field,
+.key-field,
 .notes-field {
   grid-column: 1 / -1;
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-xs);
+}
+
+.risk-notice {
+  margin-bottom: 10px;
+}
+
+.risk-notice p {
+  margin: 0 0 6px;
+}
+
+.capability-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.capability-row {
+  display: grid;
+  grid-template-columns: 1fr 140px auto;
+  gap: 8px;
+  align-items: center;
 }
 
 .modal-grid :deep(.n-date-picker) {
@@ -310,6 +674,10 @@ async function handleSave() {
 
 @media (max-width: 640px) {
   .modal-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .capability-row {
     grid-template-columns: 1fr;
   }
 }

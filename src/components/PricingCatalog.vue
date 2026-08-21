@@ -16,123 +16,147 @@
     >
       <n-button size="small" secondary @click="loadProviderCatalog">{{ t("重试") }}</n-button>
     </n-alert>
-    <n-empty
-      v-else-if="catalogEmpty"
-      class="catalog-state"
-      :description="t('服务商目录暂无数据')"
-    />
-
-    <section class="pricing-card" aria-labelledby="pricing-title">
-    <div class="pricing-head">
-      <div>
-        <h2 id="pricing-title">$ {{ t("OpenCode Go 额度价格表") }}</h2>
-        <p>{{ t("只在你主动刷新时访问官方文档；刷新失败会继续使用当前快照。") }}</p>
-      </div>
-      <div class="pricing-actions">
-        <n-button
-          v-if="snapshot"
-          tag="a"
-          text
-          :href="snapshot.source_url"
-          target="_blank"
-          rel="noopener noreferrer"
-        >{{ t("官方来源") }}</n-button>
-        <n-button
-          type="primary"
-          :loading="refreshing"
-          :disabled="loading || refreshing || savingModelId !== null || confirmationOpen"
-          @click="requestPricingRefresh"
-        >{{ refreshing ? t("正在刷新…") : t("刷新价格表") }}</n-button>
-      </div>
-    </div>
-
-    <n-alert v-if="loadError && !snapshot" type="error" :title="t('加载额度价格表失败: {error}', { error: loadError })">
-      <n-button size="small" secondary @click="loadPricing">{{ t("重试") }}</n-button>
-    </n-alert>
-    <n-alert v-else-if="refreshError" type="warning" :title="t('刷新额度价格表失败: {error}', { error: refreshError })" />
-
-    <n-spin :show="loading">
-      <template v-if="snapshot">
-        <dl class="pricing-ledger">
-          <div class="pricing-ledger__revision">
-            <dt>{{ t("修订版本") }}</dt>
-            <dd><code>{{ snapshot.revision }}</code></dd>
-          </div>
+    <template v-if="!catalogLoading">
+      <section
+        v-for="group in planGroups"
+        :key="group.plan.id"
+        class="pricing-card"
+        :aria-labelledby="`pricing-title-${group.plan.id}`"
+      >
+        <div class="pricing-head">
           <div>
-            <dt>{{ t("启用时间") }}</dt>
-            <dd>{{ formatTimestamp(snapshot.activated_at) }}</dd>
+            <h2 :id="`pricing-title-${group.plan.id}`">
+              {{ group.label }}
+              <n-tag
+                v-if="group.plan.kind === 'free'"
+                type="success"
+                size="small"
+                :bordered="false"
+              >{{ t("免费 · 出口 IP 共享") }}</n-tag>
+              <n-tag
+                v-else-if="group.plan.kind === 'subscription'"
+                type="info"
+                size="small"
+                :bordered="false"
+              >{{ t("订阅制") }}</n-tag>
+            </h2>
+            <n-alert
+              v-if="pricingDisplay(group).state === 'error'"
+              type="error"
+              :title="t(pricingDisplay(group).messageKey, { error: pricingDisplay(group).error ?? '' })"
+            >
+              <n-button size="small" secondary @click="retryGroupPricing(group)">{{ t("重试") }}</n-button>
+            </n-alert>
+            <p v-else>{{ t(pricingDisplay(group).messageKey) }}</p>
           </div>
-          <div>
-            <dt>{{ t("文档更新时间") }}</dt>
-            <dd>{{ snapshot.document_updated_at ? formatTimestamp(snapshot.document_updated_at) : "—" }}</dd>
+          <div
+            v-if="group.content.kind === 'opencode-go'"
+            class="pricing-actions"
+          >
+            <n-button
+              v-if="snapshot"
+              tag="a"
+              text
+              :href="snapshot.source_url"
+              target="_blank"
+              rel="noopener noreferrer"
+            >{{ t("官方来源") }}</n-button>
+            <n-button
+              type="primary"
+              :loading="refreshing"
+              :disabled="loading || refreshing || savingModelId !== null || confirmationOpen"
+              @click="requestPricingRefresh"
+            >{{ refreshing ? t("正在刷新…") : t("刷新价格表") }}</n-button>
           </div>
-          <div>
-            <dt>{{ t("5 小时额度") }}</dt>
-            <dd>{{ formatRate(snapshot.limits.window_5h).label }}</dd>
-          </div>
-          <div>
-            <dt>{{ t("周额度") }}</dt>
-            <dd>{{ formatRate(snapshot.limits.window_week).label }}</dd>
-          </div>
-          <div>
-            <dt>{{ t("月额度") }}</dt>
-            <dd>{{ formatRate(snapshot.limits.window_month).label }}</dd>
-          </div>
-        </dl>
-
-        <p class="pricing-note">
-          {{ t("模型价格为 OpenCode Go 表中的美元/百万 tokens；官方倍率用于换算额度消耗，可按活动手动调整。") }}
-        </p>
-        <n-data-table
-          :columns="columns"
-          :data="tableRows"
-          :pagination="false"
-          :row-key="rowKey"
-          :expanded-row-keys="expandedRowKeys"
-          :scroll-x="1310"
-          size="small"
-          @update:expanded-row-keys="updateExpandedRowKeys"
-        />
-      </template>
-    </n-spin>
-  </section>
-
-    <section
-      v-for="section in secondaryOfferingSections"
-      :key="`${section.provider_id}/${section.offering_id}`"
-      class="pricing-card pricing-offering"
-      :aria-labelledby="`pricing-offering-${section.provider_id}`"
-    >
-      <div class="pricing-head">
-        <div>
-          <h2 :id="`pricing-offering-${section.provider_id}`">
-            {{ section.label }}
-            <n-tag
-              v-if="section.presentation === 'experimental'"
-              type="warning"
-              size="small"
-              :bordered="false"
-            >{{ t("实验性") }}</n-tag>
-          </h2>
-          <p v-if="section.presentation === 'experimental'">
-            {{ t("实验性接入，尚未配置价格目录，不展示价格表。") }}
-          </p>
-          <p v-else>
-            {{ t("零价格；额度按出口 IP 共享，429 后整条 free 通道冷却。") }}
-          </p>
         </div>
-      </div>
-    </section>
+
+        <template v-if="group.content.kind === 'opencode-go'">
+            <n-alert v-if="refreshError" type="warning" :title="t('刷新额度价格表失败: {error}', { error: refreshError })" />
+
+            <n-spin :show="loading">
+              <template v-if="snapshot && pricingDisplay(group).state === 'available-table'">
+                <dl class="pricing-ledger">
+                  <div class="pricing-ledger__revision">
+                    <dt>{{ t("修订版本") }}</dt>
+                    <dd><code>{{ snapshot.revision }}</code></dd>
+                  </div>
+                  <div>
+                    <dt>{{ t("启用时间") }}</dt>
+                    <dd>{{ formatTimestamp(snapshot.activated_at) }}</dd>
+                  </div>
+                  <div>
+                    <dt>{{ t("文档更新时间") }}</dt>
+                    <dd>{{ snapshot.document_updated_at ? formatTimestamp(snapshot.document_updated_at) : "—" }}</dd>
+                  </div>
+                  <div>
+                    <dt>{{ t("5 小时额度") }}</dt>
+                    <dd>{{ formatRate(snapshot.limits.window_5h).label }}</dd>
+                  </div>
+                  <div>
+                    <dt>{{ t("周额度") }}</dt>
+                    <dd>{{ formatRate(snapshot.limits.window_week).label }}</dd>
+                  </div>
+                  <div>
+                    <dt>{{ t("月额度") }}</dt>
+                    <dd>{{ formatRate(snapshot.limits.window_month).label }}</dd>
+                  </div>
+                </dl>
+
+                <p class="pricing-note">
+                  {{ t("模型价格为 OpenCode Go 表中的美元/百万 tokens；官方倍率用于换算额度消耗，可按活动手动调整。") }}
+                  {{ t("未知价格不会参与费用估算") }}
+                </p>
+                <n-data-table
+                  :columns="columns"
+                  :data="tableRows"
+                  :pagination="false"
+                  :row-key="rowKey"
+                  :expanded-row-keys="expandedRowKeys"
+                  :scroll-x="1310"
+                  size="small"
+                  @update:expanded-row-keys="updateExpandedRowKeys"
+                />
+              </template>
+            </n-spin>
+        </template>
+
+        <template v-else-if="pricingDisplay(group).state === 'available-table' && group.content.snapshot">
+            <dl class="pricing-ledger pricing-ledger--compact">
+              <div>
+                <dt>{{ t("修订版本") }}</dt>
+                <dd><code>{{ group.content.snapshot.revision }}</code></dd>
+              </div>
+              <div>
+                <dt>{{ t("启用时间") }}</dt>
+                <dd>{{ formatTimestamp(group.content.snapshot.activated_at) }}</dd>
+              </div>
+              <div>
+                <dt>{{ t("文档更新时间") }}</dt>
+                <dd>{{ group.content.snapshot.document_updated_at ? formatTimestamp(group.content.snapshot.document_updated_at) : "—" }}</dd>
+              </div>
+            </dl>
+            <div class="pricing-actions">
+              <n-button
+                v-if="group.content.snapshot.source_url"
+                tag="a"
+                text
+                :href="group.content.snapshot.source_url"
+                target="_blank"
+                rel="noopener noreferrer"
+              >{{ t("官方来源") }}</n-button>
+            </div>
+        </template>
+      </section>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from "vue";
+import { computed, h, onMounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
   NDataTable,
-  NEmpty,
   NIcon,
   NInputNumber,
   NSpin,
@@ -152,13 +176,19 @@ import { providerApi } from "../api/providers.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { locale, t } from "../i18n/index.ts";
 import {
-  buildPricingOfferingSections,
   buildPricingTableRows,
   effectivePricingRate,
   formatPricingMultiplier,
   formatPricingRate,
 } from "../views/pricing-view";
 import type { PricingTableRow } from "../views/pricing-view";
+import { PLAN_DEFINITIONS } from "../views/plans.ts";
+import type { PlanId } from "../views/plans.ts";
+import {
+  buildPlanPricingGroups,
+  resolvePlanPricingDisplay,
+} from "../views/pricing-plans.ts";
+import type { PlanPricingGroup, ProviderSnapshots } from "../views/pricing-plans.ts";
 
 const message = useMessage();
 const dialog = useDialog();
@@ -174,6 +204,8 @@ const multiplierDrafts = ref<Partial<Record<string, number | null>>>({});
 const expandedRowKeys = ref<DataTableRowKey[]>([]);
 const loadError = ref("");
 const refreshError = ref("");
+const providerSnapshots = ref<ProviderSnapshots>({});
+const providerSnapshotErrors = ref<Partial<Record<PlanId, string>>>({});
 
 const tableRows = computed(() => buildPricingTableRows(snapshot.value?.models ?? [], {
   highspeed: t("高速别名"),
@@ -182,13 +214,28 @@ const tableRows = computed(() => buildPricingTableRows(snapshot.value?.models ??
   minimaxM3UpperPriority: t("> 512K 输入 + 优先服务"),
 }));
 
-const offeringSections = computed(() => buildPricingOfferingSections(catalog.value));
-const secondaryOfferingSections = computed(() => (
-  offeringSections.value.filter(({ presentation }) => presentation !== "table")
+const planGroups = computed<PlanPricingGroup[]>(() => (
+  buildPlanPricingGroups(catalog.value, snapshot.value, providerSnapshots.value)
 ));
-const catalogEmpty = computed(() => (
-  catalog.value !== null && catalog.value.length === 0
-));
+
+function pricingError(group: PlanPricingGroup): string | null {
+  if (group.plan.id === "opencode-go") return !snapshot.value ? loadError.value || null : null;
+  return providerSnapshotErrors.value[group.plan.id] ?? null;
+}
+
+function pricingDisplay(group: PlanPricingGroup) {
+  return resolvePlanPricingDisplay(group, pricingError(group));
+}
+
+function retryGroupPricing(group: PlanPricingGroup) {
+  if (group.plan.id === "opencode-go") {
+    void loadPricing();
+  } else if (catalog.value) {
+    void loadProviderSnapshots(catalog.value);
+  } else {
+    void loadProviderCatalog();
+  }
+}
 
 // The catalog is fetched once on mount (or via the error-state retry); there
 // is deliberately no polling, matching the manual-refresh pricing policy.
@@ -204,6 +251,49 @@ async function loadProviderCatalog() {
     catalogLoading.value = false;
   }
 }
+
+// Provider-scoped pricing snapshots are loaded opportunistically for plans the
+// catalog marks as pricing-available. Failures are swallowed so a missing
+// endpoint or an in-flight backend change never breaks the page.
+async function loadProviderSnapshots(catalogValue: ProviderCatalogEntry[]) {
+  const availablePlans = PLAN_DEFINITIONS.map((plan) => {
+    const entry = plan.offering_ids
+      .map((offeringId) => catalogValue.find((item) => (
+        item.provider_id === plan.provider_id && item.offering_id === offeringId
+      )))
+      .find(Boolean);
+    return { plan, entry };
+  }).filter(({ plan, entry }) => (
+    plan.id !== "opencode-go" && entry?.pricing_availability === "available"
+  ));
+
+  const results = await Promise.allSettled(
+    availablePlans.map(({ plan, entry }) => providerApi.getProviderPricing(
+      plan.provider_id,
+      entry!.offering_id,
+    )),
+  );
+  const next: ProviderSnapshots = {};
+  const nextErrors: Partial<Record<PlanId, string>> = {};
+  results.forEach((result, index) => {
+    const { plan } = availablePlans[index]!;
+    if (result.status === "fulfilled" && plan) {
+      next[plan.id] = result.value;
+    } else if (result.status === "rejected" && plan) {
+      nextErrors[plan.id] = result.reason instanceof Error
+        ? result.reason.message
+        : String(result.reason);
+    }
+  });
+  providerSnapshots.value = next;
+  providerSnapshotErrors.value = nextErrors;
+}
+
+watch(catalog, (catalogValue) => {
+  if (catalogValue) {
+    void loadProviderSnapshots(catalogValue);
+  }
+}, { immediate: true });
 
 function formatRate(value: number | null) {
   return formatPricingRate(value, locale.value);
@@ -608,7 +698,7 @@ onMounted(() => void loadProviderCatalog());
   display: grid;
   place-items: center;
 }
-.pricing-offering h2 :deep(.n-tag) {
+.pricing-card h2 :deep(.n-tag) {
   margin-left: 8px;
   vertical-align: middle;
 }
@@ -653,6 +743,9 @@ onMounted(() => void loadProviderCatalog());
   border: 1px solid var(--ocg-border);
   border-radius: 10px;
   background: var(--ocg-border);
+}
+.pricing-ledger--compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .pricing-ledger > div {
   min-width: 0;
@@ -773,6 +866,9 @@ onMounted(() => void loadProviderCatalog());
   .pricing-ledger {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+  .pricing-ledger--compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 @media (max-width: 640px) {
   .pricing-head {
@@ -784,6 +880,9 @@ onMounted(() => void loadProviderCatalog());
   }
   .pricing-ledger {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pricing-ledger--compact {
+    grid-template-columns: repeat(1, minmax(0, 1fr));
   }
   :global(.pricing-refresh-comparison) {
     min-width: 0;

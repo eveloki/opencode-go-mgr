@@ -13,14 +13,45 @@ import type {
  * generic account PATCH.
  */
 
+export interface ProviderCatalogFormField {
+  id: string;
+  kind: "text" | "secret" | "date" | "acknowledgement" | "url" | "select" | "models";
+  required: boolean;
+  immutable_after_create: boolean;
+}
+
+export interface ProviderCatalogRiskNotice {
+  acknowledgement_id: string;
+  version: string;
+  source_url: string;
+  body: string;
+  content_hash: string;
+}
+
 export interface ProviderCatalogEntry {
   provider_id: string;
   offering_id: string;
+  display_name: string;
+  display_family: string;
   credential_kind: AccountCredentialKind;
   quota_scope: AccountQuotaScope;
   singleton: boolean;
-  pricing_availability: string;
-  usage_availability: string;
+  creation_availability: "available" | "unavailable";
+  creation_unavailable_reason?: string | null;
+  verification_policy: "not_required" | "required";
+  verification_runtime_availability: "optional" | "unavailable" | "not_applicable" | "available";
+  routable: boolean;
+  managed_registration: boolean;
+  pricing_availability: "available" | "unavailable" | "not_applicable" | "unpriced";
+  usage_availability: "available" | "unavailable" | "local_state";
+  quota_unit: string;
+  model_source: string;
+  key_prefix?: string | null;
+  auth_schemes: ("bearer" | "x-api-key")[];
+  upstream_protocols: ("chat_completions" | "responses" | "messages")[];
+  form_fields: ProviderCatalogFormField[];
+  risk_notice?: ProviderCatalogRiskNotice | null;
+  model_aliases: string[];
 }
 
 export interface StoredProviderPricingSnapshot {
@@ -37,7 +68,7 @@ export interface StoredProviderPricingSnapshot {
 export interface ProviderPricingResponse {
   provider_id: string;
   offering_id: string;
-  availability: string;
+  availability: "available" | "unavailable" | "not_applicable" | "unpriced";
   snapshot?: StoredProviderPricingSnapshot;
 }
 

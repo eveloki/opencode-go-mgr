@@ -33,6 +33,13 @@ function account(id: string, provider_id: string, offering_id: string, credentia
     notes: "",
     usage_sync_last_success_at: null,
     usage_sync_next_allowed_at: null,
+    verification_status: "not_required",
+    connection_verified_at: null,
+    verification_error: null,
+    plan_routable: provider_id === "opencode" || provider_id === "opencode-zen-free",
+    custom_config: null,
+    model_capabilities: [],
+    acknowledgements: [],
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   };
@@ -45,8 +52,21 @@ function catalog(provider_id: string, offering_id: string, credential_kind: "api
     credential_kind,
     quota_scope: credential_kind === "none" ? "egress-ip" : "key",
     singleton: credential_kind === "none",
-    pricing_availability: provider_id === "command-code" ? "unconfigured" : "available",
-    usage_availability: provider_id === "command-code" ? "unconfigured" : "available",
+    display_name: `${provider_id} ${offering_id}`,
+    display_family: provider_id,
+    creation_availability: "available",
+    verification_policy: provider_id === "command-code" ? "required" : "not_required",
+    verification_runtime_availability: provider_id === "command-code" ? "unavailable" : "optional",
+    routable: provider_id !== "command-code",
+    managed_registration: provider_id === "opencode",
+    pricing_availability: provider_id === "command-code" ? "unavailable" : "available",
+    usage_availability: provider_id === "command-code" ? "unavailable" : "available",
+    quota_unit: "usd",
+    model_source: "test",
+    auth_schemes: credential_kind === "none" ? [] : ["bearer"],
+    upstream_protocols: ["chat_completions"],
+    form_fields: [],
+    model_aliases: [],
   };
 }
 
@@ -69,6 +89,11 @@ test("provider dashboard keeps Zen credentialless, GOAT fail-closed, and unknown
   assert.equal(rows[1]?.cost_state, "unknown");
   assert.equal(rows[2]?.cost, 0);
   assert.equal(rows[2]?.cost_state, "free");
+  assert.deepEqual(rows.map(({ label }) => label), [
+    "opencode go",
+    "command-code goat",
+    "opencode-zen-free anonymous-free",
+  ]);
 });
 
 test("provider health honors provider-specific cooldowns and ignores expired or foreign ones", () => {
@@ -107,11 +132,16 @@ test("provider health honors provider-specific cooldowns and ignores expired or 
   // Zen free ignores the Go per-window cooldowns.
   assert.equal(providerAccountHealthy(zen({ cooldown_5h_until: future }), now), true);
 
-  // GOAT stays fail-closed even with valid credentials and no cooldown.
+  // Any backend-declared unroutable draft stays fail-closed, independent of provider name.
   assert.equal(providerAccountHealthy(
     account("goat", "command-code", "goat", "api_key"),
     now,
   ), false);
+  assert.equal(providerAccountHealthy({
+    ...account("custom", "custom", "api", "api_key"),
+    plan_routable: true,
+    verification_status: "verified",
+  }, now), true);
   // Malformed cooldown timestamps never block health.
   assert.equal(providerAccountHealthy(go({ cooldown_until: "not-a-date" }), now), true);
 });
@@ -124,7 +154,8 @@ test("dashboard loads provider-filtered remote summaries and skips legacy usage 
   assert.match(source, /account\.provider_id === "opencode"/);
   assert.match(source, /account\.offering_id === "go"/);
   assert.match(source, /provider\.cost_state === "unknown"[^]*?t\("未知"\)/);
-  assert.match(source, /供应商尚未配置/);
+  assert.doesNotMatch(source, /provider\.provider_id === ["']command-code["']/);
+  assert.match(source, /provider\.routable/);
   // Cost copy says cumulative, not "current log range".
   assert.match(source, /t\("账号健康与累计成本"\)/);
   assert.match(source, /t\("累计成本"\)/);

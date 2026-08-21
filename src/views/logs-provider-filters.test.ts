@@ -56,9 +56,18 @@ test("forward log DTO declares nullable provider attribution and cost fields", (
     "raw_cost_usd",
     "quota_debit",
     "effective_paid_cost_usd",
+    "native_cost_value",
+    "native_cost_unit",
+    "native_cost_currency",
   ]) {
     assert.match(api, new RegExp(`${field}\\?: [^;]*\\| null`));
   }
+});
+
+test("Alias column and detail titles distinguish effective Alias from the requested model", () => {
+  assert.match(logs, /title: t\("模型别名"\)[^\n]*forwardLogAlias\(row\)/);
+  assert.match(logs, /\[t\("请求模型"\), forwardLogRequestedModel\(row\)\]/);
+  assert.match(logs, /\[t\("解析别名"\), forwardLogResolvedAlias\(row\)\]/);
 });
 
 test("forward filters are remote query params, reset paging, and are never local-page filtering", () => {
@@ -117,4 +126,5 @@ test("row details render provider attribution and costs, with null as unknown an
   const detail = logs.slice(logs.indexOf("function renderProviderCost"));
   assert.match(detail, /value === null \|\| value === undefined \? t\("未知"\)/);
   assert.doesNotMatch(detail, /formatCost\(value \?\? 0|\|\| 0\)/);
+  assert.doesNotMatch(detail.slice(0, detail.indexOf("function renderDiagnostic")), /native_cost_/);
 });

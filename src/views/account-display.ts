@@ -5,6 +5,7 @@ import { daysUntilDate, expiryTagType } from "./account-lifecycle.ts";
 import type { ExpiryTagType } from "./account-lifecycle.ts";
 import { isZenFreeAccount } from "./account-providers.ts";
 import { t } from "../i18n/index.ts";
+import type { MessageKey } from "../i18n/index.ts";
 
 /**
  * Pure presentational helpers for the account list: status/expiry tags,
@@ -24,6 +25,30 @@ export type AccountMenuOption = {
 
 export function accountIsReady(account: Pick<Account, "setup_step">): boolean {
   return account.setup_step === "ready";
+}
+
+/** Shared label for ready accounts that the backend keeps as unroutable drafts. */
+export function accountRoutingDraftLabel(
+  account: Pick<Account, "setup_step" | "plan_routable" | "verification_status">,
+): MessageKey | null {
+  if (!accountIsReady(account) || account.plan_routable) return null;
+  if (account.verification_status === "pending") return "待验证";
+  if (account.verification_status === "failed") return "验证失败";
+  return "等待支持";
+}
+
+/** Shared explanatory copy for the same backend-owned draft state. */
+export function accountRoutingDraftDescription(
+  account: Pick<Account, "setup_step" | "plan_routable" | "verification_status">,
+): MessageKey | null {
+  if (!accountRoutingDraftLabel(account)) return null;
+  if (account.verification_status === "pending") {
+    return "该方案验证功能暂不可用，创建后保持禁用草稿。";
+  }
+  if (account.verification_status === "failed") {
+    return "验证失败，请检查 Key 或等待该方案支持验证。";
+  }
+  return "该方案暂不可路由。";
 }
 
 export function formatCooldownRemainingUntil(until: string | null, now = Date.now()): string {
@@ -58,6 +83,8 @@ export function accountStatusLabel(account: Account, now = Date.now()): string {
     return t("可用");
   }
   if (!accountIsReady(account)) return t("注册中");
+  const draftLabel = accountRoutingDraftLabel(account);
+  if (draftLabel) return t(draftLabel);
   if (account.auth_error) {
     return account.enabled
       ? t("认证失效（401 熔断）")
@@ -74,6 +101,8 @@ export function accountStatusTagType(account: Account, now = Date.now()): Accoun
     return isFreeCooling(account, now) ? "warning" : "success";
   }
   if (!accountIsReady(account)) return "warning";
+  const draftLabel = accountRoutingDraftLabel(account);
+  if (draftLabel) return draftLabel === "验证失败" ? "error" : "warning";
   if (account.auth_error) return "error";
   if (!account.enabled) return "default";
   if (isCooling(account, now)) return "warning";

@@ -52,10 +52,10 @@ test("conflict reload keeps the edit modal for a surviving account, closes it fo
   assert.match(accounts, /editingAccount\.value = stillListed;\s*\n[\s\S]*?if \(!stillListed\) showModal\.value = false;/);
 });
 
-test("GOAT cards are fail-closed and never call legacy Go usage or ping controls", () => {
-  assert.match(card, /const isGoat = computed/);
-  assert.match(card, /v-else-if="isGoat" class="provider-unconfigured"/);
+test("unroutable cards are fail-closed without provider-specific draft branches", () => {
+  assert.match(card, /const isDraft = computed[\s\S]*?!props\.account\.plan_routable/);
+  assert.match(card, /v-else-if="isDraft" class="provider-unconfigured"/);
   assert.match(card, /v-if="isGo && accountIsReady\(account\)"/);
-  assert.match(accounts, /account\.provider_id === "opencode"/);
-  assert.match(accounts, /account\.offering_id === "go"/);
+  assert.match(card, /accountRoutingDraftDescription\(props\.account\)/);
+  assert.doesNotMatch(card, /provider_id === "command-code"|provider_id === "scnet"|provider_id === "custom"/);
 });

@@ -415,7 +415,7 @@ test("forward logs can be filtered by client key including the unattributed opti
   assert.doesNotMatch(noteRule, /grid-column/);
   // The key filter keeps a real column width (an `auto` column collapses an
   // empty select) and its menu expands to fit long key names.
-  assert.match(source, /grid-template-columns: 240px 140px 180px 180px 180px 120px auto 1fr/);
+  assert.match(source, /grid-template-columns: repeat\(5, 1fr\)/);
   const keyField = template.slice(template.indexOf("接入 Key"), template.indexOf("时间范围"));
   assert.match(keyField, /:consistent-menu-width="false"/);
 });

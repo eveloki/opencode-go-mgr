@@ -13,6 +13,31 @@ export { isVersionAtLeast } from "../utils/version.ts";
 export type AccountCredentialKind = "api_key" | "none";
 export type AccountQuotaScope = "key" | "egress-ip";
 
+export interface AccountCustomConfig {
+  account_id: string;
+  base_url: string;
+  upstream_protocol: "chat_completions" | "responses" | "messages";
+  auth_scheme: "bearer" | "x-api-key";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccountModelCapability {
+  account_id: string;
+  model_id: string;
+  protocol: "chat_completions" | "responses" | "messages";
+  verified_at: string | null;
+  source: string;
+}
+
+export interface AccountAcknowledgement {
+  account_id: string;
+  acknowledgement_id: string;
+  version: string;
+  content_hash: string;
+  accepted_at: string;
+}
+
 export interface Account {
   id: string;
   name: string;
@@ -46,6 +71,14 @@ export interface Account {
   usage_sync_next_allowed_at: string | null;
   created_at: string;
   updated_at: string;
+  verification_status: "not_required" | "pending" | "verified" | "failed";
+  connection_verified_at: string | null;
+  verification_error: string | null;
+  /** Whether the backend considers this plan ready for gateway routing. */
+  plan_routable: boolean;
+  custom_config?: AccountCustomConfig | null;
+  model_capabilities: AccountModelCapability[];
+  acknowledgements: AccountAcknowledgement[];
 }
 
 export type AccountType = "key" | "managed";
@@ -56,6 +89,23 @@ export type AccountSetupStep =
   | "payment"
   | "key_verification"
   | "ready";
+
+export interface AccountCustomConfigInput {
+  base_url: string;
+  upstream_protocol: "chat_completions" | "responses" | "messages";
+  auth_scheme: "bearer" | "x-api-key";
+}
+
+export interface AccountModelCapabilityInput {
+  model_id: string;
+  protocol: "chat_completions" | "responses" | "messages";
+  source?: string;
+}
+
+export interface AccountAcknowledgementInput {
+  acknowledgement_id: string;
+  version: string;
+}
 
 export interface AccountInput {
   name: string;
@@ -68,6 +118,11 @@ export interface AccountInput {
   purchase_date?: string;
   notes?: string;
   expected_revision?: number;
+  /** Custom API accounts only. */
+  custom_config?: AccountCustomConfigInput;
+  acknowledgements?: AccountAcknowledgementInput[];
+  /** Custom API accounts only. */
+  model_capabilities?: AccountModelCapabilityInput[];
 }
 
 export interface AccountUpdate {
@@ -241,6 +296,15 @@ export interface ForwardLog {
   id: number;
   timestamp: string;
   model: string;
+  /**
+   * v2 alias contract: `requested_model` is what the client requested,
+   * `resolved_alias` is the alias that resolved (e.g. Claude Desktop alias),
+   * and `upstream_model` is the model ID actually sent upstream. Protocol
+   * info is only available through the free-form `diagnostic` JSON.
+   */
+  requested_model?: string | null;
+  resolved_alias?: string | null;
+  upstream_model?: string | null;
   account_id: string;
   account_name: string;
   client_key_id?: string | null;
@@ -253,6 +317,10 @@ export interface ForwardLog {
   raw_cost_usd?: number | null;
   quota_debit?: number | null;
   effective_paid_cost_usd?: number | null;
+  /** Provider-native attribution; informational only until a renderer understands the unit. */
+  native_cost_value?: number | null;
+  native_cost_unit?: string | null;
+  native_cost_currency?: string | null;
   status: string;
   http_status: number | null;
   prompt_tokens: number;
