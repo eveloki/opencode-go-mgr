@@ -36,9 +36,11 @@ impl ApiFormat {
 pub struct RequestPlan {
     pub client: ApiFormat,
     pub upstream: ApiFormat,
-    /// Upstream/routed model sent to the provider.
+    /// Upstream/routed model sent to the provider. Forward logs persist this as
+    /// `upstream_model`; pricing still keys off this ID.
     pub model: String,
-    /// Original client-requested name, echoed in downstream responses.
+    /// Original client-requested name, echoed in downstream responses. Forward
+    /// logs persist this as `requested_model`.
     pub client_model: String,
     pub stream: bool,
     pub body: Bytes,
@@ -68,6 +70,16 @@ impl RequestPlan {
             &self.client_model
         }
     }
+
+    /// Client-facing request text persisted on forward logs as `requested_model`.
+    pub fn log_requested_model(&self) -> &str {
+        self.response_model()
+    }
+
+    /// Actual materialized upstream ID persisted on forward logs as `upstream_model`.
+    pub fn log_upstream_model(&self) -> &str {
+        &self.model
+    }
 }
 
 /// Client protocol parsed once, before per-candidate materialization.
@@ -89,6 +101,9 @@ pub struct ParsedClientRequest {
 pub struct MaterializeSpec {
     pub client_model: String,
     pub upstream_model: String,
+    /// Canonical registry alias from runtime resolution. `None` when the
+    /// candidate is a unique raw ID with no published alias.
+    pub resolved_alias: Option<String>,
     pub channel: UpstreamChannel,
     pub upstream_base_override: Option<String>,
     pub original_model: Option<String>,
@@ -488,6 +503,10 @@ fn identity_spec(parsed: &ParsedClientRequest) -> MaterializeSpec {
     MaterializeSpec {
         client_model: parsed.requested_model.clone(),
         upstream_model: parsed.requested_model.clone(),
+        resolved_alias: match crate::alias::resolve(&parsed.requested_model) {
+            Ok(crate::alias::ResolvedModel::Alias { alias, .. }) => Some(alias.to_string()),
+            Ok(crate::alias::ResolvedModel::PinnedRaw { .. }) | Err(_) => None,
+        },
         channel: UpstreamChannel::Go,
         upstream_base_override: None,
         original_model: None,
@@ -518,6 +537,11 @@ pub fn materialize_parsed_request(
     plan.upstream_base_override = spec.upstream_base_override.clone();
     plan.original_model = spec.original_model.clone();
     plan.allow_go_fallback = spec.allow_go_fallback;
+    debug_assert!(
+        spec.resolved_alias
+            .as_deref()
+            .is_none_or(|alias| !alias.is_empty())
+    );
     Ok(plan)
 }
 
@@ -5449,6 +5473,14 @@ mod tests {
         assert_eq!(plan.model, "MiniMax-M3");
         assert_eq!(plan.client_model, "MiniMax-M3");
         assert_eq!(plan.response_model(), "MiniMax-M3");
+        assert_eq!(plan.log_requested_model(), "MiniMax-M3");
+        assert_eq!(plan.log_upstream_model(), "MiniMax-M3");
+        assert_eq!(
+            crate::gateway::materialize::native_log_identity(&plan)
+                .resolved_alias
+                .as_deref(),
+            Some("minimax-m3")
+        );
     }
 
     #[test]
@@ -5466,6 +5498,7 @@ mod tests {
             &MaterializeSpec {
                 client_model: parsed.requested_model.clone(),
                 upstream_model: "deepseek-v4-flash".into(),
+                resolved_alias: Some("deepseek-v4-flash".into()),
                 channel: UpstreamChannel::Go,
                 upstream_base_override: None,
                 original_model: None,
@@ -5478,6 +5511,7 @@ mod tests {
             &MaterializeSpec {
                 client_model: parsed.requested_model.clone(),
                 upstream_model: "deepseek-v4-flash-free".into(),
+                resolved_alias: Some("deepseek-v4-flash".into()),
                 channel: UpstreamChannel::Free,
                 upstream_base_override: Some("https://opencode.ai/zen".into()),
                 original_model: Some("deepseek-v4-flash".into()),
@@ -5487,9 +5521,25 @@ mod tests {
         .unwrap();
         assert_eq!(go.model, "deepseek-v4-flash");
         assert_eq!(go.client_model, "deepseek-v4-flash");
+        assert_eq!(go.log_requested_model(), "deepseek-v4-flash");
+        assert_eq!(go.log_upstream_model(), "deepseek-v4-flash");
+        assert_eq!(
+            crate::gateway::materialize::native_log_identity(&go)
+                .resolved_alias
+                .as_deref(),
+            Some("deepseek-v4-flash")
+        );
         assert_eq!(go.channel, UpstreamChannel::Go);
         assert_eq!(free.model, "deepseek-v4-flash-free");
         assert_eq!(free.client_model, "deepseek-v4-flash");
+        assert_eq!(free.log_requested_model(), "deepseek-v4-flash");
+        assert_eq!(free.log_upstream_model(), "deepseek-v4-flash-free");
+        assert_eq!(
+            crate::gateway::materialize::native_log_identity(&free)
+                .resolved_alias
+                .as_deref(),
+            Some("deepseek-v4-flash")
+        );
         assert_eq!(free.channel, UpstreamChannel::Free);
         assert_eq!(free.original_model.as_deref(), Some("deepseek-v4-flash"));
         let go_body: Value = serde_json::from_slice(&go.body).unwrap();

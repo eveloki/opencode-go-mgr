@@ -6,7 +6,9 @@ use crate::gateway::forwarder::{
     ForwardAction, UpstreamPayloadTooLargeResponse, forward_get, forward_request,
     rate_limited_response,
 };
-use crate::gateway::materialize::{materialize_account_routes, protocol_error_from_resolve};
+use crate::gateway::materialize::{
+    materialize_account_routes, protocol_error_from_resolve, resolved_alias_from_model,
+};
 use crate::gateway::protocol::{
     ApiFormat, MaterializeSpec, ProtocolError, RequestPlan, format_error, format_protocol_error,
     materialize_parsed_request, parse_client_request, parse_gemini_request,
@@ -575,6 +577,7 @@ async fn execute_plan(
         &MaterializeSpec {
             client_model: client_model.clone(),
             upstream_model: diagnostic_model,
+            resolved_alias: resolved_alias_from_model(&resolved),
             channel: diagnostic_channel,
             upstream_base_override: None,
             original_model: None,
@@ -1105,6 +1108,7 @@ fn protocol_error_from(format: ApiFormat, error: ProtocolError) -> axum::respons
 #[cfg(test)]
 mod tests {
     use super::{check_auth, extract_client_key_id, rewrite_claude_desktop_model};
+    use crate::gateway::materialize::resolved_alias_from_model;
     use crate::gateway::protocol::{
         ApiFormat, MaterializeSpec, materialize_parsed_request, parse_client_request,
         prepare_request,
@@ -1314,6 +1318,7 @@ mod tests {
             &MaterializeSpec {
                 client_model: parsed.requested_model.clone(),
                 upstream_model: mapped.to_string(),
+                resolved_alias: resolved_alias_from_model(&resolved),
                 channel: crate::models::UpstreamChannel::Go,
                 upstream_base_override: None,
                 original_model: None,
@@ -1323,6 +1328,12 @@ mod tests {
         .expect("Claude Desktop keeps the original alias as client_model");
         assert_eq!(plan.model, "glm-5.2");
         assert_eq!(plan.client_model, CLAUDE_DESKTOP_OPUS_ALIAS);
+        assert_eq!(
+            crate::gateway::materialize::native_log_identity(&plan)
+                .resolved_alias
+                .as_deref(),
+            Some("glm-5.2")
+        );
         assert_eq!(plan.upstream, ApiFormat::Messages);
     }
 

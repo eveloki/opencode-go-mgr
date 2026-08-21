@@ -63,6 +63,68 @@ pub(crate) fn protocol_error_from_resolve(error: ResolveError) -> ProtocolError 
     }
 }
 
+/// Canonical registry alias persisted on forward logs for this resolution.
+pub(crate) fn resolved_alias_from_model(resolved: &ResolvedModel) -> Option<String> {
+    match resolved {
+        ResolvedModel::Alias { alias, .. } => Some((*alias).to_string()),
+        ResolvedModel::PinnedRaw { mapping, .. } => registry_alias_for_mapping(mapping),
+    }
+}
+
+/// Registry alias for a unique raw mapping, when one is published.
+pub(crate) fn registry_alias_for_mapping(mapping: &ProviderMapping) -> Option<String> {
+    for published in crate::alias::published_aliases() {
+        match crate::alias::resolve(published) {
+            Ok(ResolvedModel::Alias {
+                alias, mappings, ..
+            }) => {
+                if mappings.iter().any(|candidate| {
+                    candidate.provider_id == mapping.provider_id
+                        && candidate.offering_id == mapping.offering_id
+                        && candidate.upstream_model == mapping.upstream_model
+                }) {
+                    return Some(alias.to_string());
+                }
+            }
+            Ok(ResolvedModel::PinnedRaw { .. }) | Err(_) => {}
+        }
+    }
+    None
+}
+
+/// Request / alias / upstream identity persisted on every forward log row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeLogIdentity {
+    pub requested_model: String,
+    pub resolved_alias: Option<String>,
+    pub upstream_model: String,
+}
+
+/// Carry materialization identity into logs without inferring at the DB layer.
+pub(crate) fn native_log_identity(plan: &RequestPlan) -> NativeLogIdentity {
+    let requested_model = plan.log_requested_model().to_string();
+    let upstream_model = plan.log_upstream_model().to_string();
+    let resolved_alias = resolved_alias_for_name(&requested_model)
+        .or_else(|| {
+            plan.original_model
+                .as_deref()
+                .and_then(resolved_alias_for_name)
+        })
+        .or_else(|| resolved_alias_for_name(&upstream_model));
+    NativeLogIdentity {
+        requested_model,
+        resolved_alias,
+        upstream_model,
+    }
+}
+
+pub(crate) fn resolved_alias_for_name(name: &str) -> Option<String> {
+    match crate::alias::resolve(name) {
+        Ok(resolved) => resolved_alias_from_model(&resolved),
+        Err(_) => None,
+    }
+}
+
 /// Preserve original casing when the client name already identifies this mapping.
 pub(crate) fn upstream_model_for(requested: &str, canonical: &str) -> String {
     if normalize_model_name(requested) == normalize_model_name(canonical) {
@@ -101,6 +163,7 @@ pub(crate) fn materialize_account_routes(
                 client_model,
                 routing_model,
                 mapping,
+                resolved_alias_from_model(resolved),
                 None,
                 false,
             )?;
@@ -142,6 +205,7 @@ pub(crate) fn materialize_account_routes(
             }
 
             let mut plans = Vec::new();
+            let resolved_alias = Some(alias.to_string());
             for mapping in &routeable {
                 if mapping.is_zen_free() && !free_available && !zen_only {
                     continue;
@@ -152,6 +216,7 @@ pub(crate) fn materialize_account_routes(
                     client_model,
                     routing_model,
                     mapping,
+                    resolved_alias.clone(),
                     None,
                     false,
                 )?;
@@ -180,6 +245,7 @@ pub(crate) fn materialize_account_routes(
                     client_model,
                     routing_model,
                     &twin_mapping,
+                    resolved_alias.clone(),
                     Some(routing_model.to_string()),
                     true,
                 )?;
@@ -221,12 +287,14 @@ fn should_overlay_prefer_twin(
     .is_ok_and(|decision| decision.allow_go_fallback && decision.channel == UpstreamChannel::Free)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_mapping_plan(
     config: &AppConfig,
     parsed: &ParsedClientRequest,
     client_model: &str,
     routing_model: &str,
     mapping: &ProviderMapping,
+    resolved_alias: Option<String>,
     original_model: Option<String>,
     allow_go_fallback: bool,
 ) -> Result<RequestPlan, ProtocolError> {
@@ -247,17 +315,20 @@ fn materialize_mapping_plan(
         parsed,
         client_model,
         &model,
+        resolved_alias,
         channel,
         original_model,
         allow_go_fallback,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_channel_plan(
     config: &AppConfig,
     parsed: &ParsedClientRequest,
     client_model: &str,
     model: &str,
+    resolved_alias: Option<String>,
     channel: UpstreamChannel,
     original_model: Option<String>,
     allow_go_fallback: bool,
@@ -269,6 +340,7 @@ fn materialize_channel_plan(
         &MaterializeSpec {
             client_model: client_model.to_string(),
             upstream_model: model.to_string(),
+            resolved_alias,
             channel,
             upstream_base_override: match channel {
                 UpstreamChannel::Free => Some(base),
@@ -481,6 +553,10 @@ mod tests {
         assert_eq!(set.routes[0].plan.client_model, "glm-5.2");
         assert_eq!(set.routes[0].plan.channel, UpstreamChannel::Go);
         assert!(!set.free_only);
+        let identity = native_log_identity(&set.routes[0].plan);
+        assert_eq!(identity.requested_model, "glm-5.2");
+        assert_eq!(identity.resolved_alias.as_deref(), Some("glm-5.2"));
+        assert_eq!(identity.upstream_model, "glm-5.2");
     }
 
     #[test]
@@ -490,6 +566,10 @@ mod tests {
         assert_eq!(set.routes[0].plan.model, "MiniMax-M3");
         assert_eq!(set.routes[0].plan.client_model, "MiniMax-M3");
         assert_eq!(set.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+        let identity = native_log_identity(&set.routes[0].plan);
+        assert_eq!(identity.requested_model, "MiniMax-M3");
+        assert_eq!(identity.resolved_alias.as_deref(), Some("minimax-m3"));
+        assert_eq!(identity.upstream_model, "MiniMax-M3");
     }
 
     #[test]
@@ -533,6 +613,13 @@ mod tests {
             Some("deepseek-v4-flash")
         );
         assert!(set.routes[1].plan.allow_go_fallback);
+        let free_identity = native_log_identity(&set.routes[1].plan);
+        assert_eq!(free_identity.requested_model, "deepseek-v4-flash");
+        assert_eq!(
+            free_identity.resolved_alias.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(free_identity.upstream_model, "deepseek-v4-flash-free");
     }
 
     #[test]
@@ -570,6 +657,13 @@ mod tests {
         assert_eq!(set.routes[0].plan.client_model, "vendor.gadget-v1");
         assert!(!set.routes[0].plan.allow_go_fallback);
         assert!(set.routes[0].plan.original_model.is_none());
+        let identity = native_log_identity(&set.routes[0].plan);
+        assert_eq!(identity.requested_model, "vendor.gadget-v1");
+        assert_eq!(
+            identity.resolved_alias.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(identity.upstream_model, "deepseek-v4-flash");
     }
 
     #[test]
@@ -717,5 +811,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(gemini.client, ApiFormat::Gemini);
+    }
+
+    #[test]
+    fn claude_desktop_identity_keeps_client_name_and_mapped_alias() {
+        let body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "model": crate::models::CLAUDE_DESKTOP_OPUS_ALIAS,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap(),
+        );
+        let parsed = parse_client_request(ApiFormat::Messages, body).unwrap();
+        let plan = materialize_parsed_request(
+            &parsed,
+            &MaterializeSpec {
+                client_model: parsed.requested_model.clone(),
+                upstream_model: "glm-5.2".into(),
+                resolved_alias: Some("glm-5.2".into()),
+                channel: UpstreamChannel::Go,
+                upstream_base_override: None,
+                original_model: None,
+                allow_go_fallback: false,
+            },
+        )
+        .unwrap();
+        let identity = native_log_identity(&plan);
+        assert_eq!(
+            identity.requested_model,
+            crate::models::CLAUDE_DESKTOP_OPUS_ALIAS
+        );
+        assert_eq!(identity.resolved_alias.as_deref(), Some("glm-5.2"));
+        assert_eq!(identity.upstream_model, "glm-5.2");
     }
 }

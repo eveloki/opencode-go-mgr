@@ -5,6 +5,7 @@ use crate::gateway::diagnostics::{
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
 use crate::gateway::limit::{parse_free_reset_or_default, parse_reset, parse_usage_limit_window};
+use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
     ApiFormat, RequestPlan, UsageCounts, error_body, extract_usage, format_error,
     has_complete_usage, has_usage, merge_stream_usage, transform_response,
@@ -59,6 +60,9 @@ struct ForwardAttemptContext {
     client_format: ApiFormat,
     upstream_format: ApiFormat,
     model: String,
+    requested_model: String,
+    resolved_alias: Option<String>,
+    upstream_model: String,
     stream: bool,
     known_secret: Option<String>,
     route_account_id: Option<String>,
@@ -76,6 +80,7 @@ impl ForwardAttemptContext {
         attempt: u32,
         plan: &RequestPlan,
     ) -> Self {
+        let identity = native_log_identity(plan);
         Self {
             trace: trace.clone(),
             client_body_bytes,
@@ -84,6 +89,9 @@ impl ForwardAttemptContext {
             client_format: plan.client,
             upstream_format: plan.upstream,
             model: plan.model.clone(),
+            requested_model: identity.requested_model,
+            resolved_alias: identity.resolved_alias,
+            upstream_model: identity.upstream_model,
             stream: plan.stream,
             known_secret: None,
             route_account_id: None,
@@ -1145,7 +1153,8 @@ async fn forward_request_impl(
                                     });
                                     let diagnostic = failure.update();
                                     let db = state_h.db.lock();
-                                    let _ = db.update_forward_log(
+                                    let _ = finalize_logged_forward(
+                                        &db,
                                         initial_id,
                                         "outcome_unknown",
                                         None,
@@ -1156,6 +1165,7 @@ async fn forward_request_impl(
                                         ),
                                         Some(&msg),
                                         Some(&diagnostic),
+                                        &attempt_map,
                                     );
                                     (chunks, true)
                                 }
@@ -1189,7 +1199,8 @@ async fn forward_request_impl(
                             });
                             let diagnostic = failure.update();
                             let db = state_h.db.lock();
-                            let _ = db.update_forward_log(
+                            let _ = finalize_logged_forward(
+                                &db,
                                 initial_id,
                                 "outcome_unknown",
                                 None,
@@ -1200,6 +1211,7 @@ async fn forward_request_impl(
                                 ),
                                 Some(&msg),
                                 Some(&diagnostic),
+                                &attempt_map,
                             );
                             (chunks, true)
                         }
@@ -1234,7 +1246,8 @@ async fn forward_request_impl(
                             });
                             let diagnostic = failure.update();
                             let db = state_h.db.lock();
-                            let _ = db.update_forward_log(
+                            let _ = finalize_logged_forward(
+                                &db,
                                 initial_id,
                                 "outcome_unknown",
                                 None,
@@ -1245,6 +1258,7 @@ async fn forward_request_impl(
                                 ),
                                 Some(&msg),
                                 Some(&diagnostic),
+                                &attempt_map,
                             );
                             (chunks, true)
                         }
@@ -1426,13 +1440,15 @@ async fn forward_request_impl(
                             .or(stream_error.as_deref())
                             .map(|error| attempt.redact_known_secret(error));
                         let db = db_h.db.lock();
-                        if let Err(e) = db.update_forward_log(
+                        if let Err(e) = finalize_logged_forward(
+                            &db,
                             initial_id,
                             &status_str,
                             None,
                             metrics,
                             persisted_error.as_deref(),
                             diagnostic.as_ref(),
+                            &attempt,
                         ) {
                             let _ = db.log_gateway(
                                 "warn",
@@ -1785,13 +1801,15 @@ impl Drop for StreamOutcomeGuard {
             .as_deref()
             .map(|message| self.attempt_context.redact_known_secret(message));
         let db = self.state.db.lock();
-        if let Err(error) = db.update_forward_log(
+        if let Err(error) = finalize_logged_forward(
+            &db,
             self.log_id,
             status,
             None,
             metrics,
             persisted_error.as_deref(),
             diagnostic.as_ref(),
+            &self.attempt_context,
         ) {
             let _ = db.log_gateway(
                 "warn",
@@ -1880,13 +1898,15 @@ fn handle_pre_output_stream_failure(
     });
     let diagnostic = failure.update();
     let db = state.db.lock();
-    if let Err(error) = db.update_forward_log(
+    if let Err(error) = finalize_logged_forward(
+        &db,
         log_id,
         "outcome_unknown",
         None,
         metadata_metrics(pricing, plan.service_tier.as_deref(), "outcome_unknown"),
         Some(&message),
         Some(&diagnostic),
+        attempt,
     ) {
         let _ = db.log_gateway(
             "warn",
@@ -2299,7 +2319,7 @@ fn log_forward(
     let failure_value = failure
         .as_ref()
         .and_then(|failure| serde_json::from_str(&failure.diagnostic_json).ok());
-    db.log_forward(&ForwardLog {
+    let id = db.log_forward(&ForwardLog {
         id: 0,
         timestamp: Utc::now(),
         model: model.to_string(),
@@ -2337,7 +2357,35 @@ fn log_forward(
         error_stage: failure.as_ref().map(|failure| failure.error_stage.clone()),
         duration_ms: failure.as_ref().map(|failure| failure.duration_ms),
         diagnostic: failure_value,
-    })
+    })?;
+    persist_log_identity(db, id, context)?;
+    Ok(id)
+}
+
+fn persist_log_identity(db: &Database, id: i64, context: &ForwardAttemptContext) -> Result<()> {
+    let Some(mut attribution) = db.forward_log_native_attribution(id)? else {
+        return Ok(());
+    };
+    attribution.requested_model = Some(context.requested_model.clone());
+    attribution.resolved_alias = context.resolved_alias.clone();
+    attribution.upstream_model = Some(context.upstream_model.clone());
+    db.set_forward_log_native_attribution(id, &attribution)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_logged_forward(
+    db: &Database,
+    id: i64,
+    status: &str,
+    http_status: Option<i32>,
+    metrics: ForwardMetrics,
+    error_message: Option<&str>,
+    diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
+    context: &ForwardAttemptContext,
+) -> Result<()> {
+    db.update_forward_log(id, status, http_status, metrics, error_message, diagnostic)?;
+    persist_log_identity(db, id, context)
 }
 
 fn success_status_for_cost(cost_state: &str) -> &'static str {
@@ -2599,6 +2647,9 @@ mod stream_usage_tests {
             client_format: ApiFormat::ChatCompletions,
             upstream_format: ApiFormat::ChatCompletions,
             model: "test-model".into(),
+            requested_model: "test-model".into(),
+            resolved_alias: None,
+            upstream_model: "test-model".into(),
             stream: false,
             known_secret: Some(secret.clone()),
             route_account_id: None,

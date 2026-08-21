@@ -201,6 +201,10 @@ async fn unknown_chat_model_returns_400_before_any_upstream_request() {
             .map(|call: &FakeCall| call.path.as_str())
             .collect::<Vec<_>>()
     );
+    assert!(
+        state.db.lock().list_forward_logs(8).unwrap().is_empty(),
+        "unknown models must not create an upstream forward log"
+    );
 
     stop(state, dir, gateway_handle, stop_mock);
 }
@@ -290,4 +294,246 @@ async fn ambiguous_model_id_is_structured_across_client_formats() {
                 .is_some_and(|message| message.contains(alias::AMBIGUOUS_MODEL_ID))
         );
     }
+}
+
+const CHAT_SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"upstream-should-not-leak","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+const CHAT_STREAM_BODY: &str = concat!(
+    "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chat-stream\",\"model\":\"upstream-should-not-leak\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
+    "data: [DONE]\n\n"
+);
+
+fn latest_log_identity(
+    state: &CoreStateInner,
+) -> (String, ocg_core::models::ForwardLogNativeAttribution) {
+    let logs = state.db.lock().list_forward_logs(8).unwrap();
+    assert_eq!(logs.len(), 1, "expected one forward log, got {logs:?}");
+    let log = logs.into_iter().next().unwrap();
+    let attribution = state
+        .db
+        .lock()
+        .forward_log_native_attribution(log.id)
+        .unwrap()
+        .expect("native attribution should exist");
+    (log.status, attribution)
+}
+
+#[tokio::test]
+async fn successful_alias_chat_persists_requested_alias_and_upstream() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: CHAT_SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let response = loopback_client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth("gw-test")
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["model"], "deepseek-v4-flash");
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    let (status, attribution) = latest_log_identity(&state);
+    assert_eq!(status, "success");
+    assert_eq!(
+        attribution.requested_model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        attribution.resolved_alias.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        attribution.upstream_model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert!(attribution.native_cost_value.is_some());
+    assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
+
+    stop(state, dir, gateway_handle, stop_mock);
+}
+
+#[tokio::test]
+async fn mixed_case_alias_chat_persists_canonical_alias() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: CHAT_SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, _calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let response = loopback_client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth("gw-test")
+        .json(&serde_json::json!({
+            "model": "MiniMax-M3",
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["model"], "MiniMax-M3");
+
+    let (status, attribution) = latest_log_identity(&state);
+    assert_eq!(status, "success");
+    assert_eq!(attribution.requested_model.as_deref(), Some("MiniMax-M3"));
+    assert_eq!(attribution.resolved_alias.as_deref(), Some("minimax-m3"));
+    assert_eq!(attribution.upstream_model.as_deref(), Some("MiniMax-M3"));
+
+    stop(state, dir, gateway_handle, stop_mock);
+}
+
+#[tokio::test]
+async fn successful_alias_chat_stream_preserves_identity_after_finalize() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([FakeReply {
+            status: 200,
+            body: CHAT_STREAM_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let response = loopback_client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth("gw-test")
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("data:"), "{body}");
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    let (status, attribution) = latest_log_identity(&state);
+    assert_eq!(status, "success");
+    assert_eq!(
+        attribution.requested_model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        attribution.resolved_alias.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        attribution.upstream_model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert!(attribution.native_cost_value.is_some());
+    assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
+
+    stop(state, dir, gateway_handle, stop_mock);
+}
+
+#[tokio::test]
+async fn alias_upstream_error_still_persists_identity() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([FakeReply {
+            status: 500,
+            body: r#"{"error":{"message":"boom"}}"#,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let response = loopback_client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth("gw-test")
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    let (status, attribution) = latest_log_identity(&state);
+    assert_eq!(status, "error");
+    assert_eq!(
+        attribution.requested_model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        attribution.resolved_alias.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        attribution.upstream_model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+
+    stop(state, dir, gateway_handle, stop_mock);
+}
+
+#[tokio::test]
+async fn alias_client_error_still_persists_identity() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([FakeReply {
+            status: 400,
+            body: r#"{"error":{"message":"bad request"}}"#,
+        }]),
+    )]);
+    let (base_url, _calls, stop_mock) = start_fake_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let response = loopback_client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth("gw-test")
+        .json(&serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let (status, attribution) = latest_log_identity(&state);
+    assert_eq!(status, "client_error");
+    assert_eq!(
+        attribution.resolved_alias.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        attribution.requested_model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        attribution.upstream_model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+
+    stop(state, dir, gateway_handle, stop_mock);
 }
