@@ -24,6 +24,60 @@ pub const SCNET_RISK_ACKNOWLEDGEMENT_VERSION: &str = "2026-08-21";
 pub const SCNET_RISK_ACKNOWLEDGEMENT_SOURCE_URL: &str =
     "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html";
 pub const SCNET_RISK_ACKNOWLEDGEMENT_BODY: &str = "SCNet Token Plan keys (sk-tp-) are limited to interactive use inside AI tools. Account sharing and using the API as a custom application backend, automation script, or non-interactive batch caller is prohibited and may suspend the subscription or revoke the key.";
+/// Pinned SHA-256 of [`SCNET_RISK_ACKNOWLEDGEMENT_BODY`]. Changing the body
+/// requires an explicit acknowledgement version bump and this hash update.
+pub const SCNET_RISK_ACKNOWLEDGEMENT_CONTENT_HASH: &str =
+    "d8d82fda982880016cf7f3c5e6a8e944cac4dcf900643f31eab3cdfd05aa6e60";
+
+pub const SCNET_TOKEN_PLAN_OFFICIAL_BASIC_NAME: &str = "基础版";
+pub const SCNET_TOKEN_PLAN_OFFICIAL_STANDARD_NAME: &str = "标准版";
+pub const SCNET_TOKEN_PLAN_OFFICIAL_PREMIUM_NAME: &str = "高级版";
+pub const SCNET_TOKEN_PLAN_OFFERING_IDS: [&str; 3] = [
+    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+    SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID,
+    SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
+];
+
+/// Catalog `model_source` shared by token-plan-basic/standard/premium.
+/// Official usable-model table only; not a client alias registry.
+pub const SCNET_TOKEN_PLAN_MODEL_SOURCE: &str = "official_token_plan_usable_models_2026_08_21";
+pub const SCNET_TOKEN_PLAN_MODEL_SNAPSHOT_VERSION: &str = "2026-08-21";
+pub const SCNET_TOKEN_PLAN_MODEL_SOURCE_URL: &str = SCNET_RISK_ACKNOWLEDGEMENT_SOURCE_URL;
+
+/// Documented OpenAI/Anthropic bases and paths. Future adapter input only;
+/// this crate must not issue live Token Plan requests.
+pub const SCNET_TOKEN_PLAN_ENDPOINT_SOURCE_URL: &str =
+    "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/tutorial/quickstart.html";
+pub const SCNET_TOKEN_PLAN_OPENAI_BASE_URL: &str = "https://api.scnet.cn/api/llm/v1";
+pub const SCNET_TOKEN_PLAN_ANTHROPIC_BASE_URL: &str = "https://api.scnet.cn/api/llm/anthropic";
+pub const SCNET_TOKEN_PLAN_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+pub const SCNET_TOKEN_PLAN_MESSAGES_PATH: &str = "/v1/messages";
+
+/// Official Token Plan usable-model table, 2026-08-21, exact case and order.
+/// Shared by 基础版/标准版/高级版. Do not publish as `model_aliases`.
+pub const SCNET_TOKEN_PLAN_USABLE_MODELS: &[&str] = &[
+    "GLM-5.2",
+    "GLM-5",
+    "GLM-5.1",
+    "Kimi-K3",
+    "Kimi-K2.7-Code",
+    "Kimi-K2.6",
+    "Kimi-K2.5",
+    "DeepSeek-V4-Flash",
+    "DeepSeek-V3.2",
+    "MiniMax-M3",
+    "MiniMax-M2.7",
+    "MiniMax-M2.5",
+    "MiMo-V2.5-Pro",
+];
+
+/// Pricing-table / FAQ extras that are not in the usable-model table.
+pub const SCNET_TOKEN_PLAN_EXCLUDED_PRICING_TABLE_OR_FAQ_MODELS: &[&str] = &[
+    "DeepSeek-V4-Pro",
+    "DeepSeek-V4-Flash-0731",
+    "Qwen3.8-max",
+    "Qwen3-235B-A22B",
+];
 
 pub const QUOTA_WINDOW_FIVE_HOURS: &str = "five_hours";
 pub const QUOTA_WINDOW_WEEK: &str = "week";
@@ -257,6 +311,73 @@ impl PlanRiskNotice {
     }
 }
 
+/// Official Token Plan usage restrictions pinned from the 2026-08-21 docs.
+/// Adapter input only; these flags do not authorize outbound calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScnetTokenPlanUsageRestrictions {
+    pub interactive_ai_tools_only: bool,
+    pub account_sharing_prohibited: bool,
+    pub custom_application_backends_prohibited: bool,
+    pub automation_scripts_prohibited: bool,
+    pub non_interactive_batch_calls_prohibited: bool,
+    pub curl_style_non_interactive_calls_prohibited: bool,
+    pub quota_status_rest_established: bool,
+    pub non_billable_verification_established: bool,
+}
+
+pub const SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS: ScnetTokenPlanUsageRestrictions =
+    ScnetTokenPlanUsageRestrictions {
+        interactive_ai_tools_only: true,
+        account_sharing_prohibited: true,
+        custom_application_backends_prohibited: true,
+        automation_scripts_prohibited: true,
+        non_interactive_batch_calls_prohibited: true,
+        curl_style_non_interactive_calls_prohibited: true,
+        quota_status_rest_established: false,
+        non_billable_verification_established: false,
+    };
+
+/// Documented Token Plan HTTP contract. Do not concatenate these into a live
+/// client; official usage restrictions prohibit custom application backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScnetTokenPlanDocumentedEndpoints {
+    pub source_url: &'static str,
+    pub openai_base_url: &'static str,
+    pub anthropic_base_url: &'static str,
+    pub chat_completions_path: &'static str,
+    pub messages_path: &'static str,
+    pub auth_scheme: UpstreamAuthScheme,
+}
+
+pub const SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS: ScnetTokenPlanDocumentedEndpoints =
+    ScnetTokenPlanDocumentedEndpoints {
+        source_url: SCNET_TOKEN_PLAN_ENDPOINT_SOURCE_URL,
+        openai_base_url: SCNET_TOKEN_PLAN_OPENAI_BASE_URL,
+        anthropic_base_url: SCNET_TOKEN_PLAN_ANTHROPIC_BASE_URL,
+        chat_completions_path: SCNET_TOKEN_PLAN_CHAT_COMPLETIONS_PATH,
+        messages_path: SCNET_TOKEN_PLAN_MESSAGES_PATH,
+        auth_scheme: UpstreamAuthScheme::Bearer,
+    };
+
+/// Versioned official usable-model snapshot shared by all three offerings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScnetTokenPlanModelSnapshot {
+    pub source: &'static str,
+    pub version: &'static str,
+    pub source_url: &'static str,
+    pub upstream_models: &'static [&'static str],
+    pub excluded_pricing_table_or_faq_models: &'static [&'static str],
+}
+
+pub const SCNET_TOKEN_PLAN_MODEL_SNAPSHOT: ScnetTokenPlanModelSnapshot =
+    ScnetTokenPlanModelSnapshot {
+        source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
+        version: SCNET_TOKEN_PLAN_MODEL_SNAPSHOT_VERSION,
+        source_url: SCNET_TOKEN_PLAN_MODEL_SOURCE_URL,
+        upstream_models: SCNET_TOKEN_PLAN_USABLE_MODELS,
+        excluded_pricing_table_or_faq_models: SCNET_TOKEN_PLAN_EXCLUDED_PRICING_TABLE_OR_FAQ_MODELS,
+    };
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinPlan {
     pub offering: BuiltinOffering,
@@ -476,7 +597,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         pricing_availability: "unavailable",
         usage_availability: "unavailable",
         quota_unit: "credits",
-        model_source: "pending_runtime",
+        model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
         key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
         auth_schemes: &BEARER_AUTH,
         upstream_protocols: &SCNET_PROTOCOLS,
@@ -496,7 +617,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         pricing_availability: "unavailable",
         usage_availability: "unavailable",
         quota_unit: "credits",
-        model_source: "pending_runtime",
+        model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
         key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
         auth_schemes: &BEARER_AUTH,
         upstream_protocols: &SCNET_PROTOCOLS,
@@ -516,7 +637,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         pricing_availability: "unavailable",
         usage_availability: "unavailable",
         quota_unit: "credits",
-        model_source: "pending_runtime",
+        model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
         key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
         auth_schemes: &BEARER_AUTH,
         upstream_protocols: &SCNET_PROTOCOLS,
@@ -579,6 +700,28 @@ pub fn builtin_plan(provider_id: &str, offering_id: &str) -> Option<BuiltinPlan>
     BUILTIN_PLANS.iter().copied().find(|plan| {
         plan.offering.provider_id == provider_id && plan.offering.offering_id == offering_id
     })
+}
+
+pub fn is_scnet_token_plan(provider_id: &str, offering_id: &str) -> bool {
+    provider_id == SCNET_PROVIDER_ID
+        && scnet_token_plan_official_offering_name(offering_id).is_some()
+}
+
+pub fn scnet_token_plan_official_offering_name(offering_id: &str) -> Option<&'static str> {
+    match offering_id {
+        SCNET_TOKEN_PLAN_BASIC_OFFERING_ID => Some(SCNET_TOKEN_PLAN_OFFICIAL_BASIC_NAME),
+        SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID => Some(SCNET_TOKEN_PLAN_OFFICIAL_STANDARD_NAME),
+        SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID => Some(SCNET_TOKEN_PLAN_OFFICIAL_PREMIUM_NAME),
+        _ => None,
+    }
+}
+
+/// Shared official snapshot for every Token Plan offering. None for other Plans.
+pub fn scnet_token_plan_model_snapshot(
+    provider_id: &str,
+    offering_id: &str,
+) -> Option<ScnetTokenPlanModelSnapshot> {
+    is_scnet_token_plan(provider_id, offering_id).then_some(SCNET_TOKEN_PLAN_MODEL_SNAPSHOT)
 }
 
 pub fn acknowledgement_content_hash(body: &str) -> String {
@@ -1018,10 +1161,166 @@ mod tests {
     #[test]
     fn scnet_acknowledgement_hash_is_stable() {
         let notice = SCNET_RISK_NOTICE;
+        assert_eq!(notice.acknowledgement_id, SCNET_RISK_ACKNOWLEDGEMENT_ID);
+        assert_eq!(notice.version, SCNET_RISK_ACKNOWLEDGEMENT_VERSION);
+        assert_eq!(notice.source_url, SCNET_RISK_ACKNOWLEDGEMENT_SOURCE_URL);
+        assert_eq!(notice.body, SCNET_RISK_ACKNOWLEDGEMENT_BODY);
+        assert_eq!(
+            notice.content_hash(),
+            SCNET_RISK_ACKNOWLEDGEMENT_CONTENT_HASH
+        );
         assert_eq!(
             notice.content_hash(),
             acknowledgement_content_hash(SCNET_RISK_ACKNOWLEDGEMENT_BODY)
         );
         assert_ne!(notice.content_hash(), acknowledgement_content_hash("other"));
+    }
+
+    #[test]
+    fn scnet_token_plans_share_official_usable_model_snapshot() {
+        assert_eq!(
+            SCNET_TOKEN_PLAN_USABLE_MODELS,
+            [
+                "GLM-5.2",
+                "GLM-5",
+                "GLM-5.1",
+                "Kimi-K3",
+                "Kimi-K2.7-Code",
+                "Kimi-K2.6",
+                "Kimi-K2.5",
+                "DeepSeek-V4-Flash",
+                "DeepSeek-V3.2",
+                "MiniMax-M3",
+                "MiniMax-M2.7",
+                "MiniMax-M2.5",
+                "MiMo-V2.5-Pro",
+            ]
+        );
+        let expected = SCNET_TOKEN_PLAN_MODEL_SNAPSHOT;
+        let mut previous: Option<BuiltinPlan> = None;
+        for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
+            let plan = builtin_plan(SCNET_PROVIDER_ID, offering_id).unwrap();
+            assert!(is_scnet_token_plan(
+                plan.offering.provider_id,
+                plan.offering.offering_id
+            ));
+            assert_eq!(plan.model_source, SCNET_TOKEN_PLAN_MODEL_SOURCE);
+            assert_eq!(
+                scnet_token_plan_model_snapshot(
+                    plan.offering.provider_id,
+                    plan.offering.offering_id
+                ),
+                Some(expected)
+            );
+            assert!(std::ptr::eq(
+                expected.upstream_models,
+                SCNET_TOKEN_PLAN_USABLE_MODELS
+            ));
+            if let Some(previous) = previous {
+                assert_eq!(previous.model_source, plan.model_source);
+                assert_eq!(
+                    scnet_token_plan_model_snapshot(
+                        previous.offering.provider_id,
+                        previous.offering.offering_id
+                    )
+                    .unwrap()
+                    .upstream_models,
+                    expected.upstream_models
+                );
+            }
+            previous = Some(plan);
+        }
+        assert_eq!(
+            scnet_token_plan_official_offering_name(SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
+            Some(SCNET_TOKEN_PLAN_OFFICIAL_BASIC_NAME)
+        );
+        assert_eq!(
+            scnet_token_plan_official_offering_name(SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID),
+            Some(SCNET_TOKEN_PLAN_OFFICIAL_STANDARD_NAME)
+        );
+        assert_eq!(
+            scnet_token_plan_official_offering_name(SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID),
+            Some(SCNET_TOKEN_PLAN_OFFICIAL_PREMIUM_NAME)
+        );
+    }
+
+    #[test]
+    fn scnet_token_plan_excludes_pricing_table_and_faq_extras() {
+        for extra in SCNET_TOKEN_PLAN_EXCLUDED_PRICING_TABLE_OR_FAQ_MODELS {
+            assert!(
+                !SCNET_TOKEN_PLAN_USABLE_MODELS.contains(extra),
+                "{extra} is a pricing-table/FAQ extra and must not enter the usable snapshot"
+            );
+        }
+        assert!(!SCNET_TOKEN_PLAN_USABLE_MODELS.contains(&"glm-5.2"));
+        assert!(!SCNET_TOKEN_PLAN_USABLE_MODELS.contains(&"DeepSeek-V4-Pro"));
+        assert!(!SCNET_TOKEN_PLAN_USABLE_MODELS.contains(&"Qwen3-235B-A22B"));
+    }
+
+    #[test]
+    fn scnet_token_plans_stay_fail_closed_without_quota_windows() {
+        for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
+            let plan = builtin_plan(SCNET_PROVIDER_ID, offering_id).unwrap();
+            assert!(!plan.routable);
+            assert_eq!(plan.verification_policy, VerificationPolicy::Required);
+            assert_eq!(plan.verification_runtime_availability, "unavailable");
+            assert_eq!(plan.pricing_availability, "unavailable");
+            assert_eq!(plan.usage_availability, "unavailable");
+            assert_eq!(plan.quota_unit, "credits");
+            assert_ne!(plan.quota_unit, QUOTA_WINDOW_FIVE_HOURS);
+            assert_ne!(plan.quota_unit, QUOTA_WINDOW_WEEK);
+            assert_eq!(plan.key_prefix, Some(SCNET_TOKEN_PLAN_KEY_PREFIX));
+            assert_eq!(plan.auth_schemes, &BEARER_AUTH);
+            assert_eq!(
+                plan.upstream_protocols,
+                &[
+                    UpstreamProtocolKind::ChatCompletions,
+                    UpstreamProtocolKind::Messages
+                ]
+            );
+            assert!(
+                !plan
+                    .upstream_protocols
+                    .contains(&UpstreamProtocolKind::Responses)
+            );
+            assert!(validate_plan_key(plan, "sk-tp-live").is_ok());
+            assert!(
+                validate_plan_key(plan, "sk-live-not-token")
+                    .unwrap_err()
+                    .to_string()
+                    .contains(SCNET_TOKEN_PLAN_KEY_PREFIX)
+            );
+        }
+        assert!(!SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.quota_status_rest_established);
+        assert!(!SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.non_billable_verification_established);
+        assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.custom_application_backends_prohibited);
+        assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.automation_scripts_prohibited);
+        assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.non_interactive_batch_calls_prohibited);
+        assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.curl_style_non_interactive_calls_prohibited);
+        assert_eq!(
+            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.auth_scheme,
+            UpstreamAuthScheme::Bearer
+        );
+        assert_eq!(
+            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.openai_base_url,
+            "https://api.scnet.cn/api/llm/v1"
+        );
+        assert_eq!(
+            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.anthropic_base_url,
+            "https://api.scnet.cn/api/llm/anthropic"
+        );
+        assert_eq!(
+            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.chat_completions_path,
+            "/chat/completions"
+        );
+        assert_eq!(
+            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.messages_path,
+            "/v1/messages"
+        );
+        let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+        assert_eq!(goat.model_source, "pending_runtime");
+        assert!(
+            scnet_token_plan_model_snapshot(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none()
+        );
     }
 }

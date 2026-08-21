@@ -1,0 +1,55 @@
+{
+  "comment": "Official SCNet Token Plan usable-model snapshot pinned 2026-08-21 from the Token Plan usable-model table. Shared by token-plan-basic/standard/premium (基础版/标准版/高级版). Catalog may identify model_source; model_aliases stay empty because the Plans are unroutable. Pricing-table and FAQ extras are excluded.",
+  "source": "official_token_plan_usable_models_2026_08_21",
+  "version": "2026-08-21",
+  "source_url": "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html",
+  "endpoint_source_url": "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/tutorial/quickstart.html",
+  "offerings": [
+    {
+      "offering_id": "token-plan-basic",
+      "official_name": "基础版"
+    },
+    {
+      "offering_id": "token-plan-standard",
+      "official_name": "标准版"
+    },
+    {
+      "offering_id": "token-plan-premium",
+      "official_name": "高级版"
+    }
+  ],
+  "upstream_models": [
+    "GLM-5.2",
+    "GLM-5",
+    "GLM-5.1",
+    "Kimi-K3",
+    "Kimi-K2.7-Code",
+    "Kimi-K2.6",
+    "Kimi-K2.5",
+    "DeepSeek-V4-Flash",
+    "DeepSeek-V3.2",
+    "MiniMax-M3",
+    "MiniMax-M2.7",
+    "MiniMax-M2.5",
+    "MiMo-V2.5-Pro"
+  ],
+  "excluded_pricing_table_or_faq_extras": [
+    "DeepSeek-V4-Pro",
+    "DeepSeek-V4-Flash-0731",
+    "Qwen3.8-max",
+    "Qwen3-235B-A22B"
+  ],
+  "key_prefix": "sk-tp-",
+  "auth_scheme": "bearer",
+  "openai_base_url": "https://api.scnet.cn/api/llm/v1",
+  "anthropic_base_url": "https://api.scnet.cn/api/llm/anthropic",
+  "openai_chat_completions_path": "/chat/completions",
+  "anthropic_messages_path": "/v1/messages",
+  "risk_notice": {
+    "acknowledgement_id": "scnet-token-plan-restrictions",
+    "version": "2026-08-21",
+    "source_url": "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html",
+    "body": "SCNet Token Plan keys (sk-tp-) are limited to interactive use inside AI tools. Account sharing and using the API as a custom application backend, automation script, or non-interactive batch caller is prohibited and may suspend the subscription or revoke the key.",
+    "content_hash": "d8d82fda982880016cf7f3c5e6a8e944cac4dcf900643f31eab3cdfd05aa6e60"
+  }
+}
