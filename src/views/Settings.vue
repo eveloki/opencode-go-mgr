@@ -481,6 +481,7 @@ import { computed, onActivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
+  NCheckbox,
   NForm,
   NFormItem,
   NIcon,
