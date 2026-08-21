@@ -465,6 +465,7 @@ export const zhTWMessages = {
   "5 小时额度": "5 小時額度",
   "周额度": "每週額度",
   "月额度": "每月額度",
+  "GOAT 官方套餐额度；实时用量请在 Command Code CLI 运行 /usage 查看。": "GOAT 官方方案額度；即時用量請在 Command Code CLI 執行 /usage 查看。",
   "官方倍率": "官方倍率",
   "模型价格为 OpenCode Go 表中的美元/百万 tokens；官方倍率用于换算额度消耗，可按活动手动调整。": "模型價格為 OpenCode Go 表中的美元／百萬 tokens；官方倍率用於換算額度消耗，可依活動手動調整。",
   "保存倍率": "儲存倍率",

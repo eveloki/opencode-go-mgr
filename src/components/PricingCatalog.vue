@@ -17,12 +17,22 @@
       <n-button size="small" secondary @click="loadProviderCatalog">{{ t("重试") }}</n-button>
     </n-alert>
     <template v-if="!catalogLoading">
-      <section
-        v-for="group in planGroups"
-        :key="group.plan.id"
-        class="pricing-card"
-        :aria-labelledby="`pricing-title-${group.plan.id}`"
+      <n-tabs
+        v-model:value="activePlanId"
+        type="line"
+        display-directive="if"
+        class="pricing-plan-tabs"
       >
+        <n-tab-pane
+          v-for="group in planGroups"
+          :key="group.plan.id"
+          :name="group.plan.id"
+          :tab="group.label"
+        >
+          <section
+            class="pricing-card"
+            :aria-labelledby="`pricing-title-${group.plan.id}`"
+          >
         <div class="pricing-head">
           <div>
             <h2 :id="`pricing-title-${group.plan.id}`">
@@ -146,7 +156,9 @@
               >{{ t("官方来源") }}</n-button>
             </div>
         </template>
-      </section>
+          </section>
+        </n-tab-pane>
+      </n-tabs>
     </template>
   </div>
 </template>
@@ -160,7 +172,9 @@ import {
   NIcon,
   NInputNumber,
   NSpin,
+  NTabPane,
   NTag,
+  NTabs,
   NTooltip,
   useDialog,
   useMessage,
@@ -206,6 +220,7 @@ const loadError = ref("");
 const refreshError = ref("");
 const providerSnapshots = ref<ProviderSnapshots>({});
 const providerSnapshotErrors = ref<Partial<Record<PlanId, string>>>({});
+const activePlanId = ref<PlanId>("opencode-go");
 
 const tableRows = computed(() => buildPricingTableRows(snapshot.value?.models ?? [], {
   highspeed: t("高速别名"),
@@ -692,6 +707,9 @@ onMounted(() => void loadProviderCatalog());
 .pricing-catalog {
   display: grid;
   gap: 16px;
+}
+.pricing-plan-tabs {
+  min-width: 0;
 }
 .catalog-state {
   min-height: 42px;

@@ -80,82 +80,87 @@
     </template>
 
     <template #header-extra>
-      <n-space align="center" :size="8">
-        <n-tooltip v-if="isGo && accountIsReady(account)" trigger="hover">
-          <template #trigger>
-            <n-button
-              circle
-              quaternary
-              size="small"
-              :aria-label="t('测试账号 {name}', { name: account.name })"
-              :loading="pinging"
-              @click="emit('ping')"
-            >
-              <template #icon><n-icon :component="ThunderboltOutlined" /></template>
-            </n-button>
-          </template>
-          {{ t("测试连接") }}
-        </n-tooltip>
+      <div class="account-actions">
+        <div v-if="isGo && accountIsReady(account)" class="account-action account-action--ping">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button
+                circle
+                quaternary
+                size="small"
+                :aria-label="t('测试账号 {name}', { name: account.name })"
+                :loading="pinging"
+                @click="emit('ping')"
+              >
+                <template #icon><n-icon :component="ThunderboltOutlined" /></template>
+              </n-button>
+            </template>
+            {{ t("测试连接") }}
+          </n-tooltip>
+        </div>
 
-        <n-tooltip v-if="accountIsReady(account)" trigger="hover">
-          <template #trigger>
-            <n-switch
-              :value="account.enabled"
-              :disabled="!!toggleBlockedReason"
-              :aria-label="account.enabled ? t('禁用账号 {name}', { name: account.name }) : t('启用账号 {name}', { name: account.name })"
-              @update:value="emit('toggle')"
-            />
-          </template>
-          {{ toggleBlockedReason || (account.enabled
-            ? t("禁用账号 {name}", { name: account.name })
-            : t("启用账号 {name}", { name: account.name })) }}
-        </n-tooltip>
+        <div v-if="accountIsReady(account)" class="account-action account-action--enabled">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-switch
+                :value="account.enabled"
+                :disabled="!!toggleBlockedReason"
+                :aria-label="account.enabled ? t('禁用账号 {name}', { name: account.name }) : t('启用账号 {name}', { name: account.name })"
+                @update:value="emit('toggle')"
+              />
+            </template>
+            {{ toggleBlockedReason || (account.enabled
+              ? t("禁用账号 {name}", { name: account.name })
+              : t("启用账号 {name}", { name: account.name })) }}
+          </n-tooltip>
+        </div>
 
-        <n-tooltip v-if="isZen && accountIsReady(account) && account.enabled" trigger="hover">
-          <template #trigger>
-            <n-switch
-              :value="account.free_alias_enabled"
-              :loading="freeAliasSaving"
-              :aria-label="account.free_alias_enabled
-                ? t('禁用 {name} 的 Free 别名', { name: account.name })
-                : t('启用 {name} 的 Free 别名', { name: account.name })"
-              @update:value="emit('toggle-free-alias')"
-            />
-          </template>
-          {{ account.free_alias_enabled
-            ? t("禁用 {name} 的 Free 别名", { name: account.name })
-            : t("启用 {name} 的 Free 别名", { name: account.name }) }}
-        </n-tooltip>
+        <div v-if="isZen && accountIsReady(account) && account.enabled" class="account-action account-action--secondary">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-switch
+                :value="account.free_alias_enabled"
+                :loading="freeAliasSaving"
+                :aria-label="account.free_alias_enabled
+                  ? t('禁用 {name} 的 Free 别名', { name: account.name })
+                  : t('启用 {name} 的 Free 别名', { name: account.name })"
+                @update:value="emit('toggle-free-alias')"
+              />
+            </template>
+            {{ account.free_alias_enabled
+              ? t("禁用 {name} 的 Free 别名", { name: account.name })
+              : t("启用 {name} 的 Free 别名", { name: account.name }) }}
+          </n-tooltip>
+        </div>
 
-        <n-tooltip
-          v-if="isGo && accountIsReady(account)"
-          trigger="hover"
-        >
-          <template #trigger>
-            <n-button
-              circle
-              quaternary
-              size="small"
-              :aria-label="t('刷新额度')"
-              :loading="usageRefreshLoading"
-              :disabled="isUsageRefreshBlocked(account, now) || usageLoading || !!usageLoadError"
-              @click="emit('refresh-usage')"
-            >
-              <template #icon><n-icon :component="ReloadOutlined" /></template>
-            </n-button>
-          </template>
-          {{ usageRefreshTooltip(account, now) }}
-        </n-tooltip>
+        <div v-if="isGo && accountIsReady(account)" class="account-action account-action--secondary">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button
+                circle
+                quaternary
+                size="small"
+                :aria-label="t('刷新额度')"
+                :loading="usageRefreshLoading"
+                :disabled="isUsageRefreshBlocked(account, now) || usageLoading || !!usageLoadError"
+                @click="emit('refresh-usage')"
+              >
+                <template #icon><n-icon :component="ReloadOutlined" /></template>
+              </n-button>
+            </template>
+            {{ usageRefreshTooltip(account, now) }}
+          </n-tooltip>
+        </div>
 
-        <n-popover
-          v-if="isGo && accountIsReady(account) && edits"
-          trigger="click"
-          placement="bottom-end"
-          :show-arrow="false"
-          :width="320"
-          style="max-width: calc(100vw - 64px)"
-          @update:show="(show: boolean) => show && emit('usage-editor-open')"
-        >
+        <div v-if="isGo && accountIsReady(account) && edits" class="account-action account-action--edit">
+          <n-popover
+            trigger="click"
+            placement="bottom-end"
+            :show-arrow="false"
+            :width="320"
+            style="max-width: calc(100vw - 64px)"
+            @update:show="(show: boolean) => show && emit('usage-editor-open')"
+          >
           <template #trigger>
             <n-tooltip trigger="hover">
               <template #trigger>
@@ -173,42 +178,44 @@
             </n-tooltip>
           </template>
 
-          <AccountUsageEditor
-            :account="account"
-            :usage="usage"
-            :limits="limits"
-            :edits="edits!"
-            :loading="usageLoading"
-            :now="now"
-            @update-draft="(key, value) => emit('usage-update-draft', key, value)"
-            @update-resets-first="(key, value) => emit('usage-update-resets-first', key, value)"
-            @update-resets-second="(key, value) => emit('usage-update-resets-second', key, value)"
-            @save="(key) => emit('usage-save', key)"
-          />
-        </n-popover>
+            <AccountUsageEditor
+              :account="account"
+              :usage="usage"
+              :limits="limits"
+              :edits="edits!"
+              :loading="usageLoading"
+              :now="now"
+              @update-draft="(key, value) => emit('usage-update-draft', key, value)"
+              @update-resets-first="(key, value) => emit('usage-update-resets-first', key, value)"
+              @update-resets-second="(key, value) => emit('usage-update-resets-second', key, value)"
+              @save="(key) => emit('usage-save', key)"
+            />
+          </n-popover>
+        </div>
 
-        <n-dropdown
-          v-if="menuOptions.length > 0"
-          :options="menuOptions"
-          trigger="click"
-          placement="bottom-end"
-          @select="(key: string | number) => emit('menu-select', key)"
-        >
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-button
-                circle
-                quaternary
-                size="small"
-                :aria-label="t('更多操作')"
-              >
-                <template #icon><n-icon :component="MoreOutlined" /></template>
-              </n-button>
-            </template>
-            {{ t("更多操作") }}
-          </n-tooltip>
-        </n-dropdown>
-      </n-space>
+        <div v-if="menuOptions.length > 0" class="account-action account-action--menu">
+          <n-dropdown
+            :options="menuOptions"
+            trigger="click"
+            placement="bottom-end"
+            @select="(key: string | number) => emit('menu-select', key)"
+          >
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  circle
+                  quaternary
+                  size="small"
+                  :aria-label="t('更多操作')"
+                >
+                  <template #icon><n-icon :component="MoreOutlined" /></template>
+                </n-button>
+              </template>
+              {{ t("更多操作") }}
+            </n-tooltip>
+          </n-dropdown>
+        </div>
+      </div>
     </template>
 
     <n-alert
@@ -241,7 +248,8 @@
       </n-button>
     </div>
     <div v-else-if="isDraft" class="provider-unconfigured" role="status">
-      {{ draftDescription }}
+      <p>{{ draftDescription }}</p>
+      <GoatQuotaReference v-if="isGoat" />
     </div>
     <div v-else-if="isCustom" class="custom-endpoint">
       <div class="custom-endpoint__meta">
@@ -304,7 +312,6 @@ import {
   NDropdown,
   NIcon,
   NPopover,
-  NSpace,
   NSwitch,
   NTag,
   NTooltip,
@@ -334,7 +341,10 @@ import {
   usageSyncCaption,
 } from "../views/account-display.ts";
 import type { AccountMenuOption } from "../views/account-display.ts";
-import { isZenFreeAccount } from "../views/account-providers.ts";
+import {
+  isCommandCodeGoatAccount,
+  isZenFreeAccount,
+} from "../views/account-providers.ts";
 import {
   customAccountNeedsVerification,
   customAccountToggleBlocked,
@@ -344,6 +354,7 @@ import { accountPlanWarning, planLabel } from "../views/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../views/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
+import GoatQuotaReference from "./GoatQuotaReference.vue";
 import UsageStrip from "./UsageStrip.vue";
 
 const props = defineProps<{
@@ -385,6 +396,7 @@ const emit = defineEmits<{
 }>();
 
 const isZen = computed(() => isZenFreeAccount(props.account));
+const isGoat = computed(() => isCommandCodeGoatAccount(props.account));
 const isGo = computed(() => (
   props.account.provider_id === "opencode" && props.account.offering_id === "go"
 ));
@@ -473,6 +485,45 @@ const usageEditorAvailable = computed(() => {
 .provider-unconfigured {
   color: var(--ocg-warning);
   font-size: var(--ocg-font-sm);
+}
+
+.provider-unconfigured > p {
+  margin: 0;
+}
+
+.account-actions {
+  display: grid;
+  grid-template-columns: repeat(5, 40px);
+  align-items: center;
+  justify-content: end;
+  column-gap: 8px;
+}
+
+.account-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.account-action--ping {
+  grid-column: 1;
+}
+
+.account-action--enabled {
+  grid-column: 2;
+}
+
+.account-action--secondary {
+  grid-column: 3;
+}
+
+.account-action--edit {
+  grid-column: 4;
+}
+
+.account-action--menu {
+  grid-column: 5;
 }
 
 .custom-endpoint {

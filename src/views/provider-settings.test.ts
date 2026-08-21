@@ -130,6 +130,16 @@ test("pricing catalog fetches the provider catalog explicitly and keeps the Go t
   assert.equal(catalog.match(/<n-data-table/g)?.length, 1);
 });
 
+test("pricing catalog uses one keyboard-accessible plan-family tab switcher with Go selected first", () => {
+  const catalog = readFileSync(new URL("../components/PricingCatalog.vue", import.meta.url), "utf8");
+
+  assert.match(catalog, /v-model:value="activePlanId"/);
+  assert.match(catalog, /display-directive="if"/);
+  assert.match(catalog, /<n-tab-pane[\s\S]*?v-for="group in planGroups"[\s\S]*?:name="group\.plan\.id"/);
+  assert.match(catalog, /const activePlanId = ref<PlanId>\("opencode-go"\)/);
+  assert.doesNotMatch(catalog, /<section\s+v-for="group in planGroups"/);
+});
+
 test("account form uses the catalog display name and does not invent GOAT availability", () => {
   const accountForm = readFileSync(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
   const accountCard = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
@@ -145,14 +155,29 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.match(accountForm, /:disabled="fieldImmutableAfterCreate\('auth_scheme'\)"/);
   assert.equal(accountForm.match(/t\("创建后不可修改"\)/g)?.length, 2);
   assert.match(accountForm, /t\(accountCreatePayloadErrorKey\(error\)\)/);
+  assert.match(accountForm, /path="key"[\s\S]*?class="full-width-field"/);
+  assert.match(accountForm, /\.full-width-field,[\s\S]*?grid-column: 1 \/ -1;/);
   assert.doesNotMatch(accountForm, /实验性 · 未配置/);
   assert.match(accountCard, /planLabel\(account, catalog\)/);
+  assert.match(accountCard, /<GoatQuotaReference v-if="isGoat"/);
+  assert.match(accountCard, /grid-template-columns: repeat\(5, 40px\)/);
+  assert.match(accountCard, /account-action--enabled/);
   assert.doesNotMatch(accountCard, /<n-tag v-if="isDraft"/);
   assert.match(accounts, /:catalog="providerCatalog"/);
   assert.match(accounts, /@import-key="openCreateModal\(OPENCODE_GO_PLAN\)"/);
   assert.match(accounts, /加载服务商目录失败: \{error\}/);
   assert.match(chooser, /t\(option\.disabledReason\)/);
   assert.match(chooser, /t\(option\.creationHint\)/);
+});
+
+test("GOAT cards show official plan-limit bars without claiming synchronized usage", () => {
+  const reference = readFileSync(new URL("../components/GoatQuotaReference.vue", import.meta.url), "utf8");
+
+  assert.match(reference, /label: "5 小时额度", amount: "\$14"/);
+  assert.match(reference, /label: "周额度", amount: "\$35"/);
+  assert.match(reference, /label: "月额度", amount: "\$70"/);
+  assert.match(reference, /Command Code CLI 运行 \/usage 查看/);
+  assert.doesNotMatch(reference, /used|remaining|percentage|provider-usage/);
 });
 
 test("Applications labels all model selectors as Alias-first", () => {

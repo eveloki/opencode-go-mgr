@@ -23,6 +23,9 @@ export type ProviderOffering = {
 export const DEFAULT_PROVIDER_ID = "opencode";
 export const DEFAULT_OFFERING_ID = "go";
 
+export const COMMAND_CODE_PROVIDER_ID = "command-code";
+export const COMMAND_CODE_GOAT_OFFERING_ID = "goat";
+
 /** Built-in singleton Zen Free account; created and owned by the backend. */
 export const ZEN_FREE_ACCOUNT_ID = "00000000-0000-0000-0000-000000000002";
 export const ZEN_FREE_PROVIDER_ID = "opencode-zen-free";
@@ -38,8 +41,8 @@ export const PROVIDER_OFFERINGS: readonly ProviderOffering[] = [
     managed_registration: true,
   },
   {
-    provider_id: "command-code",
-    offering_id: "goat",
+    provider_id: COMMAND_CODE_PROVIDER_ID,
+    offering_id: COMMAND_CODE_GOAT_OFFERING_ID,
     label: "Command Code GOAT",
     credential_kind: "api_key",
     quota_scope: "key",
@@ -61,6 +64,13 @@ export function isZenFreeAccount(
 ): boolean {
   return account.id === ZEN_FREE_ACCOUNT_ID
     || account.provider_id === ZEN_FREE_PROVIDER_ID;
+}
+
+export function isCommandCodeGoatAccount(
+  account: Pick<Account, "provider_id" | "offering_id">,
+): boolean {
+  return account.provider_id === COMMAND_CODE_PROVIDER_ID
+    && account.offering_id === COMMAND_CODE_GOAT_OFFERING_ID;
 }
 
 export function findProviderOffering(

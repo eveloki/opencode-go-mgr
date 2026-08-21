@@ -46,7 +46,7 @@ pub const CUSTOM_UNROUTABLE_MODEL_ID: &str = "custom-unroutable-model";
 
 pub const GO_ALIAS: &str = "deepseek-v4-flash";
 pub const GOAT_UNIQUE_RAW_ID: &str = "deepseek/deepseek-v4-flash";
-pub const FREE_MODEL: &str = "deepseek-v4-flash-free";
+pub const FREE_MODEL: &str = "mimo-v2.5-free";
 pub const AMBIGUOUS_ERROR_TYPE: &str = "ambiguous_model_id";
 pub const CUSTOM_OVERLAP_RAW_ID: &str = "shared-raw-model";
 

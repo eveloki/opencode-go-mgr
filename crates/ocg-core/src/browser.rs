@@ -1756,7 +1756,10 @@ mod tests {
 
     #[test]
     fn remote_sessions_expire_on_idle_or_absolute_deadline() {
-        let now = Instant::now();
+        // Advance a synthetic clock so the test does not depend on machine
+        // uptime (subtracting a long duration from a fresh Windows Instant
+        // can underflow immediately after boot).
+        let now = Instant::now() + SESSION_MAX_LIFETIME + Duration::from_secs(60);
         let base = RemoteSession {
             account_id: "account-1".into(),
             binding: "admin".into(),

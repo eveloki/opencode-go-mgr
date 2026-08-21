@@ -133,10 +133,18 @@ fn assert_local_openai_alias_list(body: &Value) {
         .find(|item| item["id"] == "deepseek-v4-flash")
         .expect("Go alias");
     assert_eq!(go["owned_by"], ocg_core::provider::OPENCODE_PROVIDER_ID);
-    let zen = data
+    let go_named_free = data
         .iter()
         .find(|item| item["id"] == "deepseek-v4-flash-free")
-        .expect("Zen alias");
+        .expect("Go alias whose name contains free");
+    assert_eq!(
+        go_named_free["owned_by"],
+        ocg_core::provider::OPENCODE_PROVIDER_ID
+    );
+    let zen = data
+        .iter()
+        .find(|item| item["id"] == "mimo-v2.5-free")
+        .expect("registered Zen alias");
     assert_eq!(
         zen["owned_by"],
         ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID

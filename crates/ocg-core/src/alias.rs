@@ -533,15 +533,15 @@ mod tests {
     }
 
     #[test]
-    fn zen_free_ids_are_aliases_not_go() {
-        let resolved = resolve("deepseek-v4-flash-free").expect("free alias");
+    fn go_named_free_ids_are_aliases_not_zen() {
+        let resolved = resolve("deepseek-v4-flash-free").expect("Go alias");
         match resolved {
             ResolvedModel::Alias {
                 alias, mappings, ..
             } => {
                 assert_eq!(alias, "deepseek-v4-flash-free");
                 assert_eq!(mappings.len(), 1);
-                assert!(mappings[0].is_zen_free());
+                assert!(mappings[0].is_opencode_go());
                 assert_eq!(mappings[0].upstream_model, "deepseek-v4-flash-free");
             }
             other => panic!("expected alias, got {other:?}"),
@@ -552,7 +552,7 @@ mod tests {
     fn prefer_twins_are_recorded_on_go_aliases() {
         match resolve("deepseek-v4-flash").unwrap() {
             ResolvedModel::Alias { prefer_twin, .. } => {
-                assert_eq!(prefer_twin, Some("deepseek-v4-flash-free"));
+                assert_eq!(prefer_twin, None);
             }
             other => panic!("expected alias, got {other:?}"),
         }
@@ -624,11 +624,11 @@ mod tests {
             .find(|item| item.alias == "glm-5.2")
             .expect("Go alias");
         assert_eq!(go.owned_by, OPENCODE_PROVIDER_ID);
-        let zen = published
+        let go_named_free = published
             .iter()
             .find(|item| item.alias == "deepseek-v4-flash-free")
-            .expect("Zen alias");
-        assert_eq!(zen.owned_by, OPENCODE_ZEN_FREE_PROVIDER_ID);
+            .expect("Go alias whose name contains free");
+        assert_eq!(go_named_free.owned_by, OPENCODE_PROVIDER_ID);
         let goat_alias = published
             .iter()
             .find(|item| item.alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS)
@@ -872,9 +872,9 @@ mod tests {
         assert!(go.contains(&"glm-5.2"));
         assert!(go.contains(&COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS));
         assert!(go.contains(&"minimax-m2.7-highspeed"));
-        assert!(!go.contains(&"deepseek-v4-flash-free"));
+        assert!(go.contains(&"deepseek-v4-flash-free"));
         assert!(!zen.contains(&"glm-5.2"));
-        assert!(zen.contains(&"deepseek-v4-flash-free"));
+        assert!(!zen.contains(&"deepseek-v4-flash-free"));
         for id in free_model_ids() {
             assert!(zen.contains(&id), "Zen catalog must include `{id}`");
             assert!(!go.contains(&id), "Go catalog must not include free `{id}`");

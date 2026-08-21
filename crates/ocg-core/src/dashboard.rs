@@ -516,7 +516,7 @@ struct DashboardAccount {
     notes: String,
     /// Last successful official Go usage calibration, if any.
     usage_sync_last_success_at: Option<String>,
-    /// When a manual refresh may be attempted again (60s throttle), if blocked.
+    /// When a manual refresh may be attempted again (15s throttle), if blocked.
     usage_sync_next_allowed_at: Option<String>,
     created_at: String,
     updated_at: String,
@@ -6438,7 +6438,7 @@ mod tests {
         assert!(go.model_aliases.contains(&"glm-5.2".to_string()));
         assert!(!go.model_aliases.iter().any(|alias| alias.contains('/')));
         assert!(
-            !go.model_aliases
+            go.model_aliases
                 .iter()
                 .any(|alias| alias == "deepseek-v4-flash-free")
         );
@@ -6464,8 +6464,9 @@ mod tests {
             .map(str::to_string)
             .collect::<Vec<_>>()
         );
+        assert!(zen.model_aliases.contains(&"mimo-v2.5-free".to_string()));
         assert!(
-            zen.model_aliases
+            !zen.model_aliases
                 .contains(&"deepseek-v4-flash-free".to_string())
         );
         assert!(!zen.model_aliases.iter().any(|alias| alias.contains('/')));

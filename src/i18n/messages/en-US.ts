@@ -462,6 +462,7 @@ export const enUSMessages = {
   "5 小时额度": "5-hour quota",
   "周额度": "Weekly quota",
   "月额度": "Monthly quota",
+  "GOAT 官方套餐额度；实时用量请在 Command Code CLI 运行 /usage 查看。": "Official GOAT plan limits; run /usage in the Command Code CLI to see live usage.",
   "官方倍率": "Official multiplier",
   "模型价格为 OpenCode Go 表中的美元/百万 tokens；官方倍率用于换算额度消耗，可按活动手动调整。": "Model rates are the OpenCode Go table's USD rates per million tokens; the official multiplier converts quota usage and can be adjusted manually for promotions.",
   "保存倍率": "Save multiplier",

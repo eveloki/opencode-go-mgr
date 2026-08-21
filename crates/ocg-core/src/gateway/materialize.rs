@@ -712,7 +712,7 @@ mod tests {
     fn zen_free_alias_materializes_anonymous_channel() {
         let config = AppConfig::default();
         let set = routes_for(
-            "deepseek-v4-flash-free",
+            "mimo-v2.5-free",
             &[go_account("go-1"), zen_account()],
             &config,
             true,
@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(set.routes.len(), 1);
         assert_eq!(set.routes[0].routing.account.id, ZEN_FREE_ACCOUNT_ID);
         assert_eq!(set.routes[0].plan.channel, UpstreamChannel::Free);
-        assert_eq!(set.routes[0].plan.model, "deepseek-v4-flash-free");
+        assert_eq!(set.routes[0].plan.model, "mimo-v2.5-free");
         assert!(set.routes[0].plan.upstream_base_override.is_some());
     }
 
@@ -732,7 +732,7 @@ mod tests {
             ..AppConfig::default()
         };
         let set = routes_for(
-            "deepseek-v4-flash",
+            "mimo-v2.5",
             &[go_account("go-1"), zen_account()],
             &config,
             true,
@@ -742,20 +742,17 @@ mod tests {
         assert_eq!(set.routes[0].plan.channel, UpstreamChannel::Go);
         assert_eq!(set.routes[1].routing.account.id, ZEN_FREE_ACCOUNT_ID);
         assert_eq!(set.routes[1].plan.channel, UpstreamChannel::Free);
-        assert_eq!(set.routes[1].plan.model, "deepseek-v4-flash-free");
-        assert_eq!(set.routes[1].plan.client_model, "deepseek-v4-flash");
+        assert_eq!(set.routes[1].plan.model, "mimo-v2.5-free");
+        assert_eq!(set.routes[1].plan.client_model, "mimo-v2.5");
         assert_eq!(
             set.routes[1].plan.original_model.as_deref(),
-            Some("deepseek-v4-flash")
+            Some("mimo-v2.5")
         );
         assert!(set.routes[1].plan.allow_go_fallback);
         let free_identity = native_log_identity(&set.routes[1].plan);
-        assert_eq!(free_identity.requested_model, "deepseek-v4-flash");
-        assert_eq!(
-            free_identity.resolved_alias.as_deref(),
-            Some("deepseek-v4-flash")
-        );
-        assert_eq!(free_identity.upstream_model, "deepseek-v4-flash-free");
+        assert_eq!(free_identity.requested_model, "mimo-v2.5");
+        assert_eq!(free_identity.resolved_alias.as_deref(), Some("mimo-v2.5"));
+        assert_eq!(free_identity.upstream_model, "mimo-v2.5-free");
     }
 
     #[test]
@@ -815,7 +812,7 @@ mod tests {
                 crate::alias::ProviderMapping {
                     provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
                     offering_id: ANONYMOUS_FREE_OFFERING_ID,
-                    upstream_model: "deepseek-v4-flash-free",
+                    upstream_model: "mimo-v2.5-free",
                     routeable: true,
                 },
                 crate::alias::ProviderMapping {
@@ -845,7 +842,7 @@ mod tests {
         assert_eq!(set.routes[0].plan.model, "glm-5.2");
         assert_eq!(set.routes[1].routing.account.id, ZEN_FREE_ACCOUNT_ID);
         assert_eq!(set.routes[1].plan.channel, UpstreamChannel::Free);
-        assert_eq!(set.routes[1].plan.model, "deepseek-v4-flash-free");
+        assert_eq!(set.routes[1].plan.model, "mimo-v2.5-free");
     }
 
     #[test]

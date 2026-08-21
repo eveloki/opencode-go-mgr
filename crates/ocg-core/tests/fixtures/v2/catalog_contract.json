@@ -31,7 +31,7 @@
       "verification_runtime_availability": "optional",
       "creation_availability": "available",
       "routable": true,
-      "required_aliases": ["deepseek-v4-flash", "minimax-m2.7", "grok-4.5"]
+      "required_aliases": ["deepseek-v4-flash", "deepseek-v4-flash-free", "minimax-m2.7", "grok-4.5"]
     },
     {
       "provider_id": "opencode-zen-free",
@@ -41,7 +41,7 @@
       "creation_availability": "unavailable",
       "routable": true,
       "singleton": true,
-      "required_aliases": ["deepseek-v4-flash-free", "mimo-v2.5-free"]
+      "required_aliases": ["mimo-v2.5-free"]
     },
     {
       "provider_id": "command-code",

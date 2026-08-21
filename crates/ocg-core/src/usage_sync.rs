@@ -28,7 +28,7 @@ use std::time::Duration as StdDuration;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 /// Manual refresh may not re-attempt the same account more often than this.
-pub const MANUAL_THROTTLE: Duration = Duration::seconds(60);
+pub const MANUAL_THROTTLE: Duration = Duration::seconds(15);
 /// Ready accounts with local activity in the last day refresh about hourly.
 pub const ACTIVE_CADENCE: Duration = Duration::hours(1);
 /// Ready accounts without recent local activity refresh about daily.
@@ -893,12 +893,12 @@ mod tests {
         let now = fixed("2026-08-18T12:00:00Z");
         assert_eq!(manual_next_allowed_at(None, now), None);
         assert_eq!(
-            manual_next_allowed_at(Some(now - Duration::seconds(61)), now),
+            manual_next_allowed_at(Some(now - Duration::seconds(16)), now),
             None
         );
         assert_eq!(
-            manual_next_allowed_at(Some(now - Duration::seconds(30)), now),
-            Some(now + Duration::seconds(30))
+            manual_next_allowed_at(Some(now - Duration::seconds(10)), now),
+            Some(now + Duration::seconds(5))
         );
     }
 
@@ -1266,7 +1266,7 @@ mod tests {
         assert_eq!(sync.failure_streak, 1);
         assert_eq!(sync.next_eligible_at, Some(now + failure_backoff(1)));
         assert_eq!(sync.last_attempt_at, Some(now));
-        // Manual 60s throttle still exposed after CAS conflict.
+        // Manual 15s throttle still exposed after CAS conflict.
         assert_eq!(
             manual_next_allowed_at(sync.last_attempt_at, now),
             Some(now + MANUAL_THROTTLE)

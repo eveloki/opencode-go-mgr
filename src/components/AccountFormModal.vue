@@ -76,7 +76,7 @@
           v-if="hasField('key')"
           path="key"
           :label="t('API Key')"
-          class="key-field"
+          class="full-width-field"
         >
           <n-input
             v-model:value="form.key"
@@ -672,7 +672,6 @@ async function handleSave() {
 }
 
 .full-width-field,
-.key-field,
 .notes-field {
   grid-column: 1 / -1;
 }

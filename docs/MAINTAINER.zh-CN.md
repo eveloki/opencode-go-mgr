@@ -319,7 +319,7 @@ Desktop 三个角色模型的持久化行为。
   fetch + key CAS + 三窗口校准路径。ready+enabled 且近 24h 有本地活动的账号约
   每小时对账，无活动约每天；禁用 / 非 ready / 空 Key 排除。启动不得轰鸣：全局
   并发 1、节奏控制、有界抖动，并提供可注入 clock/jitter/fetch 缝。手动刷新在任
-  何尝试后有 60 秒每账号节流、并发去重与 Retry-After / `next_allowed_at`。本地
+  何尝试后有 15 秒每账号节流、并发去重与 Retry-After / `next_allowed_at`。本地
   最大 Go 用量 ≥80% 时最多每 15 分钟加速一次。真实推理 `429` 仍写现有
   cooldown/selector，并额外调度约 1–2 分钟后的官方同步（绝不 inline）。官方失
   败或 `status=rate-limited` 永不写推理冷却。成功后按最早 `resetsAt`（有界抖动）
