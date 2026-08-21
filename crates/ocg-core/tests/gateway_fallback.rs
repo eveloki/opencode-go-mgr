@@ -2962,7 +2962,7 @@ async fn free_429_uses_channel_not_misleading_window_and_survives_account_remova
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(
         calls
@@ -2985,12 +2985,12 @@ async fn free_429_uses_channel_not_misleading_window_and_survives_account_remova
     }
 
     set_account_enabled(&state, "acct-1", false);
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 1);
 
     state.db.lock().delete_account("acct-1").unwrap();
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "deepseek-v4-flash-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 1);
 
