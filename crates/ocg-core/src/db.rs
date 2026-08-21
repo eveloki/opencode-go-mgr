@@ -5471,7 +5471,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -5620,7 +5620,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -5764,7 +5764,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -5813,7 +5813,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
             .with_timezone(&Utc);
@@ -6387,7 +6387,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -6441,7 +6441,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -6520,7 +6520,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         assert!(auth_error.is_none());
 
         drop(db);
@@ -8293,7 +8293,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
         let index_exists: i64 = db
             .conn
@@ -8316,7 +8316,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -8353,7 +8353,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
         // Replaying the migration converges to the same shape.
         db.migrate().unwrap();
@@ -8628,7 +8628,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("repaired schema should load");
-        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
         assert_eq!(notes_after, 1);
         db.list_accounts()
             .expect("account reads must survive a missing notes column on the draft");
@@ -9875,8 +9875,8 @@ mod tests {
         create_v22_fixture(&dir);
         let conn = Connection::open(dir.join("data.sqlite")).expect("v22 fixture should reopen");
         for plan in BUILTIN_PLANS.iter().filter(|plan| {
-            !plan.routable
-                && !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
+            !(plan.routable
+                || plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
                     && plan.offering.offering_id == GOAT_OFFERING_ID)
         }) {
             clone_account_row_as_enabled(
@@ -9907,8 +9907,8 @@ mod tests {
         );
         assert!(!db.get_account("v22-goat").unwrap().unwrap().enabled);
         for plan in BUILTIN_PLANS.iter().filter(|plan| {
-            !plan.routable
-                && !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
+            !(plan.routable
+                || plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
                     && plan.offering.offering_id == GOAT_OFFERING_ID)
         }) {
             let id = format!("v22-{}", plan.offering.offering_id);

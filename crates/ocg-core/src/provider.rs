@@ -2003,12 +2003,16 @@ mod tests {
                     .contains(SCNET_TOKEN_PLAN_KEY_PREFIX)
             );
         }
-        assert!(!SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.quota_status_rest_established);
-        assert!(!SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.non_billable_verification_established);
-        assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.custom_application_backends_prohibited);
-        assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.automation_scripts_prohibited);
-        assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.non_interactive_batch_calls_prohibited);
-        assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.curl_style_non_interactive_calls_prohibited);
+        const {
+            assert!(!SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.quota_status_rest_established);
+            assert!(!SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.non_billable_verification_established);
+            assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.custom_application_backends_prohibited);
+            assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.automation_scripts_prohibited);
+            assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.non_interactive_batch_calls_prohibited);
+            assert!(
+                SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.curl_style_non_interactive_calls_prohibited
+            );
+        };
         assert_eq!(
             SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.auth_scheme,
             UpstreamAuthScheme::Bearer
