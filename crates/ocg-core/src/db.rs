@@ -35,6 +35,11 @@ pub const FREE_CHANNEL_COOLDOWN_SETTING: &str = "free_channel_cooldown_until";
 /// One-time, non-overwriting SQLite snapshot taken before an existing pre-v22
 /// database receives any migration writes on its way to v22.
 pub const PRE_V22_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v22.";
+/// One-time, non-overwriting SQLite snapshot taken before an existing pre-v23
+/// database receives any migration writes on its way to v23.
+pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
+/// Highest schema this binary can open or migrate. Newer databases fail closed.
+pub const CURRENT_SCHEMA_VERSION: i32 = 23;
 
 pub struct ForwardLogQueryOptions<'a> {
     pub limit: i64,
@@ -179,28 +184,24 @@ fn schema_version_on(conn: &Connection) -> Result<i32> {
         .unwrap_or(0))
 }
 
-fn verify_pre_v22_backup(path: &Path, source_version: i32) -> Result<()> {
+fn verify_schema_backup(path: &Path, prefix: &str, source_version: i32) -> Result<()> {
     let backup = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("failed to open pre-v22 backup {}", path.display()))?;
+        .with_context(|| format!("failed to open {prefix} backup {}", path.display()))?;
     let version = schema_version_on(&backup)?;
     anyhow::ensure!(
         version == source_version,
-        "refusing to reuse invalid pre-v22 backup {} (expected schema version {source_version}, found {version})",
+        "refusing to reuse invalid {prefix} backup {} (expected schema version {source_version}, found {version})",
         path.display()
     );
     Ok(())
 }
 
-fn ensure_pre_v22_backup(conn: &Connection, db_path: &Path) -> Result<()> {
-    let source_version = schema_version_on(conn)?;
-    let unversioned_legacy = source_version == 0
-        && (table_exists(conn, "accounts")?
-            || table_exists(conn, "settings")?
-            || table_exists(conn, "forward_logs")?);
-    if !(1..22).contains(&source_version) && !unversioned_legacy {
-        return Ok(());
-    }
-
+fn ensure_schema_backup(
+    conn: &Connection,
+    db_path: &Path,
+    prefix: &str,
+    source_version: i32,
+) -> Result<()> {
     let data_dir = db_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("database path has no parent: {}", db_path.display()))?;
@@ -210,42 +211,249 @@ fn ensure_pre_v22_backup(conn: &Connection, db_path: &Path) -> Result<()> {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name.starts_with(PRE_V22_BACKUP_FILE_PREFIX) && name.ends_with(".bak")
-                })
+                .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".bak"))
         })
         .collect::<Vec<_>>();
     existing_backups.sort();
     if let Some(valid) = existing_backups
         .iter()
         .rev()
-        .find(|path| verify_pre_v22_backup(path, source_version).is_ok())
+        .find(|path| verify_schema_backup(path, prefix, source_version).is_ok())
     {
-        return verify_pre_v22_backup(valid, source_version);
+        return verify_schema_backup(valid, prefix, source_version);
     }
 
     let timestamp = Utc::now().format("%Y%m%dT%H%M%S%9fZ");
-    let backup_path =
-        db_path.with_file_name(format!("{PRE_V22_BACKUP_FILE_PREFIX}{timestamp}.bak"));
+    let backup_path = db_path.with_file_name(format!("{prefix}{timestamp}.bak"));
 
     // VACUUM INTO is SQLite's consistent online snapshot mechanism: unlike a
     // raw file copy it also includes committed pages still resident in WAL.
     // SQLite refuses to overwrite an existing target, preserving the first
-    // pre-v22 rollback point across retries.
+    // rollback point across retries.
     let backup_value = backup_path.to_string_lossy().into_owned();
     match conn.execute("VACUUM main INTO ?1", [&backup_value]) {
-        Ok(_) => verify_pre_v22_backup(&backup_path, source_version),
-        Err(error) if backup_path.exists() => verify_pre_v22_backup(&backup_path, source_version)
-            .with_context(|| {
-                format!("pre-v22 backup appeared concurrently after SQLite reported: {error}")
-            }),
+        Ok(_) => verify_schema_backup(&backup_path, prefix, source_version),
+        Err(error) if backup_path.exists() => {
+            verify_schema_backup(&backup_path, prefix, source_version).with_context(|| {
+                format!("{prefix} backup appeared concurrently after SQLite reported: {error}")
+            })
+        }
         Err(error) => Err(error).with_context(|| {
             format!(
-                "failed to create pre-v22 database backup {}",
+                "failed to create {prefix} database backup {}",
                 backup_path.display()
             )
         }),
     }
+}
+
+fn has_unversioned_legacy_tables(conn: &Connection) -> Result<bool> {
+    Ok(table_exists(conn, "accounts")?
+        || table_exists(conn, "settings")?
+        || table_exists(conn, "forward_logs")?)
+}
+
+fn ensure_pre_v22_backup(conn: &Connection, db_path: &Path) -> Result<()> {
+    let source_version = schema_version_on(conn)?;
+    let unversioned_legacy = source_version == 0 && has_unversioned_legacy_tables(conn)?;
+    if !(1..22).contains(&source_version) && !unversioned_legacy {
+        return Ok(());
+    }
+    ensure_schema_backup(conn, db_path, PRE_V22_BACKUP_FILE_PREFIX, source_version)
+}
+
+fn ensure_pre_v23_backup(conn: &Connection, db_path: &Path) -> Result<()> {
+    let source_version = schema_version_on(conn)?;
+    let unversioned_legacy = source_version == 0 && has_unversioned_legacy_tables(conn)?;
+    if !(1..23).contains(&source_version) && !unversioned_legacy {
+        return Ok(());
+    }
+    ensure_schema_backup(conn, db_path, PRE_V23_BACKUP_FILE_PREFIX, source_version)
+}
+
+fn insert_account_row(
+    conn: &Connection,
+    account: &Account,
+    purchase_date: &str,
+    verification_status: ConnectionVerificationStatus,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at, provider_id, offering_id, credential_kind, quota_scope, free_alias_enabled, verification_status, connection_verified_at, verification_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, NULL, NULL)",
+        params![
+            account.id,
+            account.name,
+            account.username,
+            account.password_cipher,
+            account.key_cipher,
+            account.enabled as i32,
+            account.referral_code,
+            purchase_date,
+            account.cooldown_until.map(|t| t.to_rfc3339()),
+            account.cooldown_generic_until.map(|t| t.to_rfc3339()),
+            account.cooldown_5h_until.map(|t| t.to_rfc3339()),
+            account.cooldown_week_until.map(|t| t.to_rfc3339()),
+            account.cooldown_month_until.map(|t| t.to_rfc3339()),
+            account.cooldown_free_until.map(|t| t.to_rfc3339()),
+            account.last_error,
+            account.auth_error,
+            account.account_type.as_str(),
+            account.setup_step.as_str(),
+            account.notes,
+            account.created_at.to_rfc3339(),
+            account.updated_at.to_rfc3339(),
+            account.provider_id,
+            account.offering_id,
+            account.credential_kind.as_str(),
+            account.quota_scope.as_str(),
+            account.free_alias_enabled as i32,
+            verification_status.as_str(),
+        ],
+    )?;
+    conn.execute(
+        "INSERT INTO provider_usage_sync_state (
+            account_id, last_success_at, last_attempt_at, next_eligible_at,
+            failure_streak, last_expedited_at
+         ) VALUES (?1, NULL, NULL, NULL, 0, NULL)",
+        [&account.id],
+    )?;
+    Ok(())
+}
+
+fn persist_account_custom_config_on(
+    conn: &Connection,
+    account_id: &str,
+    input: &AccountCustomConfigInput,
+    allow_protocol_auth_change: bool,
+) -> Result<()> {
+    let base_url = validate_custom_base_url(&input.base_url)?;
+    let now = Utc::now().to_rfc3339();
+    let existing = conn
+        .query_row(
+            "SELECT upstream_protocol, auth_scheme FROM account_custom_configs WHERE account_id = ?1",
+            [account_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if let Some((protocol, auth_scheme)) = existing {
+        anyhow::ensure!(
+            allow_protocol_auth_change
+                || (protocol == input.upstream_protocol.as_str()
+                    && auth_scheme == input.auth_scheme.as_str()),
+            "Custom protocol and auth scheme cannot be changed after create"
+        );
+        conn.execute(
+            "UPDATE account_custom_configs
+             SET base_url = ?2, upstream_protocol = ?3, auth_scheme = ?4, updated_at = ?5
+             WHERE account_id = ?1",
+            params![
+                account_id,
+                base_url,
+                input.upstream_protocol.as_str(),
+                input.auth_scheme.as_str(),
+                now,
+            ],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO account_custom_configs (
+                account_id, base_url, upstream_protocol, auth_scheme, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![
+                account_id,
+                base_url,
+                input.upstream_protocol.as_str(),
+                input.auth_scheme.as_str(),
+                now,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn persist_account_model_capabilities_on(
+    conn: &Connection,
+    account_id: &str,
+    capabilities: &[AccountModelCapabilityInput],
+) -> Result<()> {
+    let now = Utc::now();
+    conn.execute(
+        "DELETE FROM account_model_capabilities WHERE account_id = ?1",
+        [account_id],
+    )?;
+    let mut seen = HashSet::new();
+    for capability in capabilities {
+        let model_id = validate_custom_model_id(&capability.model_id)?;
+        let source = capability
+            .source
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("manual");
+        let key = (model_id.clone(), capability.protocol.as_str().to_string());
+        anyhow::ensure!(
+            seen.insert(key),
+            "duplicate model capability `{model_id}` / {}",
+            capability.protocol.as_str()
+        );
+        conn.execute(
+            "INSERT INTO account_model_capabilities (
+                account_id, model_id, protocol, verified_at, source
+             ) VALUES (?1, ?2, ?3, NULL, ?4)",
+            params![account_id, model_id, capability.protocol.as_str(), source],
+        )?;
+    }
+    if !capabilities.is_empty() {
+        let binding = conn
+            .query_row(
+                "SELECT provider_id, offering_id FROM accounts WHERE id = ?1",
+                [account_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if binding.is_some_and(|(provider_id, offering_id)| {
+            builtin_plan(&provider_id, &offering_id)
+                .is_some_and(|plan| plan.verification_policy == VerificationPolicy::Required)
+        }) {
+            conn.execute(
+                "UPDATE accounts
+                 SET verification_status = CASE
+                        WHEN verification_status = 'verified' THEN 'pending'
+                        ELSE verification_status END,
+                     connection_verified_at = NULL,
+                     updated_at = ?2
+                 WHERE id = ?1",
+                params![account_id, now.to_rfc3339()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_account_acknowledgement_on(
+    conn: &Connection,
+    account_id: &str,
+    notice: PlanRiskNotice,
+    accepted_at: DateTime<Utc>,
+) -> Result<()> {
+    let hash = notice.content_hash();
+    conn.execute(
+        "INSERT INTO account_acknowledgements (
+            account_id, acknowledgement_id, version, content_hash, accepted_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(account_id, acknowledgement_id) DO UPDATE SET
+            version = excluded.version,
+            content_hash = excluded.content_hash,
+            accepted_at = excluded.accepted_at",
+        params![
+            account_id,
+            notice.acknowledgement_id,
+            notice.version,
+            hash,
+            accepted_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn migrate_legacy_usage_baselines(
@@ -367,7 +575,13 @@ impl Database {
         let db_path = data_dir.join("data.sqlite");
         let conn = Connection::open(&db_path)?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        let existing_version = schema_version_on(&conn)?;
+        anyhow::ensure!(
+            existing_version <= CURRENT_SCHEMA_VERSION,
+            "database schema version {existing_version} is newer than this build supports ({CURRENT_SCHEMA_VERSION}); restore a matching data directory and encryption key"
+        );
         ensure_pre_v22_backup(&conn, &db_path)?;
+        ensure_pre_v23_backup(&conn, &db_path)?;
         // WAL keeps request-path log writes off the rollback-journal FULL fsync;
         // must be set outside any transaction, hence before migrate().
         let _journal_mode: String =
@@ -394,6 +608,10 @@ impl Database {
                 |row| row.get(0),
             )
             .unwrap_or(0);
+        anyhow::ensure!(
+            version <= CURRENT_SCHEMA_VERSION,
+            "database schema version {version} is newer than this build supports ({CURRENT_SCHEMA_VERSION}); restore a matching data directory and encryption key"
+        );
 
         // 修复：v1.4.2 -> v1.5.0 升级时，旧 v9 migration（HEAD 固定窗口）只添加了
         // usage_*_window_* 列，没有添加 upstream v9 的 cost_state 等 forward_logs 列。
@@ -1391,6 +1609,117 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (22);")?;
         }
 
+        if version < 23 {
+            ensure_column(
+                &tx,
+                "accounts",
+                "verification_status",
+                "TEXT NOT NULL DEFAULT 'not_required'",
+            )?;
+            ensure_column(&tx, "accounts", "connection_verified_at", "TEXT")?;
+            ensure_column(&tx, "accounts", "verification_error", "TEXT")?;
+            for (column, definition) in [
+                ("requested_model", "TEXT"),
+                ("resolved_alias", "TEXT"),
+                ("upstream_model", "TEXT"),
+                ("native_cost_value", "REAL"),
+                ("native_cost_unit", "TEXT"),
+                ("native_cost_currency", "TEXT"),
+            ] {
+                ensure_column(&tx, "forward_logs", column, definition)?;
+            }
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS account_custom_configs (
+                    account_id TEXT PRIMARY KEY,
+                    base_url TEXT NOT NULL,
+                    upstream_protocol TEXT NOT NULL,
+                    auth_scheme TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS account_model_capabilities (
+                    account_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    verified_at TEXT,
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    PRIMARY KEY (account_id, model_id, protocol),
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS account_acknowledgements (
+                    account_id TEXT NOT NULL,
+                    acknowledgement_id TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    accepted_at TEXT NOT NULL,
+                    PRIMARY KEY (account_id, acknowledgement_id),
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_account_model_capabilities_account
+                    ON account_model_capabilities(account_id);
+                CREATE INDEX IF NOT EXISTS idx_account_acknowledgements_account
+                    ON account_acknowledgements(account_id);",
+            )?;
+
+            if table_has_column(&tx, "accounts", "provider_id")?
+                && table_has_column(&tx, "accounts", "offering_id")?
+            {
+                if table_has_column(&tx, "accounts", "enabled")? {
+                    tx.execute(
+                        "UPDATE accounts SET verification_status = 'pending', verification_error = NULL,
+                                enabled = 0
+                         WHERE provider_id = ?1 AND offering_id = ?2",
+                        params![COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
+                    )?;
+                } else {
+                    tx.execute(
+                        "UPDATE accounts SET verification_status = 'pending', verification_error = NULL
+                         WHERE provider_id = ?1 AND offering_id = ?2",
+                        params![COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE accounts SET verification_status = 'not_required', verification_error = NULL
+                     WHERE NOT (provider_id = ?1 AND offering_id = ?2)
+                       AND (verification_status IS NULL OR verification_status = 'not_required')",
+                    params![COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
+                )?;
+            }
+
+            if table_has_column(&tx, "forward_logs", "model")? {
+                tx.execute(
+                    "UPDATE forward_logs SET
+                        requested_model = COALESCE(requested_model, model),
+                        upstream_model = COALESCE(upstream_model, model),
+                        native_cost_value = COALESCE(
+                            native_cost_value,
+                            raw_cost_usd,
+                            CASE WHEN cost_state IN ('priced', 'legacy_estimate', 'free')
+                                 THEN cost ELSE NULL END
+                        ),
+                        native_cost_unit = COALESCE(
+                            native_cost_unit,
+                            CASE WHEN cost_state IN ('priced', 'legacy_estimate', 'free')
+                                 THEN 'usd' ELSE NULL END
+                        ),
+                        native_cost_currency = COALESCE(
+                            native_cost_currency,
+                            CASE WHEN cost_state IN ('priced', 'legacy_estimate', 'free')
+                                 THEN 'USD' ELSE NULL END
+                        )
+                     WHERE requested_model IS NULL
+                        OR upstream_model IS NULL
+                        OR native_cost_value IS NULL
+                        OR native_cost_unit IS NULL
+                        OR native_cost_currency IS NULL",
+                    [],
+                )?;
+            }
+
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (23);")?;
+        }
+
         // Unreleased #43 drafts numbered client-key columns as v18 and the
         // sub-key table as v19, so those databases already report version
         // >= 18 and skip the notes gate above. ensure_column is idempotent
@@ -1408,6 +1737,70 @@ impl Database {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         ensure_column(&tx, "accounts", "usage_sync_last_expedited_at", "TEXT")?;
+        ensure_column(
+            &tx,
+            "accounts",
+            "verification_status",
+            "TEXT NOT NULL DEFAULT 'not_required'",
+        )?;
+        ensure_column(&tx, "accounts", "connection_verified_at", "TEXT")?;
+        ensure_column(&tx, "accounts", "verification_error", "TEXT")?;
+        for (column, definition) in [
+            ("requested_model", "TEXT"),
+            ("resolved_alias", "TEXT"),
+            ("upstream_model", "TEXT"),
+            ("native_cost_value", "REAL"),
+            ("native_cost_unit", "TEXT"),
+            ("native_cost_currency", "TEXT"),
+        ] {
+            ensure_column(&tx, "forward_logs", column, definition)?;
+        }
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS account_custom_configs (
+                account_id TEXT PRIMARY KEY,
+                base_url TEXT NOT NULL,
+                upstream_protocol TEXT NOT NULL,
+                auth_scheme TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS account_model_capabilities (
+                account_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                verified_at TEXT,
+                source TEXT NOT NULL DEFAULT 'manual',
+                PRIMARY KEY (account_id, model_id, protocol),
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS account_acknowledgements (
+                account_id TEXT NOT NULL,
+                acknowledgement_id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                accepted_at TEXT NOT NULL,
+                PRIMARY KEY (account_id, acknowledgement_id),
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+            );",
+        )?;
+        // Fail-closed for databases that already reported v23 from the first
+        // contract slice: unverified GOAT rows must stay pending and disabled.
+        // Sparse pre-v22 fixtures may still lack `enabled` even after additive
+        // column backstops, so skip rather than fail the open.
+        if table_has_column(&tx, "accounts", "provider_id")?
+            && table_has_column(&tx, "accounts", "offering_id")?
+            && table_has_column(&tx, "accounts", "enabled")?
+            && table_has_column(&tx, "accounts", "verification_status")?
+        {
+            tx.execute(
+                "UPDATE accounts SET verification_status = 'pending', verification_error = NULL,
+                        enabled = 0
+                 WHERE provider_id = ?1 AND offering_id = ?2
+                   AND verification_status <> 'verified'",
+                params![COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
+            )?;
+        }
 
         // Detailed diagnostics are intentionally short-lived. Keep the base log row,
         // stable request id, source, stage, and original compact error indefinitely.
@@ -1568,46 +1961,79 @@ impl Database {
         } else {
             normalize_purchase_date(&account.purchase_date)?
         };
+        let verification_status = builtin_plan(&account.provider_id, &account.offering_id)
+            .map(default_verification_status)
+            .unwrap_or(ConnectionVerificationStatus::NotRequired);
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at, provider_id, offering_id, credential_kind, quota_scope, free_alias_enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
-            params![
-                account.id,
-                account.name,
-                account.username,
-                account.password_cipher,
-                account.key_cipher,
-                account.enabled as i32,
-                account.referral_code,
-                purchase_date,
-                account.cooldown_until.map(|t| t.to_rfc3339()),
-                account.cooldown_generic_until.map(|t| t.to_rfc3339()),
-                account.cooldown_5h_until.map(|t| t.to_rfc3339()),
-                account.cooldown_week_until.map(|t| t.to_rfc3339()),
-                account.cooldown_month_until.map(|t| t.to_rfc3339()),
-                account.cooldown_free_until.map(|t| t.to_rfc3339()),
-                account.last_error,
-                account.auth_error,
-                account.account_type.as_str(),
-                account.setup_step.as_str(),
-                account.notes,
-                account.created_at.to_rfc3339(),
-                account.updated_at.to_rfc3339(),
-                account.provider_id,
-                account.offering_id,
-                account.credential_kind.as_str(),
-                account.quota_scope.as_str(),
-                account.free_alias_enabled as i32,
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO provider_usage_sync_state (
-                account_id, last_success_at, last_attempt_at, next_eligible_at,
-                failure_streak, last_expedited_at
-             ) VALUES (?1, NULL, NULL, NULL, 0, NULL)",
-            [&account.id],
-        )?;
+        insert_account_row(&tx, account, &purchase_date, verification_status)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Persist the account row together with Custom config/capabilities and a
+    /// required SCNet acknowledgement in one SQLite transaction. A crash or
+    /// constraint failure leaves no orphan account and does not rely on
+    /// compensating deletes.
+    pub fn create_account_with_contract(
+        &self,
+        account: &Account,
+        custom_config: Option<&AccountCustomConfigInput>,
+        capabilities: &[AccountModelCapabilityInput],
+        risk_notice: Option<PlanRiskNotice>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            account.id != ZEN_FREE_ACCOUNT_ID,
+            "Zen Free is database-owned and cannot be created through the generic account API"
+        );
+        account.validate_provider_binding()?;
+        let plan = builtin_plan(&account.provider_id, &account.offering_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+        if plan_requires_custom_config(plan) {
+            anyhow::ensure!(
+                custom_config.is_some(),
+                "Custom API accounts require a base URL, upstream protocol, and auth scheme"
+            );
+            anyhow::ensure!(
+                !capabilities.is_empty(),
+                "Custom API accounts require at least one model capability"
+            );
+        } else {
+            anyhow::ensure!(
+                custom_config.is_none(),
+                "custom config is only available for Custom API accounts"
+            );
+            anyhow::ensure!(
+                capabilities.is_empty(),
+                "model capabilities are only available for Custom API accounts"
+            );
+        }
+        if let Some(required) = plan.risk_notice {
+            let accepted = risk_notice.is_some_and(|notice| {
+                notice.acknowledgement_id == required.acknowledgement_id
+                    && notice.version == required.version
+            });
+            anyhow::ensure!(
+                accepted,
+                "this Plan requires a matching versioned risk acknowledgement before create"
+            );
+        }
+        let purchase_date = if account.purchase_date.trim().is_empty() {
+            local_today()
+        } else {
+            normalize_purchase_date(&account.purchase_date)?
+        };
+        let verification_status = default_verification_status(plan);
+        let tx = self.conn.unchecked_transaction()?;
+        insert_account_row(&tx, account, &purchase_date, verification_status)?;
+        if let Some(config) = custom_config {
+            persist_account_custom_config_on(&tx, &account.id, config, true)?;
+        }
+        if !capabilities.is_empty() {
+            persist_account_model_capabilities_on(&tx, &account.id, capabilities)?;
+        }
+        if let Some(notice) = plan.risk_notice {
+            persist_account_acknowledgement_on(&tx, &account.id, notice, Utc::now())?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1653,11 +2079,17 @@ impl Database {
             Some(s) => Some(s.to_string()),
             None => existing.password_cipher.clone(),
         };
+        let key_replaced = key_cipher.is_some();
+        let requires_verification = builtin_plan(&existing.provider_id, &existing.offering_id)
+            .is_some_and(|plan| plan.verification_policy == VerificationPolicy::Required);
 
         self.conn.execute(
             "UPDATE accounts SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4, enabled = ?5, referral_code = ?6, recharge_date = ?7, notes = ?8,
              usage_month_window_cost_offset = CASE WHEN ?9 THEN 0 ELSE usage_month_window_cost_offset END,
              auth_error = CASE WHEN ?10 THEN NULL ELSE auth_error END,
+             verification_status = CASE WHEN ?10 AND ?13 THEN 'pending' ELSE verification_status END,
+             connection_verified_at = CASE WHEN ?10 AND ?13 THEN NULL ELSE connection_verified_at END,
+             verification_error = CASE WHEN ?10 AND ?13 THEN NULL ELSE verification_error END,
              updated_at = ?11 WHERE id = ?12",
             params![
                 name,
@@ -1669,11 +2101,18 @@ impl Database {
                 purchase_date,
                 notes,
                 purchase_date_changed,
-                key_cipher.is_some(),
+                key_replaced,
                 Utc::now().to_rfc3339(),
                 id,
+                requires_verification,
             ],
         )?;
+        if key_replaced && requires_verification {
+            self.conn.execute(
+                "DELETE FROM account_model_capabilities WHERE account_id = ?1",
+                [id],
+            )?;
+        }
         Ok(())
     }
 
@@ -1721,6 +2160,18 @@ impl Database {
             "DELETE FROM provider_usage_sync_state WHERE account_id = ?1",
             [id],
         )?;
+        tx.execute(
+            "DELETE FROM account_custom_configs WHERE account_id = ?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM account_model_capabilities WHERE account_id = ?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM account_acknowledgements WHERE account_id = ?1",
+            [id],
+        )?;
         tx.execute("DELETE FROM accounts WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(())
@@ -1736,6 +2187,240 @@ impl Database {
             )
             .unwrap_or(0);
         Ok(version)
+    }
+
+    pub fn account_verification_state(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<AccountVerificationState>> {
+        self.conn
+            .query_row(
+                "SELECT id, verification_status, connection_verified_at, verification_error
+                 FROM accounts WHERE id = ?1",
+                [account_id],
+                account_verification_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn load_account_contract(&self, account_id: &str) -> Result<AccountContractState> {
+        let Some(verification) = self.account_verification_state(account_id)? else {
+            return Ok(AccountContractState::default());
+        };
+        Ok(AccountContractState {
+            verification,
+            custom_config: self.account_custom_config(account_id)?,
+            model_capabilities: self.list_account_model_capabilities(account_id)?,
+            acknowledgements: self.list_account_acknowledgements(account_id)?,
+        })
+    }
+
+    pub fn set_account_verification(
+        &self,
+        account_id: &str,
+        status: ConnectionVerificationStatus,
+        verified_at: Option<DateTime<Utc>>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE accounts
+             SET verification_status = ?2,
+                 connection_verified_at = ?3,
+                 verification_error = ?4,
+                 updated_at = ?5
+             WHERE id = ?1",
+            params![
+                account_id,
+                status.as_str(),
+                verified_at.map(|value| value.to_rfc3339()),
+                error,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn account_custom_config(&self, account_id: &str) -> Result<Option<AccountCustomConfig>> {
+        self.conn
+            .query_row(
+                "SELECT account_id, base_url, upstream_protocol, auth_scheme, created_at, updated_at
+                 FROM account_custom_configs WHERE account_id = ?1",
+                [account_id],
+                account_custom_config_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn upsert_account_custom_config(
+        &self,
+        account_id: &str,
+        input: &AccountCustomConfigInput,
+        allow_protocol_auth_change: bool,
+    ) -> Result<AccountCustomConfig> {
+        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
+        persist_account_custom_config_on(
+            &self.conn,
+            account_id,
+            input,
+            allow_protocol_auth_change,
+        )?;
+        self.account_custom_config(account_id)?
+            .ok_or_else(|| anyhow::anyhow!("custom config was not persisted"))
+    }
+
+    pub fn list_account_model_capabilities(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<AccountModelCapability>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT account_id, model_id, protocol, verified_at, source
+             FROM account_model_capabilities
+             WHERE account_id = ?1
+             ORDER BY model_id ASC, protocol ASC",
+        )?;
+        let rows = stmt.query_map([account_id], account_model_capability_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn replace_account_model_capabilities(
+        &self,
+        account_id: &str,
+        capabilities: &[AccountModelCapabilityInput],
+    ) -> Result<Vec<AccountModelCapability>> {
+        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
+        let tx = self.conn.unchecked_transaction()?;
+        persist_account_model_capabilities_on(&tx, account_id, capabilities)?;
+        tx.commit()?;
+        self.list_account_model_capabilities(account_id)
+    }
+
+    pub fn list_account_acknowledgements(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<AccountAcknowledgement>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT account_id, acknowledgement_id, version, content_hash, accepted_at
+             FROM account_acknowledgements
+             WHERE account_id = ?1
+             ORDER BY acknowledgement_id ASC",
+        )?;
+        let rows = stmt.query_map([account_id], account_acknowledgement_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn record_account_acknowledgement(
+        &self,
+        account_id: &str,
+        notice: PlanRiskNotice,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<AccountAcknowledgement> {
+        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
+        persist_account_acknowledgement_on(&self.conn, account_id, notice, accepted_at)?;
+        self.list_account_acknowledgements(account_id)?
+            .into_iter()
+            .find(|row| row.acknowledgement_id == notice.acknowledgement_id)
+            .ok_or_else(|| anyhow::anyhow!("acknowledgement was not persisted"))
+    }
+
+    pub fn account_has_acknowledgement(
+        &self,
+        account_id: &str,
+        notice: PlanRiskNotice,
+    ) -> Result<bool> {
+        let hash = notice.content_hash();
+        let found = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM account_acknowledgements
+                 WHERE account_id = ?1
+                   AND acknowledgement_id = ?2
+                   AND version = ?3
+                   AND content_hash = ?4
+             )",
+            params![account_id, notice.acknowledgement_id, notice.version, hash],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(found != 0)
+    }
+
+    pub fn forward_log_native_attribution(
+        &self,
+        id: i64,
+    ) -> Result<Option<ForwardLogNativeAttribution>> {
+        self.conn
+            .query_row(
+                "SELECT requested_model, resolved_alias, upstream_model,
+                        native_cost_value, native_cost_unit, native_cost_currency
+                 FROM forward_logs WHERE id = ?1",
+                [id],
+                forward_log_native_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn set_forward_log_native_attribution(
+        &self,
+        id: i64,
+        attribution: &ForwardLogNativeAttribution,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE forward_logs SET
+                requested_model = ?2,
+                resolved_alias = ?3,
+                upstream_model = ?4,
+                native_cost_value = ?5,
+                native_cost_unit = ?6,
+                native_cost_currency = ?7
+             WHERE id = ?1",
+            params![
+                id,
+                attribution.requested_model,
+                attribution.resolved_alias,
+                attribution.upstream_model,
+                attribution.native_cost_value,
+                attribution.native_cost_unit,
+                attribution.native_cost_currency,
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn query_forward_log_native_attributions(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, ForwardLogNativeAttribution>> {
+        let mut map = std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(map);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, requested_model, resolved_alias, upstream_model,
+                    native_cost_value, native_cost_unit, native_cost_currency
+             FROM forward_logs WHERE id = ?1",
+        )?;
+        for id in ids {
+            if let Some(attribution) = stmt
+                .query_row([id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        ForwardLogNativeAttribution {
+                            requested_model: row.get(1)?,
+                            resolved_alias: row.get(2)?,
+                            upstream_model: row.get(3)?,
+                            native_cost_value: row.get(4)?,
+                            native_cost_unit: row.get(5)?,
+                            native_cost_currency: row.get(6)?,
+                        },
+                    ))
+                })
+                .optional()?
+            {
+                map.insert(attribution.0, attribution.1);
+            }
+        }
+        Ok(map)
     }
 
     pub fn upsert_quota_window(&self, window: &QuotaWindow) -> Result<()> {
@@ -2238,6 +2923,7 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let attribution = ForwardLogNativeAttribution::inferred_from_forward_log(log);
         self.conn.execute(
             "INSERT INTO forward_logs
              (timestamp, model, account_id, account_name, client_key_id, client_key_name,
@@ -2247,10 +2933,12 @@ impl Database {
               raw_cost_usd, quota_debit, effective_paid_cost_usd,
               pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
               service_tier, cost_state, error_message, request_id, attempt,
-              error_source, error_stage, duration_ms, diagnostic_json)
+              error_source, error_stage, duration_ms, diagnostic_json,
+              requested_model, resolved_alias, upstream_model,
+              native_cost_value, native_cost_unit, native_cost_currency)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                      ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                     ?31, ?32)",
+                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38)",
             params![
                 log.timestamp.to_rfc3339(),
                 log.model,
@@ -2284,6 +2972,12 @@ impl Database {
                 log.error_stage,
                 log.duration_ms,
                 diagnostic_json,
+                attribution.requested_model,
+                attribution.resolved_alias,
+                attribution.upstream_model,
+                attribution.native_cost_value,
+                attribution.native_cost_unit,
+                attribution.native_cost_currency,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -2341,6 +3035,15 @@ impl Database {
         } else {
             0.0
         };
+        // Stream inserts dual-write native USD from the preliminary row. Finalize
+        // native_cost_* from the same cost/raw_cost_usd/cost_state tuple written
+        // here so Go/Zen cannot keep a 0/NULL native snapshot after success.
+        let (native_cost_value, native_cost_unit, native_cost_currency) =
+            ForwardLogNativeAttribution::usd_fields_from_cost(
+                metrics.raw_cost_usd,
+                (cost_state == "priced").then_some(metrics.cost),
+                cost_state,
+            );
         self.conn.execute(
             "UPDATE forward_logs
              SET status = ?2,
@@ -2362,7 +3065,10 @@ impl Database {
                  error_source = COALESCE(?18, error_source),
                  error_stage = COALESCE(?19, error_stage),
                  duration_ms = COALESCE(?20, duration_ms),
-                 diagnostic_json = COALESCE(?21, diagnostic_json)
+                 diagnostic_json = COALESCE(?21, diagnostic_json),
+                 native_cost_value = ?22,
+                 native_cost_unit = ?23,
+                 native_cost_currency = ?24
              WHERE id = ?1",
             params![
                 id,
@@ -2386,6 +3092,9 @@ impl Database {
                 diagnostic.map(|diagnostic| diagnostic.error_stage),
                 diagnostic.map(|diagnostic| diagnostic.duration_ms),
                 diagnostic.map(|diagnostic| diagnostic.diagnostic_json),
+                native_cost_value,
+                native_cost_unit,
+                native_cost_currency,
             ],
         )?;
         Ok(())
@@ -3869,6 +4578,74 @@ fn sub_gateway_key_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SubGate
     })
 }
 
+fn account_verification_from_row(row: &Row<'_>) -> rusqlite::Result<AccountVerificationState> {
+    let status_value = row.get::<_, String>(1)?;
+    let status =
+        ConnectionVerificationStatus::try_from(status_value.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+        })?;
+    Ok(AccountVerificationState {
+        account_id: row.get(0)?,
+        status,
+        connection_verified_at: row.get::<_, Option<String>>(2)?.map(parse_datetime),
+        verification_error: row.get(3)?,
+    })
+}
+
+fn account_custom_config_from_row(row: &Row<'_>) -> rusqlite::Result<AccountCustomConfig> {
+    let protocol_value = row.get::<_, String>(2)?;
+    let protocol = UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+    })?;
+    let auth_value = row.get::<_, String>(3)?;
+    let auth_scheme = UpstreamAuthScheme::try_from(auth_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+    })?;
+    Ok(AccountCustomConfig {
+        account_id: row.get(0)?,
+        base_url: row.get(1)?,
+        upstream_protocol: protocol,
+        auth_scheme,
+        created_at: parse_datetime(row.get::<_, String>(4)?),
+        updated_at: parse_datetime(row.get::<_, String>(5)?),
+    })
+}
+
+fn account_model_capability_from_row(row: &Row<'_>) -> rusqlite::Result<AccountModelCapability> {
+    let protocol_value = row.get::<_, String>(2)?;
+    let protocol = UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+    })?;
+    Ok(AccountModelCapability {
+        account_id: row.get(0)?,
+        model_id: row.get(1)?,
+        protocol,
+        verified_at: row.get::<_, Option<String>>(3)?.map(parse_datetime),
+        source: row.get(4)?,
+    })
+}
+
+fn account_acknowledgement_from_row(row: &Row<'_>) -> rusqlite::Result<AccountAcknowledgement> {
+    Ok(AccountAcknowledgement {
+        account_id: row.get(0)?,
+        acknowledgement_id: row.get(1)?,
+        version: row.get(2)?,
+        content_hash: row.get(3)?,
+        accepted_at: parse_datetime(row.get::<_, String>(4)?),
+    })
+}
+
+fn forward_log_native_from_row(row: &Row<'_>) -> rusqlite::Result<ForwardLogNativeAttribution> {
+    Ok(ForwardLogNativeAttribution {
+        requested_model: row.get(0)?,
+        resolved_alias: row.get(1)?,
+        upstream_model: row.get(2)?,
+        native_cost_value: row.get(3)?,
+        native_cost_unit: row.get(4)?,
+        native_cost_currency: row.get(5)?,
+    })
+}
+
 fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     // SELECT order: id,name,username,password,key,enabled,referral,recharge,
     // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup,notes,
@@ -4006,10 +4783,24 @@ mod tests {
             "PRAGMA foreign_keys=OFF;
              DROP INDEX IF EXISTS idx_forward_logs_route_account;
              DROP INDEX IF EXISTS idx_forward_logs_provider_offering;
+             DROP INDEX IF EXISTS idx_account_model_capabilities_account;
+             DROP INDEX IF EXISTS idx_account_acknowledgements_account;
              DROP TABLE IF EXISTS provider_usage_sync_state;
              DROP TABLE IF EXISTS provider_pricing_snapshots;
              DROP TABLE IF EXISTS credit_balances;
              DROP TABLE IF EXISTS quota_windows;
+             DROP TABLE IF EXISTS account_custom_configs;
+             DROP TABLE IF EXISTS account_model_capabilities;
+             DROP TABLE IF EXISTS account_acknowledgements;
+             ALTER TABLE accounts DROP COLUMN verification_error;
+             ALTER TABLE accounts DROP COLUMN connection_verified_at;
+             ALTER TABLE accounts DROP COLUMN verification_status;
+             ALTER TABLE forward_logs DROP COLUMN native_cost_currency;
+             ALTER TABLE forward_logs DROP COLUMN native_cost_unit;
+             ALTER TABLE forward_logs DROP COLUMN native_cost_value;
+             ALTER TABLE forward_logs DROP COLUMN upstream_model;
+             ALTER TABLE forward_logs DROP COLUMN resolved_alias;
+             ALTER TABLE forward_logs DROP COLUMN requested_model;
              ALTER TABLE accounts DROP COLUMN free_alias_enabled;
              ALTER TABLE accounts DROP COLUMN quota_scope;
              ALTER TABLE accounts DROP COLUMN credential_kind;
@@ -4059,6 +4850,25 @@ mod tests {
             .collect::<Vec<_>>();
         paths.sort();
         paths
+    }
+
+    fn backup_paths_with_prefix(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+        let mut paths = fs::read_dir(dir)
+            .expect("fixture directory should be readable")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".bak"))
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    fn pre_v23_backup_paths(dir: &Path) -> Vec<PathBuf> {
+        backup_paths_with_prefix(dir, PRE_V23_BACKUP_FILE_PREFIX)
     }
 
     fn account(id: &str) -> Account {
@@ -4181,7 +4991,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
@@ -4408,7 +5218,7 @@ mod tests {
                     row.get(0)
                 })
                 .expect("schema version should load");
-            assert_eq!(version, 22, "{label}");
+            assert_eq!(version, CURRENT_SCHEMA_VERSION, "{label}");
             let account = db
                 .get_account("old")
                 .expect("account query should work")
@@ -4486,7 +5296,7 @@ mod tests {
             })
             .expect("schema version should be readable");
         let usage = db.account_usage("old").expect("usage should load");
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         assert_eq!(
             db.get_account("old")
                 .expect("account should load")
@@ -4635,7 +5445,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         assert_eq!(
             db.get_account("valid")
                 .expect("valid account query should work")
@@ -4779,7 +5589,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         let states = db
             .conn
             .prepare("SELECT cost, cost_state FROM forward_logs ORDER BY id")
@@ -4828,7 +5638,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         let created_at = DateTime::parse_from_rfc3339("2026-01-02T01:30:00+02:00")
             .expect("fixed timestamp should parse")
             .with_timezone(&Utc);
@@ -5402,7 +6212,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("migration state should load");
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         assert_eq!(remaining_baselines, 0);
 
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -5456,7 +6266,7 @@ mod tests {
                 row.get(0)
             })
             .expect("schema version should load");
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         for index in ["idx_forward_logs_request_id", "idx_gateway_logs_request_id"] {
             let exists: bool = db
                 .conn
@@ -5535,7 +6345,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("v15 migration state should load");
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         assert!(auth_error.is_none());
 
         drop(db);
@@ -6926,7 +7736,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
 
         let index_exists: i64 = db
             .conn
@@ -6949,7 +7759,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -6986,7 +7796,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
 
         // Replaying the migration converges to the same shape.
         db.migrate().unwrap();
@@ -7016,7 +7826,7 @@ mod tests {
         ] {
             assert!(columns.contains(&name.to_string()), "missing {name}");
         }
-        assert_eq!(db.schema_version().unwrap(), 22);
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
 
         let account = account("sync-defaults");
         db.create_account(&account).unwrap();
@@ -7031,7 +7841,7 @@ mod tests {
         assert!(sync.last_expedited_at.is_none());
 
         db.migrate().unwrap();
-        assert_eq!(db.schema_version().unwrap(), 22);
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -7075,7 +7885,7 @@ mod tests {
         create_v21_fixture(&dir, false);
 
         let db = Database::open(dir.clone()).expect("v21 database should migrate");
-        assert_eq!(db.schema_version().unwrap(), 22);
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         assert!(
             db.get_account("rollback-account")
                 .expect("migrated account should load")
@@ -7112,6 +7922,13 @@ mod tests {
 
         let backups_before = pre_v22_backup_paths(&dir);
         assert_eq!(backups_before.len(), 1);
+        let pre_v23 = pre_v23_backup_paths(&dir);
+        assert_eq!(pre_v23.len(), 1);
+        let pre_v23_backup =
+            Connection::open_with_flags(&pre_v23[0], OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("pre-v23 backup should open");
+        assert_eq!(schema_version_on(&pre_v23_backup).unwrap(), 21);
+        drop(pre_v23_backup);
         let backup_path = &backups_before[0];
         let backup_name = backup_path
             .file_name()
@@ -7162,7 +7979,7 @@ mod tests {
 
         let backup_bytes = fs::read(backup_path).expect("backup should be readable");
         let reopened = Database::open(dir.clone()).expect("v22 database should reopen");
-        assert_eq!(reopened.schema_version().unwrap(), 22);
+        assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         drop(reopened);
         assert_eq!(pre_v22_backup_paths(&dir), backups_before);
         assert_eq!(
@@ -7179,7 +7996,7 @@ mod tests {
         create_v20_fixture(&dir, false);
 
         let db = Database::open(dir.clone()).expect("v20 database should migrate directly");
-        assert_eq!(db.schema_version().unwrap(), 22);
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         let account_columns = db
             .conn
             .prepare("PRAGMA table_info(accounts)")
@@ -7208,7 +8025,7 @@ mod tests {
         drop(backup);
 
         let reopened = Database::open(dir.clone()).expect("v22 database should reopen");
-        assert_eq!(reopened.schema_version().unwrap(), 22);
+        assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         drop(reopened);
         assert_eq!(pre_v22_backup_paths(&dir), backups_before);
         assert_eq!(
@@ -7254,7 +8071,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("repaired schema should load");
-        assert_eq!(version, 22);
+        assert_eq!(version as i32, CURRENT_SCHEMA_VERSION);
         assert_eq!(notes_after, 1);
         db.list_accounts()
             .expect("account reads must survive a missing notes column on the draft");
@@ -7431,5 +8248,575 @@ mod tests {
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn create_v22_fixture(dir: &Path) {
+        let db = Database::open(dir.to_path_buf()).expect("fixture database should open");
+        db.create_account(&account("v22-account"))
+            .expect("representative account should save");
+        let mut goat = account("v22-goat");
+        goat.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
+        goat.offering_id = GOAT_OFFERING_ID.to_string();
+        goat.enabled = true;
+        db.create_account(&goat)
+            .expect("representative GOAT account should save");
+        db.log_forward(&forward_log("v22-account", "success", 3.5))
+            .expect("representative forward log should save");
+        drop(db);
+
+        let conn = Connection::open(dir.join("data.sqlite")).expect("v23 fixture should reopen");
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             DROP INDEX IF EXISTS idx_account_model_capabilities_account;
+             DROP INDEX IF EXISTS idx_account_acknowledgements_account;
+             DROP TABLE IF EXISTS account_custom_configs;
+             DROP TABLE IF EXISTS account_model_capabilities;
+             DROP TABLE IF EXISTS account_acknowledgements;
+             ALTER TABLE accounts DROP COLUMN verification_error;
+             ALTER TABLE accounts DROP COLUMN connection_verified_at;
+             ALTER TABLE accounts DROP COLUMN verification_status;
+             ALTER TABLE forward_logs DROP COLUMN native_cost_currency;
+             ALTER TABLE forward_logs DROP COLUMN native_cost_unit;
+             ALTER TABLE forward_logs DROP COLUMN native_cost_value;
+             ALTER TABLE forward_logs DROP COLUMN upstream_model;
+             ALTER TABLE forward_logs DROP COLUMN resolved_alias;
+             ALTER TABLE forward_logs DROP COLUMN requested_model;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version (version) VALUES (22);
+             PRAGMA foreign_keys=ON;",
+        )
+        .expect("v22 fixture should be created");
+    }
+
+    #[test]
+    fn v22_to_v23_creates_one_usable_rollback_backup_and_contract_tables() {
+        let dir = temp_data_dir("v22-v23-backup");
+        create_v22_fixture(&dir);
+        assert!(pre_v23_backup_paths(&dir).is_empty());
+
+        let db = Database::open(dir.clone()).expect("v22 database should migrate");
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        let go = db
+            .account_verification_state("v22-account")
+            .unwrap()
+            .unwrap();
+        assert_eq!(go.status, ConnectionVerificationStatus::NotRequired);
+        let goat = db.get_account("v22-goat").unwrap().unwrap();
+        assert!(!goat.enabled, "migrated GOAT rows must be fail-closed");
+        let goat_state = db.account_verification_state("v22-goat").unwrap().unwrap();
+        assert_eq!(goat_state.status, ConnectionVerificationStatus::Pending);
+        let log_id: i64 = db
+            .conn
+            .query_row("SELECT id FROM forward_logs LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        let attribution = db.forward_log_native_attribution(log_id).unwrap().unwrap();
+        assert_eq!(attribution.requested_model.as_deref(), Some("test"));
+        assert_eq!(attribution.upstream_model.as_deref(), Some("test"));
+        assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
+        assert_eq!(attribution.native_cost_currency.as_deref(), Some("USD"));
+        drop(db);
+
+        let backups = pre_v23_backup_paths(&dir);
+        assert_eq!(backups.len(), 1);
+        let backup = Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("pre-v23 backup should open");
+        assert_eq!(schema_version_on(&backup).unwrap(), 22);
+        assert!(!table_has_column(&backup, "accounts", "verification_status").unwrap());
+        drop(backup);
+
+        let reopened = Database::open(dir.clone()).expect("v23 database should reopen");
+        assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(reopened);
+        assert_eq!(pre_v23_backup_paths(&dir).len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn newer_unsupported_schema_is_rejected_without_writes() {
+        let dir = temp_data_dir("schema-too-new");
+        let db = Database::open(dir.clone()).unwrap();
+        db.conn
+            .execute_batch(
+                "DELETE FROM schema_version;
+                 INSERT INTO schema_version (version) VALUES (24);",
+            )
+            .unwrap();
+        drop(db);
+
+        let error = match Database::open(dir.clone()) {
+            Ok(_) => panic!("unsupported schema must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("newer than this build supports"),
+            "{error}"
+        );
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        assert_eq!(schema_version_on(&conn).unwrap(), 24);
+        drop(conn);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v23_persists_verification_custom_config_capabilities_and_acks() {
+        let dir = temp_data_dir("v23-contracts");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut goat = account("goat-draft");
+        goat.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
+        goat.offering_id = GOAT_OFFERING_ID.to_string();
+        db.create_account(&goat).unwrap();
+        let goat_state = db
+            .account_verification_state("goat-draft")
+            .unwrap()
+            .unwrap();
+        assert_eq!(goat_state.status, ConnectionVerificationStatus::Pending);
+
+        let mut custom = account("custom-1");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        db.create_account(&custom).unwrap();
+        db.upsert_account_custom_config(
+            "custom-1",
+            &AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            },
+            true,
+        )
+        .unwrap();
+        let rejected = db.upsert_account_custom_config(
+            "custom-1",
+            &AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::Messages,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            },
+            false,
+        );
+        assert!(
+            rejected.is_err(),
+            "protocol must stay immutable after create"
+        );
+        db.replace_account_model_capabilities(
+            "custom-1",
+            &[AccountModelCapabilityInput {
+                model_id: "deepseek/deepseek-v4-flash".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: Some("manual".into()),
+            }],
+        )
+        .unwrap();
+        let capabilities = db.list_account_model_capabilities("custom-1").unwrap();
+        assert_eq!(capabilities[0].model_id, "deepseek/deepseek-v4-flash");
+
+        let mut scnet = account("scnet-1");
+        scnet.provider_id = SCNET_PROVIDER_ID.to_string();
+        scnet.offering_id = SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.to_string();
+        db.create_account(&scnet).unwrap();
+        let scnet_notice = builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
+            .and_then(|plan| plan.risk_notice)
+            .expect("SCNet plans require a versioned risk notice");
+        db.record_account_acknowledgement("scnet-1", scnet_notice, Utc::now())
+            .unwrap();
+        assert!(
+            db.account_has_acknowledgement("scnet-1", scnet_notice)
+                .unwrap()
+        );
+
+        db.set_account_verification(
+            "custom-1",
+            ConnectionVerificationStatus::Verified,
+            Some(Utc::now()),
+            None,
+        )
+        .unwrap();
+        db.update_account(
+            "custom-1",
+            &AccountUpdate {
+                key: Some("rotated".into()),
+                ..AccountUpdate::default()
+            },
+            Some("new-cipher"),
+            None,
+        )
+        .unwrap();
+        let after_key = db.account_verification_state("custom-1").unwrap().unwrap();
+        assert_eq!(after_key.status, ConnectionVerificationStatus::Pending);
+        assert!(
+            db.list_account_model_capabilities("custom-1")
+                .unwrap()
+                .is_empty()
+        );
+
+        let unknown = account("unknown");
+        let mut unknown = unknown;
+        unknown.provider_id = "no-such-provider".into();
+        unknown.offering_id = "no-such-offering".into();
+        assert!(db.create_account(&unknown).is_err());
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn forward_logs_dual_write_native_usd_attribution() {
+        let dir = temp_data_dir("v23-native-logs");
+        let db = Database::open(dir.clone()).unwrap();
+        db.create_account(&account("priced")).unwrap();
+        let mut log = forward_log("priced", "success", 1.25);
+        log.raw_cost_usd = Some(1.25);
+        log.cost_state = "priced".into();
+        let id = db.log_forward(&log).unwrap();
+        let attribution = db.forward_log_native_attribution(id).unwrap().unwrap();
+        assert_eq!(attribution.native_cost_value, Some(1.25));
+        assert_eq!(attribution.native_cost_unit.as_deref(), Some("usd"));
+        assert_eq!(attribution.native_cost_currency.as_deref(), Some("USD"));
+        assert_eq!(attribution.upstream_model.as_deref(), Some("test"));
+
+        db.set_forward_log_native_attribution(
+            id,
+            &ForwardLogNativeAttribution {
+                requested_model: Some("deepseek-v4-flash".into()),
+                resolved_alias: Some("deepseek-v4-flash".into()),
+                upstream_model: Some("deepseek/deepseek-v4-flash".into()),
+                native_cost_value: Some(12.0),
+                native_cost_unit: Some("credits".into()),
+                native_cost_currency: None,
+            },
+        )
+        .unwrap();
+        let updated = db.forward_log_native_attribution(id).unwrap().unwrap();
+        assert_eq!(
+            updated.upstream_model.as_deref(),
+            Some("deepseek/deepseek-v4-flash")
+        );
+        assert_eq!(updated.native_cost_unit.as_deref(), Some("credits"));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn update_forward_log_finalizes_native_usd_with_cost_fields() {
+        let dir = temp_data_dir("v23-native-finalize");
+        let db = Database::open(dir.clone()).unwrap();
+        db.create_account(&account("stream")).unwrap();
+
+        let mut streaming = forward_log("stream", "streaming", 0.0);
+        streaming.cost = None;
+        streaming.raw_cost_usd = None;
+        streaming.cost_state = "not_applicable".into();
+        streaming.provider_id = Some(OPENCODE_PROVIDER_ID.to_string());
+        streaming.offering_id = Some(GO_OFFERING_ID.to_string());
+        let streaming_id = db.log_forward(&streaming).unwrap();
+        let preliminary = db
+            .forward_log_native_attribution(streaming_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preliminary.native_cost_value, None);
+        assert_eq!(preliminary.native_cost_unit, None);
+
+        db.update_forward_log(
+            streaming_id,
+            "success",
+            Some(200),
+            ForwardMetrics {
+                cost: 1.25,
+                raw_cost_usd: Some(1.25),
+                cost_state: "priced",
+                ..ForwardMetrics::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        let finalized = db
+            .forward_log_native_attribution(streaming_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(finalized.native_cost_value, Some(1.25));
+        assert_eq!(finalized.native_cost_unit.as_deref(), Some("usd"));
+        assert_eq!(finalized.native_cost_currency.as_deref(), Some("USD"));
+        let stored_cost: f64 = db
+            .conn
+            .query_row(
+                "SELECT cost FROM forward_logs WHERE id = ?1",
+                [streaming_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((stored_cost - 1.25).abs() < 1e-9);
+
+        let zero_id = db
+            .log_forward(&forward_log("stream", "streaming", 0.0))
+            .unwrap();
+        assert_eq!(
+            db.forward_log_native_attribution(zero_id)
+                .unwrap()
+                .unwrap()
+                .native_cost_value,
+            Some(0.0)
+        );
+        db.update_forward_log(
+            zero_id,
+            "success",
+            None,
+            ForwardMetrics {
+                cost: 2.5,
+                raw_cost_usd: Some(2.5),
+                cost_state: "priced",
+                ..ForwardMetrics::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.forward_log_native_attribution(zero_id)
+                .unwrap()
+                .unwrap()
+                .native_cost_value,
+            Some(2.5)
+        );
+
+        let mut zen = forward_log("stream", "streaming", 0.0);
+        zen.cost = None;
+        zen.raw_cost_usd = None;
+        zen.cost_state = "not_applicable".into();
+        zen.provider_id = Some(OPENCODE_ZEN_FREE_PROVIDER_ID.to_string());
+        zen.offering_id = Some(ANONYMOUS_FREE_OFFERING_ID.to_string());
+        let zen_id = db.log_forward(&zen).unwrap();
+        db.update_forward_log(
+            zen_id,
+            "success",
+            Some(200),
+            ForwardMetrics {
+                cost: 1.0,
+                raw_cost_usd: Some(1.0),
+                cost_state: "priced",
+                ..ForwardMetrics::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        let zen_native = db.forward_log_native_attribution(zen_id).unwrap().unwrap();
+        assert_eq!(zen_native.native_cost_value, Some(0.0));
+        assert_eq!(zen_native.native_cost_unit.as_deref(), Some("usd"));
+        let zen_cost: (f64, String) = db
+            .conn
+            .query_row(
+                "SELECT cost, cost_state FROM forward_logs WHERE id = ?1",
+                [zen_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(zen_cost.0, 0.0);
+        assert_eq!(zen_cost.1, "free");
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn create_account_with_contract_is_atomic_on_custom_config_failure() {
+        let dir = temp_data_dir("v23-atomic-create");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut custom = account("custom-atomic");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_custom_config
+                 BEFORE INSERT ON account_custom_configs
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced custom config failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = db
+            .create_account_with_contract(
+                &custom,
+                Some(&AccountCustomConfigInput {
+                    base_url: "https://api.example.com/v1".into(),
+                    upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                    auth_scheme: UpstreamAuthScheme::Bearer,
+                }),
+                &[AccountModelCapabilityInput {
+                    model_id: "org/model".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                }],
+                None,
+            )
+            .expect_err("forced custom config failure should abort the create");
+        assert!(
+            error.to_string().contains("forced custom config failure"),
+            "{error}"
+        );
+        assert!(db.get_account("custom-atomic").unwrap().is_none());
+        assert!(db.account_custom_config("custom-atomic").unwrap().is_none());
+        assert!(
+            db.list_account_model_capabilities("custom-atomic")
+                .unwrap()
+                .is_empty()
+        );
+
+        db.conn
+            .execute_batch("DROP TRIGGER fail_custom_config;")
+            .unwrap();
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+            None,
+        )
+        .unwrap();
+        assert!(db.get_account("custom-atomic").unwrap().is_some());
+        assert!(db.account_custom_config("custom-atomic").unwrap().is_some());
+
+        let mut go = account("go-rejects-custom");
+        let rejected = db.create_account_with_contract(
+            &go,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[],
+            None,
+        );
+        assert!(rejected.is_err(), "non-Custom accounts must reject config");
+        assert!(db.get_account("go-rejects-custom").unwrap().is_none());
+
+        go.id = "go-rejects-caps".into();
+        go.name = "go-rejects-caps".into();
+        let rejected_caps = db.create_account_with_contract(
+            &go,
+            None,
+            &[AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+            None,
+        );
+        assert!(
+            rejected_caps.is_err(),
+            "non-Custom accounts must reject capabilities"
+        );
+        assert!(db.get_account("go-rejects-caps").unwrap().is_none());
+
+        let mut custom_empty = account("custom-empty-caps");
+        custom_empty.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom_empty.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        let empty_caps = db.create_account_with_contract(
+            &custom_empty,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[],
+            None,
+        );
+        assert!(
+            empty_caps.is_err(),
+            "Custom create must require at least one model capability"
+        );
+        assert!(db.get_account("custom-empty-caps").unwrap().is_none());
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v23_migration_failure_rolls_back_to_usable_v22_source_and_backup() {
+        let dir = temp_data_dir("v23-atomic-migration");
+        create_v22_fixture(&dir);
+        let conn = Connection::open(dir.join("data.sqlite")).expect("v22 fixture should reopen");
+        conn.execute_batch(
+            "CREATE TRIGGER fail_v23_migration
+             BEFORE INSERT ON schema_version
+             WHEN NEW.version = 23
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced v23 migration failure');
+             END;",
+        )
+        .expect("fault-injection trigger should install");
+        drop(conn);
+
+        assert!(Database::open(dir.clone()).is_err());
+        let conn = Connection::open(dir.join("data.sqlite")).expect("db should reopen");
+        let columns = conn
+            .prepare("PRAGMA table_info(accounts)")
+            .expect("table info should prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("table info should query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("columns should load");
+        assert!(!columns.iter().any(|name| name == "verification_status"));
+        assert!(!table_exists(&conn, "account_custom_configs").unwrap());
+        assert_eq!(schema_version_on(&conn).unwrap(), 22);
+        let preserved_account: (String, String, i64) = conn
+            .query_row(
+                "SELECT name, key_cipher, enabled FROM accounts WHERE id = 'v22-account'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("source account should remain readable");
+        let preserved_goat: (String, i64) = conn
+            .query_row(
+                "SELECT name, enabled FROM accounts WHERE id = 'v22-goat'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("source GOAT account should remain readable");
+        let preserved_log: (String, String, String, f64) = conn
+            .query_row(
+                "SELECT account_id, model, status, cost FROM forward_logs LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("source forward log should remain readable");
+        assert_eq!(
+            preserved_account,
+            ("v22-account".into(), "cipher".into(), 1)
+        );
+        assert_eq!(preserved_goat, ("v22-goat".into(), 1));
+        assert_eq!(
+            preserved_log,
+            ("v22-account".into(), "test".into(), "success".into(), 3.5)
+        );
+        drop(conn);
+
+        let backups_before = pre_v23_backup_paths(&dir);
+        assert_eq!(backups_before.len(), 1);
+        let backup_bytes =
+            fs::read(&backups_before[0]).expect("rollback backup should be readable");
+        let backup =
+            Connection::open_with_flags(&backups_before[0], OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("pre-v23 backup should open");
+        assert_eq!(schema_version_on(&backup).unwrap(), 22);
+        assert!(!table_has_column(&backup, "accounts", "verification_status").unwrap());
+        drop(backup);
+
+        assert!(Database::open(dir.clone()).is_err());
+        assert_eq!(pre_v23_backup_paths(&dir), backups_before);
+        assert_eq!(
+            fs::read(&backups_before[0]).expect("rollback backup should remain readable"),
+            backup_bytes
+        );
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
     }
 }

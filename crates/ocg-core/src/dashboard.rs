@@ -68,6 +68,19 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             patch(update_zen_free_settings_for_account),
         )
         .route("/accounts/{id}/toggle", post(toggle_account))
+        .route("/accounts/{id}/verify", post(verify_account_connection))
+        .route(
+            "/accounts/{id}/custom-config",
+            get(get_account_custom_config).put(put_account_custom_config),
+        )
+        .route(
+            "/accounts/{id}/model-capabilities",
+            get(get_account_model_capabilities).put(put_account_model_capabilities),
+        )
+        .route(
+            "/accounts/{id}/acknowledgements",
+            get(list_account_acknowledgements).post(create_account_acknowledgement),
+        )
         .route("/accounts/{id}/test", post(test_account))
         .route("/accounts/{id}/setup", patch(advance_account_setup))
         .route(
@@ -509,13 +522,33 @@ struct DashboardAccount {
     updated_at: String,
     /// Shared control-plane revision used by account/settings CAS mutations.
     revision: u64,
+    verification_status: crate::provider::ConnectionVerificationStatus,
+    connection_verified_at: Option<String>,
+    verification_error: Option<String>,
+    plan_routable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    custom_config: Option<AccountCustomConfig>,
+    model_capabilities: Vec<AccountModelCapability>,
+    acknowledgements: Vec<AccountAcknowledgement>,
 }
 
 fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
+    let ((usage_sync_last_success_at, usage_sync_next_allowed_at), contract) = {
+        let db = state.db.lock();
+        let sync = db.account_usage_sync_state(&account.id).ok().flatten();
+        let contract = db.load_account_contract(&account.id).unwrap_or_default();
+        (
+            crate::usage_sync::dashboard_sync_fields(sync.as_ref(), state.usage_sync.now()),
+            contract,
+        )
+    };
     // The decrypted key is only needed to redact secrets inside persisted
     // error text; skip the (Windows DPAPI-backed) decrypt for accounts
     // without errors, which is the common case on every list call.
-    let known_secret = if account.last_error.is_some() || account.auth_error.is_some() {
+    let known_secret = if account.last_error.is_some()
+        || account.auth_error.is_some()
+        || contract.verification.verification_error.is_some()
+    {
         if account.key_cipher.is_empty() {
             Some(String::new())
         } else {
@@ -531,15 +564,11 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
                 .map(|secret| redact_known_secret(&error, secret))
         })
     };
-    let (usage_sync_last_success_at, usage_sync_next_allowed_at) = {
-        let db = state.db.lock();
-        let sync = db.account_usage_sync_state(&account.id).ok().flatten();
-        crate::usage_sync::dashboard_sync_fields(sync.as_ref(), state.usage_sync.now())
-    };
+    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id);
     DashboardAccount {
-        id: account.id,
-        provider_id: account.provider_id,
-        offering_id: account.offering_id,
+        id: account.id.clone(),
+        provider_id: account.provider_id.clone(),
+        offering_id: account.offering_id.clone(),
         credential_kind: account.credential_kind,
         quota_scope: account.quota_scope,
         free_alias_enabled: account.free_alias_enabled,
@@ -566,6 +595,16 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
         created_at: account.created_at.to_rfc3339(),
         updated_at: account.updated_at.to_rfc3339(),
         revision: state.settings_revision(),
+        verification_status: contract.verification.status,
+        connection_verified_at: contract
+            .verification
+            .connection_verified_at
+            .map(|value| value.to_rfc3339()),
+        verification_error: sanitize_persisted_error(contract.verification.verification_error),
+        plan_routable: plan.is_some_and(|plan| plan.routable),
+        custom_config: contract.custom_config,
+        model_capabilities: contract.model_capabilities,
+        acknowledgements: contract.acknowledgements,
     }
 }
 
@@ -872,46 +911,112 @@ fn encrypted_optional(
 }
 
 #[derive(Debug, Serialize)]
+struct ProviderCatalogFormField {
+    id: &'static str,
+    kind: &'static str,
+    required: bool,
+    immutable_after_create: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderCatalogRiskNotice {
+    acknowledgement_id: &'static str,
+    version: &'static str,
+    source_url: &'static str,
+    body: &'static str,
+    content_hash: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ProviderCatalogEntry {
     provider_id: String,
     offering_id: String,
+    display_name: &'static str,
+    display_family: &'static str,
     credential_kind: crate::provider::CredentialKind,
     quota_scope: crate::provider::QuotaScope,
     singleton: bool,
+    creation_availability: crate::provider::CreationAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creation_unavailable_reason: Option<&'static str>,
+    verification_policy: crate::provider::VerificationPolicy,
+    verification_runtime_availability: &'static str,
+    routable: bool,
+    managed_registration: bool,
     pricing_availability: &'static str,
     usage_availability: &'static str,
+    quota_unit: &'static str,
+    model_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_prefix: Option<&'static str>,
+    auth_schemes: Vec<&'static str>,
+    upstream_protocols: Vec<&'static str>,
+    form_fields: Vec<ProviderCatalogFormField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    risk_notice: Option<ProviderCatalogRiskNotice>,
+    model_aliases: Vec<String>,
 }
 
-/// Built-in provider/offering pairs only. Command Code GOAT deliberately has
-/// no inferred endpoint, pricing, or usage contract until one is verified.
+/// Built-in provider/offering pairs only. Command Code GOAT, SCNet, and Custom
+/// are catalogued for persistence but remain unroutable until a later slice
+/// wires a verified runtime.
 async fn provider_catalog() -> Json<Vec<ProviderCatalogEntry>> {
     Json(
-        crate::provider::BUILTIN_OFFERINGS
+        crate::provider::BUILTIN_PLANS
             .iter()
-            .map(|offering| {
-                let is_go = offering.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-                    && offering.offering_id == crate::provider::GO_OFFERING_ID;
-                let is_zen = offering.provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
-                    && offering.offering_id == crate::provider::ANONYMOUS_FREE_OFFERING_ID;
+            .map(|plan| {
+                let is_go = plan.offering.provider_id == crate::provider::OPENCODE_PROVIDER_ID
+                    && plan.offering.offering_id == crate::provider::GO_OFFERING_ID;
                 ProviderCatalogEntry {
-                    provider_id: offering.provider_id.to_string(),
-                    offering_id: offering.offering_id.to_string(),
-                    credential_kind: offering.credential_kind,
-                    quota_scope: offering.quota_scope,
-                    singleton: offering.singleton_account_id.is_some(),
-                    pricing_availability: if is_go {
-                        "available"
-                    } else if is_zen {
-                        "not_applicable"
+                    provider_id: plan.offering.provider_id.to_string(),
+                    offering_id: plan.offering.offering_id.to_string(),
+                    display_name: plan.display_name,
+                    display_family: plan.display_family,
+                    credential_kind: plan.offering.credential_kind,
+                    quota_scope: plan.offering.quota_scope,
+                    singleton: plan.offering.singleton_account_id.is_some(),
+                    creation_availability: plan.creation_availability,
+                    creation_unavailable_reason: plan.creation_unavailable_reason,
+                    verification_policy: plan.verification_policy,
+                    verification_runtime_availability: plan.verification_runtime_availability,
+                    routable: plan.routable,
+                    managed_registration: plan.managed_registration,
+                    pricing_availability: plan.pricing_availability,
+                    usage_availability: plan.usage_availability,
+                    quota_unit: plan.quota_unit,
+                    model_source: plan.model_source,
+                    key_prefix: plan.key_prefix,
+                    auth_schemes: plan
+                        .auth_schemes
+                        .iter()
+                        .map(|value| value.as_str())
+                        .collect(),
+                    upstream_protocols: plan
+                        .upstream_protocols
+                        .iter()
+                        .map(|value| value.as_str())
+                        .collect(),
+                    form_fields: plan
+                        .form_fields
+                        .iter()
+                        .map(|field| ProviderCatalogFormField {
+                            id: field.id,
+                            kind: field.kind,
+                            required: field.required,
+                            immutable_after_create: field.immutable_after_create,
+                        })
+                        .collect(),
+                    risk_notice: plan.risk_notice.map(|notice| ProviderCatalogRiskNotice {
+                        acknowledgement_id: notice.acknowledgement_id,
+                        version: notice.version,
+                        source_url: notice.source_url,
+                        body: notice.body,
+                        content_hash: notice.content_hash(),
+                    }),
+                    model_aliases: if is_go {
+                        supported_model_ids().map(str::to_string).collect()
                     } else {
-                        "unavailable"
-                    },
-                    usage_availability: if is_go {
-                        "available"
-                    } else if is_zen {
-                        "local_state"
-                    } else {
-                        "unavailable"
+                        Vec::new()
                     },
                 }
             })
@@ -1006,15 +1111,33 @@ async fn provider_account_usage(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
+    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
+    let capability = crate::usage_sync::provider_adapter::provider_usage_capability(
+        &account.provider_id,
+        &account.offering_id,
+    );
+    if plan.usage_availability == "unavailable" {
+        return Ok(Json(ProviderUsageResponse {
+            account_id: id,
+            provider_id: account.provider_id,
+            offering_id: account.offering_id,
+            availability: "unavailable",
+            experimental: capability.is_some_and(|capability| capability.experimental),
+            free_cooldown_until: None,
+            quota_windows: Vec::new(),
+            credit_balances: Vec::new(),
+            sync_state: db
+                .account_usage_sync_state(&account.id)
+                .map_err(ApiError::internal)?,
+        }));
+    }
     let is_go = account.provider_id == crate::provider::OPENCODE_PROVIDER_ID
         && account.offering_id == crate::provider::GO_OFFERING_ID;
     let is_zen = account.provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
         && account.offering_id == crate::provider::ANONYMOUS_FREE_OFFERING_ID;
-    let capability = crate::usage_sync::provider_adapter::provider_usage_capability(
-        &account.provider_id,
-        &account.offering_id,
-    )
-    .ok_or_else(|| ApiError::bad_request("account provider usage capability is unknown"))?;
+    let capability = capability
+        .ok_or_else(|| ApiError::bad_request("account provider usage capability is unknown"))?;
     let free_cooldown_until = if is_zen {
         db.free_channel_cooldown_until()
             .map_err(ApiError::internal)?
@@ -1173,6 +1296,12 @@ struct DashboardAccountInput {
     account: AccountInput,
     #[serde(default)]
     expected_revision: Option<u64>,
+    #[serde(default)]
+    custom_config: Option<AccountCustomConfigInput>,
+    #[serde(default)]
+    acknowledgements: Vec<AccountAcknowledgementInput>,
+    #[serde(default)]
+    model_capabilities: Vec<AccountModelCapabilityInput>,
 }
 
 async fn create_account_route(
@@ -1181,7 +1310,13 @@ async fn create_account_route(
 ) -> Result<Json<DashboardAccount>, ApiError> {
     let _settings_update = state.settings_update.lock();
     check_key_revision(&state, input.expected_revision)?;
-    let mut account = create_account_inner(state.clone(), input.account)?;
+    let mut account = create_account_inner(
+        state.clone(),
+        input.account,
+        input.custom_config,
+        input.acknowledgements,
+        input.model_capabilities,
+    )?;
     // Account creation is a shared control-plane mutation; stamp the returned
     // legacy account DTO with the same revision used by following CAS writes.
     account.0.revision = state.bump_settings_revision();
@@ -1193,12 +1328,15 @@ async fn create_account(
     State(state): State<CoreState>,
     Json(input): Json<AccountInput>,
 ) -> Result<Json<DashboardAccount>, ApiError> {
-    create_account_inner(state, input)
+    create_account_inner(state, input, None, Vec::new(), Vec::new())
 }
 
 fn create_account_inner(
     state: CoreState,
     input: AccountInput,
+    custom_config: Option<AccountCustomConfigInput>,
+    acknowledgements: Vec<AccountAcknowledgementInput>,
+    model_capabilities: Vec<AccountModelCapabilityInput>,
 ) -> Result<Json<DashboardAccount>, ApiError> {
     let name = input.name.trim().to_string();
     if name.is_empty() {
@@ -1206,22 +1344,72 @@ fn create_account_inner(
     }
     let provider_id = input.provider_id.trim();
     let offering_id = input.offering_id.trim();
-    let offering =
-        crate::provider::builtin_offering(provider_id, offering_id).ok_or_else(|| {
-            ApiError::bad_request(format!(
-                "unknown provider offering `{provider_id}/{offering_id}`"
-            ))
-        })?;
+    let plan = crate::provider::builtin_plan(provider_id, offering_id).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "unknown provider offering `{provider_id}/{offering_id}`"
+        ))
+    })?;
+    let offering = plan.offering;
+    if plan.creation_availability == crate::provider::CreationAvailability::Unavailable {
+        return Err(ApiError::bad_request(
+            plan.creation_unavailable_reason
+                .unwrap_or("this Plan cannot be created through the generic account API")
+                .to_string(),
+        ));
+    }
     if offering.singleton_account_id.is_some() {
         return Err(ApiError::bad_request(
             "Zen Free is a built-in singleton and cannot be created through the generic account API",
         ));
     }
-    if offering.credential_kind == crate::provider::CredentialKind::ApiKey
-        && input.key.trim().is_empty()
-    {
-        return Err(ApiError::bad_request("key is required"));
+    crate::provider::validate_plan_key(plan, &input.key)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let requires_custom = crate::provider::plan_requires_custom_config(plan);
+    if requires_custom {
+        match custom_config.as_ref() {
+            Some(config) => {
+                crate::provider::validate_custom_base_url(&config.base_url)
+                    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            }
+            None => {
+                return Err(ApiError::bad_request(
+                    "Custom API accounts require a base URL, upstream protocol, and auth scheme",
+                ));
+            }
+        }
+        if model_capabilities.is_empty() {
+            return Err(ApiError::bad_request(
+                "Custom API accounts require at least one model capability",
+            ));
+        }
+        for capability in &model_capabilities {
+            crate::provider::validate_custom_model_id(&capability.model_id)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        }
+    } else {
+        if custom_config.is_some() {
+            return Err(ApiError::bad_request(
+                "custom config is only available for Custom API accounts",
+            ));
+        }
+        if !model_capabilities.is_empty() {
+            return Err(ApiError::bad_request(
+                "model capabilities are only available for Custom API accounts",
+            ));
+        }
     }
+    if let Some(notice) = plan.risk_notice {
+        let accepted = acknowledgements.iter().any(|item| {
+            item.acknowledgement_id == notice.acknowledgement_id && item.version == notice.version
+        });
+        if !accepted {
+            return Err(ApiError::bad_request(
+                "this Plan requires a matching versioned risk acknowledgement before create",
+            ));
+        }
+    }
+    let requires_verification =
+        plan.verification_policy == crate::provider::VerificationPolicy::Required;
     let purchase_date = match input.purchase_date {
         Some(value) if !value.trim().is_empty() => normalize_purchase_date(&value)
             .map_err(|error| ApiError::bad_request(error.to_string()))?,
@@ -1247,7 +1435,7 @@ fn create_account_inner(
         key_cipher: state
             .encrypt_key(input.key.trim())
             .map_err(ApiError::internal)?,
-        enabled: true,
+        enabled: !requires_verification,
         account_type: AccountType::Key,
         setup_step: AccountSetupStep::Ready,
         referral_code: clean_optional(input.referral_code),
@@ -1267,7 +1455,13 @@ fn create_account_inner(
     };
     let account = {
         let db = state.db.lock();
-        db.create_account(&account).map_err(ApiError::internal)?;
+        db.create_account_with_contract(
+            &account,
+            custom_config.as_ref(),
+            &model_capabilities,
+            plan.risk_notice,
+        )
+        .map_err(map_account_contract_error)?;
         let _ = db.log_gateway(
             "info",
             "account",
@@ -1278,6 +1472,23 @@ fn create_account_inner(
             .ok_or_else(|| ApiError::internal("created account not found"))?
     };
     Ok(Json(dashboard_account(&state, account)))
+}
+
+fn map_account_contract_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("Custom API accounts require")
+        || message.contains("only available for Custom")
+        || message.contains("risk acknowledgement")
+        || message.contains("base URL")
+        || message.contains("model id")
+        || message.contains("model capability")
+        || message.contains("protocol and auth")
+        || message.contains("duplicate model")
+    {
+        ApiError::bad_request(message)
+    } else {
+        ApiError::internal(error)
+    }
 }
 
 #[derive(Deserialize)]
@@ -1803,6 +2014,9 @@ async fn update_account(
             "finish managed-account key verification before enabling or replacing its key",
         ));
     }
+    if update.enabled == Some(true) {
+        ensure_account_can_enable(&state, &existing)?;
+    }
     if let Some(value) = update.purchase_date.take() {
         update.purchase_date = Some(
             normalize_purchase_date(&value)
@@ -1815,6 +2029,13 @@ async fn update_account(
                 .map_err(|error| ApiError::bad_request(error.to_string()))?
                 .unwrap_or_default(),
         );
+    }
+    if let Some(plan) = crate::provider::builtin_plan(&existing.provider_id, &existing.offering_id)
+    {
+        if let Some(key) = update.key.as_deref() {
+            crate::provider::validate_plan_key(plan, key)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        }
     }
     let key_cipher = match update.key.as_deref().map(str::trim) {
         Some("") | None => None,
@@ -1844,6 +2065,33 @@ async fn update_account(
         .ok_or_else(|| ApiError::not_found("account not found"))?;
     state.bump_settings_revision();
     Ok(Json(dashboard_account(&state, account)))
+}
+
+fn ensure_account_can_enable(state: &CoreState, account: &Account) -> Result<(), ApiError> {
+    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
+    if !plan.routable {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "this Plan is catalogued but is not routable in this release",
+        ));
+    }
+    if plan.verification_policy == crate::provider::VerificationPolicy::Required {
+        let status = state
+            .db
+            .lock()
+            .account_verification_state(&account.id)
+            .map_err(ApiError::internal)?
+            .map(|state| state.status)
+            .unwrap_or(crate::provider::ConnectionVerificationStatus::Pending);
+        if !status.allows_enablement() {
+            return Err(ApiError::status(
+                StatusCode::CONFLICT,
+                "verify the account connection before enabling it",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1991,6 +2239,9 @@ async fn toggle_account(
             "account setup is not complete and cannot be enabled",
         ));
     }
+    if next_enabled {
+        ensure_account_can_enable(&state, &account)?;
+    }
     let update = AccountUpdate {
         name: None,
         username: None,
@@ -2006,6 +2257,264 @@ async fn toggle_account(
         db.update_account(&id, &update, None, None)
             .map_err(ApiError::internal)?;
     }
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    state.bump_settings_revision();
+    Ok(Json(dashboard_account(&state, account)))
+}
+
+async fn verify_account_connection(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    expectation: Option<Json<AccountRevisionExpectation>>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(
+        &state,
+        expectation.and_then(|Json(body)| body.expected_revision),
+    )?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
+    if plan.verification_policy == crate::provider::VerificationPolicy::NotRequired {
+        return Ok(Json(dashboard_account(&state, account)));
+    }
+    if crate::provider::plan_requires_custom_config(plan)
+        && state
+            .db
+            .lock()
+            .account_custom_config(&id)
+            .map_err(ApiError::internal)?
+            .is_none()
+    {
+        return Err(ApiError::bad_request(
+            "Custom API accounts require a persisted base URL, protocol, and auth scheme",
+        ));
+    }
+    if let Some(notice) = plan.risk_notice {
+        if !state
+            .db
+            .lock()
+            .account_has_acknowledgement(&id, notice)
+            .map_err(ApiError::internal)?
+        {
+            return Err(ApiError::bad_request(
+                "this Plan requires a matching versioned risk acknowledgement before verification",
+            ));
+        }
+    }
+    if plan.verification_runtime_availability != "available"
+        && plan.verification_runtime_availability != "optional"
+    {
+        return Err(ApiError::status(
+            StatusCode::NOT_IMPLEMENTED,
+            "connection verification runtime is not available for this Plan in this slice",
+        ));
+    }
+    Ok(Json(dashboard_account(&state, account)))
+}
+
+async fn get_account_custom_config(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+) -> Result<Json<Option<AccountCustomConfig>>, ApiError> {
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    require_custom_config_plan(&account)?;
+    state
+        .db
+        .lock()
+        .account_custom_config(&id)
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+fn require_custom_config_plan(account: &Account) -> Result<(), ApiError> {
+    require_custom_plan(
+        account,
+        "custom config is only available for Custom API accounts",
+    )
+}
+
+fn require_custom_capabilities_plan(account: &Account) -> Result<(), ApiError> {
+    require_custom_plan(
+        account,
+        "model capabilities are only available for Custom API accounts",
+    )
+}
+
+fn require_custom_plan(account: &Account, message: &'static str) -> Result<(), ApiError> {
+    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
+    if crate::provider::plan_requires_custom_config(plan) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(message))
+    }
+}
+
+#[derive(Deserialize)]
+struct DashboardCustomConfigUpdate {
+    #[serde(flatten)]
+    config: AccountCustomConfigInput,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+async fn put_account_custom_config(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    Json(input): Json<DashboardCustomConfigUpdate>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(&state, input.expected_revision)?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    require_custom_config_plan(&account)?;
+    state
+        .db
+        .lock()
+        .upsert_account_custom_config(&id, &input.config, false)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    state.bump_settings_revision();
+    Ok(Json(dashboard_account(&state, account)))
+}
+
+async fn get_account_model_capabilities(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AccountModelCapability>>, ApiError> {
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    require_custom_capabilities_plan(&account)?;
+    state
+        .db
+        .lock()
+        .list_account_model_capabilities(&id)
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+#[derive(Deserialize)]
+struct DashboardModelCapabilitiesUpdate {
+    capabilities: Vec<AccountModelCapabilityInput>,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+async fn put_account_model_capabilities(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    Json(input): Json<DashboardModelCapabilitiesUpdate>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(&state, input.expected_revision)?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    require_custom_capabilities_plan(&account)?;
+    state
+        .db
+        .lock()
+        .replace_account_model_capabilities(&id, &input.capabilities)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    state.bump_settings_revision();
+    Ok(Json(dashboard_account(&state, account)))
+}
+
+async fn list_account_acknowledgements(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<AccountAcknowledgement>>, ApiError> {
+    if state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("account not found"));
+    }
+    state
+        .db
+        .lock()
+        .list_account_acknowledgements(&id)
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+#[derive(Deserialize)]
+struct DashboardAcknowledgementCreate {
+    acknowledgement_id: String,
+    version: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+async fn create_account_acknowledgement(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    Json(input): Json<DashboardAcknowledgementCreate>,
+) -> Result<Json<DashboardAccount>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(&state, input.expected_revision)?;
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
+    let notice = plan.risk_notice.ok_or_else(|| {
+        ApiError::bad_request("this Plan does not require a risk acknowledgement")
+    })?;
+    if notice.acknowledgement_id != input.acknowledgement_id || notice.version != input.version {
+        return Err(ApiError::bad_request(
+            "acknowledgement id and version must match the current catalog notice",
+        ));
+    }
+    state
+        .db
+        .lock()
+        .record_account_acknowledgement(&id, notice, Utc::now())
+        .map_err(ApiError::internal)?;
     let account = state
         .db
         .lock()
@@ -3548,10 +4057,28 @@ async fn gateway_logs(
     Ok(Json(logs))
 }
 
+#[derive(Serialize)]
+struct DashboardForwardLog {
+    #[serde(flatten)]
+    log: ForwardLog,
+    requested_model: Option<String>,
+    resolved_alias: Option<String>,
+    upstream_model: Option<String>,
+    native_cost_value: Option<f64>,
+    native_cost_unit: Option<String>,
+    native_cost_currency: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DashboardForwardLogPage {
+    items: Vec<DashboardForwardLog>,
+    summary: ForwardLogSummary,
+}
+
 async fn forward_logs(
     State(state): State<CoreState>,
     Query(q): Query<ForwardLogQuery>,
-) -> Result<Json<ForwardLogPage>, ApiError> {
+) -> Result<Json<DashboardForwardLogPage>, ApiError> {
     let (start_time, end_time) = validate_forward_log_query(&q)?;
     let mut page = state
         .db
@@ -3590,7 +4117,32 @@ async fn forward_logs(
             log.diagnostic = redact_diagnostic(log.diagnostic.take(), std::slice::from_ref(secret));
         }
     }
-    Ok(Json(page))
+    let attributions = state
+        .db
+        .lock()
+        .query_forward_log_native_attributions(
+            &page.items.iter().map(|log| log.id).collect::<Vec<_>>(),
+        )
+        .map_err(ApiError::internal)?;
+    Ok(Json(DashboardForwardLogPage {
+        items: page
+            .items
+            .into_iter()
+            .map(|log| {
+                let attribution = attributions.get(&log.id).cloned().unwrap_or_default();
+                DashboardForwardLog {
+                    log,
+                    requested_model: attribution.requested_model,
+                    resolved_alias: attribution.resolved_alias,
+                    upstream_model: attribution.upstream_model,
+                    native_cost_value: attribution.native_cost_value,
+                    native_cost_unit: attribution.native_cost_unit,
+                    native_cost_currency: attribution.native_cost_currency,
+                }
+            })
+            .collect(),
+        summary: page.summary,
+    }))
 }
 
 fn dashboard_account_secrets(state: &CoreState) -> Result<BTreeMap<String, String>, ApiError> {
@@ -3772,21 +4324,22 @@ mod tests {
         OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
         ProxyTestRequest, SemverVersion, SettingsUpdateRequest, VerifyManagedKeyInput,
         advance_account_setup, apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path,
-        create_account, create_managed_account, dashboard_account, dashboard_summary,
-        format_error_chain, is_update_available, load_ready_account_for_official_go_usage,
-        map_official_usage_refresh_error, open_account_browser, parse_semver_version,
-        pricing_multiplier_changes, pricing_semantically_equal,
-        read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
-        reorder_accounts, test_proxy, update_account, update_account_usage,
-        update_pricing_multipliers, update_settings, validate_forward_log_query,
-        validate_websocket_origin, verify_managed_account_key,
+        create_account, create_account_inner, create_managed_account, dashboard_account,
+        dashboard_summary, format_error_chain, is_update_available,
+        load_ready_account_for_official_go_usage, map_official_usage_refresh_error,
+        open_account_browser, parse_semver_version, pricing_multiplier_changes,
+        pricing_semantically_equal, provider_account_usage, read_managed_key_verification_response,
+        redact_diagnostic, redact_known_secrets, reorder_accounts, test_proxy, update_account,
+        update_account_usage, update_pricing_multipliers, update_settings,
+        validate_forward_log_query, validate_websocket_origin, verify_managed_account_key,
     };
     use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::{AccountUsageCalibrationSnapshot, Database};
     use crate::go_usage::{GoUsageError, GoUsageSnapshot, GoUsageWindowStatus};
     use crate::models::{
-        Account, AccountInput, AccountSetupStep, AccountType, AccountUpdate, AppConfig,
+        Account, AccountAcknowledgementInput, AccountCustomConfigInput, AccountInput,
+        AccountModelCapabilityInput, AccountSetupStep, AccountType, AccountUpdate, AppConfig,
         ClaudeDesktopModels, ProxyMode, UsageWindow, normalize_purchase_date, purchase_expires_on,
     };
     use crate::pricing::stamp_pricing_activation;
@@ -4525,6 +5078,69 @@ mod tests {
         assert!(!json.to_string().contains(OPAQUE_KEY));
         assert!(json.get("recharge_date").is_none());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dashboard_account_redacts_verification_error_with_known_secret() {
+        const OPAQUE_KEY: &str = "opaque/account+key=42";
+        let dir = temp_data_dir("secret-verify-error");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+        let account = Account {
+            id: "acct-verify".into(),
+            provider_id: crate::provider::default_provider_id(),
+            offering_id: crate::provider::default_offering_id(),
+            credential_kind: crate::provider::default_credential_kind(),
+            quota_scope: crate::provider::default_quota_scope(),
+            free_alias_enabled: false,
+            name: "verify".into(),
+            username: None,
+            password_cipher: None,
+            key_cipher: state.encrypt_key(OPAQUE_KEY).unwrap(),
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state.db.lock().create_account(&account).unwrap();
+        state
+            .db
+            .lock()
+            .set_account_verification(
+                "acct-verify",
+                crate::provider::ConnectionVerificationStatus::Failed,
+                None,
+                Some(&format!("connection verify echoed {OPAQUE_KEY}")),
+            )
+            .unwrap();
+        let stored = state.db.lock().get_account("acct-verify").unwrap().unwrap();
+        let dto = dashboard_account(&state, stored);
+        let error = dto
+            .verification_error
+            .as_deref()
+            .expect("verification error should be exported");
+        assert!(error.contains("connection verify echoed"));
+        assert!(!error.contains(OPAQUE_KEY));
+        assert!(dto.last_error.is_none());
+        assert!(dto.auth_error.is_none());
+        let json = serde_json::to_value(dto).expect("dashboard account should serialize");
+        assert!(!json.to_string().contains(OPAQUE_KEY));
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5684,5 +6300,354 @@ mod tests {
                 "{version} should be rejected"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_is_the_plan_source_and_keeps_unverified_plans_unroutable() {
+        let catalog = super::provider_catalog().await.0;
+        assert_eq!(catalog.len(), 7);
+        let go = catalog
+            .iter()
+            .find(|entry| entry.provider_id == crate::provider::OPENCODE_PROVIDER_ID)
+            .unwrap();
+        assert!(go.routable);
+        assert_eq!(go.pricing_availability, "available");
+        assert!(!go.model_aliases.is_empty());
+
+        let goat = catalog
+            .iter()
+            .find(|entry| {
+                entry.provider_id == crate::provider::COMMAND_CODE_PROVIDER_ID
+                    && entry.offering_id == crate::provider::GOAT_OFFERING_ID
+            })
+            .unwrap();
+        assert!(!goat.routable);
+        assert_eq!(goat.pricing_availability, "unavailable");
+        assert_eq!(goat.usage_availability, "unavailable");
+        assert_eq!(
+            goat.verification_policy,
+            crate::provider::VerificationPolicy::Required
+        );
+
+        let scnet = catalog
+            .iter()
+            .find(|entry| {
+                entry.provider_id == crate::provider::SCNET_PROVIDER_ID
+                    && entry.offering_id == crate::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID
+            })
+            .unwrap();
+        assert!(!scnet.routable);
+        assert!(scnet.risk_notice.is_some());
+        assert_eq!(
+            scnet.key_prefix,
+            Some(crate::provider::SCNET_TOKEN_PLAN_KEY_PREFIX)
+        );
+    }
+
+    #[tokio::test]
+    async fn create_account_saves_verification_required_plans_as_disabled_drafts() {
+        let dir = temp_data_dir("v23-create-drafts");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let go = create_account(
+            State(state.clone()),
+            Json(AccountInput {
+                provider_id: crate::provider::OPENCODE_PROVIDER_ID.into(),
+                offering_id: crate::provider::GO_OFFERING_ID.into(),
+                name: "Go".into(),
+                username: None,
+                password: None,
+                key: "sk-go".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect("Go import should stay immediately usable")
+        .0;
+        assert!(go.enabled);
+        assert_eq!(
+            go.verification_status,
+            crate::provider::ConnectionVerificationStatus::NotRequired
+        );
+        assert!(go.plan_routable);
+
+        let goat = create_account(
+            State(state.clone()),
+            Json(AccountInput {
+                provider_id: crate::provider::COMMAND_CODE_PROVIDER_ID.into(),
+                offering_id: crate::provider::GOAT_OFFERING_ID.into(),
+                name: "GOAT".into(),
+                username: None,
+                password: None,
+                key: "goat-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect("GOAT should persist as a draft")
+        .0;
+        assert!(!goat.enabled);
+        assert_eq!(
+            goat.verification_status,
+            crate::provider::ConnectionVerificationStatus::Pending
+        );
+        assert!(!goat.plan_routable);
+
+        let scnet_err = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::SCNET_PROVIDER_ID.into(),
+                offering_id: crate::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
+                name: "SCNet".into(),
+                username: None,
+                password: None,
+                key: "sk-tp-basic".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect_err("SCNet create requires acknowledgement");
+        assert_eq!(scnet_err.status, StatusCode::BAD_REQUEST);
+
+        let notice = crate::provider::builtin_plan(
+            crate::provider::SCNET_PROVIDER_ID,
+            crate::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+        )
+        .unwrap()
+        .risk_notice
+        .unwrap();
+        let scnet = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::SCNET_PROVIDER_ID.into(),
+                offering_id: crate::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
+                name: "SCNet".into(),
+                username: None,
+                password: None,
+                key: "sk-tp-basic".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            None,
+            vec![AccountAcknowledgementInput {
+                acknowledgement_id: notice.acknowledgement_id.to_string(),
+                version: notice.version.to_string(),
+            }],
+            Vec::new(),
+        )
+        .expect("acknowledged SCNet draft should save")
+        .0;
+        assert!(!scnet.enabled);
+        assert_eq!(scnet.acknowledgements.len(), 1);
+
+        let custom_err = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::CUSTOM_PROVIDER_ID.into(),
+                offering_id: crate::provider::CUSTOM_API_OFFERING_ID.into(),
+                name: "Custom".into(),
+                username: None,
+                password: None,
+                key: "custom-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect_err("Custom create requires config");
+        assert_eq!(custom_err.status, StatusCode::BAD_REQUEST);
+
+        let custom_caps_err = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::CUSTOM_PROVIDER_ID.into(),
+                offering_id: crate::provider::CUSTOM_API_OFFERING_ID.into(),
+                name: "Custom".into(),
+                username: None,
+                password: None,
+                key: "custom-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            Some(AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: crate::provider::UpstreamProtocolKind::Messages,
+                auth_scheme: crate::provider::UpstreamAuthScheme::XApiKey,
+            }),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect_err("Custom create requires model capabilities");
+        assert_eq!(custom_caps_err.status, StatusCode::BAD_REQUEST);
+
+        let go_custom_err = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::OPENCODE_PROVIDER_ID.into(),
+                offering_id: crate::provider::GO_OFFERING_ID.into(),
+                name: "Go custom".into(),
+                username: None,
+                password: None,
+                key: "sk-go-custom".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            Some(AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
+            }),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect_err("Go accounts must reject custom_config");
+        assert_eq!(go_custom_err.status, StatusCode::BAD_REQUEST);
+
+        let go_caps_err = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::OPENCODE_PROVIDER_ID.into(),
+                offering_id: crate::provider::GO_OFFERING_ID.into(),
+                name: "Go caps".into(),
+                username: None,
+                password: None,
+                key: "sk-go-caps".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            None,
+            Vec::new(),
+            vec![AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+                source: None,
+            }],
+        )
+        .expect_err("Go accounts must reject capabilities");
+        assert_eq!(go_caps_err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            state
+                .db
+                .lock()
+                .list_accounts()
+                .unwrap()
+                .iter()
+                .all(|account| account.name != "Go custom" && account.name != "Go caps")
+        );
+
+        let invalid_url_err = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::CUSTOM_PROVIDER_ID.into(),
+                offering_id: crate::provider::CUSTOM_API_OFFERING_ID.into(),
+                name: "Custom orphan".into(),
+                username: None,
+                password: None,
+                key: "custom-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            Some(AccountCustomConfigInput {
+                base_url: "https://user:pass@api.example.com/v1".into(),
+                upstream_protocol: crate::provider::UpstreamProtocolKind::Messages,
+                auth_scheme: crate::provider::UpstreamAuthScheme::XApiKey,
+            }),
+            Vec::new(),
+            vec![AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: crate::provider::UpstreamProtocolKind::Messages,
+                source: None,
+            }],
+        )
+        .expect_err("invalid Custom URL should fail closed");
+        assert_eq!(invalid_url_err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            state
+                .db
+                .lock()
+                .list_accounts()
+                .unwrap()
+                .iter()
+                .all(|account| account.name != "Custom orphan"),
+            "failed Custom create must not leave an account row"
+        );
+
+        let custom = create_account_inner(
+            state.clone(),
+            AccountInput {
+                provider_id: crate::provider::CUSTOM_PROVIDER_ID.into(),
+                offering_id: crate::provider::CUSTOM_API_OFFERING_ID.into(),
+                name: "Custom".into(),
+                username: None,
+                password: None,
+                key: "custom-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            Some(AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocol: crate::provider::UpstreamProtocolKind::Messages,
+                auth_scheme: crate::provider::UpstreamAuthScheme::XApiKey,
+            }),
+            Vec::new(),
+            vec![AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: crate::provider::UpstreamProtocolKind::Messages,
+                source: None,
+            }],
+        )
+        .expect("Custom draft should save")
+        .0;
+        assert!(!custom.enabled);
+        assert_eq!(
+            custom.custom_config.as_ref().unwrap().base_url,
+            "https://api.example.com/v1"
+        );
+        assert_eq!(custom.model_capabilities[0].model_id, "org/model");
+
+        let verify = super::verify_account_connection(
+            State(state.clone()),
+            AxumPath(custom.id.clone()),
+            None,
+        )
+        .await
+        .expect_err("Custom verification runtime is not in this slice");
+        assert_eq!(verify.status, StatusCode::NOT_IMPLEMENTED);
+
+        for (account_id, experimental) in [
+            (goat.id.as_str(), true),
+            (scnet.id.as_str(), false),
+            (custom.id.as_str(), false),
+        ] {
+            let usage = provider_account_usage(State(state.clone()), AxumPath(account_id.into()))
+                .await
+                .expect("unavailable catalog usage must not return a generic 400")
+                .0;
+            assert_eq!(usage.availability, "unavailable");
+            assert_eq!(usage.experimental, experimental);
+            assert!(usage.quota_windows.is_empty());
+        }
+
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

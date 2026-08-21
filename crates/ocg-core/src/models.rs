@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::provider::{
-    CredentialKind, QuotaScope, ZEN_FREE_ACCOUNT_ID, default_credential_kind, default_offering_id,
+    ConnectionVerificationStatus, CredentialKind, QuotaScope, UpstreamAuthScheme,
+    UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID, default_credential_kind, default_offering_id,
     default_provider_id, default_quota_scope, validate_account_binding,
 };
 
@@ -302,6 +303,124 @@ pub fn normalize_account_notes(value: &str) -> Result<Option<String>, AccountNot
 }
 
 impl std::error::Error for PurchaseDateError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountCustomConfig {
+    pub account_id: String,
+    pub base_url: String,
+    pub upstream_protocol: UpstreamProtocolKind,
+    pub auth_scheme: UpstreamAuthScheme,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountCustomConfigInput {
+    pub base_url: String,
+    pub upstream_protocol: UpstreamProtocolKind,
+    pub auth_scheme: UpstreamAuthScheme,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountModelCapability {
+    pub account_id: String,
+    pub model_id: String,
+    pub protocol: UpstreamProtocolKind,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountModelCapabilityInput {
+    pub model_id: String,
+    pub protocol: UpstreamProtocolKind,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountAcknowledgement {
+    pub account_id: String,
+    pub acknowledgement_id: String,
+    pub version: String,
+    pub content_hash: String,
+    pub accepted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountAcknowledgementInput {
+    pub acknowledgement_id: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountVerificationState {
+    pub account_id: String,
+    pub status: ConnectionVerificationStatus,
+    pub connection_verified_at: Option<DateTime<Utc>>,
+    pub verification_error: Option<String>,
+}
+
+impl Default for AccountVerificationState {
+    fn default() -> Self {
+        Self {
+            account_id: String::new(),
+            status: ConnectionVerificationStatus::NotRequired,
+            connection_verified_at: None,
+            verification_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AccountContractState {
+    pub verification: AccountVerificationState,
+    pub custom_config: Option<AccountCustomConfig>,
+    pub model_capabilities: Vec<AccountModelCapability>,
+    pub acknowledgements: Vec<AccountAcknowledgement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ForwardLogNativeAttribution {
+    pub requested_model: Option<String>,
+    pub resolved_alias: Option<String>,
+    pub upstream_model: Option<String>,
+    pub native_cost_value: Option<f64>,
+    pub native_cost_unit: Option<String>,
+    pub native_cost_currency: Option<String>,
+}
+
+impl ForwardLogNativeAttribution {
+    pub fn inferred_from_forward_log(log: &ForwardLog) -> Self {
+        let (native_cost_value, native_cost_unit, native_cost_currency) =
+            Self::usd_fields_from_cost(log.raw_cost_usd, log.cost, &log.cost_state);
+        Self {
+            requested_model: Some(log.model.clone()),
+            resolved_alias: None,
+            upstream_model: Some(log.model.clone()),
+            native_cost_value,
+            native_cost_unit,
+            native_cost_currency,
+        }
+    }
+
+    /// Dual-write USD native fields from the same cost/raw_cost_usd/cost_state
+    /// tuple persisted on the compatibility columns. Callers that only have a
+    /// priced `cost` REAL should pass `Some(cost)` when `cost_state == "priced"`.
+    pub fn usd_fields_from_cost(
+        raw_cost_usd: Option<f64>,
+        cost: Option<f64>,
+        cost_state: &str,
+    ) -> (Option<f64>, Option<String>, Option<String>) {
+        let usd = raw_cost_usd.or(cost);
+        let has_usd = matches!(cost_state, "priced" | "legacy_estimate" | "free") && usd.is_some();
+        (
+            usd,
+            has_usd.then_some("usd".to_string()),
+            has_usd.then_some("USD".to_string()),
+        )
+    }
+}
 
 /// Returns the current calendar date in the process's local timezone.
 pub fn local_today() -> String {
