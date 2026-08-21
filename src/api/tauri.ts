@@ -66,6 +66,8 @@ export type ProxyListDirection = "whitelist" | "blacklist";
 export interface ProxySupportedModel {
   id: string;
   preferred_protocol: string;
+  /** On the registered Zen free channel (egress-IP-shared quota). */
+  zen_free: boolean;
 }
 
 /** Fixed attribution id of the primary key; mirrors the backend constant. */

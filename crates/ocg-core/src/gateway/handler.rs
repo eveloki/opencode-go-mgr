@@ -6,8 +6,8 @@ use crate::gateway::forwarder::{
     rate_limited_response,
 };
 use crate::gateway::free_models::{
-    apply_shared_free_exhaustion, decide_route, is_free_model, resolve_upstream_base,
-    rewrite_body_model,
+    apply_shared_free_exhaustion, decide_route, is_free_model, merge_free_models_into_list,
+    resolve_upstream_base, rewrite_body_model,
 };
 use crate::gateway::protocol::{
     ApiFormat, ProtocolError, RequestPlan, format_error, prepare_gemini_request, prepare_request,
@@ -17,10 +17,10 @@ use crate::gateway::selector::AccountSelector;
 use crate::models::UpstreamChannel;
 use crate::models::{
     AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
-    ClaudeDesktopModels,
+    ClaudeDesktopModels, FreeModelRouting,
 };
 use crate::state::CoreState;
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
@@ -250,7 +250,7 @@ pub async fn models(
 
     let (config, client) = state.upstream_context();
     match forward_get(&client, &state, &config, "/v1/models").await {
-        Ok(resp) => resp,
+        Ok(resp) => attach_free_models_if_enabled(resp, config.free_model_routing).await,
         Err(e) => local_failure_response(
             &state,
             &trace,
@@ -263,6 +263,29 @@ pub async fn models(
             None,
         ),
     }
+}
+
+async fn attach_free_models_if_enabled(resp: Response, policy: FreeModelRouting) -> Response {
+    if policy == FreeModelRouting::Deny || !resp.status().is_success() {
+        return resp;
+    }
+    let status = resp.status();
+    let mut headers = resp.headers().clone();
+    let Ok(bytes) = to_bytes(resp.into_body(), 1024 * 1024).await else {
+        return protocol_error_response(
+            ApiFormat::ChatCompletions,
+            StatusCode::BAD_GATEWAY,
+            "upstream model list is invalid",
+            None,
+        );
+    };
+    let body = merge_free_models_into_list(&bytes).unwrap_or_else(|_| bytes.to_vec());
+    headers.remove(axum::http::header::CONTENT_LENGTH);
+    headers.remove(axum::http::header::TRANSFER_ENCODING);
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
 }
 
 async fn proxy_handler(

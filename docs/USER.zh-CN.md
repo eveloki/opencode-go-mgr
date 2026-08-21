@@ -491,9 +491,11 @@ Manager 恢复，只能从备份恢复或重新登录。
 
 - Chat 流式请求会设置 `stream_options.include_usage`，让 OpenAI 兼容上游返回
   usage chunk。仍然没有 usage chunk 的行会标 `success_no_usage`。usage chunk
-  只会让 token 数量准确；Go 费用仍按当前 OpenCode Go 价格快照估算。Zen free
-  模型（`*-free`、`big-pickle`）会记录 token，但 `cost_state=free`，不计入 Go
-  额度。展开行可查看请求 ID 与诊断详情。
+  只会让 token 数量准确；Go 费用仍按当前 OpenCode Go 价格快照估算。已登记的
+  Zen free 模型（`big-pickle`、`mimo-v2.5-free` 等）会记录 token，但
+  `cost_state=free`，不计入 Go 额度。Go 上名字带 `free` 的模型（目前
+  `ox-alpha-free`）仍走 Go；官方价格列为 `-` 时记为 unpriced。展开行可查看请求
+  ID 与诊断详情。
 - `outcome_unknown` 表示上游可能已经完成并扣额，但 Gateway 超时或丢失响应；
   这类请求不会自动重试，且本地额度消耗保持未知。
 - **Key** 筛选把行与汇总统计限定到单个客户端 Key。选项来自日志表本身，因此
@@ -608,17 +610,17 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 
 | 推荐上游协议 | 模型 |
 | --- | --- |
-| OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3` |
-| OpenAI Responses | `grok-4.5`、`gpt-5.6-luna`、`muse-spark-1.2`、`muse-spark-1.2-contributor` |
+| OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`、`ox-alpha-free`、`big-pickle`、`mimo-v2.5-free`、`hy3-free`、`nemotron-3-ultra-free`、`laguna-s-2.1-free` |
+| OpenAI Responses | `grok-4.5`、`gpt-5.6-luna`、`muse-spark-1.2`、`muse-spark-1.2-contributor`、`muse-spark-1.2-contributor-free` |
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
 
 透传矩阵（测试账号实测，2026-08-14）。✓ = 客户端协议原样转发；空 = 转换到该
 模型推荐协议。权威来源：`crates/ocg-core/src/gateway/protocol.rs` 的
 `MODEL_PROTOCOLS`。
 
-`reasoning.effort` 别名（转发或转换前应用）：`muse-spark-1.2` 与
-`muse-spark-1.2-contributor` 把 `max` 映射为 `xhigh`（上游拒绝 `max`）；
-其他模型的 `reasoning.effort` 原样透传。
+`reasoning.effort` 别名（转发或转换前应用）：`muse-spark-1.2`、
+`muse-spark-1.2-contributor` 与 `muse-spark-1.2-contributor-free` 把 `max`
+映射为 `xhigh`（上游拒绝 `max`）；其他模型的 `reasoning.effort` 原样透传。
 
 | 模型 | 推荐 | Chat | Responses | Messages |
 | --- | --- | :---: | :---: | :---: |
@@ -629,7 +631,8 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 | `glm-5` | Chat | ✓ | ✓ | ✓ |
 | `gpt-5.6-luna` | Responses | ✓ | ✓ | |
 | `muse-spark-1.2` | Responses | | ✓ | |
-| `muse-spark-1.2-contributor` | Responses | | ✓ | |
+| `muse-spark-1.2-contributor` | Responses | ✓ | ✓ | |
+| `muse-spark-1.2-contributor-free` | Responses | | ✓ | |
 | `kimi-k3` | Chat | ✓ | | ✓ |
 | `kimi-k2.7-code` | Chat | ✓ | | |
 | `kimi-k2.6` | Chat | ✓ | | |
@@ -639,6 +642,12 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 | `mimo-v2.5` | Chat | ✓ | | |
 | `mimo-v2.5-pro` | Chat | ✓ | | |
 | `hy3` | Chat | ✓ | | |
+| `ox-alpha-free` | Chat | ✓ | | |
+| `big-pickle` | Chat | ✓ | | |
+| `mimo-v2.5-free` | Chat | ✓ | | |
+| `hy3-free` | Chat | ✓ | | |
+| `nemotron-3-ultra-free` | Chat | ✓ | | |
+| `laguna-s-2.1-free` | Chat | ✓ | | |
 | `minimax-m3` | Messages | ✓ | | ✓ |
 | `minimax-m2.7` | Messages | ✓ | | ✓ |
 | `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
@@ -715,9 +724,11 @@ Gateway 不会把 Gemini 线格式数据发往上游。它把 `contents`、纯�
 - 已经在本次请求里失败过的账号（例如拿到 `429`）。
 
 带有可识别 `Resets in …` 时间短语的 `429` 写入 `cooldown_until`，然后尝试下一
-个账号。`401`/`403` 不写冷却、直接切换——这是鉴权问题，不是配额问题。只有能
-证明请求尚未发出的 DNS/TCP/TLS 建连失败，才会在同一账号重试一次，流式请求也
-遵循这一规则。
+个账号。`403` 不写冷却、直接换号。`401` **原样返回给客户端**，不换号、也不写
+`auth_error`——OpenCode Go 会把「模型不存在」也打成 401 `ModelError`，若当成
+Key 失效会打断 CLI 并误伤好账号。面板 **Ping** / Key 验证拿到 401 时仍会记录
+`auth_error`。只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败，才会在同一账号
+重试一次，流式请求也遵循这一规则。
 
 `408`、`5xx`、建连后的传输失败、响应体超时和流式中断一律不重放。无法确认上游
 是否已经完成的失败会以 `upstream_outcome_unknown` 返回并记为
@@ -778,9 +789,21 @@ Go 快照。
 
 | 档位 | 行为 |
 | --- | --- |
-| **禁止 Free 模型** | 拒绝 `*-free` / `big-pickle`，也不把 Go 模型改写到 free |
-| **仅显式使用 Free 模型**（默认） | 只有客户端显式请求 free 才走 `https://opencode.ai/zen`；Go 模型仍走 Go 上游 |
-| **自动优先同名 Free 模型** | 当前映射：`deepseek-v4-flash` → `deepseek-v4-flash-free`，`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽（按 IP 共享，不换 Key）或超长后回落 Go |
+| **禁止 Free 模型** | 拒绝已登记的 Zen free 模型（`big-pickle`、`mimo-v2.5-free` 等），也不把 Go 模型改写到 Zen。Go 上只是名字带 `free` 的模型（如 `ox-alpha-free`）仍走 Go。 |
+| **仅显式使用 Free 模型**（默认） | 只有客户端显式请求 Zen free 才走 `https://opencode.ai/zen`；Go 模型仍走 Go 上游 |
+| **自动优先同名 Free 模型** | 当前映射：`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽（按 IP 共享，不换 Key）或超长后回落 Go |
+
+Zen free 路由是显式名单（`big-pickle` 与已登记的 Zen 促销 id），不是 `-free`
+后缀。官方 Go 文档把 `ox-alpha-free`（Ox Alpha Free）列在
+`https://opencode.ai/zen/go/v1/chat/completions`，因此该模型走 Go。free 路由
+不是 deny 时，`GET /v1/models` 会把当前已知仍可用的 Zen free id 并入 Go 目录，
+方便客户端发现。
+
+2026-08-21 实测仍可用的 Zen free：`big-pickle`、`mimo-v2.5-free`、`hy3-free`、
+`nemotron-3-ultra-free`、`laguna-s-2.1-free`（Chat），以及
+`muse-spark-1.2-contributor-free`（Responses；`max_output_tokens` 至少 16）。
+`deepseek-v4-flash-free` 已返回 unavailable。官方文档仍列出
+`nemotron-3.5-lightning-free`，但本次探测没有打通。
 
 Free 与 Go 使用**独立冷却窗口**。Zen free 促销额度按出口 IP 共享，因此 free
 `429` 会冷却整条 free 通道，**不会**换 Key 重试；prefer 随后回落 Go。Go 通道
@@ -845,7 +868,7 @@ Release 也会附带只拉取镜像的
 与 `.env.example` 的仓库目录中运行（建议检出对应 Release tag）：
 
 ```bash
-git clone --branch v1.8.1 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v1.8.2 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell：Copy-Item .env.example .env
@@ -861,7 +884,7 @@ docker compose ps
   `ghcr.io/klarkxy/opencode-go-mgr:latest`；Release 中的 `compose.example.yaml`
   默认固定对应的完整版本。
 - 生产部署建议在 `.env` 中用 `OCG_IMAGE` 固定完整版本标签，例如
-  `ghcr.io/klarkxy/opencode-go-mgr:1.8.1`。
+  `ghcr.io/klarkxy/opencode-go-mgr:1.8.2`。
 - 完整版本与 `sha-<commit>` 标签用于标识单次发布，按发布策略不应移动；`1.5`
   与 `latest` 会继续移动。技术上只有
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` digest 真正不可变。
@@ -982,13 +1005,13 @@ curl --fail http://127.0.0.1:9042/dashboard/
 provenance attestation。可这样检查发布版本：
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.1
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.1
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.2
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.2
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.2 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.1 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.2 \
   --repo klarkxy/opencode-go-mgr
 ```
 
@@ -1080,8 +1103,9 @@ ocg.example.com {
   还握着单实例锁。退出占用端口的进程或上一个 release 托盘程序后重试。仅源码开
   发时可用 `scripts/free-dev-port.mjs` 清理 `30001` 上的残留 Vite 进程；它不会
   释放 `9042`，也不会释放桌面端单实例锁。
-- **上游返回 `401 Unauthorized`。**OpenCode-Go 账号 Key 无效或被吊销。打开
-  **账号** 视图替换 Key 再试；`key ping <id>` 是最快的验证手段。
+- **上游返回 `401 Unauthorized`。**Gateway 会把该状态原样返回给客户端，不会
+  换号。OpenCode Go 也会对未上架模型返回 401 `ModelError`。要确认 Key 本身是
+  否失效，在 **账号** 视图用 **Ping**，或执行 `key ping <id>`。
 - **本地进度条满格但请求依然成功。**这是 **假熔断**——本地估算不是上游账单。
   继续使用即可，Gateway 会继续转发。
 - **本地进度条满格，Gateway 返回 `429`。**这是 **真熔断**。等 `cooldown_until`

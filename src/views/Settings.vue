@@ -68,7 +68,7 @@
                   v-for="model in config.proxy_supported_models"
                   :key="model.id"
                   class="proxy-model-option"
-                  :class="{ 'proxy-model-free': isFreeModelId(model.id) }"
+                  :class="{ 'proxy-model-free': isZenFreeModel(model.id) }"
                 >
                   <n-checkbox
                     :checked="config.proxy_list_models.includes(model.id)"
@@ -78,7 +78,7 @@
                     {{ model.id }}
                   </n-checkbox>
                   <span class="proxy-model-hint">{{ protocolLabel(model.preferred_protocol) }}</span>
-                  <span v-if="isFreeModelId(model.id)" class="proxy-model-free-hint">
+                  <span v-if="isZenFreeModel(model.id)" class="proxy-model-free-hint">
                     {{ t("Zen free 额度按出口 IP 共享，走代理会改变额度归属") }}
                   </span>
                 </label>
@@ -598,7 +598,7 @@ const freeModelRoutingOptions: Array<{
   {
     value: "deny",
     label: "禁止 Free 模型",
-    behavior: "拒绝所有 free / big-pickle 请求，也不会把 Go 模型改写到 free。",
+    behavior: "拒绝已登记的 Zen free 模型（如 big-pickle），不拦截 Go 上名字带 free 的模型（如 ox-alpha-free），也不把 Go 模型改写到 Zen。",
   },
   {
     value: "explicit",
@@ -675,8 +675,11 @@ const proxyUnknownModels = computed(() => (
     : []
 ));
 
-function isFreeModelId(id: string): boolean {
-  return id.endsWith("-free");
+/** On the registered Zen free channel (egress-IP-shared quota). Go catalog
+ * ids may end in `-free` without being on the free channel, so the hint must
+ * follow the registry flag, not the suffix. */
+function isZenFreeModel(id: string): boolean {
+  return config.value.proxy_supported_models.some((model) => model.id === id && model.zen_free);
 }
 
 function protocolLabel(protocol: string): string {

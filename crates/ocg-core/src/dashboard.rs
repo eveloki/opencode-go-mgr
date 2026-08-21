@@ -2024,11 +2024,14 @@ async fn reset_account_cooldown(
     Ok(Json(dashboard_account(&state, account)))
 }
 
-/// One known model entry backing the list-mode checkbox grid.
+/// One known model entry backing the list-mode checkbox grid. `zen_free`
+/// follows the registered Zen promo allowlist (not a `-free` suffix — Go
+/// catalog ids may contain `free` without being on the free channel).
 #[derive(Serialize)]
 struct ProxySupportedModel {
     id: String,
     preferred_protocol: &'static str,
+    zen_free: bool,
 }
 
 #[derive(Serialize)]
@@ -2055,6 +2058,7 @@ async fn get_settings(State(state): State<CoreState>) -> Json<SettingsResponse> 
             .map(|(id, preferred)| ProxySupportedModel {
                 id: id.to_string(),
                 preferred_protocol: api_format_name(preferred),
+                zen_free: crate::gateway::free_models::free_model_ids().any(|free| free == id),
             })
             .collect(),
     })
@@ -5053,12 +5057,23 @@ mod tests {
             .as_array()
             .expect("proxy_supported_models must serialize as an array");
         assert!(!models.is_empty());
-        assert!(
-            models.iter().all(|model| {
-                model["id"].is_string() && model["preferred_protocol"].is_string()
-            })
-        );
+        assert!(models.iter().all(|model| {
+            model["id"].is_string()
+                && model["preferred_protocol"].is_string()
+                && model["zen_free"].as_bool().is_some()
+        }));
         assert!(models.iter().any(|model| model["id"] == "gpt-5.6-luna"));
+        // The free-channel hint follows the Zen promo allowlist, not the -free suffix.
+        assert!(
+            models
+                .iter()
+                .any(|model| model["id"] == "mimo-v2.5-free" && model["zen_free"] == true)
+        );
+        assert!(
+            models
+                .iter()
+                .any(|model| model["id"] == "ox-alpha-free" && model["zen_free"] == false)
+        );
         // Flattened config fields stay at the top level next to the extras.
         assert!(encoded["proxy_mode"].is_string());
         assert!(encoded["proxy_list_direction"].is_string());
