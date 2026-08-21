@@ -11,6 +11,7 @@ use crate::gateway::protocol::{
 };
 use crate::gateway::protocol_stream::StreamConverter;
 use crate::gateway::selector::AccountSelector;
+use crate::http_client::RouteLabel;
 use crate::models::{
     Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
 };
@@ -59,6 +60,9 @@ struct ForwardAttemptContext {
     upstream_format: ApiFormat,
     model: String,
     stream: bool,
+    /// Route leg this attempt connected through, resolved by the handler from
+    /// the request's route-set snapshot; recorded on the forward log row.
+    route: RouteLabel,
     known_secret: Option<String>,
     client_key_id: Option<String>,
     client_key_name: Option<String>,
@@ -70,6 +74,7 @@ impl ForwardAttemptContext {
         client_body_bytes: usize,
         attempt: u32,
         plan: &RequestPlan,
+        route: RouteLabel,
     ) -> Self {
         Self {
             trace: trace.clone(),
@@ -80,6 +85,7 @@ impl ForwardAttemptContext {
             upstream_format: plan.upstream,
             model: plan.model.clone(),
             stream: plan.stream,
+            route,
             known_secret: None,
             client_key_id: None,
             client_key_name: None,
@@ -186,8 +192,9 @@ impl FailureRecord {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn forward_request(
+pub(crate) async fn forward_request(
     client: &Client,
+    route: RouteLabel,
     state: &CoreState,
     account: &Account,
     config: &AppConfig,
@@ -202,6 +209,7 @@ pub async fn forward_request(
 ) -> Result<ForwardResult> {
     forward_request_impl(
         client,
+        route,
         state,
         account,
         config,
@@ -220,6 +228,7 @@ pub async fn forward_request(
 #[allow(clippy::too_many_arguments)]
 async fn forward_request_impl(
     client: &Client,
+    route: RouteLabel,
     state: &CoreState,
     account: &Account,
     config: &AppConfig,
@@ -232,7 +241,8 @@ async fn forward_request_impl(
     pricing_snapshot: Arc<PricingSnapshot>,
     client_key_id: Option<&str>,
 ) -> Result<ForwardResult> {
-    let mut attempt_context = ForwardAttemptContext::new(trace, client_body.len(), attempt, plan);
+    let mut attempt_context =
+        ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
     attempt_context.set_client_key(client_key_id, state);
     let upstream_base = plan
         .upstream_base_override
@@ -2236,6 +2246,7 @@ fn log_forward(
         client_key_name: context.client_key_name.clone(),
         status: status.to_string(),
         http_status,
+        route: context.route.as_str().to_string(),
         prompt_tokens: metrics.prompt_tokens,
         completion_tokens: metrics.completion_tokens,
         cached_tokens: metrics.cached_tokens,
@@ -2513,6 +2524,7 @@ mod stream_usage_tests {
             upstream_format: ApiFormat::ChatCompletions,
             model: "test-model".into(),
             stream: false,
+            route: RouteLabel::Proxy,
             known_secret: Some(secret.clone()),
             client_key_id: None,
             client_key_name: None,

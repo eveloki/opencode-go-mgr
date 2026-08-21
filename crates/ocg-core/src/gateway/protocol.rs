@@ -349,6 +349,14 @@ pub fn supported_model_ids() -> impl Iterator<Item = &'static str> {
     MODEL_PROTOCOLS.iter().map(|profile| profile.id)
 }
 
+/// Returns (id, preferred protocol) for every known model; backs the proxy
+/// list picker's protocol hints. Same registry as `supported_model_ids`.
+pub fn supported_model_protocols() -> impl Iterator<Item = (&'static str, ApiFormat)> {
+    MODEL_PROTOCOLS
+        .iter()
+        .map(|profile| (profile.id, profile.preferred))
+}
+
 const ANTHROPIC_THINKING_ENCRYPTED_PREFIX: &str = "ocg-anthropic-thinking-v1:";
 const CHAT_REASONING_ENCRYPTED_PREFIX: &str = "ocg-chat-reasoning-v1:";
 const CHAT_TOOL_REASONING_PLACEHOLDER: &str = "Tool call reasoning unavailable.";

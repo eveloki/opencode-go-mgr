@@ -609,4 +609,23 @@ export const deDEMessages = {
   "未归因": "Nicht zugeordnet",
   "升级前用量统一计入主 Key": "Nutzung vor dem Upgrade wird dem primären Key zugeordnet",
   "加载 Key 筛选失败: {error}": "Key-Filter konnte nicht geladen werden: {error}",
+
+  // list proxy mode (per-model routing)
+  "按模型名单": "Liste pro Modell",
+  "按模型名单分流：只有名单内模型按方向走代理或直连；“测试连接”验证的是方向默认段。": "Teilt das Routing nach Modellliste: Nur gelistete Modelle folgen der Richtung über Proxy oder direkt; „Verbindung testen“ prüft den Standard-Abschnitt der Richtung.",
+  "名单方向": "Listenrichtung",
+  "白名单（名单内走代理）": "Whitelist (Gelistete über Proxy)",
+  "黑名单（名单内直连）": "Blacklist (Gelistete direkt)",
+  "名单内模型走代理地址，名单外模型直连；非聊天出站（价格 / 用量 / 升级检查）将改为直连。": "Gelistete Modelle nutzen die Proxy-URL; nicht gelistete verbinden direkt. Nicht-Chat-Ausgangsverkehr (Preise / Nutzung / Update-Prüfung) wird direkt.",
+  "名单内模型直连，名单外模型走代理地址；非聊天出站（价格 / 用量 / 升级检查）走代理地址。": "Gelistete Modelle verbinden direkt; nicht gelistete nutzen die Proxy-URL. Nicht-Chat-Ausgangsverkehr (Preise / Nutzung / Update-Prüfung) nutzt die Proxy-URL.",
+  "名单内模型": "Gelistete Modelle",
+  "Zen free 额度按出口 IP 共享，走代理会改变额度归属": "Das Zen-Free-Kontingent wird nach ausgehender IP geteilt; über einen Proxy ändert sich die Kontingentzuordnung",
+  "存储名单包含未知模型": "Die gespeicherte Liste enthält unbekannte Modelle",
+  "保存时将被忽略：{ids}": "Beim Speichern werden sie ignoriert: {ids}",
+  "名单模式需要填写代理地址": "Der Listenmodus erfordert eine Proxy-URL",
+  "名单模式至少勾选一个模型": "Der Listenmodus erfordert mindestens ein Modell",
+  "路由": "Route",
+  "自动": "Auto",
+  "代理": "Proxy",
+  "直连": "Direkt",
 } satisfies Messages;

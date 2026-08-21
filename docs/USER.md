@@ -638,6 +638,29 @@ The **Settings** view exposes the persistent gateway configuration:
   installer downloads; the browser sidecar is outside its scope. **Test connection** uses the unsaved form values
   against the current upstream. Any HTTP status proves network reachability,
   without running model inference or incurring model usage.
+- **Per-model list** (fourth proxy mode) — routes chat forwarding per model
+  instead of process-wide. Pick a direction and check models from the known
+  registry; the list accepts exact known model ids only (no patterns or
+  free-text). With the **whitelist** direction, listed models — for example
+  region-restricted ones such as `gpt-5.6-luna`, `grok-4.5`, or
+  `muse-spark-1.2` — connect through the proxy URL while every unlisted model
+  connects directly (ignoring system/environment proxies, exactly like force
+  direct). The **blacklist** direction inverts this: listed models connect
+  directly and everything else uses the proxy URL. Both directions require the
+  proxy URL; an empty list or an empty URL cannot be saved. Non-chat outbound
+  traffic (pricing refreshes, official usage sync, update checks, and signed
+  downloads) always follows the direction's default leg: direct for a
+  whitelist, the proxy URL for a blacklist — so switching from `Manual HTTP
+  proxy` to a whitelist changes that traffic to direct. The account-key test
+  and **Test connection** likewise probe the default leg, so they do not
+  represent the real forwarding path of a listed model. Free-channel models
+  can be listed, but Zen free quota is shared by egress IP, so routing them
+  through a proxy changes which quota they draw from. Every forward-log row
+  (successes included) records the leg it used — `proxy`, `direct`, or `auto`
+  — in its expanded details; rows from before this feature show "not
+  recorded". List mode requires this version or newer; an older binary cannot
+  start on a config saved with `list` mode — switch back to manual or direct
+  mode first when rolling back.
 - **OpenCode Go invite URL** — the restricted HTTPS invite used by managed
   account onboarding. Fresh installs may ship a demo default; replace it with
   your own link before a real signup. Creating a managed draft can also edit

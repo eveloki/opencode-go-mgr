@@ -283,7 +283,7 @@ async fn proxy_handler_inner(
     client_format: ApiFormat,
     claude_desktop: bool,
 ) -> axum::response::Response {
-    let (config, client) = state.upstream_context();
+    let config = state.config();
     let client_body_bytes = body.len();
 
     let Some(client_key_id) = extract_client_key_id(&headers, &state) else {
@@ -349,7 +349,6 @@ async fn proxy_handler_inner(
         client_format,
         plan,
         config,
-        client,
         Some(client_key_id),
     )
     .await
@@ -389,7 +388,7 @@ async fn gemini_proxy_handler(
     model: String,
     stream: bool,
 ) -> axum::response::Response {
-    let (config, client) = state.upstream_context();
+    let config = state.config();
     let client_body_bytes = body.len();
     let Some(client_key_id) = extract_client_key_id(&headers, &state) else {
         return protocol_error_response(
@@ -428,7 +427,6 @@ async fn gemini_proxy_handler(
         ApiFormat::Gemini,
         plan,
         config,
-        client,
         Some(client_key_id),
     )
     .await
@@ -443,12 +441,15 @@ async fn execute_plan(
     client_format: ApiFormat,
     plan: RequestPlan,
     config: AppConfig,
-    client: reqwest::Client,
     client_key_id: Option<String>,
 ) -> axum::response::Response {
     // One logical client request, including safe retries and account fallback,
     // must use one immutable pricing revision from start to finish.
     let pricing_snapshot = state.pricing_snapshot();
+    // Routing snapshot captured once at entry: every attempt (including after
+    // free fallback rewrites the model) resolves its leg from this snapshot,
+    // and a concurrent settings switch only affects requests starting later.
+    let route_snapshot = state.forward_route_set();
     let conversation_key = if config.conversation_sticky {
         resolve_conversation_key(client_format, &plan.model, &headers, &client_body)
     } else {
@@ -693,8 +694,12 @@ async fn execute_plan(
         let mut retried_same_account = false;
         loop {
             attempt = attempt.saturating_add(1);
+            // Re-resolve the leg on every attempt: free fallback or sticky
+            // rewrites can swap `active_plan.model` mid-request.
+            let (client, route) = route_snapshot.client_for(&active_plan.model);
             match forward_request(
-                &client,
+                client,
+                route,
                 &state,
                 &account,
                 &config,

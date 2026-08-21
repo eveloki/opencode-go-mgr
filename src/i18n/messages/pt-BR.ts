@@ -609,4 +609,23 @@ export const ptBRMessages = {
   "未归因": "Não atribuído",
   "升级前用量统一计入主 Key": "O uso anterior à atualização é atribuído à Key principal",
   "加载 Key 筛选失败: {error}": "Falha ao carregar o filtro de Key: {error}",
+
+  // list proxy mode (per-model routing)
+  "按模型名单": "Lista por modelo",
+  "按模型名单分流：只有名单内模型按方向走代理或直连；“测试连接”验证的是方向默认段。": "Divide o roteamento por lista de modelos: apenas os modelos listados seguem a direção via proxy ou direto; “Testar conexão” valida o trecho padrão da direção.",
+  "名单方向": "Direção da lista",
+  "白名单（名单内走代理）": "Lista branca (listados via proxy)",
+  "黑名单（名单内直连）": "Lista negra (listados diretos)",
+  "名单内模型走代理地址，名单外模型直连；非聊天出站（价格 / 用量 / 升级检查）将改为直连。": "Modelos listados usam a URL do proxy; os não listados conectam diretamente. O tráfego de saída não-chat (preços / uso / verificações de atualização) passa a direto.",
+  "名单内模型直连，名单外模型走代理地址；非聊天出站（价格 / 用量 / 升级检查）走代理地址。": "Modelos listados conectam diretamente; os não listados usam a URL do proxy. O tráfego de saída não-chat (preços / uso / verificações de atualização) usa a URL do proxy.",
+  "名单内模型": "Modelos listados",
+  "Zen free 额度按出口 IP 共享，走代理会改变额度归属": "A cota Zen free é compartilhada por IP de saída; usar um proxy altera a qual cota ela pertence",
+  "存储名单包含未知模型": "A lista salva contém modelos desconhecidos",
+  "保存时将被忽略：{ids}": "Serão ignorados ao salvar: {ids}",
+  "名单模式需要填写代理地址": "O modo lista exige uma URL de proxy",
+  "名单模式至少勾选一个模型": "O modo lista exige pelo menos um modelo",
+  "路由": "Rota",
+  "自动": "Automático",
+  "代理": "Proxy",
+  "直连": "Direto",
 } satisfies Messages;

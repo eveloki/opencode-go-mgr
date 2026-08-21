@@ -609,4 +609,23 @@ export const frFRMessages = {
   "未归因": "Non attribué",
   "升级前用量统一计入主 Key": "L'usage antérieur à la mise à niveau est attribué à la Key principale",
   "加载 Key 筛选失败: {error}": "Échec du chargement du filtre de Key : {error}",
+
+  // list proxy mode (per-model routing)
+  "按模型名单": "Liste par modèle",
+  "按模型名单分流：只有名单内模型按方向走代理或直连；“测试连接”验证的是方向默认段。": "Répartit le routage par liste de modèles : seuls les modèles listés suivent la direction via le proxy ou en direct ; « Tester la connexion » vérifie la branche par défaut de la direction.",
+  "名单方向": "Direction de la liste",
+  "白名单（名单内走代理）": "Liste blanche (listés via proxy)",
+  "黑名单（名单内直连）": "Liste noire (listés en direct)",
+  "名单内模型走代理地址，名单外模型直连；非聊天出站（价格 / 用量 / 升级检查）将改为直连。": "Les modèles listés utilisent l'URL du proxy ; les modèles non listés se connectent en direct. Le trafic sortant non-chat (tarification / usage / vérifications de mise à jour) devient direct.",
+  "名单内模型直连，名单外模型走代理地址；非聊天出站（价格 / 用量 / 升级检查）走代理地址。": "Les modèles listés se connectent en direct ; les non listés utilisent l'URL du proxy. Le trafic sortant non-chat (tarification / usage / vérifications de mise à jour) utilise l'URL du proxy.",
+  "名单内模型": "Modèles listés",
+  "Zen free 额度按出口 IP 共享，走代理会改变额度归属": "Le quota Zen free est partagé par IP sortante ; passer par un proxy change le quota concerné",
+  "存储名单包含未知模型": "La liste enregistrée contient des modèles inconnus",
+  "保存时将被忽略：{ids}": "Ils seront ignorés lors de l'enregistrement : {ids}",
+  "名单模式需要填写代理地址": "Le mode liste exige une URL de proxy",
+  "名单模式至少勾选一个模型": "Le mode liste exige au moins un modèle",
+  "路由": "Route",
+  "自动": "Auto",
+  "代理": "Proxy",
+  "直连": "Direct",
 } satisfies Messages;
