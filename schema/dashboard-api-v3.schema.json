@@ -824,6 +824,38 @@
       ],
       "type": "string"
     },
+    "ApplicationModels": {
+      "additionalProperties": false,
+      "description": "Local Applications picker: Go routable Alias ∩ current pricing snapshot.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "models",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
     "CapabilitySummary": {
       "additionalProperties": false,
       "description": "Registry pricing or usage availability copied as display data.",
@@ -1051,6 +1083,130 @@
       ],
       "type": "object"
     },
+    "DailyCostByModel": {
+      "additionalProperties": false,
+      "description": "GET `/dashboard/daily-cost-by-model` envelope.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DailyModelCost"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "DailyCostQuery": {
+      "additionalProperties": false,
+      "description": "GET `/dashboard/daily-cost-by-model` query. `days` may be omitted.",
+      "properties": {
+        "days": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DailyModelCost": {
+      "additionalProperties": false,
+      "description": "One UTC day / model cost bucket. `date` is `YYYY-MM-DD`.",
+      "properties": {
+        "cost": {
+          "format": "double",
+          "type": "number"
+        },
+        "date": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "date",
+        "model",
+        "cost"
+      ],
+      "type": "object"
+    },
+    "DashboardSummary": {
+      "additionalProperties": false,
+      "description": "Dashboard home totals. Custom/GOAT/SCNet cards are not \"available\".",
+      "properties": {
+        "availableAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gatewayRunning": {
+          "type": "boolean"
+        },
+        "monthCost": {
+          "format": "double",
+          "type": "number"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "todayCost": {
+          "format": "double",
+          "type": "number"
+        },
+        "totalAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "weekCost": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "totalAccounts",
+        "availableAccounts",
+        "gatewayRunning",
+        "todayCost",
+        "weekCost",
+        "monthCost",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
     "EffectiveCatalog": {
       "additionalProperties": false,
       "description": "Merged model-id catalog for one contract scope.",
@@ -1221,6 +1377,687 @@
         "lastProbeResult",
         "lastProbeAt",
         "lastProbeError"
+      ],
+      "type": "object"
+    },
+    "ForwardLog": {
+      "additionalProperties": false,
+      "description": "One redacted forward-log row plus native model identity. There is no\n`requestedAlias` field.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "accountName": {
+          "type": "string"
+        },
+        "attempt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cacheCreationTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cachedTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "clientKeyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clientKeyName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completionTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cost": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "costState": {
+          "type": "string"
+        },
+        "credentialAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "diagnostic": true,
+        "durationMs": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "effectivePaidCostUsd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "errorMessage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorStage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "httpStatus": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "localAdjustmentMultiplier": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "nativeCostCurrency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeCostUnit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeCostValue": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "offeringId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pricingRevisionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promptTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotaDebit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "quotaMultiplier": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rawCostUsd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolvedAlias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "type": "string"
+        },
+        "routeAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serviceTier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "upstreamModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "model",
+        "accountId",
+        "accountName",
+        "routeAccountId",
+        "providerId",
+        "offeringId",
+        "credentialAccountId",
+        "clientKeyId",
+        "clientKeyName",
+        "status",
+        "httpStatus",
+        "route",
+        "promptTokens",
+        "completionTokens",
+        "cachedTokens",
+        "cacheCreationTokens",
+        "cost",
+        "rawCostUsd",
+        "quotaDebit",
+        "effectivePaidCostUsd",
+        "pricingRevisionId",
+        "quotaMultiplier",
+        "localAdjustmentMultiplier",
+        "serviceTier",
+        "costState",
+        "errorMessage",
+        "requestId",
+        "attempt",
+        "errorSource",
+        "errorStage",
+        "durationMs",
+        "diagnostic",
+        "requestedModel",
+        "resolvedAlias",
+        "upstreamModel",
+        "nativeCostValue",
+        "nativeCostUnit",
+        "nativeCostCurrency"
+      ],
+      "type": "object"
+    },
+    "ForwardLogClientKey": {
+      "additionalProperties": false,
+      "description": "One historical client-key identity observed in forward logs.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ForwardLogKeys": {
+      "additionalProperties": false,
+      "description": "GET `/logs/forward/keys` envelope. Includes disabled, deleted, and\ndangling identities so stored rows remain selectable.",
+      "properties": {
+        "keys": {
+          "items": {
+            "$ref": "#/$defs/ForwardLogClientKey"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keys",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ForwardLogModels": {
+      "additionalProperties": false,
+      "description": "GET `/logs/forward/models` envelope.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "models",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ForwardLogQuery": {
+      "additionalProperties": false,
+      "description": "GET `/logs/forward` query. Filter/sort tokens keep V2 values\n(`prompt_tokens`, `asc`/`desc`). Unknown fields are rejected.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endTime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keyId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offeringId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routeAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sortBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sortOrder": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startTime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ForwardLogSummary": {
+      "additionalProperties": false,
+      "description": "Aggregates for the current forward-log filter, computed before paging.",
+      "properties": {
+        "cachedTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "completionTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cost": {
+          "format": "double",
+          "type": "number"
+        },
+        "promptTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "totalRequests": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "totalRequests",
+        "promptTokens",
+        "completionTokens",
+        "cachedTokens",
+        "cost"
+      ],
+      "type": "object"
+    },
+    "ForwardLogs": {
+      "additionalProperties": false,
+      "description": "GET `/logs/forward` envelope.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ForwardLog"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "summary": {
+          "$ref": "#/$defs/ForwardLogSummary"
+        }
+      },
+      "required": [
+        "items",
+        "summary",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "GatewayLog": {
+      "additionalProperties": false,
+      "description": "One redacted gateway log row.",
+      "properties": {
+        "attempt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "category": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "diagnostic": true,
+        "durationMs": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "errorSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorStage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "level": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "level",
+        "category",
+        "message",
+        "createdAt",
+        "requestId",
+        "attempt",
+        "errorSource",
+        "errorStage",
+        "durationMs",
+        "diagnostic"
+      ],
+      "type": "object"
+    },
+    "GatewayLogQuery": {
+      "additionalProperties": false,
+      "description": "GET `/logs/gateway` query. All fields may be omitted.",
+      "properties": {
+        "limit": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GatewayLogs": {
+      "additionalProperties": false,
+      "description": "GET `/logs/gateway` envelope.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/GatewayLog"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "GatewayStatus": {
+      "additionalProperties": false,
+      "description": "Secret-free gateway listener view. The plaintext Key lives only on\n[`ConnectionInfo`].",
+      "properties": {
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "upstreamBaseUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "running",
+        "port",
+        "upstreamBaseUrl",
+        "lastError",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
       ],
       "type": "object"
     },
@@ -3009,6 +3846,54 @@
     },
     {
       "$ref": "#/$defs/PricingAvailability"
+    },
+    {
+      "$ref": "#/$defs/GatewayStatus"
+    },
+    {
+      "$ref": "#/$defs/ApplicationModels"
+    },
+    {
+      "$ref": "#/$defs/DashboardSummary"
+    },
+    {
+      "$ref": "#/$defs/DailyModelCost"
+    },
+    {
+      "$ref": "#/$defs/DailyCostByModel"
+    },
+    {
+      "$ref": "#/$defs/GatewayLog"
+    },
+    {
+      "$ref": "#/$defs/GatewayLogs"
+    },
+    {
+      "$ref": "#/$defs/ForwardLog"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogSummary"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogs"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogClientKey"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogKeys"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogModels"
+    },
+    {
+      "$ref": "#/$defs/GatewayLogQuery"
+    },
+    {
+      "$ref": "#/$defs/ForwardLogQuery"
+    },
+    {
+      "$ref": "#/$defs/DailyCostQuery"
     }
   ],
   "title": "DashboardApiV3"

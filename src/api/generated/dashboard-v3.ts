@@ -72,7 +72,23 @@ export type DashboardApiV3 =
   | PricingMultipliersUpdate
   | PricingMultiplierWrite
   | ProviderPricing
-  | PricingAvailability;
+  | PricingAvailability
+  | GatewayStatus
+  | ApplicationModels
+  | DashboardSummary
+  | DailyModelCost
+  | DailyCostByModel
+  | GatewayLog
+  | GatewayLogs
+  | ForwardLog
+  | ForwardLogSummary
+  | ForwardLogs
+  | ForwardLogClientKey
+  | ForwardLogKeys
+  | ForwardLogModels
+  | GatewayLogQuery
+  | ForwardLogQuery
+  | DailyCostQuery;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -890,4 +906,208 @@ export interface ProviderPricing {
   providerId: string;
   revision: number;
   snapshot: PricingSnapshot | null;
+}
+/**
+ * Secret-free gateway listener view. The plaintext Key lives only on
+ * [`ConnectionInfo`].
+ */
+export interface GatewayStatus {
+  lastError: string | null;
+  port: number;
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+  running: boolean;
+  upstreamBaseUrl: string;
+}
+/**
+ * Local Applications picker: Go routable Alias ∩ current pricing snapshot.
+ */
+export interface ApplicationModels {
+  models: string[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * Dashboard home totals. Custom/GOAT/SCNet cards are not "available".
+ */
+export interface DashboardSummary {
+  availableAccounts: number;
+  gatewayRunning: boolean;
+  monthCost: number;
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+  todayCost: number;
+  totalAccounts: number;
+  weekCost: number;
+}
+/**
+ * One UTC day / model cost bucket. `date` is `YYYY-MM-DD`.
+ */
+export interface DailyModelCost {
+  cost: number;
+  date: string;
+  model: string;
+}
+/**
+ * GET `/dashboard/daily-cost-by-model` envelope.
+ */
+export interface DailyCostByModel {
+  items: DailyModelCost[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * One redacted gateway log row.
+ */
+export interface GatewayLog {
+  attempt: number | null;
+  category: string;
+  createdAt: string;
+  diagnostic: any;
+  durationMs: number | null;
+  errorSource: string | null;
+  errorStage: string | null;
+  id: number;
+  level: string;
+  message: string;
+  requestId: string | null;
+}
+/**
+ * GET `/logs/gateway` envelope.
+ */
+export interface GatewayLogs {
+  items: GatewayLog[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * One redacted forward-log row plus native model identity. There is no
+ * `requestedAlias` field.
+ */
+export interface ForwardLog {
+  accountId: string;
+  accountName: string;
+  attempt: number | null;
+  cacheCreationTokens: number;
+  cachedTokens: number;
+  clientKeyId: string | null;
+  clientKeyName: string | null;
+  completionTokens: number;
+  cost: number | null;
+  costState: string;
+  credentialAccountId: string | null;
+  diagnostic: any;
+  durationMs: number | null;
+  effectivePaidCostUsd: number | null;
+  errorMessage: string | null;
+  errorSource: string | null;
+  errorStage: string | null;
+  httpStatus: number | null;
+  id: number;
+  localAdjustmentMultiplier: number | null;
+  model: string;
+  nativeCostCurrency: string | null;
+  nativeCostUnit: string | null;
+  nativeCostValue: number | null;
+  offeringId: string | null;
+  pricingRevisionId: string | null;
+  promptTokens: number;
+  providerId: string | null;
+  quotaDebit: number | null;
+  quotaMultiplier: number | null;
+  rawCostUsd: number | null;
+  requestId: string | null;
+  requestedModel: string | null;
+  resolvedAlias: string | null;
+  route: string;
+  routeAccountId: string | null;
+  serviceTier: string | null;
+  status: string;
+  timestamp: string;
+  upstreamModel: string | null;
+}
+/**
+ * Aggregates for the current forward-log filter, computed before paging.
+ */
+export interface ForwardLogSummary {
+  cachedTokens: number;
+  completionTokens: number;
+  cost: number;
+  promptTokens: number;
+  totalRequests: number;
+}
+/**
+ * GET `/logs/forward` envelope.
+ */
+export interface ForwardLogs {
+  items: ForwardLog[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+  summary: ForwardLogSummary;
+}
+/**
+ * One historical client-key identity observed in forward logs.
+ */
+export interface ForwardLogClientKey {
+  id: string;
+  name: string;
+}
+/**
+ * GET `/logs/forward/keys` envelope. Includes disabled, deleted, and
+ * dangling identities so stored rows remain selectable.
+ */
+export interface ForwardLogKeys {
+  keys: ForwardLogClientKey[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * GET `/logs/forward/models` envelope.
+ */
+export interface ForwardLogModels {
+  models: string[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * GET `/logs/gateway` query. All fields may be omitted.
+ */
+export interface GatewayLogQuery {
+  limit?: number | null;
+  requestId?: string | null;
+}
+/**
+ * GET `/logs/forward` query. Filter/sort tokens keep V2 values
+ * (`prompt_tokens`, `asc`/`desc`). Unknown fields are rejected.
+ */
+export interface ForwardLogQuery {
+  accountId?: string | null;
+  credentialAccountId?: string | null;
+  endTime?: string | null;
+  keyId?: string | null;
+  limit?: number | null;
+  model?: string | null;
+  offeringId?: string | null;
+  offset?: number | null;
+  providerId?: string | null;
+  requestId?: string | null;
+  routeAccountId?: string | null;
+  sortBy?: string | null;
+  sortOrder?: string | null;
+  startTime?: string | null;
+  status?: string | null;
+}
+/**
+ * GET `/dashboard/daily-cost-by-model` query. `days` may be omitted.
+ */
+export interface DailyCostQuery {
+  days?: number | null;
 }
