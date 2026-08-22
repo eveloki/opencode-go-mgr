@@ -251,3 +251,30 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     home.join(".ocg-mgr")
 }
+
+#[cfg(test)]
+mod host_lifecycle_surface {
+    #[test]
+    fn desktop_capabilities_and_exit_are_separate_from_gateway_and_updater() {
+        // Source-text: live tray/AppHandle construction is not available in
+        // crate unit tests without a packaged WebView runtime.
+        let production = include_str!("lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production lib.rs precedes this test module");
+        assert!(production.contains("home.join(\".ocg-mgr\")"));
+        assert!(production.contains("if let Some(handle) = core_state.gateway.lock().take()"));
+        assert!(production.contains("gateway::stop_gateway(handle)"));
+        assert!(
+            !production.contains("usage_sync"),
+            "application exit stops the gateway listener and does not cancel the CoreState usage worker"
+        );
+        assert!(production.contains("autostart::sync"));
+        assert!(production.contains("set_dock_visibility_sync"));
+        assert!(production.contains("updater::configure"));
+
+        let capabilities = include_str!("../capabilities/default.json");
+        assert!(capabilities.contains("core:window:allow-hide"));
+        assert!(!capabilities.contains("updater"));
+    }
+}

@@ -216,4 +216,35 @@ mod tests {
             "blacklist default leg is the manual proxy"
         );
     }
+
+    #[test]
+    fn updater_is_not_a_webview_command() {
+        // Source-text: constructing a Tauri AppHandle here would require the
+        // desktop runtime, signing keys, and would change production seams.
+        let production = include_str!("lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production lib.rs precedes any test module");
+        let handler_start = production
+            .find("tauri::generate_handler![")
+            .expect("invoke handler");
+        let handler = production[handler_start..]
+            .split(']')
+            .next()
+            .expect("handler list");
+        assert!(handler.contains("commands::setting::update_settings"));
+        assert!(handler.contains("commands::gateway::restart_gateway"));
+        assert!(!handler.contains("updater"));
+        assert!(!handler.contains("install_update"));
+        assert!(!handler.contains("check_update"));
+        assert!(production.contains("updater::configure("));
+
+        let capabilities = include_str!("../capabilities/default.json");
+        assert!(
+            !capabilities.contains("updater"),
+            "desktop capabilities must not expose updater plugin commands to the WebView"
+        );
+        assert!(!capabilities.contains("allow-check"));
+        assert!(!capabilities.contains("allow-download-and-install"));
+    }
 }

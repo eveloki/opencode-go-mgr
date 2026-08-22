@@ -663,4 +663,110 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[tokio::test]
+    async fn tauri_account_mutations_skip_cas_and_enable_pending_custom() {
+        let (dir, core) = temp_core();
+        let revision = core.settings_revision();
+
+        let go = create_account_inner(
+            &core,
+            AccountInput {
+                provider_id: ocg_core::provider::OPENCODE_PROVIDER_ID.into(),
+                offering_id: ocg_core::provider::GO_OFFERING_ID.into(),
+                name: "go-cas".into(),
+                username: None,
+                password: None,
+                key: "sk-go-cas".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert!(go.enabled);
+        assert_eq!(core.settings_revision(), revision);
+
+        let custom = create_account_inner(
+            &core,
+            AccountInput {
+                provider_id: ocg_core::provider::CUSTOM_PROVIDER_ID.into(),
+                offering_id: ocg_core::provider::CUSTOM_API_OFFERING_ID.into(),
+                name: "custom-cas".into(),
+                username: None,
+                password: None,
+                key: "custom-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            custom.enabled,
+            "Tauri Custom create uses offering_allows_enablement and skips dashboard verification"
+        );
+        let contract = core.db.lock().load_account_contract(&custom.id).unwrap();
+        assert_eq!(
+            contract.verification.status,
+            ocg_core::provider::ConnectionVerificationStatus::Pending
+        );
+        assert!(contract.custom_config.is_none());
+        assert!(contract.model_capabilities.is_empty());
+        assert_eq!(core.settings_revision(), revision);
+
+        let disabled = toggle_account_inner(&core, custom.id.clone()).unwrap();
+        assert!(!disabled.enabled);
+        let reenabled = toggle_account_inner(&core, custom.id.clone()).unwrap();
+        assert!(
+            reenabled.enabled,
+            "Tauri toggle does not consult Custom verification status"
+        );
+        assert_eq!(
+            core.db
+                .lock()
+                .account_verification_state(&custom.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ocg_core::provider::ConnectionVerificationStatus::Pending
+        );
+
+        let renamed = update_account_inner(
+            &core,
+            custom.id.clone(),
+            AccountUpdate {
+                name: Some("custom-renamed".into()),
+                enabled: Some(false),
+                ..AccountUpdate::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(renamed.name, "custom-renamed");
+        assert!(!renamed.enabled);
+        let forced = update_account_inner(
+            &core,
+            custom.id.clone(),
+            AccountUpdate {
+                enabled: Some(true),
+                ..AccountUpdate::default()
+            },
+        )
+        .unwrap();
+        assert!(forced.enabled);
+
+        let masked = test_account_inner(&core, custom.id.clone()).unwrap();
+        assert!(masked.contains("custom-renamed"));
+        assert!(core.gateway.lock().is_none());
+
+        reset_account_cooldown_inner(&core, go.id.clone()).unwrap();
+        delete_account_inner(&core, go.id.clone()).await.unwrap();
+        assert_eq!(
+            core.settings_revision(),
+            revision,
+            "Tauri account commands must not bump the dashboard CAS token"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

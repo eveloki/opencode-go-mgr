@@ -920,6 +920,50 @@ mod tests {
         std::fs::remove_dir_all(data_dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn legacy_open_rejects_missing_account_without_launching() {
+        use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
+        use ocg_core::db::Database;
+        use ocg_core::state::CoreStateInner;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let data_dir = std::env::temp_dir().join(format!(
+            "ocg-native-browser-missing-account-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("browser-missing-test"));
+        let core = Arc::new(
+            CoreStateInner::new(
+                Database::open(data_dir.clone()).unwrap(),
+                data_dir.clone(),
+                cipher,
+            )
+            .unwrap(),
+        );
+        let launched = Arc::new(AtomicBool::new(false));
+        let launched_flag = launched.clone();
+        core.browser
+            .register_native_hooks(
+                Arc::new(move |_, _| {
+                    launched_flag.store(true, Ordering::SeqCst);
+                    Ok(())
+                }),
+                Arc::new(|_| Ok(())),
+            )
+            .unwrap();
+
+        let error = open_browser_inner(&core, "missing-account")
+            .await
+            .expect_err("missing account must not launch");
+        assert_eq!(error, "account not found");
+        assert!(!launched.load(Ordering::SeqCst));
+
+        drop(core);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
     #[test]
     fn native_profile_open_and_lock_cleanup_use_resolved_external_paths() {
         let data_dir = std::env::temp_dir().join(format!(

@@ -265,4 +265,40 @@ mod tests {
 
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn dashboard_summary_excludes_enabled_pending_custom() {
+        let dir = std::env::temp_dir().join(format!("ocg-tauri-dash-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let core = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+
+        let custom = crate::commands::account::create_account_inner(
+            &core,
+            AccountInput {
+                provider_id: ocg_core::provider::CUSTOM_PROVIDER_ID.into(),
+                offering_id: ocg_core::provider::CUSTOM_API_OFFERING_ID.into(),
+                name: "custom".into(),
+                username: None,
+                password: None,
+                key: "custom-key".into(),
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+        assert!(custom.enabled);
+
+        let summary = get_dashboard_summary_inner(&core).unwrap();
+        assert_eq!(summary.total_accounts, 2);
+        assert_eq!(
+            summary.available_accounts, 1,
+            "Tauri dashboard summary only counts Go and Zen Free as available"
+        );
+        assert!(!summary.gateway_running);
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

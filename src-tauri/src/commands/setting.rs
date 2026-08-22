@@ -238,4 +238,57 @@ mod tests {
         drop(occupied);
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn tauri_settings_have_no_cas_and_skip_dashboard_write_gates() {
+        let (dir, core) = temp_core();
+        let original_key = core.config().gateway_key.clone();
+        let revision = core.settings_revision();
+
+        let mut empty = core.config();
+        empty.gateway_key = "   ".into();
+        let empty_err = update_settings_inner(&core, &mut empty, false).unwrap_err();
+        assert_eq!(empty_err, PRIMARY_KEY_REQUIRED_MESSAGE);
+        assert_eq!(core.settings_revision(), revision);
+        assert_eq!(core.config().gateway_key, original_key);
+
+        let sub = ocg_core::gateway_keys::create_sub_key(&core, "Laptop").unwrap();
+        let mut collide = core.config();
+        collide.gateway_key = sub.key.clone();
+        let collide_err = update_settings_inner(&core, &mut collide, false).unwrap_err();
+        assert!(collide_err.contains("already used"), "{collide_err}");
+        assert_eq!(core.settings_revision(), revision);
+        assert_eq!(core.config().gateway_key, original_key);
+
+        let mut next = core.config();
+        next.upstream_base_url = "https://example.com/go".into();
+        next.auto_start = true;
+        next.show_dock_icon = false;
+        next.proxy_mode = ocg_core::models::ProxyMode::List;
+        next.proxy_url = "http://127.0.0.1:7890".into();
+        next.proxy_list_direction = ocg_core::models::ProxyListDirection::Whitelist;
+        next.proxy_list_models = vec!["not-a-known-model".into(), "also-unknown".into()];
+        next.claude_desktop_models.sonnet = "glm-5.2".into();
+        let status = update_settings_inner(&core, &mut next, false).unwrap();
+        assert!(!status.running);
+        assert_eq!(core.settings_revision(), revision + 1);
+        let stored = core.config();
+        assert_eq!(stored.upstream_base_url, "https://example.com/go");
+        assert!(stored.auto_start);
+        assert!(!stored.show_dock_icon);
+        assert_eq!(
+            stored.proxy_list_models,
+            vec!["not-a-known-model", "also-unknown"]
+        );
+        assert_eq!(stored.claude_desktop_models.sonnet, "glm-5.2");
+
+        let after_update = core.settings_revision();
+        let rotated = regenerate_gateway_key_inner(&core).unwrap();
+        assert_ne!(rotated, original_key);
+        assert_eq!(core.settings_revision(), after_update + 1);
+        assert!(core.credential_entry_for_value(&rotated).is_some());
+        assert!(core.credential_entry_for_value(&original_key).is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

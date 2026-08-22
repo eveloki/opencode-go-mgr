@@ -598,8 +598,11 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use ocg_core::browser::browser_profile_paths;
     use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
-    use ocg_core::models::{Account, AccountSetupStep, AccountType};
-    use ocg_core::provider::{BUILTIN_PLANS, CredentialKind, ZEN_FREE_ACCOUNT_ID};
+    use ocg_core::models::{Account, AccountSetupStep, AccountType, AccountUpdate};
+    use ocg_core::provider::{
+        BUILTIN_PLANS, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus,
+        CredentialKind, GO_OFFERING_ID, OPENCODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
+    };
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1231,6 +1234,299 @@ mod tests {
         // Reopen and ensure the port override was persisted for the next start.
         let reopened = build_state(dir.clone(), cipher).unwrap();
         assert_eq!(reopened.config().gateway_port, port);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_command_surface_is_serve_key_status_only() {
+        let command = Cli::command();
+        let names = command
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["serve", "key", "status"]);
+
+        let key = command.find_subcommand("key").expect("key subcommand");
+        let key_names = key
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            key_names,
+            ["list", "add", "remove", "enable", "disable", "ping"]
+        );
+        assert!(command.find_subcommand("settings").is_none());
+    }
+
+    #[test]
+    fn cli_production_source_has_no_cas_custom_create_or_usage_loop_control() {
+        // Source-text: UsageSyncRuntime.loop_started is private to ocg-core, and
+        // this binary crate cannot invoke a live dashboard CAS checker. Split at
+        // the test module so these assertions do not match themselves.
+        let production = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes the test module");
+        assert!(
+            !production.contains("bump_settings_revision"),
+            "CLI must not share the dashboard CAS token"
+        );
+        assert!(!production.contains("expected_revision"));
+        assert!(
+            !production.contains("CUSTOM_PROVIDER_ID"),
+            "CLI key add is hardcoded to OpenCode Go and cannot create Custom"
+        );
+        assert!(
+            !production.contains("usage_sync"),
+            "CLI stop_serve must not cancel the process-level usage worker"
+        );
+        assert!(production.contains("state.set_config(config.clone())?"));
+        assert!(production.contains("async fn stop_serve"));
+        assert!(production.contains("state.gateway.lock().take()"));
+    }
+
+    fn custom_draft(state: &ocg_core::state::CoreStateInner, id: &str) -> Account {
+        let now = Utc::now();
+        Account {
+            id: id.to_string(),
+            provider_id: CUSTOM_PROVIDER_ID.to_string(),
+            offering_id: CUSTOM_API_OFFERING_ID.to_string(),
+            credential_kind: CredentialKind::ApiKey,
+            quota_scope: ocg_core::provider::QuotaScope::Key,
+            name: id.to_string(),
+            username: None,
+            password_cipher: None,
+            key_cipher: state.encrypt_key("custom-cli-key").unwrap(),
+            enabled: false,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_key_mutations_do_not_bump_a_live_serve_revision() {
+        let dir = temp_dir("cli-cas-split");
+        let dash = dir.join("dist");
+        std::fs::create_dir_all(&dash).unwrap();
+        let cipher = test_cipher();
+        let port = free_port();
+        let serving = start_serve(
+            dir.clone(),
+            cipher.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Some(port),
+            Some(dash),
+        )
+        .await
+        .unwrap();
+        let revision_after_serve = serving.settings_revision();
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Add {
+                name: "go-cas".into(),
+                key: "sk-cas".into(),
+                username: None,
+                password: None,
+            },
+        )
+        .await
+        .unwrap();
+        key_command(dir.clone(), cipher.clone(), KeyAction::List)
+            .await
+            .unwrap();
+        status_command(dir.clone(), cipher.clone()).await.unwrap();
+
+        let go = serving
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .into_iter()
+            .find(|account| account.name == "go-cas")
+            .expect("CLI key add must be visible to the live serve CoreState via SQLite");
+        assert_eq!(go.provider_id, OPENCODE_PROVIDER_ID);
+        assert_eq!(go.offering_id, GO_OFFERING_ID);
+        assert!(go.enabled);
+        assert_eq!(go.setup_step, AccountSetupStep::Ready);
+        assert_eq!(go.credential_kind, CredentialKind::ApiKey);
+        assert_eq!(
+            serving.settings_revision(),
+            revision_after_serve,
+            "CLI key add/list/status must not bump the live serve CAS token"
+        );
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Disable { id: go.id.clone() },
+        )
+        .await
+        .unwrap();
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Enable { id: go.id.clone() },
+        )
+        .await
+        .unwrap();
+        assert_eq!(serving.settings_revision(), revision_after_serve);
+        assert!(
+            serving
+                .db
+                .lock()
+                .get_account(&go.id)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+
+        let before_toggle = serving.settings_revision();
+        toggle_account(&serving, &go.id, false).unwrap();
+        assert!(
+            !serving
+                .db
+                .lock()
+                .get_account(&go.id)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        assert_eq!(
+            serving.settings_revision(),
+            before_toggle,
+            "in-process CLI toggle_account must not bump settings_revision"
+        );
+
+        key_command(
+            dir.clone(),
+            cipher.clone(),
+            KeyAction::Remove { id: go.id.clone() },
+        )
+        .await
+        .unwrap();
+        assert!(serving.db.lock().get_account(&go.id).unwrap().is_none());
+        assert_eq!(serving.settings_revision(), revision_after_serve);
+
+        stop_serve(&serving).await;
+        assert!(serving.gateway.lock().is_none());
+        assert_eq!(
+            serving.settings_revision(),
+            revision_after_serve,
+            "stop_serve must leave settings_revision untouched"
+        );
+        assert_eq!(serving.config().gateway_port, port);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn cli_enables_pending_custom_without_dashboard_verification() {
+        let dir = temp_dir("cli-custom-enable");
+        let cipher = test_cipher();
+        let state = build_state(dir.clone(), cipher.clone()).unwrap();
+        state
+            .db
+            .lock()
+            .create_account(&custom_draft(&state, "cli-custom"))
+            .unwrap();
+        let before = state
+            .db
+            .lock()
+            .account_verification_state("cli-custom")
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.status, ConnectionVerificationStatus::Pending);
+        let revision = state.settings_revision();
+
+        toggle_account(&state, "cli-custom", true).unwrap();
+        let enabled = state.db.lock().get_account("cli-custom").unwrap().unwrap();
+        assert!(
+            enabled.enabled,
+            "CLI enablement does not consult Custom verification status"
+        );
+        let after = state
+            .db
+            .lock()
+            .account_verification_state("cli-custom")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, ConnectionVerificationStatus::Pending);
+        assert_eq!(state.settings_revision(), revision);
+
+        key_command(
+            dir.clone(),
+            cipher,
+            KeyAction::Enable {
+                id: "cli-custom".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            state
+                .db
+                .lock()
+                .get_account("cli-custom")
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_update_shaped_writes_skip_revision_unlike_dashboard() {
+        let dir = temp_dir("cli-update-shape");
+        let cipher = test_cipher();
+        let state = build_state(dir.clone(), cipher).unwrap();
+        state
+            .db
+            .lock()
+            .create_account(&custom_draft(&state, "rename-me"))
+            .unwrap();
+        let revision = state.settings_revision();
+        state
+            .db
+            .lock()
+            .update_account(
+                "rename-me",
+                &AccountUpdate {
+                    name: Some("renamed".into()),
+                    ..AccountUpdate::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(state.settings_revision(), revision);
+        assert_eq!(
+            state
+                .db
+                .lock()
+                .get_account("rename-me")
+                .unwrap()
+                .unwrap()
+                .name,
+            "renamed"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

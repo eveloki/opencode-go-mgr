@@ -198,4 +198,32 @@ mod tests {
         stop_and_wait(state.gateway.lock().take().unwrap());
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn restart_inner_is_a_listener_lifecycle_and_does_not_bump_revision() {
+        let dir = temp_data_dir();
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+        let mut config = state.config();
+        config.gateway_port = free_port();
+        let revision = state.settings_revision();
+
+        let started = restart_inner(&state, &config).unwrap();
+        assert!(started.running);
+        assert_eq!(state.settings_revision(), revision);
+        assert!(TcpStream::connect(("127.0.0.1", config.gateway_port)).is_ok());
+
+        let restarted = restart_inner(&state, &config).unwrap();
+        assert!(restarted.running);
+        assert_eq!(restarted.port, config.gateway_port);
+        assert_eq!(state.settings_revision(), revision);
+
+        stop_and_wait(state.gateway.lock().take().unwrap());
+        assert!(state.gateway.lock().is_none());
+        assert_eq!(state.settings_revision(), revision);
+        let _ = state.db.lock().list_accounts().unwrap();
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }
