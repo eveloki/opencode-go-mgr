@@ -3491,6 +3491,70 @@
       ],
       "type": "object"
     },
+    "ProxyTestRequest": {
+      "additionalProperties": false,
+      "description": "POST `/settings/test-proxy` body. This is an operational diagnostic, not a\ncontrol-plane mutation: CAS tokens are neither required nor accepted.\nUnknown fields, including an upstream URL, are rejected. `proxyUrl` and\n`proxyListDirection` may be omitted; omitted direction keeps the persisted\nlist-mode direction.",
+      "properties": {
+        "proxyListDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyListDirection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxyMode": {
+          "$ref": "#/$defs/ProxyMode"
+        },
+        "proxyUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "proxyMode"
+      ],
+      "type": "object"
+    },
+    "ProxyTestResponse": {
+      "additionalProperties": false,
+      "description": "POST `/settings/test-proxy` result. Any diagnostic HTTP status is success.\nThe body never includes proxy credentials, the diagnostic URL, or the\nupstream payload. `revision` and `processGeneration` are captured before\nnetwork I/O and are not bumped.",
+      "properties": {
+        "latencyMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proxyMode": {
+          "$ref": "#/$defs/ProxyMode"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "proxyMode",
+        "status",
+        "latencyMs",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "QuotaWindow": {
       "additionalProperties": false,
       "description": "One live or synthetic quota window. Distinct from `provider::QuotaWindow`.",
@@ -4416,6 +4480,12 @@
     },
     {
       "$ref": "#/$defs/AuthLogout"
+    },
+    {
+      "$ref": "#/$defs/ProxyTestRequest"
+    },
+    {
+      "$ref": "#/$defs/ProxyTestResponse"
     }
   ],
   "title": "DashboardApiV3"

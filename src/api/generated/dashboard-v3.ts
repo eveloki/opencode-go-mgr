@@ -100,7 +100,9 @@ export type DashboardApiV3 =
   | AuthStatus
   | AuthRegister
   | AuthLogin
-  | AuthLogout;
+  | AuthLogout
+  | ProxyTestRequest
+  | ProxyTestResponse;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -1265,4 +1267,29 @@ export interface AuthLogin {
 export interface AuthLogout {
   expectedRevision: number;
   processGeneration: number;
+}
+/**
+ * POST `/settings/test-proxy` body. This is an operational diagnostic, not a
+ * control-plane mutation: CAS tokens are neither required nor accepted.
+ * Unknown fields, including an upstream URL, are rejected. `proxyUrl` and
+ * `proxyListDirection` may be omitted; omitted direction keeps the persisted
+ * list-mode direction.
+ */
+export interface ProxyTestRequest {
+  proxyListDirection?: ProxyListDirection | null;
+  proxyMode: ProxyMode;
+  proxyUrl?: string;
+}
+/**
+ * POST `/settings/test-proxy` result. Any diagnostic HTTP status is success.
+ * The body never includes proxy credentials, the diagnostic URL, or the
+ * upstream payload. `revision` and `processGeneration` are captured before
+ * network I/O and are not bumped.
+ */
+export interface ProxyTestResponse {
+  latencyMs: number;
+  processGeneration: number;
+  proxyMode: ProxyMode;
+  revision: number;
+  status: number;
 }
