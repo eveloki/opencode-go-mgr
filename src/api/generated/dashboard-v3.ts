@@ -33,7 +33,32 @@ export type DashboardApiV3 =
   | AccountModelCapabilitiesUpdate
   | AccountModelCapabilityWrite
   | AccountAcknowledgementCreate
-  | AccountAcknowledgementWrite;
+  | AccountAcknowledgementWrite
+  | ProviderCatalog
+  | ProviderCatalogEntry
+  | ProviderCatalogFormField
+  | ProviderCatalogRiskNotice
+  | ProviderModelCapability
+  | ZenFreeSettings
+  | ZenFreeSettingsUpdate
+  | ZenFreeModels
+  | ZenFreeModel
+  | ProviderContracts
+  | ProviderContractGroup
+  | CustomEndpointContract
+  | ProviderOfferingChoice
+  | ProviderAccountChoice
+  | ProtocolSwitches
+  | EffectiveCatalog
+  | EffectiveModelContract
+  | EffectiveModelProtocols
+  | EffectiveProtocolEvidence
+  | CapabilitySummary
+  | CardCapabilitySummary
+  | ProtocolSwitchUpdate
+  | ProtocolProbeRequest
+  | ProtocolProbeResult
+  | ProtocolProbeResponse;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -74,6 +99,19 @@ export type AccountSetupStep = "google_account" | "opencode_registration" | "pay
  * Connection-verification status. Wire values match V2 snake_case.
  */
 export type AccountVerificationStatus = "not_required" | "pending" | "verified" | "failed";
+/**
+ * Last explicit probe outcome stored on evidence. Distinct from
+ * [`ProtocolProbeResult`].
+ */
+export type ProbeResultKind = "success" | "failure";
+/**
+ * How a protocol row was established. Wire values match V2 snake_case.
+ */
+export type ContractEvidenceSource = "static" | "preset" | "probe_confirmed" | "probe_observed";
+/**
+ * Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.
+ */
+export type ContractScopeKind = "provider" | "custom_endpoint";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -418,4 +456,297 @@ export interface AccountAcknowledgementCreate {
   expectedRevision: number;
   processGeneration: number;
   version: string;
+}
+/**
+ * Built-in Plan catalog. Model capabilities are a separate DTO.
+ *
+ * `pricingRevision` is the live pricing snapshot id, not a CAS token.
+ */
+export interface ProviderCatalog {
+  entries: ProviderCatalogEntry[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * One Provider Registry offering as a wire catalog row. Identity strings are
+ * data copied from the static registry; this DTO does not define them.
+ */
+export interface ProviderCatalogEntry {
+  authSchemes: AccountAuthScheme[];
+  creationAvailability: string;
+  creationUnavailableReason: string | null;
+  credentialKind: AccountCredentialKind;
+  displayFamily: string;
+  displayName: string;
+  formFields: ProviderCatalogFormField[];
+  keyPrefix: string | null;
+  managedRegistration: boolean;
+  manualUsageCalibration: boolean;
+  modelAliases: string[];
+  modelSource: string;
+  offeringId: string;
+  pricingAvailability: string;
+  providerId: string;
+  quotaScope: AccountQuotaScope;
+  quotaUnit: string;
+  riskNotice: ProviderCatalogRiskNotice | null;
+  routable: boolean;
+  singleton: boolean;
+  upstreamProtocols: AccountUpstreamProtocol[];
+  usageAvailability: string;
+  verificationPolicy: string;
+  verificationRuntimeAvailability: string;
+}
+/**
+ * One create-form field advertised by a catalog offering.
+ */
+export interface ProviderCatalogFormField {
+  id: string;
+  immutableAfterCreate: boolean;
+  kind: string;
+  required: boolean;
+}
+/**
+ * Plan risk notice shown before create. `body` is the acknowledgement text,
+ * not a secret.
+ */
+export interface ProviderCatalogRiskNotice {
+  acknowledgementId: string;
+  body: string;
+  contentHash: string;
+  sourceUrl: string;
+  version: string;
+}
+/**
+ * One Go protocol-table capability. GOAT/SCNet must not reuse these rows.
+ */
+export interface ProviderModelCapability {
+  modelId: string;
+  offeringId: string;
+  preferredProtocol: AccountUpstreamProtocol;
+  providerId: string;
+  supportedProtocols: AccountUpstreamProtocol[];
+}
+/**
+ * Zen Free enablement after a successful settings write.
+ */
+export interface ZenFreeSettings {
+  accountId: string;
+  enabled: boolean;
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * PATCH Zen Free enablement. CAS tokens and `enabled` are required.
+ */
+export interface ZenFreeSettingsUpdate {
+  enabled: boolean;
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * Last successful Zen Free catalog snapshot. `sourceUrl` is the public
+ * official directory, not a credential.
+ */
+export interface ZenFreeModels {
+  accountId: string;
+  models: ZenFreeModel[];
+  pricingRevision: string;
+  processGeneration: number;
+  refreshedAt: string | null;
+  revision: number;
+  sourceUrl: string;
+}
+/**
+ * One persisted Zen Free model and its de-suffixed alias.
+ */
+export interface ZenFreeModel {
+  alias: string;
+  modelId: string;
+}
+/**
+ * Effective provider-scope and custom-endpoint contracts.
+ *
+ * Top-level `revision` is the settings CAS token. Nested `revision` values
+ * are display-only and must not be sent as `expectedRevision`.
+ */
+export interface ProviderContracts {
+  customEndpoints: CustomEndpointContract[];
+  pricingRevision: string;
+  processGeneration: number;
+  providers: ProviderContractGroup[];
+  revision: number;
+}
+/**
+ * One Custom API account scope. Distinct from built-in provider groups.
+ */
+export interface CustomEndpointContract {
+  account: ProviderAccountChoice;
+  card: CardCapabilitySummary;
+  catalog: EffectiveCatalog;
+  catalogRoutable: boolean;
+  disabledReasons: string[];
+  models: EffectiveModelContract[];
+  pricing: CapabilitySummary;
+  productionInference: boolean;
+  protocols: ProtocolSwitches;
+  providerId: string;
+  /**
+   * Display revision for this endpoint, distinct from the top-level CAS token.
+   */
+  revision: number;
+  scopeId: string;
+  scopeKind: ContractScopeKind;
+  usage: CapabilitySummary;
+}
+/**
+ * Secret-free account identity on a contract card.
+ */
+export interface ProviderAccountChoice {
+  enabled: boolean;
+  id: string;
+  name: string;
+  verificationStatus: AccountVerificationStatus;
+}
+/**
+ * Provider-page actions that are actually implemented for this scope.
+ */
+export interface CardCapabilitySummary {
+  catalogRefresh: boolean;
+  discoverModels: boolean;
+  fetchZenModels: boolean;
+  protocolProbe: boolean;
+}
+/**
+ * Merged model-id catalog for one contract scope.
+ */
+export interface EffectiveCatalog {
+  models: string[];
+  refreshSupported: boolean;
+  refreshedAt: string | null;
+  source: string;
+  sourceUrl: string;
+}
+/**
+ * One model's preferred protocol and per-protocol evidence.
+ */
+export interface EffectiveModelContract {
+  disabledReasons: string[];
+  modelId: string;
+  preferredProtocol: AccountUpstreamProtocol;
+  protocols: EffectiveModelProtocols;
+  routable: boolean;
+}
+/**
+ * Per-protocol evidence keyed by snake_case protocol tokens. Missing
+ * protocols serialize as `null` and must not be invented as available.
+ */
+export interface EffectiveModelProtocols {
+  chat_completions: EffectiveProtocolEvidence | null;
+  messages: EffectiveProtocolEvidence | null;
+  responses: EffectiveProtocolEvidence | null;
+}
+/**
+ * Merged evidence for one upstream protocol on one model.
+ */
+export interface EffectiveProtocolEvidence {
+  available: boolean;
+  enabled: boolean;
+  lastProbeAt: string | null;
+  lastProbeError: string | null;
+  lastProbeResult: ProbeResultKind | null;
+  observedAt: string | null;
+  protocol: AccountUpstreamProtocol;
+  source: ContractEvidenceSource;
+  verifiedAt: string | null;
+}
+/**
+ * Registry pricing or usage availability copied as display data.
+ */
+export interface CapabilitySummary {
+  availability: string;
+}
+/**
+ * Upstream protocol enablement. JSON keys stay the protocol tokens.
+ */
+export interface ProtocolSwitches {
+  chat_completions: boolean;
+  messages: boolean;
+  responses: boolean;
+}
+/**
+ * One built-in provider scope. SCNet is a single group with three offerings.
+ */
+export interface ProviderContractGroup {
+  card: CardCapabilitySummary;
+  catalog: EffectiveCatalog;
+  catalogRoutable: boolean;
+  disabledReasons: string[];
+  models: EffectiveModelContract[];
+  offerings: ProviderOfferingChoice[];
+  pricing: CapabilitySummary;
+  productionInference: boolean;
+  protocols: ProtocolSwitches;
+  providerId: string;
+  /**
+   * Display revision for this scope, distinct from the top-level CAS token.
+   */
+  revision: number;
+  scopeId: string;
+  scopeKind: ContractScopeKind;
+  usage: CapabilitySummary;
+}
+/**
+ * One offering under a provider scope, with current account cards.
+ */
+export interface ProviderOfferingChoice {
+  accounts: ProviderAccountChoice[];
+  displayName: string;
+  offeringId: string;
+  routable: boolean;
+}
+/**
+ * PUT one protocol switch. CAS tokens and `enabled` are required. The path
+ * protocol token is not repeated here.
+ */
+export interface ProtocolSwitchUpdate {
+  enabled: boolean;
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * POST protocol-probe body. `accountId` may be omitted; `protocols` is the
+ * required explicit probe set. Handlers validate membership and uniqueness.
+ */
+export interface ProtocolProbeRequest {
+  accountId?: string | null;
+  expectedRevision: number;
+  modelId: string;
+  processGeneration: number;
+  protocols: AccountUpstreamProtocol[];
+}
+/**
+ * One requested protocol's probe outcome.
+ */
+export interface ProtocolProbeResult {
+  error: string | null;
+  protocol: AccountUpstreamProtocol;
+  skipped: boolean;
+  success: boolean;
+}
+/**
+ * Protocol-probe mutation result. Identity strings are always present;
+ * `contract` is required `T | null` on the wire.
+ */
+export interface ProtocolProbeResponse {
+  accountId: string;
+  contract: EffectiveModelContract | null;
+  modelId: string;
+  pricingRevision: string;
+  processGeneration: number;
+  providerId: string;
+  results: ProtocolProbeResult[];
+  revision: number;
 }

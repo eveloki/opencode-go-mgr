@@ -824,6 +824,44 @@
       ],
       "type": "string"
     },
+    "CapabilitySummary": {
+      "additionalProperties": false,
+      "description": "Registry pricing or usage availability copied as display data.",
+      "properties": {
+        "availability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "availability"
+      ],
+      "type": "object"
+    },
+    "CardCapabilitySummary": {
+      "additionalProperties": false,
+      "description": "Provider-page actions that are actually implemented for this scope.",
+      "properties": {
+        "catalogRefresh": {
+          "type": "boolean"
+        },
+        "discoverModels": {
+          "type": "boolean"
+        },
+        "fetchZenModels": {
+          "type": "boolean"
+        },
+        "protocolProbe": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fetchZenModels",
+        "discoverModels",
+        "protocolProbe",
+        "catalogRefresh"
+      ],
+      "type": "object"
+    },
     "ConnectionInfo": {
       "additionalProperties": false,
       "description": "Lightweight connection-center payload. The only V3 DTO allowed to carry\nplaintext primary and sub Key values.",
@@ -896,6 +934,24 @@
       ],
       "type": "object"
     },
+    "ContractEvidenceSource": {
+      "description": "How a protocol row was established. Wire values match V2 snake_case.",
+      "enum": [
+        "static",
+        "preset",
+        "probe_confirmed",
+        "probe_observed"
+      ],
+      "type": "string"
+    },
+    "ContractScopeKind": {
+      "description": "Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.",
+      "enum": [
+        "provider",
+        "custom_endpoint"
+      ],
+      "type": "string"
+    },
     "ControlRevision": {
       "additionalProperties": false,
       "description": "Live CAS token, process generation, and pricing snapshot id.",
@@ -918,6 +974,253 @@
         "revision",
         "processGeneration",
         "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "CustomEndpointContract": {
+      "additionalProperties": false,
+      "description": "One Custom API account scope. Distinct from built-in provider groups.",
+      "properties": {
+        "account": {
+          "$ref": "#/$defs/ProviderAccountChoice"
+        },
+        "card": {
+          "$ref": "#/$defs/CardCapabilitySummary"
+        },
+        "catalog": {
+          "$ref": "#/$defs/EffectiveCatalog"
+        },
+        "catalogRoutable": {
+          "type": "boolean"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/EffectiveModelContract"
+          },
+          "type": "array"
+        },
+        "pricing": {
+          "$ref": "#/$defs/CapabilitySummary"
+        },
+        "productionInference": {
+          "type": "boolean"
+        },
+        "protocols": {
+          "$ref": "#/$defs/ProtocolSwitches"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "description": "Display revision for this endpoint, distinct from the top-level CAS token.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "scopeKind": {
+          "$ref": "#/$defs/ContractScopeKind"
+        },
+        "usage": {
+          "$ref": "#/$defs/CapabilitySummary"
+        }
+      },
+      "required": [
+        "scopeKind",
+        "scopeId",
+        "providerId",
+        "account",
+        "catalog",
+        "models",
+        "protocols",
+        "pricing",
+        "usage",
+        "card",
+        "catalogRoutable",
+        "productionInference",
+        "disabledReasons",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "EffectiveCatalog": {
+      "additionalProperties": false,
+      "description": "Merged model-id catalog for one contract scope.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "refreshSupported": {
+          "type": "boolean"
+        },
+        "refreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "sourceUrl",
+        "refreshedAt",
+        "models",
+        "refreshSupported"
+      ],
+      "type": "object"
+    },
+    "EffectiveModelContract": {
+      "additionalProperties": false,
+      "description": "One model's preferred protocol and per-protocol evidence.",
+      "properties": {
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "preferredProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "protocols": {
+          "$ref": "#/$defs/EffectiveModelProtocols"
+        },
+        "routable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "modelId",
+        "preferredProtocol",
+        "protocols",
+        "routable",
+        "disabledReasons"
+      ],
+      "type": "object"
+    },
+    "EffectiveModelProtocols": {
+      "additionalProperties": false,
+      "description": "Per-protocol evidence keyed by snake_case protocol tokens. Missing\nprotocols serialize as `null` and must not be invented as available.",
+      "properties": {
+        "chat_completions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "messages": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responses": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveProtocolEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "object"
+    },
+    "EffectiveProtocolEvidence": {
+      "additionalProperties": false,
+      "description": "Merged evidence for one upstream protocol on one model.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "lastProbeAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastProbeError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastProbeResult": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProbeResultKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "source": {
+          "$ref": "#/$defs/ContractEvidenceSource"
+        },
+        "verifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "available",
+        "enabled",
+        "source",
+        "verifiedAt",
+        "observedAt",
+        "lastProbeResult",
+        "lastProbeAt",
+        "lastProbeError"
       ],
       "type": "object"
     },
@@ -1031,6 +1334,598 @@
       },
       "required": [
         "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProbeResultKind": {
+      "description": "Last explicit probe outcome stored on evidence. Distinct from\n[`ProtocolProbeResult`].",
+      "enum": [
+        "success",
+        "failure"
+      ],
+      "type": "string"
+    },
+    "ProtocolProbeRequest": {
+      "additionalProperties": false,
+      "description": "POST protocol-probe body. `accountId` may be omitted; `protocols` is the\nrequired explicit probe set. Handlers validate membership and uniqueness.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "modelId",
+        "protocols"
+      ],
+      "type": "object"
+    },
+    "ProtocolProbeResponse": {
+      "additionalProperties": false,
+      "description": "Protocol-probe mutation result. Identity strings are always present;\n`contract` is required `T | null` on the wire.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "contract": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveModelContract"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/ProtocolProbeResult"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "modelId",
+        "results",
+        "contract",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProtocolProbeResult": {
+      "additionalProperties": false,
+      "description": "One requested protocol's probe outcome.",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "skipped": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "protocol",
+        "success",
+        "skipped",
+        "error"
+      ],
+      "type": "object"
+    },
+    "ProtocolSwitchUpdate": {
+      "additionalProperties": false,
+      "description": "PUT one protocol switch. CAS tokens and `enabled` are required. The path\nprotocol token is not repeated here.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "ProtocolSwitches": {
+      "additionalProperties": false,
+      "description": "Upstream protocol enablement. JSON keys stay the protocol tokens.",
+      "properties": {
+        "chat_completions": {
+          "type": "boolean"
+        },
+        "messages": {
+          "type": "boolean"
+        },
+        "responses": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "object"
+    },
+    "ProviderAccountChoice": {
+      "additionalProperties": false,
+      "description": "Secret-free account identity on a contract card.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "verificationStatus": {
+          "$ref": "#/$defs/AccountVerificationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "verificationStatus"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalog": {
+      "additionalProperties": false,
+      "description": "Built-in Plan catalog. Model capabilities are a separate DTO.\n\n`pricingRevision` is the live pricing snapshot id, not a CAS token.",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/ProviderCatalogEntry"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entries",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogEntry": {
+      "additionalProperties": false,
+      "description": "One Provider Registry offering as a wire catalog row. Identity strings are\ndata copied from the static registry; this DTO does not define them.",
+      "properties": {
+        "authSchemes": {
+          "items": {
+            "$ref": "#/$defs/AccountAuthScheme"
+          },
+          "type": "array"
+        },
+        "creationAvailability": {
+          "type": "string"
+        },
+        "creationUnavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "displayFamily": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "formFields": {
+          "items": {
+            "$ref": "#/$defs/ProviderCatalogFormField"
+          },
+          "type": "array"
+        },
+        "keyPrefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managedRegistration": {
+          "type": "boolean"
+        },
+        "manualUsageCalibration": {
+          "type": "boolean"
+        },
+        "modelAliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "modelSource": {
+          "type": "string"
+        },
+        "offeringId": {
+          "type": "string"
+        },
+        "pricingAvailability": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "quotaScope": {
+          "$ref": "#/$defs/AccountQuotaScope"
+        },
+        "quotaUnit": {
+          "type": "string"
+        },
+        "riskNotice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderCatalogRiskNotice"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "routable": {
+          "type": "boolean"
+        },
+        "singleton": {
+          "type": "boolean"
+        },
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        },
+        "usageAvailability": {
+          "type": "string"
+        },
+        "verificationPolicy": {
+          "type": "string"
+        },
+        "verificationRuntimeAvailability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId",
+        "offeringId",
+        "displayName",
+        "displayFamily",
+        "credentialKind",
+        "quotaScope",
+        "singleton",
+        "creationAvailability",
+        "creationUnavailableReason",
+        "verificationPolicy",
+        "verificationRuntimeAvailability",
+        "routable",
+        "managedRegistration",
+        "pricingAvailability",
+        "usageAvailability",
+        "manualUsageCalibration",
+        "quotaUnit",
+        "modelSource",
+        "keyPrefix",
+        "authSchemes",
+        "upstreamProtocols",
+        "formFields",
+        "riskNotice",
+        "modelAliases"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogFormField": {
+      "additionalProperties": false,
+      "description": "One create-form field advertised by a catalog offering.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "immutableAfterCreate": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "required",
+        "immutableAfterCreate"
+      ],
+      "type": "object"
+    },
+    "ProviderCatalogRiskNotice": {
+      "additionalProperties": false,
+      "description": "Plan risk notice shown before create. `body` is the acknowledgement text,\nnot a secret.",
+      "properties": {
+        "acknowledgementId": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "sourceUrl": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "acknowledgementId",
+        "version",
+        "sourceUrl",
+        "body",
+        "contentHash"
+      ],
+      "type": "object"
+    },
+    "ProviderContractGroup": {
+      "additionalProperties": false,
+      "description": "One built-in provider scope. SCNet is a single group with three offerings.",
+      "properties": {
+        "card": {
+          "$ref": "#/$defs/CardCapabilitySummary"
+        },
+        "catalog": {
+          "$ref": "#/$defs/EffectiveCatalog"
+        },
+        "catalogRoutable": {
+          "type": "boolean"
+        },
+        "disabledReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/EffectiveModelContract"
+          },
+          "type": "array"
+        },
+        "offerings": {
+          "items": {
+            "$ref": "#/$defs/ProviderOfferingChoice"
+          },
+          "type": "array"
+        },
+        "pricing": {
+          "$ref": "#/$defs/CapabilitySummary"
+        },
+        "productionInference": {
+          "type": "boolean"
+        },
+        "protocols": {
+          "$ref": "#/$defs/ProtocolSwitches"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "description": "Display revision for this scope, distinct from the top-level CAS token.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopeId": {
+          "type": "string"
+        },
+        "scopeKind": {
+          "$ref": "#/$defs/ContractScopeKind"
+        },
+        "usage": {
+          "$ref": "#/$defs/CapabilitySummary"
+        }
+      },
+      "required": [
+        "scopeKind",
+        "scopeId",
+        "providerId",
+        "offerings",
+        "catalog",
+        "models",
+        "protocols",
+        "pricing",
+        "usage",
+        "card",
+        "catalogRoutable",
+        "productionInference",
+        "disabledReasons",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ProviderContracts": {
+      "additionalProperties": false,
+      "description": "Effective provider-scope and custom-endpoint contracts.\n\nTop-level `revision` is the settings CAS token. Nested `revision` values\nare display-only and must not be sent as `expectedRevision`.",
+      "properties": {
+        "customEndpoints": {
+          "items": {
+            "$ref": "#/$defs/CustomEndpointContract"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderContractGroup"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "providers",
+        "customEndpoints",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderModelCapability": {
+      "additionalProperties": false,
+      "description": "One Go protocol-table capability. GOAT/SCNet must not reuse these rows.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        },
+        "offeringId": {
+          "type": "string"
+        },
+        "preferredProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "supportedProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "modelId",
+        "providerId",
+        "offeringId",
+        "preferredProtocol",
+        "supportedProtocols"
+      ],
+      "type": "object"
+    },
+    "ProviderOfferingChoice": {
+      "additionalProperties": false,
+      "description": "One offering under a provider scope, with current account cards.",
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/ProviderAccountChoice"
+          },
+          "type": "array"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "offeringId": {
+          "type": "string"
+        },
+        "routable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "offeringId",
+        "displayName",
+        "routable",
+        "accounts"
       ],
       "type": "object"
     },
@@ -1369,6 +2264,128 @@
         "processGeneration"
       ],
       "type": "object"
+    },
+    "ZenFreeModel": {
+      "additionalProperties": false,
+      "description": "One persisted Zen Free model and its de-suffixed alias.",
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "modelId",
+        "alias"
+      ],
+      "type": "object"
+    },
+    "ZenFreeModels": {
+      "additionalProperties": false,
+      "description": "Last successful Zen Free catalog snapshot. `sourceUrl` is the public\nofficial directory, not a credential.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/ZenFreeModel"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refreshedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "models",
+        "refreshedAt",
+        "sourceUrl",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ZenFreeSettings": {
+      "additionalProperties": false,
+      "description": "Zen Free enablement after a successful settings write.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accountId",
+        "enabled",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ZenFreeSettingsUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH Zen Free enablement. CAS tokens and `enabled` are required.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "enabled"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1459,6 +2476,81 @@
     },
     {
       "$ref": "#/$defs/AccountAcknowledgementWrite"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalog"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalogEntry"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalogFormField"
+    },
+    {
+      "$ref": "#/$defs/ProviderCatalogRiskNotice"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelCapability"
+    },
+    {
+      "$ref": "#/$defs/ZenFreeSettings"
+    },
+    {
+      "$ref": "#/$defs/ZenFreeSettingsUpdate"
+    },
+    {
+      "$ref": "#/$defs/ZenFreeModels"
+    },
+    {
+      "$ref": "#/$defs/ZenFreeModel"
+    },
+    {
+      "$ref": "#/$defs/ProviderContracts"
+    },
+    {
+      "$ref": "#/$defs/ProviderContractGroup"
+    },
+    {
+      "$ref": "#/$defs/CustomEndpointContract"
+    },
+    {
+      "$ref": "#/$defs/ProviderOfferingChoice"
+    },
+    {
+      "$ref": "#/$defs/ProviderAccountChoice"
+    },
+    {
+      "$ref": "#/$defs/ProtocolSwitches"
+    },
+    {
+      "$ref": "#/$defs/EffectiveCatalog"
+    },
+    {
+      "$ref": "#/$defs/EffectiveModelContract"
+    },
+    {
+      "$ref": "#/$defs/EffectiveModelProtocols"
+    },
+    {
+      "$ref": "#/$defs/EffectiveProtocolEvidence"
+    },
+    {
+      "$ref": "#/$defs/CapabilitySummary"
+    },
+    {
+      "$ref": "#/$defs/CardCapabilitySummary"
+    },
+    {
+      "$ref": "#/$defs/ProtocolSwitchUpdate"
+    },
+    {
+      "$ref": "#/$defs/ProtocolProbeRequest"
+    },
+    {
+      "$ref": "#/$defs/ProtocolProbeResult"
+    },
+    {
+      "$ref": "#/$defs/ProtocolProbeResponse"
     }
   ],
   "title": "DashboardApiV3"
