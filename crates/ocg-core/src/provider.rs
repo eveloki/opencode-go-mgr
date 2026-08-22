@@ -4,6 +4,9 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+pub use crate::kernel::catalog::{
+    CatalogParseError, CredentialKind, QuotaScope, UpstreamAuthScheme, UpstreamProtocolKind,
+};
 pub use crate::kernel::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
@@ -91,64 +94,6 @@ pub const QUOTA_WINDOW_WEEK: &str = "week";
 pub const QUOTA_WINDOW_MONTH: &str = "month";
 pub const QUOTA_WINDOW_FREE: &str = "free";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialKind {
-    ApiKey,
-    None,
-}
-
-impl CredentialKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ApiKey => "api_key",
-            Self::None => "none",
-        }
-    }
-}
-
-impl TryFrom<&str> for CredentialKind {
-    type Error = ProviderBindingError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "api_key" => Ok(Self::ApiKey),
-            "none" => Ok(Self::None),
-            _ => Err(ProviderBindingError::UnknownCredentialKind(
-                value.to_string(),
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum QuotaScope {
-    Key,
-    EgressIp,
-}
-
-impl QuotaScope {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Key => "key",
-            Self::EgressIp => "egress-ip",
-        }
-    }
-}
-
-impl TryFrom<&str> for QuotaScope {
-    type Error = ProviderBindingError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "key" => Ok(Self::Key),
-            "egress-ip" => Ok(Self::EgressIp),
-            _ => Err(ProviderBindingError::UnknownQuotaScope(value.to_string())),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinOffering {
     pub provider_id: &'static str,
@@ -230,27 +175,6 @@ impl TryFrom<&str> for ConnectionVerificationStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpstreamProtocolKind {
-    #[default]
-    ChatCompletions,
-    Responses,
-    Messages,
-}
-
-impl UpstreamProtocolKind {
-    pub const ALL: [Self; 3] = [Self::ChatCompletions, Self::Responses, Self::Messages];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ChatCompletions => "chat_completions",
-            Self::Responses => "responses",
-            Self::Messages => "messages",
-        }
-    }
-}
-
 /// Deterministic fallback when the preferred upstream protocol is disabled.
 pub const PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES: &[UpstreamProtocolKind] = &[
     UpstreamProtocolKind::ChatCompletions,
@@ -269,49 +193,6 @@ pub const PROTOCOL_FALLBACK_CHAT_MESSAGES: &[UpstreamProtocolKind] = &[
     UpstreamProtocolKind::ChatCompletions,
     UpstreamProtocolKind::Messages,
 ];
-
-impl TryFrom<&str> for UpstreamProtocolKind {
-    type Error = ProviderBindingError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "chat_completions" => Ok(Self::ChatCompletions),
-            "responses" => Ok(Self::Responses),
-            "messages" => Ok(Self::Messages),
-            _ => Err(ProviderBindingError::UnknownUpstreamProtocol(
-                value.to_string(),
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum UpstreamAuthScheme {
-    Bearer,
-    XApiKey,
-}
-
-impl UpstreamAuthScheme {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Bearer => "bearer",
-            Self::XApiKey => "x-api-key",
-        }
-    }
-}
-
-impl TryFrom<&str> for UpstreamAuthScheme {
-    type Error = ProviderBindingError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "bearer" => Ok(Self::Bearer),
-            "x-api-key" => Ok(Self::XApiKey),
-            _ => Err(ProviderBindingError::UnknownAuthScheme(value.to_string())),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PlanFormField {
@@ -2062,6 +1943,19 @@ impl fmt::Display for ProviderBindingError {
 
 impl std::error::Error for ProviderBindingError {}
 
+impl From<CatalogParseError> for ProviderBindingError {
+    fn from(error: CatalogParseError) -> Self {
+        match error {
+            CatalogParseError::UnknownCredentialKind(value) => Self::UnknownCredentialKind(value),
+            CatalogParseError::UnknownQuotaScope(value) => Self::UnknownQuotaScope(value),
+            CatalogParseError::UnknownUpstreamProtocol(value) => {
+                Self::UnknownUpstreamProtocol(value)
+            }
+            CatalogParseError::UnknownAuthScheme(value) => Self::UnknownAuthScheme(value),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaWindow {
     pub account_id: String,
@@ -2113,6 +2007,26 @@ pub struct ProviderUsageSyncState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_parse_errors_map_to_provider_binding_errors() {
+        assert!(matches!(
+            ProviderBindingError::from(CredentialKind::try_from("cookie").unwrap_err()),
+            ProviderBindingError::UnknownCredentialKind(value) if value == "cookie"
+        ));
+        assert!(matches!(
+            ProviderBindingError::from(QuotaScope::try_from("account").unwrap_err()),
+            ProviderBindingError::UnknownQuotaScope(value) if value == "account"
+        ));
+        assert!(matches!(
+            ProviderBindingError::from(UpstreamProtocolKind::try_from("gemini").unwrap_err()),
+            ProviderBindingError::UnknownUpstreamProtocol(value) if value == "gemini"
+        ));
+        assert!(matches!(
+            ProviderBindingError::from(UpstreamAuthScheme::try_from("basic").unwrap_err()),
+            ProviderBindingError::UnknownAuthScheme(value) if value == "basic"
+        ));
+    }
 
     #[test]
     fn builtin_pairs_derive_credential_and_quota_scope() {

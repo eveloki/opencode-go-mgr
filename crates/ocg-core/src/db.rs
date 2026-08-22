@@ -1,4 +1,5 @@
-use crate::kernel::pricing::{PricingLimits, PricingSnapshot};
+use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
+use crate::kernel::pricing::{PricingLimits, PricingSnapshot, SEED_LIMITS};
 use crate::models::*;
 use crate::provider::*;
 use crate::provider_contracts::{
@@ -1320,7 +1321,7 @@ impl Database {
                 .map(|json| serde_json::from_str::<PricingSnapshot>(&json))
                 .transpose()?
                 .map(|snapshot| snapshot.limits)
-                .unwrap_or_else(|| crate::pricing::embedded_seed().limits);
+                .unwrap_or(SEED_LIMITS);
             migrate_legacy_usage_baselines(&tx, &limits, Utc::now())?;
             tx.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (13)",
@@ -1796,9 +1797,9 @@ impl Database {
                 .map(|json| serde_json::from_str::<PricingSnapshot>(&json))
                 .transpose()?
                 .map(|snapshot| snapshot.limits)
-                .unwrap_or_else(|| crate::pricing::embedded_seed().limits)
+                .unwrap_or(SEED_LIMITS)
             } else {
-                crate::pricing::embedded_seed().limits
+                SEED_LIMITS
             };
             for account_id in &normal_account_ids {
                 let usage = account_usage_with_limits_on(&tx, account_id, &limits, migrated_at)?;
@@ -4035,8 +4036,8 @@ impl Database {
         // over its raw id.
         for key in &mut keys {
             if key.name.is_empty() {
-                key.name = if key.id == crate::gateway_keys::PRIMARY_KEY_ID {
-                    crate::gateway_keys::PRIMARY_KEY_NAME.to_string()
+                key.name = if key.id == PRIMARY_KEY_ID {
+                    PRIMARY_KEY_NAME.to_string()
                 } else {
                     key.id.clone()
                 };
@@ -4627,8 +4628,8 @@ impl Database {
     pub fn account_usage(&self, account_id: &str) -> Result<UsageWindow> {
         let limits = self
             .latest_pricing_snapshot()?
-            .unwrap_or_else(crate::pricing::embedded_seed)
-            .limits;
+            .map(|snapshot| snapshot.limits)
+            .unwrap_or(SEED_LIMITS);
         self.account_usage_with_limits(account_id, &limits)
     }
 
@@ -9214,7 +9215,7 @@ mod tests {
         db.create_account(&account("fresh-go")).unwrap();
         assert!(db.list_quota_windows("fresh-go").unwrap().is_empty());
 
-        let limits = crate::pricing::embedded_seed().limits;
+        let limits = SEED_LIMITS;
         db.calibrate_account_usage(
             "fresh-go",
             UsageWindowKind::FiveHours,
@@ -9259,7 +9260,7 @@ mod tests {
             .used;
         db.log_forward(&forward_log("rollback-account", "success", 1.5))
             .unwrap();
-        let limits = crate::pricing::embedded_seed().limits;
+        let limits = SEED_LIMITS;
         let live = db
             .live_opencode_go_quota_windows("rollback-account", &limits)
             .unwrap();

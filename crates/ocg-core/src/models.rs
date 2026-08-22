@@ -170,6 +170,7 @@ impl TryFrom<&str> for AccountSetupStep {
 }
 
 impl Account {
+    /// Compatibility wrapper around [`crate::provider::validate_account_binding`].
     pub fn validate_provider_binding(&self) -> Result<(), crate::provider::ProviderBindingError> {
         validate_account_binding(
             &self.id,

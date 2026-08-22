@@ -1,8 +1,10 @@
-//! I/O-free pricing identities, snapshot value types, and cost arithmetic.
+//! I/O-free pricing identities, snapshot value types, cost arithmetic, and
+//! the immutable embedded OpenCode Go seed view.
 //!
 //! HTML fetch, database storage, and clocked `estimate()` stay in
 //! `crate::pricing`. This module is the typed seam later control-plane and
-//! GatewayExecutor work can share without pulling db or HTTP.
+//! GatewayExecutor work can share without pulling db or HTTP. The seed view
+//! takes `activated_at` as an argument; it does not read a clock.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -420,5 +422,389 @@ impl PricingEstimate {
             local_adjustment_multiplier: None,
             cost_state: "free",
         }
+    }
+}
+
+/// Official Go usage limits captured into the embedded seed.
+pub const SEED_LIMITS: PricingLimits = PricingLimits {
+    window_5h: 12.0,
+    window_week: 30.0,
+    window_month: 60.0,
+};
+
+const SEED_REVISION: &str = "seed-2026-08-16-local-v4";
+const SEED_CONTENT_HASH: &str = "embedded-opencode-go-2026-08-16";
+const SEED_DOCUMENT_UPDATED_AT: &str = "2026-08-16T00:00:00.000Z";
+const SEED_ADJUSTMENT_POLICY_VERSION: &str = "local-v4";
+
+/// Immutable embedded OpenCode Go seed snapshot. The activation timestamp
+/// is supplied by the caller; this function does not read a clock.
+pub fn seed_snapshot(activated_at: String) -> PricingSnapshot {
+    let mut models = seed_models();
+    apply_seed_pricing_policy(&mut models, SEED_LIMITS.window_month);
+    sort_seed_models(&mut models);
+    PricingSnapshot {
+        revision: SEED_REVISION.to_string(),
+        activated_at,
+        document_updated_at: SEED_DOCUMENT_UPDATED_AT.to_string(),
+        source_url: SOURCE_URL.to_string(),
+        content_hash: SEED_CONTENT_HASH.to_string(),
+        limits: SEED_LIMITS,
+        models,
+        adjustment_policy_version: SEED_ADJUSTMENT_POLICY_VERSION.to_string(),
+    }
+}
+
+fn seed_models() -> Vec<PricingModel> {
+    vec![
+        seed_model("grok-4.5", "Grok 4.5", 2.0, 6.0, 0.3, None, 15.0),
+        seed_model("glm-5.3", "GLM-5.3", 1.4, 4.4, 0.26, None, 15.0),
+        seed_model("glm-5.2", "GLM-5.2", 1.4, 4.4, 0.26, None, 60.0),
+        seed_model("glm-5.1", "GLM-5.1", 1.4, 4.4, 0.26, None, 60.0),
+        seed_tier_with_usage(
+            "gpt-5.6-luna",
+            "GPT 5.6 Luna (≤ 272K tokens)",
+            0.2,
+            1.2,
+            0.02,
+            Some(0.25),
+            15.0,
+            None,
+            Some(272_000),
+        ),
+        seed_tier_with_usage(
+            "gpt-5.6-luna",
+            "GPT 5.6 Luna (> 272K tokens)",
+            0.4,
+            1.8,
+            0.04,
+            Some(0.5),
+            15.0,
+            Some(272_001),
+            None,
+        ),
+        seed_model("kimi-k3", "Kimi K3", 3.0, 15.0, 0.3, None, 15.0),
+        seed_model(
+            "kimi-k2.7-code",
+            "Kimi K2.7 Code",
+            0.95,
+            4.0,
+            0.19,
+            None,
+            60.0,
+        ),
+        seed_model("kimi-k2.6", "Kimi K2.6", 0.95, 4.0, 0.16, None, 60.0),
+        seed_model("mimo-v2.5", "MiMo V2.5", 0.14, 0.28, 0.0028, None, 60.0),
+        seed_model(
+            "mimo-v2.5-pro",
+            "MiMo V2.5 Pro",
+            0.435,
+            0.87,
+            0.003625,
+            None,
+            15.0,
+        ),
+        seed_model("minimax-m3", "MiniMax M3", 0.3, 1.2, 0.06, None, 60.0),
+        seed_model(
+            "minimax-m2.7",
+            "MiniMax M2.7",
+            0.3,
+            1.2,
+            0.06,
+            Some(0.375),
+            60.0,
+        ),
+        seed_model(
+            "minimax-m2.5",
+            "MiniMax M2.5",
+            0.3,
+            1.2,
+            0.06,
+            Some(0.375),
+            60.0,
+        ),
+        seed_model(
+            "qwen3.8-max",
+            "Qwen3.8 Max",
+            2.0,
+            6.0,
+            0.25,
+            Some(2.5),
+            15.0,
+        ),
+        seed_model(
+            "qwen3.7-max",
+            "Qwen3.7 Max",
+            2.5,
+            7.5,
+            0.5,
+            Some(3.125),
+            60.0,
+        ),
+        seed_tier(
+            "qwen3.7-plus",
+            "Qwen3.7 Plus (≤ 256K tokens)",
+            0.4,
+            1.6,
+            0.04,
+            0.5,
+            None,
+            Some(256_000),
+        ),
+        seed_tier(
+            "qwen3.7-plus",
+            "Qwen3.7 Plus (> 256K tokens)",
+            1.2,
+            4.8,
+            0.12,
+            1.5,
+            Some(256_001),
+            None,
+        ),
+        seed_tier(
+            "qwen3.6-plus",
+            "Qwen3.6 Plus (≤ 256K tokens)",
+            0.5,
+            3.0,
+            0.05,
+            0.625,
+            None,
+            Some(256_000),
+        ),
+        seed_tier(
+            "qwen3.6-plus",
+            "Qwen3.6 Plus (> 256K tokens)",
+            2.0,
+            6.0,
+            0.2,
+            2.5,
+            Some(256_001),
+            None,
+        ),
+        seed_scheduled(
+            "deepseek-v4-pro",
+            "DeepSeek V4 Pro (Off-Peak)",
+            0.66,
+            1.98,
+            0.022,
+            None,
+            15.0,
+            PricingTimeWindow::OffPeak,
+        ),
+        seed_scheduled(
+            "deepseek-v4-pro",
+            "DeepSeek V4 Pro (Peak)",
+            1.32,
+            3.96,
+            0.044,
+            None,
+            15.0,
+            PricingTimeWindow::Peak,
+        ),
+        seed_scheduled(
+            "deepseek-v4-flash",
+            "DeepSeek V4 Flash (Off-Peak)",
+            0.22,
+            0.66,
+            0.007,
+            None,
+            15.0,
+            PricingTimeWindow::OffPeak,
+        ),
+        seed_scheduled(
+            "deepseek-v4-flash",
+            "DeepSeek V4 Flash (Peak)",
+            0.44,
+            1.32,
+            0.014,
+            None,
+            15.0,
+            PricingTimeWindow::Peak,
+        ),
+        seed_model(
+            "muse-spark-1.2",
+            "Muse Spark 1.2",
+            0.10,
+            0.20,
+            0.002,
+            None,
+            60.0,
+        ),
+        seed_model(
+            "muse-spark-1.2-contributor",
+            "Muse Spark 1.2 Contributor",
+            0.10,
+            0.20,
+            0.002,
+            None,
+            60.0,
+        ),
+        seed_model("hy3", "Hy3", 0.14, 0.58, 0.035, None, 60.0),
+    ]
+}
+
+fn seed_model(
+    id: &str,
+    name: &str,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: Option<f64>,
+    usage: f64,
+) -> PricingModel {
+    PricingModel {
+        model_id: id.to_string(),
+        display_name: name.to_string(),
+        input,
+        output,
+        cache_read,
+        cache_write,
+        usage,
+        quota_multiplier: SEED_LIMITS.window_month / usage,
+        min_input_tokens: None,
+        max_input_tokens: None,
+        time_window: PricingTimeWindow::Always,
+        adjustments: Vec::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_scheduled(
+    id: &str,
+    name: &str,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: Option<f64>,
+    usage: f64,
+    time_window: PricingTimeWindow,
+) -> PricingModel {
+    let mut model = seed_model(id, name, input, output, cache_read, cache_write, usage);
+    model.time_window = time_window;
+    model
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_tier(
+    id: &str,
+    name: &str,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+    min_input_tokens: Option<i64>,
+    max_input_tokens: Option<i64>,
+) -> PricingModel {
+    seed_tier_with_usage(
+        id,
+        name,
+        input,
+        output,
+        cache_read,
+        Some(cache_write),
+        60.0,
+        min_input_tokens,
+        max_input_tokens,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_tier_with_usage(
+    id: &str,
+    name: &str,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: Option<f64>,
+    usage: f64,
+    min_input_tokens: Option<i64>,
+    max_input_tokens: Option<i64>,
+) -> PricingModel {
+    let mut model = seed_model(id, name, input, output, cache_read, cache_write, usage);
+    model.min_input_tokens = min_input_tokens;
+    model.max_input_tokens = max_input_tokens;
+    model
+}
+
+fn apply_seed_pricing_policy(models: &mut [PricingModel], monthly_limit: f64) {
+    for model in models.iter_mut() {
+        model.quota_multiplier = monthly_limit / model.usage;
+    }
+    add_seed_adjustments(models);
+}
+
+fn add_seed_adjustments(models: &mut [PricingModel]) {
+    for model in models {
+        model.adjustments.clear();
+        match model.model_id.as_str() {
+            "minimax-m3" => {
+                model.adjustments = vec![
+                    PricingAdjustment {
+                        label: ">512K input".to_string(),
+                        multiplier: 2.0,
+                        applies_to: "input,output,cache_read,cache_write".to_string(),
+                    },
+                    PricingAdjustment {
+                        label: "priority service tier".to_string(),
+                        multiplier: 1.5,
+                        applies_to: "input,output,cache_read,cache_write".to_string(),
+                    },
+                    PricingAdjustment {
+                        label: ">512K + priority".to_string(),
+                        multiplier: 3.0,
+                        applies_to: "input,output,cache_read,cache_write".to_string(),
+                    },
+                ];
+            }
+            "minimax-m2.7" | "minimax-m2.5" => {
+                model.adjustments = vec![PricingAdjustment {
+                    label: "highspeed alias".to_string(),
+                    multiplier: 2.0,
+                    applies_to: "input,output".to_string(),
+                }];
+            }
+            _ => {}
+        }
+    }
+}
+
+fn sort_seed_models(models: &mut [PricingModel]) {
+    models.sort_by(|left, right| {
+        left.model_id
+            .cmp(&right.model_id)
+            .then(left.min_input_tokens.cmp(&right.min_input_tokens))
+            .then(left.time_window.cmp(&right.time_window))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_snapshot_is_the_immutable_embedded_view() {
+        let snapshot = seed_snapshot("2026-08-16T12:00:00.000Z".to_string());
+        assert_eq!(snapshot.revision, "seed-2026-08-16-local-v4");
+        assert_eq!(snapshot.activated_at, "2026-08-16T12:00:00.000Z");
+        assert_eq!(snapshot.document_updated_at, "2026-08-16T00:00:00.000Z");
+        assert_eq!(snapshot.content_hash, "embedded-opencode-go-2026-08-16");
+        assert_eq!(snapshot.source_url, SOURCE_URL);
+        assert_eq!(snapshot.adjustment_policy_version, "local-v4");
+        assert_eq!(snapshot.limits, SEED_LIMITS);
+        assert_eq!(SEED_LIMITS.window_5h, 12.0);
+        assert_eq!(SEED_LIMITS.window_week, 30.0);
+        assert_eq!(SEED_LIMITS.window_month, 60.0);
+        let grok = snapshot
+            .models
+            .iter()
+            .find(|entry| entry.model_id == "grok-4.5")
+            .unwrap();
+        assert_eq!(grok.quota_multiplier, 4.0);
+        let glm = snapshot
+            .models
+            .iter()
+            .find(|entry| entry.model_id == "glm-5.2")
+            .unwrap();
+        assert_eq!(glm.quota_multiplier, 1.0);
     }
 }
