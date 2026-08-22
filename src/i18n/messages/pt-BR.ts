@@ -624,6 +624,8 @@ export const ptBRMessages = {
   "保存时将被忽略：{ids}": "Serão ignorados ao salvar: {ids}",
   "名单模式需要填写代理地址": "O modo lista exige uma URL de proxy",
   "名单模式至少勾选一个模型": "O modo lista exige pelo menos um modelo",
+  "名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。": "O modo lista divide o encaminhamento de chat por modelo; o tráfego de saída que não é de chat (testes de conta, uso, preços, verificações de atualização) segue o trecho padrão da direção.",
+  "测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。": "Testa os valores atuais sem salvar; isso verifica o trecho padrão da direção, não o caminho real de um modelo da lista.",
   "路由": "Rota",
   "自动": "Automático",
   "代理": "Proxy",

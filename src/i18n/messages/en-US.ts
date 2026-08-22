@@ -622,6 +622,8 @@ export const enUSMessages = {
   "保存时将被忽略：{ids}": "They will be ignored on save: {ids}",
   "名单模式需要填写代理地址": "List proxy mode requires a proxy URL",
   "名单模式至少勾选一个模型": "List proxy mode requires at least one model",
+  "名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。": "List mode splits chat forwarding by model; non-chat outbound traffic (account tests, usage, pricing, update checks) follows the direction's default leg.",
+  "测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。": "Tests the current form values without saving; this probes the direction's default leg, not the real forwarding path of a listed model.",
   "路由": "Route",
   "自动": "Auto",
   "代理": "Proxy",

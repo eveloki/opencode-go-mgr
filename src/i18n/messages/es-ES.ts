@@ -623,6 +623,8 @@ export const esESMessages = {
   "保存时将被忽略：{ids}": "Se ignorarán al guardar: {ids}",
   "名单模式需要填写代理地址": "El modo lista requiere una URL de proxy",
   "名单模式至少勾选一个模型": "El modo lista requiere al menos un modelo",
+  "名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。": "El modo lista reparte el reenvío de chat por modelo; el tráfico saliente que no es de chat (pruebas de cuenta, uso, precios, comprobaciones de actualización) sigue el tramo predeterminado de la dirección.",
+  "测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。": "Prueba los valores actuales sin guardarlos; comprueba el tramo predeterminado de la dirección, no la ruta real de un modelo de la lista.",
   "路由": "Ruta",
   "自动": "Automático",
   "代理": "Proxy",

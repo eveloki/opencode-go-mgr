@@ -18,7 +18,7 @@
         <section class="settings-subsection proxy-settings" aria-labelledby="proxy-title">
           <h3 id="proxy-title">{{ t("出站代理") }}</h3>
           <p class="field-caption routing-intro">
-            {{ t("统一用于模型转发、账号测试、用量与价格刷新等 OpenCode 出站请求。") }}
+            {{ proxyIntro }}
           </p>
           <n-radio-group
             v-model:value="config.proxy_mode"
@@ -98,7 +98,7 @@
               :disabled="!loaded || saving || proxyUrlPreview.status === 'error'"
               @click="testProxyConnection"
             >{{ t("测试连接") }}</n-button>
-            <span class="field-caption">{{ t("测试当前表单值，不会保存设置；收到任意 HTTP 响应即表示链路可用。") }}</span>
+            <span class="field-caption">{{ proxyTestHelp }}</span>
           </div>
           <n-alert
             v-if="proxyTestResult"
@@ -658,6 +658,18 @@ const proxyModeHelp = computed(() => {
   };
   return t(help[config.value.proxy_mode]);
 });
+
+const proxyIntro = computed(() => (
+  config.value.proxy_mode === "list"
+    ? t("名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。")
+    : t("统一用于模型转发、账号测试、用量与价格刷新等 OpenCode 出站请求。")
+));
+
+const proxyTestHelp = computed(() => (
+  config.value.proxy_mode === "list"
+    ? t("测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。")
+    : t("测试当前表单值，不会保存设置；收到任意 HTTP 响应即表示链路可用。")
+));
 
 const proxyDirectionHelp = computed(() => (
   config.value.proxy_list_direction === "whitelist"

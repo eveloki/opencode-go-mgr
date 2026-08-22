@@ -628,19 +628,23 @@ The **Settings** view exposes the persistent gateway configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`).
 - **Upstream URL** — the OpenCode-Go base URL.
-- **Outbound proxy** — a process-wide setting shared by every account.
-  `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,
-  `ALL_PROXY`, and `NO_PROXY`; Windows also reads the system proxy and connects
-  directly when none is configured. `Manual HTTP proxy` strictly routes all
-  HTTP/HTTPS targets through one `http://` or `https://` proxy such as
-  `http://127.0.0.1:7890`; a proxy failure never silently falls back to a direct
-  connection. `Force direct connection` ignores system and environment proxy
-  configuration. Proxy URLs cannot contain credentials. The policy covers core
-  HTTP requests including model forwarding, account-key tests, model listing,
-  official OpenCode Go usage API, pricing refreshes, release checks, and signed desktop
-  installer downloads; the browser sidecar is outside its scope. **Test connection** uses the unsaved form values
-  against the current upstream. Any HTTP status proves network reachability,
-  without running model inference or incurring model usage.
+- **Outbound proxy** — shared by every account. Automatic, manual, and force
+  direct apply one process-wide policy; **Per-model list** (below) splits chat
+  forwarding by model instead. `Automatic (system / environment)` reads
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`; Windows also reads
+  the system proxy and connects directly when none is configured. `Manual HTTP
+  proxy` strictly routes all HTTP/HTTPS targets through one `http://` or
+  `https://` proxy such as `http://127.0.0.1:7890`; a proxy failure never
+  silently falls back to a direct connection. `Force direct connection` ignores
+  system and environment proxy configuration. Proxy URLs cannot contain
+  credentials. For the three process-wide modes, the policy covers core HTTP
+  requests including model forwarding, account-key tests, model listing,
+  official OpenCode Go usage API, pricing refreshes, release checks, and signed
+  desktop installer downloads; the browser sidecar is outside its scope.
+  **Test connection** uses the unsaved form values against the current
+  upstream. Any HTTP status proves network reachability, without running model
+  inference or incurring model usage. In list mode it probes only the
+  direction's default leg, not a listed model's real forwarding path.
 - **Per-model list** (fourth proxy mode) — routes chat forwarding per model
   instead of process-wide. Pick a direction and check models from the known
   registry; the list accepts exact known model ids only (no patterns or

@@ -624,6 +624,8 @@ export const deDEMessages = {
   "保存时将被忽略：{ids}": "Beim Speichern werden sie ignoriert: {ids}",
   "名单模式需要填写代理地址": "Der Listenmodus erfordert eine Proxy-URL",
   "名单模式至少勾选一个模型": "Der Listenmodus erfordert mindestens ein Modell",
+  "名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。": "Der Listenmodus teilt die Chat-Weiterleitung nach Modell; ausgehender Nicht-Chat-Verkehr (Kontotests, Nutzung, Preise, Update-Prüfungen) folgt dem Standardabschnitt der Richtung.",
+  "测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。": "Testet die aktuellen Formularwerte ohne sie zu speichern; geprüft wird der Standardabschnitt der Richtung, nicht der tatsächliche Pfad eines gelisteten Modells.",
   "路由": "Route",
   "自动": "Auto",
   "代理": "Proxy",

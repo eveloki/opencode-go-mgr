@@ -624,6 +624,8 @@ export const frFRMessages = {
   "保存时将被忽略：{ids}": "Ils seront ignorés lors de l'enregistrement : {ids}",
   "名单模式需要填写代理地址": "Le mode liste exige une URL de proxy",
   "名单模式至少勾选一个模型": "Le mode liste exige au moins un modèle",
+  "名单模式按模型分流聊天转发；非聊天出站（账号测试、用量、价格、升级检查）走方向默认段。": "Le mode liste répartit le transfert du chat par modèle ; le trafic sortant hors chat (tests de compte, usage, tarifs, vérifications de mise à jour) suit le segment par défaut de la direction.",
+  "测试当前表单值，不会保存设置；验证的是方向默认段，不能代表名单内模型的真实转发路径。": "Teste les valeurs actuelles sans les enregistrer ; cela vérifie le segment par défaut de la direction, pas le chemin réel d’un modèle listé.",
   "路由": "Route",
   "自动": "Auto",
   "代理": "Proxy",
