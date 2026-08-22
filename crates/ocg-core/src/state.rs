@@ -1,95 +1,29 @@
 use crate::crypto::KeyCipher;
 use crate::db::Database;
+use crate::desktop::DesktopCapabilities;
 use crate::kernel::pricing::{PricingEstimate, PricingSnapshot};
 use crate::models::{
     AppConfig, normalize_client_root_url, normalize_opencode_invite_url, normalize_proxy_url,
 };
 use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
 use parking_lot::{Mutex, RwLock};
-use serde::Serialize;
-use std::fmt;
 use std::path::PathBuf;
 use std::sync::{
-    Arc, OnceLock,
+    Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
+
+pub use crate::desktop::{
+    AutoStartSync, DesktopUpdatePhase, DesktopUpdateStartError, DesktopUpdateStarter,
+    DesktopUpdateStatus, DockVisibilitySync,
+};
+
 const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 
 pub struct GatewayHandle {
     pub port: u16,
     pub shutdown: tokio::sync::oneshot::Sender<()>,
     pub task: tokio::task::JoinHandle<()>,
-}
-
-pub type AutoStartSync = fn(bool) -> crate::Result<()>;
-
-pub type DockVisibilitySync = Arc<dyn Fn(bool) -> crate::Result<()> + Send + Sync + 'static>;
-
-pub type DesktopUpdateStarter = Arc<dyn Fn(String) -> crate::Result<()> + Send + Sync + 'static>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DesktopUpdatePhase {
-    Idle,
-    Checking,
-    Downloading,
-    Installing,
-    Failed,
-}
-
-impl DesktopUpdatePhase {
-    fn is_busy(self) -> bool {
-        matches!(self, Self::Checking | Self::Downloading | Self::Installing)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DesktopUpdateStatus {
-    pub phase: DesktopUpdatePhase,
-    pub downloaded: u64,
-    pub total: Option<u64>,
-    pub error: Option<String>,
-    pub current_version: String,
-    pub install_supported: bool,
-}
-
-impl DesktopUpdateStatus {
-    fn new() -> Self {
-        Self {
-            phase: DesktopUpdatePhase::Idle,
-            downloaded: 0,
-            total: None,
-            error: None,
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
-            install_supported: false,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum DesktopUpdateStartError {
-    Unsupported,
-    Busy,
-    Starter(anyhow::Error),
-}
-
-impl fmt::Display for DesktopUpdateStartError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unsupported => f.write_str("desktop update installation is unavailable"),
-            Self::Busy => f.write_str("a desktop update is already in progress"),
-            Self::Starter(error) => write!(f, "failed to start desktop update: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for DesktopUpdateStartError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Starter(error) => Some(error.as_ref()),
-            Self::Unsupported | Self::Busy => None,
-        }
-    }
 }
 
 // Note: Mutex lock ordering is (1) settings_update, (2) db, (3) config,
@@ -99,7 +33,7 @@ impl std::error::Error for DesktopUpdateStartError {
 // zen_free_models → provider_contracts, then drops those before
 // `routing.reset()`. `reload_provider_contracts_locked` may already hold db
 // and then takes zen_free_models (read, dropped) before provider_contracts
-// (write). desktop_update_status and the async pricing_refresh
+// (write). The desktop update-status mutex and the async pricing_refresh
 // guard are never held while acquiring another sync lock. The credential
 // snapshot write lock is always taken last (after db/config reads) and never
 // held while acquiring another lock; auth-path readers take only the
@@ -124,10 +58,8 @@ pub struct CoreStateInner {
     pub gateway: Mutex<Option<GatewayHandle>>,
     pub dashboard_session_token: Mutex<String>,
     dashboard_local_mode: AtomicBool,
-    auto_start_sync: OnceLock<AutoStartSync>,
-    dock_visibility_sync: OnceLock<DockVisibilitySync>,
-    desktop_update_starter: OnceLock<DesktopUpdateStarter>,
-    desktop_update_status: Mutex<DesktopUpdateStatus>,
+    /// Process-level auto-start, Dock, and desktop-update hooks. Unset in CLI/Docker.
+    desktop: DesktopCapabilities,
     pub dashboard_dir: Mutex<Option<PathBuf>>,
     http_client: Mutex<Arc<crate::http_client::ForwardRouteSet>>,
     pricing: RwLock<Arc<PricingSnapshot>>,
@@ -225,10 +157,7 @@ impl CoreStateInner {
             gateway: Mutex::new(None),
             dashboard_session_token: Mutex::new(uuid::Uuid::new_v4().simple().to_string()),
             dashboard_local_mode: AtomicBool::new(false),
-            auto_start_sync: OnceLock::new(),
-            dock_visibility_sync: OnceLock::new(),
-            desktop_update_starter: OnceLock::new(),
-            desktop_update_status: Mutex::new(DesktopUpdateStatus::new()),
+            desktop: DesktopCapabilities::new(),
             dashboard_dir: Mutex::new(None),
             http_client: Mutex::new(Arc::new(http_client)),
             pricing: RwLock::new(Arc::new(pricing)),
@@ -388,127 +317,62 @@ impl CoreStateInner {
     }
 
     pub fn set_auto_start_sync(&self, sync: AutoStartSync) {
-        assert!(
-            self.auto_start_sync.set(sync).is_ok(),
-            "auto-start sync is already configured"
-        );
+        self.desktop.set_auto_start_sync(sync);
     }
 
     pub fn auto_start_supported(&self) -> bool {
-        self.auto_start_sync.get().is_some()
+        self.desktop.auto_start_supported()
     }
 
     pub fn sync_auto_start(&self, enabled: bool) -> crate::Result<()> {
-        let sync = self
-            .auto_start_sync
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("auto-start is unavailable in this runtime"))?;
-        sync(enabled)
+        self.desktop.sync_auto_start(enabled)
     }
 
     pub fn set_dock_visibility_sync(&self, sync: DockVisibilitySync) {
-        assert!(
-            self.dock_visibility_sync.set(sync).is_ok(),
-            "dock visibility sync is already configured"
-        );
+        self.desktop.set_dock_visibility_sync(sync);
     }
 
     pub fn dock_visibility_supported(&self) -> bool {
-        self.dock_visibility_sync.get().is_some()
+        self.desktop.dock_visibility_supported()
     }
 
     pub fn sync_dock_visibility(&self, visible: bool) -> crate::Result<()> {
-        let sync = self
-            .dock_visibility_sync
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("dock visibility is unavailable in this runtime"))?;
-        sync(visible)
+        self.desktop.sync_dock_visibility(visible)
     }
 
     pub fn set_desktop_update_starter(&self, starter: DesktopUpdateStarter) {
-        assert!(
-            self.desktop_update_starter.set(starter).is_ok(),
-            "desktop update starter is already configured"
-        );
-        self.desktop_update_status.lock().install_supported = true;
+        self.desktop.set_desktop_update_starter(starter);
     }
 
     pub fn desktop_update_supported(&self) -> bool {
-        self.desktop_update_starter.get().is_some()
+        self.desktop.desktop_update_supported()
     }
 
     pub fn desktop_update_status(&self) -> DesktopUpdateStatus {
-        self.desktop_update_status.lock().clone()
+        self.desktop.desktop_update_status()
     }
 
     pub fn start_desktop_update(
         &self,
         expected_version: String,
     ) -> Result<(), DesktopUpdateStartError> {
-        let starter = self
-            .desktop_update_starter
-            .get()
-            .cloned()
-            .ok_or(DesktopUpdateStartError::Unsupported)?;
-        {
-            let mut status = self.desktop_update_status.lock();
-            if status.phase.is_busy() {
-                return Err(DesktopUpdateStartError::Busy);
-            }
-            status.phase = DesktopUpdatePhase::Checking;
-            status.downloaded = 0;
-            status.total = None;
-            status.error = None;
-            status.install_supported = true;
-        }
-
-        if let Err(error) = starter(expected_version) {
-            self.set_desktop_update_failed(error.to_string());
-            return Err(DesktopUpdateStartError::Starter(error));
-        }
-        Ok(())
+        self.desktop.start_desktop_update(expected_version)
     }
 
     pub fn set_desktop_update_progress(&self, downloaded: u64, total: Option<u64>) -> bool {
-        let mut status = self.desktop_update_status.lock();
-        if !matches!(
-            status.phase,
-            DesktopUpdatePhase::Checking | DesktopUpdatePhase::Downloading
-        ) {
-            return false;
-        }
-        status.phase = DesktopUpdatePhase::Downloading;
-        status.downloaded = downloaded;
-        status.total = total;
-        status.error = None;
-        true
+        self.desktop.set_desktop_update_progress(downloaded, total)
     }
 
     pub fn set_desktop_update_installing(&self) -> bool {
-        let mut status = self.desktop_update_status.lock();
-        if !matches!(
-            status.phase,
-            DesktopUpdatePhase::Checking | DesktopUpdatePhase::Downloading
-        ) {
-            return false;
-        }
-        status.phase = DesktopUpdatePhase::Installing;
-        status.error = None;
-        true
+        self.desktop.set_desktop_update_installing()
     }
 
     pub fn set_desktop_update_failed(&self, error: impl Into<String>) {
-        let mut status = self.desktop_update_status.lock();
-        status.phase = DesktopUpdatePhase::Failed;
-        status.error = Some(error.into());
+        self.desktop.set_desktop_update_failed(error);
     }
 
     pub fn set_desktop_update_idle(&self) {
-        let mut status = self.desktop_update_status.lock();
-        status.phase = DesktopUpdatePhase::Idle;
-        status.downloaded = 0;
-        status.total = None;
-        status.error = None;
+        self.desktop.set_desktop_update_idle();
     }
 
     fn prepare_config(
@@ -1380,6 +1244,34 @@ mod tests {
         assert!(state.set_config(invalid).is_err());
         assert_eq!(state.settings_revision(), committed_revision);
 
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn desktop_hooks_live_on_the_process_facade() {
+        let production = include_str!("state.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production state.rs precedes this test module");
+        assert!(production.contains("desktop: DesktopCapabilities"));
+        assert!(production.contains("self.desktop.set_auto_start_sync"));
+        assert!(production.contains("self.desktop.sync_dock_visibility"));
+        assert!(production.contains("self.desktop.start_desktop_update"));
+        assert!(!production.contains("auto_start_sync: OnceLock"));
+        assert!(!production.contains("OnceLock<DesktopUpdateStarter>"));
+    }
+
+    #[test]
+    fn desktop_hooks_are_unset_on_a_headless_host() {
+        let dir = temp_data_dir("desktop-headless");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+        assert!(!state.auto_start_supported());
+        assert!(!state.dock_visibility_supported());
+        assert!(!state.desktop_update_supported());
+        assert!(!state.desktop_update_status().install_supported);
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");
     }

@@ -8,6 +8,7 @@ pub mod custom_http;
 pub mod dashboard;
 pub mod dashboard_v3;
 pub mod db;
+pub mod desktop;
 pub mod gateway;
 pub mod gateway_keys;
 pub mod go_usage;
