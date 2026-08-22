@@ -9,14 +9,17 @@ use chrono::{Duration, Utc};
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
-use ocg_core::models::{Account, AccountUpdate, ForwardLog, ProxyMode, RoutingMode};
+use ocg_core::models::{
+    Account, AccountUpdate, ForwardLog, FreeModelRouting, ProxyListDirection, ProxyMode,
+    RoutingMode,
+};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::fs;
 use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3661,6 +3664,7 @@ async fn gateway_stays_available_while_large_backfill_runs() {
             client_key_name: None,
             status: "success".into(),
             http_status: Some(200),
+            route: String::new(),
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
@@ -3772,5 +3776,268 @@ async fn gateway_stays_available_while_large_backfill_runs() {
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// Applies a list-mode whitelist config pointing the exception (proxy) leg at
+/// `proxy_base` and returns the mutated config for further tweaks.
+fn apply_list_whitelist_config(
+    state: &Arc<CoreStateInner>,
+    upstream_base: String,
+    proxy_base: &str,
+    listed: &[&str],
+) {
+    let mut config = state.config();
+    config.upstream_base_url = upstream_base;
+    config.proxy_mode = ProxyMode::List;
+    config.proxy_url = proxy_base.to_string();
+    config.proxy_list_direction = ProxyListDirection::Whitelist;
+    config.proxy_list_models = listed.iter().map(|model| model.to_string()).collect();
+    state.set_config(config).unwrap();
+}
+
+async fn forward_log_rows(state: &Arc<CoreStateInner>) -> Vec<ForwardLog> {
+    state.db.lock().list_forward_logs(50).unwrap()
+}
+
+#[tokio::test]
+async fn list_mode_routes_listed_models_through_the_proxy_leg_and_labels_logs() {
+    // Direct-leg upstream answers anything with success.
+    let (upstream_base, upstream_calls, stop_upstream) = start_mock_upstream(HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]))
+    .await;
+    // Proxy-leg server: distinct listener so we can tell legs apart.
+    let (proxy_base, proxy_calls, stop_proxy) = start_mock_upstream(HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]))
+    .await;
+
+    let (state, dir) = build_state(upstream_base.clone(), &["key-1"]);
+    apply_list_whitelist_config(
+        &state,
+        upstream_base.clone(),
+        &proxy_base,
+        &["gpt-5.6-luna"],
+    );
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "gpt-5.6-luna").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "glm-5.2").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let proxy_call_count = proxy_calls.lock().unwrap().len();
+    let upstream_call_count = upstream_calls.lock().unwrap().len();
+    assert_eq!(
+        proxy_call_count, 1,
+        "listed model must traverse the proxy leg"
+    );
+    assert_eq!(
+        upstream_call_count, 1,
+        "unlisted model must connect directly"
+    );
+
+    let logs = forward_log_rows(&state).await;
+    let luna = logs
+        .iter()
+        .find(|log| log.model == "gpt-5.6-luna")
+        .expect("listed model row");
+    assert_eq!(luna.route, "proxy");
+    let glm = logs
+        .iter()
+        .find(|log| log.model == "glm-5.2")
+        .expect("unlisted model row");
+    assert_eq!(glm.route, "direct");
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_upstream.send(());
+    let _ = stop_proxy.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
+    // Prefer mode: the request starts on the listed free twin (proxy leg,
+    // exhausted) and falls back to the unlisted Go model (direct leg).
+    let (upstream_base, upstream_calls, stop_upstream) = start_mock_upstream(HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]))
+    .await;
+    let (proxy_base, proxy_calls, stop_proxy) = start_mock_upstream(HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 429,
+            body: LIMITED_BODY,
+        }]),
+    )]))
+    .await;
+
+    let (state, dir) = build_state(format!("{upstream_base}/zen/go"), &["key-1"]);
+    apply_list_whitelist_config(
+        &state,
+        format!("{upstream_base}/zen/go"),
+        &proxy_base,
+        &["mimo-v2.5-free"],
+    );
+    {
+        let mut config = state.config();
+        config.free_model_routing = FreeModelRouting::Prefer;
+        state.set_config(config).unwrap();
+    }
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        proxy_calls.lock().unwrap().len(),
+        1,
+        "the free twin attempt must use the listed proxy leg"
+    );
+    assert_eq!(
+        upstream_calls.lock().unwrap().len(),
+        1,
+        "the Go fallback must use the direct default leg"
+    );
+
+    let logs = forward_log_rows(&state).await;
+    let free_row = logs
+        .iter()
+        .find(|log| log.model == "mimo-v2.5-free")
+        .expect("free attempt row");
+    assert_eq!(
+        free_row.route, "proxy",
+        "free failure rows carry the leg too"
+    );
+    let go_row = logs
+        .iter()
+        .find(|log| log.model == "mimo-v2.5" && log.status == "success")
+        .expect("Go fallback success row");
+    assert_eq!(go_row.route, "direct");
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_upstream.send(());
+    let _ = stop_proxy.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[derive(Clone)]
+struct SwitchingProxyState {
+    state: Arc<CoreStateInner>,
+    replies: Arc<Mutex<VecDeque<MockReply>>>,
+    switched: Arc<AtomicBool>,
+}
+
+/// Proxy-leg server that flips the process config to Direct while the first
+/// attempt is still in flight, then keeps replying from a fixed queue.
+async fn switching_proxy_chat(
+    axum::extract::State(server): axum::extract::State<SwitchingProxyState>,
+) -> impl IntoResponse {
+    if !server.switched.swap(true, Ordering::SeqCst) {
+        let mut config = server.state.config();
+        config.proxy_mode = ProxyMode::Direct;
+        server.state.set_config(config).unwrap();
+    }
+    let reply = server
+        .replies
+        .lock()
+        .unwrap()
+        .pop_front()
+        .expect("switching proxy replies must be pre-seeded");
+    (
+        StatusCode::from_u16(reply.status).unwrap(),
+        [("content-type", "application/json")],
+        reply.body,
+    )
+}
+
+#[tokio::test]
+async fn list_mode_midflight_config_switch_keeps_the_entry_snapshot() {
+    // Direct-leg upstream must observe zero calls: the retry after the
+    // in-flight switch still resolves from the entry snapshot's proxy leg.
+    let (upstream_base, upstream_calls, stop_upstream) = start_mock_upstream(HashMap::new()).await;
+    let replies = Arc::new(Mutex::new(VecDeque::from([
+        MockReply {
+            // 403 still rotates accounts after upstream made inference 401 a
+            // hard return (Go uses 401 for ModelError).
+            status: 403,
+            body: r#"{"error":"first attempt rejected, rotate to next account"}"#,
+        },
+        MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        },
+    ])));
+    let switched = Arc::new(AtomicBool::new(false));
+
+    let (state, dir) = build_state(upstream_base.clone(), &["key-1", "key-2"]);
+    let proxy_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let proxy_base = format!("http://{}", proxy_listener.local_addr().unwrap());
+    let (proxy_shutdown_tx, proxy_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let proxy_app = Router::new()
+        .fallback(switching_proxy_chat)
+        .with_state(SwitchingProxyState {
+            state: state.clone(),
+            replies: replies.clone(),
+            switched: switched.clone(),
+        });
+    tokio::spawn(async move {
+        let server = axum::serve(proxy_listener, proxy_app).with_graceful_shutdown(async move {
+            let _ = proxy_shutdown_rx.await;
+        });
+        let _ = server.await;
+    });
+
+    apply_list_whitelist_config(
+        &state,
+        upstream_base.clone(),
+        &proxy_base,
+        &["gpt-5.6-luna"],
+    );
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "gpt-5.6-luna").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        switched.load(Ordering::SeqCst),
+        "config must have flipped mid-flight"
+    );
+    assert_eq!(
+        replies.lock().unwrap().len(),
+        0,
+        "both attempts must have hit the proxy leg of the entry snapshot"
+    );
+    assert_eq!(
+        upstream_calls.lock().unwrap().len(),
+        0,
+        "the in-flight request must not observe the Direct switch"
+    );
+    assert_eq!(state.config().proxy_mode, ProxyMode::Direct);
+
+    let logs = forward_log_rows(&state).await;
+    assert!(
+        logs.iter()
+            .filter(|log| log.model == "gpt-5.6-luna")
+            .all(|log| log.route == "proxy")
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_upstream.send(());
+    let _ = proxy_shutdown_tx.send(());
     let _ = fs::remove_dir_all(dir);
 }

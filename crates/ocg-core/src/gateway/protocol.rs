@@ -375,6 +375,14 @@ pub fn supported_model_ids() -> impl Iterator<Item = &'static str> {
     MODEL_PROTOCOLS.iter().map(|profile| profile.id)
 }
 
+/// Returns (id, preferred protocol) for every known model; backs the proxy
+/// list picker's protocol hints. Same registry as `supported_model_ids`.
+pub fn supported_model_protocols() -> impl Iterator<Item = (&'static str, ApiFormat)> {
+    MODEL_PROTOCOLS
+        .iter()
+        .map(|profile| (profile.id, profile.preferred))
+}
+
 /// Known catalog models (Go + registered Zen free). Used as the 401 auth-breaker
 /// allowlist: an unknown model that upstream rejects must not permanently mark
 /// the account as unauthorized.

@@ -608,4 +608,23 @@ export const esESMessages = {
   "未归因": "Sin atribuir",
   "升级前用量统一计入主 Key": "El uso anterior a la actualización se atribuye a la Key principal",
   "加载 Key 筛选失败: {error}": "Error al cargar el filtro de Key: {error}",
+
+  // list proxy mode (per-model routing)
+  "按模型名单": "Lista por modelo",
+  "按模型名单分流：只有名单内模型按方向走代理或直连；“测试连接”验证的是方向默认段。": "Divide el enrutado por lista de modelos: solo los modelos listados siguen la dirección por proxy o directo; «Probar conexión» verifica el tramo por defecto de la dirección.",
+  "名单方向": "Dirección de la lista",
+  "白名单（名单内走代理）": "Lista blanca (listados por proxy)",
+  "黑名单（名单内直连）": "Lista negra (listados directos)",
+  "名单内模型走代理地址，名单外模型直连；非聊天出站（价格 / 用量 / 升级检查）将改为直连。": "Los modelos listados usan la URL del proxy; los no listados se conectan directamente. El tráfico saliente no de chat (precios / uso / comprobaciones de actualización) pasa a directo.",
+  "名单内模型直连，名单外模型走代理地址；非聊天出站（价格 / 用量 / 升级检查）走代理地址。": "Los modelos listados se conectan directamente; los no listados usan la URL del proxy. El tráfico saliente no de chat (precios / uso / comprobaciones de actualización) usa la URL del proxy.",
+  "名单内模型": "Modelos listados",
+  "Zen free 额度按出口 IP 共享，走代理会改变额度归属": "La cuota Zen free se comparte por IP de salida; pasar por un proxy cambia a qué cuota pertenece",
+  "存储名单包含未知模型": "La lista guardada contiene modelos desconocidos",
+  "保存时将被忽略：{ids}": "Se ignorarán al guardar: {ids}",
+  "名单模式需要填写代理地址": "El modo lista requiere una URL de proxy",
+  "名单模式至少勾选一个模型": "El modo lista requiere al menos un modelo",
+  "路由": "Ruta",
+  "自动": "Automático",
+  "代理": "Proxy",
+  "直连": "Directo",
 } satisfies Messages;

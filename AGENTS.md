@@ -18,7 +18,7 @@
 - 桌面端：Tauri v2 跨平台托盘应用，主窗口默认隐藏；托盘/单实例逻辑用系统浏览器打开 `http://127.0.0.1:<port>/dashboard/`，回环监听自动跳过登录。
 - Tauri commands 仍注册在 `src-tauri/src/commands/`，但不是当前 Vue dashboard 的主调用路径。
 - 每个节点都由自己的 dashboard 管理；项目不提供远端同步或 Admin API。
-- 全局出站代理保存在 `AppConfig`，模式为自动（系统/环境）、手动 HTTP、强制直连；模型、账号测试、用量、价格与已安装桌面版的签名升级下载必须遵守同一套策略。reqwest 路径复用 `http_client.rs`，Tauri updater 用其 `proxy` / `no_proxy` 对齐，不得按账号配置或绕过。
+- 全局出站代理保存在 `AppConfig`，模式为自动（系统/环境）、手动 HTTP、强制直连与按模型名单（List）。非 List 模式维持三选一；List 模式（`proxy_list_direction` 白/黑名单 + `proxy_list_models` 已知模型 id）下聊天转发与非模型出站共用“默认段 + 例外段”规则：名单内模型走方向例外段（白名单→代理 / 黑名单→直连），名单外模型与非模型出站（账号测试、用量、价格、升级下载）走方向默认段（白名单→直连 / 黑名单→代理）。名单成员校验只在 dashboard `update_settings` 写闸口执行（非空、精确已知 id、去重）；加载路径全量容忍（`AppConfig::validate` 只查 List 的 URL）。reqwest 路径复用 `http_client.rs` 的路由集/`configured_builder`，Tauri updater 用其 `proxy` / `no_proxy` 对齐默认段，不得按账号配置或绕过。转发按请求入口快照选路，配置热切换不影响在飞请求。
 - 非回环监听使用单管理员登录。Docker 可通过 `OCG_ADMIN_USERNAME` 和 `OCG_ADMIN_PASSWORD` 首次初始化（两个必须同时设置，只设一个会启动报错）；未提供时由首个注册者创建管理员。
 - 设置页通过受保护的 `/dashboard/api/settings/check-update` 手动检查 GitHub 最新 Release。内置升级公钥的已安装桌面版可继续下载、校验签名并原位安装；开发构建、CLI、Docker 与尚未进入升级通道的旧版保留发布页/手动覆盖路径。
 - 价格表通过受保护的 `GET /dashboard/api/pricing`、`PUT /dashboard/api/pricing/multipliers`、`POST /dashboard/api/pricing/refresh` 管理；只在用户点击刷新时访问 `https://opencode.ai/docs/go/`，不得自动轮询。
@@ -37,12 +37,12 @@
 
 - `crates/ocg-core/src/gateway/`：OpenAI / Anthropic / Gemini 客户端协议路由与转换、Claude Desktop 别名改写、转发、选择器、冷却、费用统计。
 - `crates/ocg-core/src/gateway_keys.rs`：子 Key 生命周期门面（`sub_gateway_keys` CRUD 封装、凭证快照构建/重建、`PRIMARY_KEY_ID` 常量、跨层值唯一闸口）；改 Key 存储或鉴权快照时从这里入手。
-- `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略。
+- `crates/ocg-core/src/http_client.rs`：核心出站 HTTP 客户端共享的全局代理策略；持有路由集 `ForwardRouteSet`（默认段+例外段双客户端、`client_for(model)` 纯函数选路、List 分支的 `configured_builder` 方向默认段）。
 - `crates/ocg-core/src/dashboard.rs`：当前 Vue 面板使用的 `/dashboard/api`。
 - `crates/ocg-core/src/go_usage.rs`：官方 Go usage 客户端（`/zen/go/v1/usage`）；手动与调度刷新共用。
 - `crates/ocg-core/src/usage_sync.rs`：自适应官方用量同步（节流、去重、活跃/非活跃节奏、80% 加速、429/reset 调度、失败退避）。后台循环按 `CoreState` 启停（Gateway start 时 spawn，随 CoreState drop 退出；不是可取消的 per-Gateway task）。失败退避地板不可被阈值/节奏/reset 提前；真实推理 429 的 1–2 分钟调度是刻意覆盖。
 - `crates/ocg-core/src/console_usage.rs`：冻结弃用的 Profile Cookie/HTML 控制台用量实现；勿调用、勿扩展。
-- `crates/ocg-core/src/db.rs`：SQLite schema、迁移、查询。
+- `crates/ocg-core/src/db.rs`：SQLite schema、迁移、查询；`forward_logs` 自 schema v22 起带 `route` 列（`auto`/`proxy`/`direct` 闭集，历史行空串=未记录）。
 - `crates/ocg-core/src/models.rs`：共享 serde 类型和 `AppConfig`（含 `DEFAULT_OPENCODE_INVITE_URL`）。
 - `crates/ocg-core/src/pricing.rs`：OpenCode Go 价格快照、倍率与额度估算。
 - `crates/ocg-cli/src/main.rs`：CLI `serve`、`key`、`status`。
