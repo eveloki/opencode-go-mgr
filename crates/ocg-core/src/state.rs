@@ -22,6 +22,10 @@ const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 
 pub struct GatewayHandle {
     pub port: u16,
+    /// Whether this listener is bound only to a loopback interface. The
+    /// lifecycle uses this metadata to keep the shared dashboard trust mode
+    /// fail-closed while replacing listeners.
+    pub dashboard_is_local: bool,
     pub shutdown: tokio::sync::oneshot::Sender<()>,
     pub task: tokio::task::JoinHandle<()>,
 }
@@ -56,8 +60,16 @@ pub struct CoreStateInner {
     /// `set_config` (primary refresh).
     pub credential_snapshot: RwLock<crate::gateway_keys::CredentialSnapshot>,
     pub gateway: Mutex<Option<GatewayHandle>>,
+    /// Serializes complete listener replacement transitions. This async gate
+    /// may span listener shutdown awaits; the synchronous `gateway` mutex may
+    /// not.
+    gateway_lifecycle: tokio::sync::Mutex<()>,
     pub dashboard_session_token: Mutex<String>,
     dashboard_local_mode: AtomicBool,
+    /// Number of spawned non-loopback listener tasks that have not yet
+    /// terminated. This makes the shared trust flag fail-closed even for
+    /// directly bound handles that have not been installed into `gateway`.
+    dashboard_public_listeners: AtomicU64,
     /// Process-level auto-start, Dock, and desktop-update hooks. Unset in CLI/Docker.
     desktop: DesktopCapabilities,
     pub dashboard_dir: Mutex<Option<PathBuf>>,
@@ -155,8 +167,10 @@ impl CoreStateInner {
             process_generation: (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF,
             credential_snapshot: RwLock::new(credential_snapshot),
             gateway: Mutex::new(None),
+            gateway_lifecycle: tokio::sync::Mutex::new(()),
             dashboard_session_token: Mutex::new(uuid::Uuid::new_v4().simple().to_string()),
             dashboard_local_mode: AtomicBool::new(false),
+            dashboard_public_listeners: AtomicU64::new(0),
             desktop: DesktopCapabilities::new(),
             dashboard_dir: Mutex::new(None),
             http_client: Mutex::new(Arc::new(http_client)),
@@ -308,12 +322,33 @@ impl CoreStateInner {
             .unwrap_or(configured)
     }
 
+    pub(crate) async fn lock_gateway_lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.gateway_lifecycle.lock().await
+    }
+
+    pub(crate) fn register_dashboard_public_listener(&self) {
+        self.dashboard_public_listeners
+            .fetch_add(1, Ordering::AcqRel);
+        self.set_dashboard_local_mode(false);
+    }
+
+    pub(crate) fn unregister_dashboard_public_listener(&self) {
+        let previous = self
+            .dashboard_public_listeners
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "public listener count must not underflow");
+    }
+
+    pub(crate) fn has_dashboard_public_listener(&self) -> bool {
+        self.dashboard_public_listeners.load(Ordering::Acquire) != 0
+    }
+
     pub fn set_dashboard_local_mode(&self, local: bool) {
-        self.dashboard_local_mode.store(local, Ordering::Relaxed);
+        self.dashboard_local_mode.store(local, Ordering::Release);
     }
 
     pub fn dashboard_local_mode(&self) -> bool {
-        self.dashboard_local_mode.load(Ordering::Relaxed)
+        self.dashboard_local_mode.load(Ordering::Acquire)
     }
 
     pub fn set_auto_start_sync(&self, sync: AutoStartSync) {

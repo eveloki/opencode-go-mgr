@@ -1086,6 +1086,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[tokio::test]
+    async fn rebind_does_not_start_usage_loop() {
+        let (dir, state) = test_state("rebind-no-loop");
+        assert!(!usage_loop_started(&state));
+
+        let first =
+            crate::gateway::listener::GatewayLifecycle::bind(state.clone(), loopback_ephemeral())
+                .await
+                .unwrap();
+        let first_port = first.port;
+        *state.gateway.lock() = Some(first);
+        assert!(
+            !usage_loop_started(&state),
+            "storing a bound listener must not start the usage worker"
+        );
+
+        let same = crate::gateway::listener::GatewayLifecycle::rebind(
+            state.clone(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], first_port)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(same, first_port);
+        assert!(
+            !usage_loop_started(&state),
+            "same-port rebind must not start the process-level usage worker"
+        );
+
+        let moved =
+            crate::gateway::listener::GatewayLifecycle::rebind(state.clone(), loopback_ephemeral())
+                .await
+                .unwrap();
+        assert_ne!(moved, first_port);
+        assert!(
+            !usage_loop_started(&state),
+            "new-port rebind must not start the process-level usage worker"
+        );
+
+        let handle = state.gateway.lock().take();
+        if let Some(handle) = handle {
+            crate::gateway::listener::GatewayLifecycle::stop_and_wait(handle).await;
+        }
+        assert!(
+            !usage_loop_started(&state),
+            "stop_and_wait must not start the usage worker"
+        );
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn rebind_keeps_started_usage_loop_without_duplicate() {
+        let (dir, state) = test_state("rebind-keep-loop");
+        assert!(!usage_loop_started(&state));
+        let handle = crate::gateway::start_gateway_on(state.clone(), loopback_ephemeral())
+            .await
+            .unwrap();
+        let first_port = handle.port;
+        *state.gateway.lock() = Some(handle);
+        assert!(
+            usage_loop_started(&state),
+            "public start_gateway_on must start the process-level usage worker"
+        );
+        ControlPlaneWorkers::ensure_started(state.clone());
+        ControlPlaneWorkers::ensure_started(state.clone());
+        assert!(
+            usage_loop_started(&state),
+            "ensure_started after start must stay once-per-CoreState"
+        );
+
+        let same = crate::gateway::listener::GatewayLifecycle::rebind(
+            state.clone(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], first_port)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(same, first_port);
+        assert!(
+            usage_loop_started(&state),
+            "same-port rebind must not clear the process-level usage worker"
+        );
+        ControlPlaneWorkers::ensure_started(state.clone());
+        assert!(
+            usage_loop_started(&state),
+            "ensure_started after same-port rebind must not spawn a second worker"
+        );
+
+        let moved =
+            crate::gateway::listener::GatewayLifecycle::rebind(state.clone(), loopback_ephemeral())
+                .await
+                .unwrap();
+        assert_ne!(moved, first_port);
+        assert!(
+            usage_loop_started(&state),
+            "new-port rebind must not clear or restart the process-level usage worker"
+        );
+        ControlPlaneWorkers::ensure_started(state.clone());
+        crate::gateway::stop_gateway(state.gateway.lock().take().unwrap());
+        assert!(
+            usage_loop_started(&state),
+            "listener stop after rebind must not clear the usage worker"
+        );
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn failure_backoff_ladder_caps_at_six_hours() {
         assert_eq!(failure_backoff(1), Duration::minutes(5));

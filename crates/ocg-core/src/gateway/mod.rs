@@ -25,6 +25,9 @@ use axum::routing::{get, post};
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 
+pub use listener::GatewayLifecycle;
+pub use listener::ListenerStopOutcome;
+
 // 1M-token conversations exceed Axum's 2 MiB Bytes default; keep a bounded cap before auth.
 const MAX_GATEWAY_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const _: () = assert!(MAX_GATEWAY_REQUEST_BODY_BYTES > 2 * 1024 * 1024);
@@ -94,6 +97,16 @@ pub async fn start_gateway_on(state: CoreState, addr: SocketAddr) -> Result<Gate
 
 pub fn stop_gateway(handle: GatewayHandle) {
     listener::GatewayLifecycle::stop(handle);
+}
+
+pub async fn stop_gateway_and_wait(handle: GatewayHandle) -> ListenerStopOutcome {
+    listener::GatewayLifecycle::stop_and_wait(handle).await
+}
+
+/// Listener-only rebind of `state.gateway`. Does not start or cancel
+/// process-level control-plane workers.
+pub async fn rebind_gateway(state: CoreState, addr: SocketAddr) -> Result<u16> {
+    listener::GatewayLifecycle::rebind(state, addr).await
 }
 
 #[cfg(test)]
