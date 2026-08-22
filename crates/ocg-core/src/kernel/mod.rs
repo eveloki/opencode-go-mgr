@@ -71,7 +71,6 @@ mod dependency_guard {
         "protocol_probe",
         "state",
     ];
-    const EXPECTED_CATALOG_SCC: &[&str] = &["go_usage", "http_client", "models", "provider"];
 
     #[test]
     fn kernel_modules_do_not_import_io_or_control_plane() {
@@ -197,7 +196,12 @@ mod dependency_guard {
 
         let graph = production_graph(&src_root, &modules);
         let expected_host = named_set(EXPECTED_HOST_SCC);
-        let expected_catalog = named_set(EXPECTED_CATALOG_SCC);
+        assert!(
+            !graph
+                .get("provider")
+                .is_some_and(|edges| edges.contains("go_usage")),
+            "provider catalog facts must not depend on the Go usage HTTP client"
+        );
         let db_component = tarjan(&graph)
             .into_iter()
             .find(|component| component.contains("db"))
@@ -299,12 +303,11 @@ mod dependency_guard {
         // SCC through gateway/state (shared admin probe transport) without a
         // dashboard or dashboard_v3 edge. Inverting the remaining pure
         // catalog/sanitizer edges from provider_contracts into gateway also
-        // dropped auth, db, and provider_contracts out of that cycle. A
-        // separate catalog cycle (models/provider/go_usage/http_client) can
-        // match this SCC's size, so identify the host cycle by `gateway` and
-        // whitelist every remaining nontrivial SCC exactly. Largest-only
-        // selection is ambiguous; gateway-only selection would ignore a new
-        // or enlarged non-gateway cycle.
+        // dropped auth, db, and provider_contracts out of that cycle. The Go
+        // usage endpoint now lives in the I/O-free kernel catalog, removing
+        // provider -> go_usage and the former catalog SCC. Whitelist every
+        // remaining nontrivial SCC exactly so a new non-gateway cycle cannot
+        // pass unnoticed.
         let mut measured = graph.clone();
         measured.remove("pricing");
         for edges in measured.values_mut() {
@@ -315,8 +318,7 @@ mod dependency_guard {
             .filter(|component| component.len() > 1)
             .collect();
         nontrivial.sort();
-        let mut expected_sccs = vec![expected_host.clone(), expected_catalog.clone()];
-        expected_sccs.sort();
+        let expected_sccs = vec![expected_host.clone()];
         assert_eq!(
             nontrivial, expected_sccs,
             "approved production SCCs after pricing exclusion should be {expected_sccs:?}, sccs={nontrivial:?}, graph={graph:?}"
@@ -329,15 +331,6 @@ mod dependency_guard {
         assert_eq!(
             host_scc, expected_host,
             "remaining production host SCC should be {expected_host:?}, sccs={nontrivial:?}, graph={graph:?}"
-        );
-        let catalog_scc = nontrivial
-            .iter()
-            .find(|component| component.contains("models"))
-            .cloned()
-            .expect("catalog modules should remain in a production SCC");
-        assert_eq!(
-            catalog_scc, expected_catalog,
-            "remaining production catalog SCC should be {expected_catalog:?}, sccs={nontrivial:?}, graph={graph:?}"
         );
         assert!(
             !host_scc.contains("provider_contracts")
