@@ -83,6 +83,17 @@ const PRICING_CATALOG_TYPES: &[&str] = &[
     "PricingAvailability",
 ];
 
+const USAGE_CATALOG_TYPES: &[&str] = &[
+    "UsageWindow",
+    "UsageMutation",
+    "AccountUsageUpdate",
+    "ProviderUsage",
+    "QuotaWindow",
+    "CreditBalance",
+    "UsageSyncState",
+    "UsageAvailability",
+];
+
 const SECRET_FIELD_NAMES: &[&str] = &[
     "key",
     "password",
@@ -208,7 +219,37 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[prefix_len..pricing_end],
         PRICING_CATALOG_TYPES
     );
-    assert!(CATALOG_TYPE_NAMES.len() >= pricing_end);
+    const OBSERVABILITY_CATALOG_TYPES: &[&str] = &[
+        "GatewayStatus",
+        "ApplicationModels",
+        "DashboardSummary",
+        "DailyModelCost",
+        "DailyCostByModel",
+        "GatewayLog",
+        "GatewayLogs",
+        "ForwardLog",
+        "ForwardLogSummary",
+        "ForwardLogs",
+        "ForwardLogClientKey",
+        "ForwardLogKeys",
+        "ForwardLogModels",
+        "GatewayLogQuery",
+        "ForwardLogQuery",
+        "DailyCostQuery",
+    ];
+    let observability_end = pricing_end + OBSERVABILITY_CATALOG_TYPES.len();
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[pricing_end..observability_end],
+        OBSERVABILITY_CATALOG_TYPES
+    );
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[observability_end..],
+        USAGE_CATALOG_TYPES
+    );
+    assert_eq!(
+        CATALOG_TYPE_NAMES.len(),
+        observability_end + USAGE_CATALOG_TYPES.len()
+    );
 }
 
 #[test]
