@@ -64,6 +64,10 @@ pub fn build_router(state: CoreState) -> Router {
     Router::new()
         .merge(gateway_api)
         .nest(
+            "/dashboard/api/v3",
+            crate::dashboard_v3::api_router(state.clone()),
+        )
+        .nest(
             "/dashboard/api",
             crate::dashboard::api_router(state.clone()),
         )

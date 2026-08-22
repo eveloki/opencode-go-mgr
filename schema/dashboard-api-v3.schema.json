@@ -1,0 +1,132 @@
+{
+  "$comment": "Extensible Dashboard V3 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. ConnectionInfo is the only future plaintext Key DTO.",
+  "$defs": {
+    "ControlRevision": {
+      "additionalProperties": false,
+      "description": "Live CAS token, process generation, and pricing snapshot id.",
+      "properties": {
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "MutationAck": {
+      "additionalProperties": false,
+      "description": "Successful control-plane mutation acknowledgement.",
+      "properties": {
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "MutationExpectation": {
+      "description": "Required mutation precondition. Wire field is `expectedRevision`.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision"
+      ],
+      "type": "object"
+    },
+    "PricingRevision": {
+      "additionalProperties": false,
+      "description": "Pricing snapshot identity. Distinct from the u64 settings CAS token.",
+      "properties": {
+        "pricingRevision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "V3Error": {
+      "additionalProperties": false,
+      "description": "Stable non-2xx JSON envelope for every Dashboard V3 error.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "currentRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "currentRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/ControlRevision"
+    },
+    {
+      "$ref": "#/$defs/MutationAck"
+    },
+    {
+      "$ref": "#/$defs/MutationExpectation"
+    },
+    {
+      "$ref": "#/$defs/PricingRevision"
+    },
+    {
+      "$ref": "#/$defs/V3Error"
+    }
+  ],
+  "title": "DashboardApiV3"
+}

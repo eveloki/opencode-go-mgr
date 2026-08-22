@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod custom;
 pub mod custom_http;
 pub mod dashboard;
+pub mod dashboard_v3;
 pub mod db;
 pub mod gateway;
 pub mod gateway_keys;

@@ -112,6 +112,10 @@ pub struct CoreStateInner {
     client_root_url_override: Option<String>,
     pub settings_update: Mutex<()>,
     settings_revision: AtomicU64,
+    /// Dashboard V3 process generation. Assigned once per CoreState, never
+    /// persisted, and independent of `settings_revision` so a CAS token from a
+    /// previous process cannot be reused after restart.
+    process_generation: u64,
     /// Authenticating credentials (value -> id/name) covering the primary
     /// key and enabled sub keys; see `gateway_keys` for the invalidation
     /// model. Written only under `settings_update` (key API) or from
@@ -216,6 +220,7 @@ impl CoreStateInner {
             settings_revision: AtomicU64::new(
                 (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF,
             ),
+            process_generation: (uuid::Uuid::new_v4().as_u128() as u64) & 0x0000_FFFF_FFFF_FFFF,
             credential_snapshot: RwLock::new(credential_snapshot),
             gateway: Mutex::new(None),
             dashboard_session_token: Mutex::new(uuid::Uuid::new_v4().simple().to_string()),
@@ -253,6 +258,10 @@ impl CoreStateInner {
 
     pub fn settings_revision(&self) -> u64 {
         self.settings_revision.load(Ordering::Acquire)
+    }
+
+    pub fn process_generation(&self) -> u64 {
+        self.process_generation
     }
 
     /// Advances the settings revision for mutations that bypass

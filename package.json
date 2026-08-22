@@ -15,6 +15,8 @@
     "release:check": "node scripts/release.mjs --check",
     "test:rust": "cargo test --workspace --locked",
     "test:web": "node --experimental-strip-types --test \"scripts/*.test.mjs\" \"src/**/*.test.ts\"",
+    "contract:v3:generate": "node scripts/dashboard-v3-contract.mjs --write",
+    "contract:v3:check": "node scripts/dashboard-v3-contract.mjs --check",
     "typecheck": "vue-tsc --noEmit",
     "test": "pnpm run test:web && pnpm run typecheck && pnpm exec vite build && pnpm run test:rust",
     "design:lint": "npx -y @google/design.md@0.3.0 lint DESIGN.md"
@@ -28,6 +30,7 @@
   "devDependencies": {
     "@types/node": "^20",
     "@vitejs/plugin-vue": "^5",
+    "json-schema-to-typescript": "15.0.4",
     "typescript": "^5",
     "vite": "^5",
     "vue": "^3",
