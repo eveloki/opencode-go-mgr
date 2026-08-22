@@ -242,14 +242,16 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[pricing_end..observability_end],
         OBSERVABILITY_CATALOG_TYPES
     );
+    let usage_end = observability_end + USAGE_CATALOG_TYPES.len();
     assert_eq!(
-        &CATALOG_TYPE_NAMES[observability_end..],
+        &CATALOG_TYPE_NAMES[observability_end..usage_end],
         USAGE_CATALOG_TYPES
     );
     assert_eq!(
-        CATALOG_TYPE_NAMES.len(),
-        observability_end + USAGE_CATALOG_TYPES.len()
+        &CATALOG_TYPE_NAMES[usage_end..],
+        ["AuthStatus", "AuthRegister", "AuthLogin", "AuthLogout"]
     );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), usage_end + 4);
 }
 
 #[test]
