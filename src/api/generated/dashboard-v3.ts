@@ -58,7 +58,21 @@ export type DashboardApiV3 =
   | ProtocolSwitchUpdate
   | ProtocolProbeRequest
   | ProtocolProbeResult
-  | ProtocolProbeResponse;
+  | ProtocolProbeResponse
+  | PricingSnapshot
+  | PricingLimits
+  | PricingModel
+  | PricingAdjustment
+  | PricingTimeWindow
+  | PricingRefresh
+  | PricingRefreshStatus
+  | PricingMultiplierChange
+  | PricingRefreshUpdate
+  | PricingRefreshPolicy
+  | PricingMultipliersUpdate
+  | PricingMultiplierWrite
+  | ProviderPricing
+  | PricingAvailability;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -112,6 +126,22 @@ export type ContractEvidenceSource = "static" | "preset" | "probe_confirmed" | "
  * Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.
  */
 export type ContractScopeKind = "provider" | "custom_endpoint";
+/**
+ * Official Peak / Off-Peak row. Wire values stay snake_case.
+ */
+export type PricingTimeWindow = "always" | "off_peak" | "peak";
+/**
+ * Refresh outcome. Wire values stay snake_case.
+ */
+export type PricingRefreshStatus = "success" | "unchanged" | "needs_confirmation" | "failed_no_change";
+/**
+ * Refresh confirmation policy. Wire values stay snake_case.
+ */
+export type PricingRefreshPolicy = "keep_current" | "use_official";
+/**
+ * Registry pricing availability. Wire values stay snake_case.
+ */
+export type PricingAvailability = "available" | "unavailable" | "not_applicable" | "unpriced";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -749,4 +779,115 @@ export interface ProtocolProbeResponse {
   providerId: string;
   results: ProtocolProbeResult[];
   revision: number;
+}
+/**
+ * Dashboard V3 pricing snapshot. Distinct from `kernel::pricing::PricingSnapshot`
+ * and from the stored provider pricing blob.
+ *
+ * `revision` is the settings CAS token. The official snapshot id is
+ * `pricingRevision` and must never be named `revision` on this wire type.
+ */
+export interface PricingSnapshot {
+  activatedAt: string;
+  adjustmentPolicyVersion: string;
+  contentHash: string;
+  documentUpdatedAt: string;
+  limits: PricingLimits;
+  models: PricingModel[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+  sourceUrl: string;
+}
+/**
+ * OpenCode Go 5h / week / month usage windows.
+ */
+export interface PricingLimits {
+  window5h: number;
+  windowMonth: number;
+  windowWeek: number;
+}
+/**
+ * One official model row, including optional cache-write and token-tier bounds.
+ */
+export interface PricingModel {
+  adjustments: PricingAdjustment[];
+  cacheRead: number;
+  cacheWrite: number | null;
+  displayName: string;
+  input: number;
+  maxInputTokens: number | null;
+  minInputTokens: number | null;
+  modelId: string;
+  output: number;
+  quotaMultiplier: number;
+  timeWindow: PricingTimeWindow;
+  usage: number;
+}
+/**
+ * One documented local adjustment on a model row.
+ */
+export interface PricingAdjustment {
+  appliesTo: string;
+  label: string;
+  multiplier: number;
+}
+/**
+ * Pricing refresh result. Nested `snapshot` is required; nullable fields emit `T | null`.
+ */
+export interface PricingRefresh {
+  error: string | null;
+  multiplierChanges: PricingMultiplierChange[];
+  officialContentHash: string | null;
+  refreshStatus: PricingRefreshStatus;
+  snapshot: PricingSnapshot;
+}
+/**
+ * One model whose official multiplier differs from the active snapshot.
+ */
+export interface PricingMultiplierChange {
+  currentMultiplier: number;
+  modelId: string;
+  officialMultiplier: number;
+}
+/**
+ * POST pricing-refresh body. CAS tokens and `expectedPricingRevision` are
+ * required; `policy` and `expectedOfficialContentHash` may be omitted.
+ */
+export interface PricingRefreshUpdate {
+  expectedOfficialContentHash?: string | null;
+  expectedPricingRevision: string;
+  expectedRevision: number;
+  policy?: PricingRefreshPolicy | null;
+  processGeneration: number;
+}
+/**
+ * PUT pricing-multipliers body. CAS tokens, `expectedPricingRevision`, and
+ * `multipliers` are required.
+ */
+export interface PricingMultipliersUpdate {
+  expectedPricingRevision: string;
+  expectedRevision: number;
+  multipliers: PricingMultiplierWrite[];
+  processGeneration: number;
+}
+/**
+ * One multiplier write. Handlers validate model id, range, and uniqueness.
+ */
+export interface PricingMultiplierWrite {
+  modelId: string;
+  multiplier: number;
+}
+/**
+ * Provider-scoped pricing. `snapshot` is required `T | null` and never
+ * carries a raw stored pricing blob.
+ */
+export interface ProviderPricing {
+  availability: PricingAvailability;
+  offeringId: string;
+  pricingRevision: string;
+  processGeneration: number;
+  providerId: string;
+  revision: number;
+  snapshot: PricingSnapshot | null;
 }

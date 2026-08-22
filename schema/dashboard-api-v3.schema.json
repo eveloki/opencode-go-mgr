@@ -1324,6 +1324,309 @@
       ],
       "type": "object"
     },
+    "PricingAdjustment": {
+      "additionalProperties": false,
+      "description": "One documented local adjustment on a model row.",
+      "properties": {
+        "appliesTo": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "multiplier": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "label",
+        "multiplier",
+        "appliesTo"
+      ],
+      "type": "object"
+    },
+    "PricingAvailability": {
+      "description": "Registry pricing availability. Wire values stay snake_case.",
+      "enum": [
+        "available",
+        "unavailable",
+        "not_applicable",
+        "unpriced"
+      ],
+      "type": "string"
+    },
+    "PricingLimits": {
+      "additionalProperties": false,
+      "description": "OpenCode Go 5h / week / month usage windows.",
+      "properties": {
+        "window5h": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowMonth": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowWeek": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "window5h",
+        "windowWeek",
+        "windowMonth"
+      ],
+      "type": "object"
+    },
+    "PricingModel": {
+      "additionalProperties": false,
+      "description": "One official model row, including optional cache-write and token-tier bounds.",
+      "properties": {
+        "adjustments": {
+          "items": {
+            "$ref": "#/$defs/PricingAdjustment"
+          },
+          "type": "array"
+        },
+        "cacheRead": {
+          "format": "double",
+          "type": "number"
+        },
+        "cacheWrite": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "input": {
+          "format": "double",
+          "type": "number"
+        },
+        "maxInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "output": {
+          "format": "double",
+          "type": "number"
+        },
+        "quotaMultiplier": {
+          "format": "double",
+          "type": "number"
+        },
+        "timeWindow": {
+          "$ref": "#/$defs/PricingTimeWindow"
+        },
+        "usage": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "modelId",
+        "displayName",
+        "input",
+        "output",
+        "cacheRead",
+        "cacheWrite",
+        "usage",
+        "quotaMultiplier",
+        "minInputTokens",
+        "maxInputTokens",
+        "timeWindow",
+        "adjustments"
+      ],
+      "type": "object"
+    },
+    "PricingMultiplierChange": {
+      "additionalProperties": false,
+      "description": "One model whose official multiplier differs from the active snapshot.",
+      "properties": {
+        "currentMultiplier": {
+          "format": "double",
+          "type": "number"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "officialMultiplier": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "modelId",
+        "currentMultiplier",
+        "officialMultiplier"
+      ],
+      "type": "object"
+    },
+    "PricingMultiplierWrite": {
+      "additionalProperties": false,
+      "description": "One multiplier write. Handlers validate model id, range, and uniqueness.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        },
+        "multiplier": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "modelId",
+        "multiplier"
+      ],
+      "type": "object"
+    },
+    "PricingMultipliersUpdate": {
+      "additionalProperties": false,
+      "description": "PUT pricing-multipliers body. CAS tokens, `expectedPricingRevision`, and\n`multipliers` are required.",
+      "properties": {
+        "expectedPricingRevision": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "multipliers": {
+          "items": {
+            "$ref": "#/$defs/PricingMultiplierWrite"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedPricingRevision",
+        "multipliers"
+      ],
+      "type": "object"
+    },
+    "PricingRefresh": {
+      "additionalProperties": false,
+      "description": "Pricing refresh result. Nested `snapshot` is required; nullable fields emit `T | null`.",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "multiplierChanges": {
+          "items": {
+            "$ref": "#/$defs/PricingMultiplierChange"
+          },
+          "type": "array"
+        },
+        "officialContentHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refreshStatus": {
+          "$ref": "#/$defs/PricingRefreshStatus"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/PricingSnapshot"
+        }
+      },
+      "required": [
+        "snapshot",
+        "refreshStatus",
+        "multiplierChanges",
+        "officialContentHash",
+        "error"
+      ],
+      "type": "object"
+    },
+    "PricingRefreshPolicy": {
+      "description": "Refresh confirmation policy. Wire values stay snake_case.",
+      "enum": [
+        "keep_current",
+        "use_official"
+      ],
+      "type": "string"
+    },
+    "PricingRefreshStatus": {
+      "description": "Refresh outcome. Wire values stay snake_case.",
+      "enum": [
+        "success",
+        "unchanged",
+        "needs_confirmation",
+        "failed_no_change"
+      ],
+      "type": "string"
+    },
+    "PricingRefreshUpdate": {
+      "additionalProperties": false,
+      "description": "POST pricing-refresh body. CAS tokens and `expectedPricingRevision` are\nrequired; `policy` and `expectedOfficialContentHash` may be omitted.",
+      "properties": {
+        "expectedOfficialContentHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedPricingRevision": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingRefreshPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedPricingRevision"
+      ],
+      "type": "object"
+    },
     "PricingRevision": {
       "additionalProperties": false,
       "description": "Pricing snapshot identity. Distinct from the u64 settings CAS token.",
@@ -1336,6 +1639,71 @@
         "pricingRevision"
       ],
       "type": "object"
+    },
+    "PricingSnapshot": {
+      "additionalProperties": false,
+      "description": "Dashboard V3 pricing snapshot. Distinct from `kernel::pricing::PricingSnapshot`\nand from the stored provider pricing blob.\n\n`revision` is the settings CAS token. The official snapshot id is\n`pricingRevision` and must never be named `revision` on this wire type.",
+      "properties": {
+        "activatedAt": {
+          "type": "string"
+        },
+        "adjustmentPolicyVersion": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "documentUpdatedAt": {
+          "type": "string"
+        },
+        "limits": {
+          "$ref": "#/$defs/PricingLimits"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/PricingModel"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration",
+        "pricingRevision",
+        "activatedAt",
+        "documentUpdatedAt",
+        "sourceUrl",
+        "contentHash",
+        "adjustmentPolicyVersion",
+        "limits",
+        "models"
+      ],
+      "type": "object"
+    },
+    "PricingTimeWindow": {
+      "description": "Official Peak / Off-Peak row. Wire values stay snake_case.",
+      "enum": [
+        "always",
+        "off_peak",
+        "peak"
+      ],
+      "type": "string"
     },
     "ProbeResultKind": {
       "description": "Last explicit probe outcome stored on evidence. Distinct from\n[`ProtocolProbeResult`].",
@@ -1926,6 +2294,54 @@
         "displayName",
         "routable",
         "accounts"
+      ],
+      "type": "object"
+    },
+    "ProviderPricing": {
+      "additionalProperties": false,
+      "description": "Provider-scoped pricing. `snapshot` is required `T | null` and never\ncarries a raw stored pricing blob.",
+      "properties": {
+        "availability": {
+          "$ref": "#/$defs/PricingAvailability"
+        },
+        "offeringId": {
+          "type": "string"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "providerId",
+        "offeringId",
+        "availability",
+        "snapshot",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
       ],
       "type": "object"
     },
@@ -2551,6 +2967,48 @@
     },
     {
       "$ref": "#/$defs/ProtocolProbeResponse"
+    },
+    {
+      "$ref": "#/$defs/PricingSnapshot"
+    },
+    {
+      "$ref": "#/$defs/PricingLimits"
+    },
+    {
+      "$ref": "#/$defs/PricingModel"
+    },
+    {
+      "$ref": "#/$defs/PricingAdjustment"
+    },
+    {
+      "$ref": "#/$defs/PricingTimeWindow"
+    },
+    {
+      "$ref": "#/$defs/PricingRefresh"
+    },
+    {
+      "$ref": "#/$defs/PricingRefreshStatus"
+    },
+    {
+      "$ref": "#/$defs/PricingMultiplierChange"
+    },
+    {
+      "$ref": "#/$defs/PricingRefreshUpdate"
+    },
+    {
+      "$ref": "#/$defs/PricingRefreshPolicy"
+    },
+    {
+      "$ref": "#/$defs/PricingMultipliersUpdate"
+    },
+    {
+      "$ref": "#/$defs/PricingMultiplierWrite"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricing"
+    },
+    {
+      "$ref": "#/$defs/PricingAvailability"
     }
   ],
   "title": "DashboardApiV3"
