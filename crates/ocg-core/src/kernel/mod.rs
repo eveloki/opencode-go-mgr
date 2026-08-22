@@ -67,12 +67,11 @@ mod dependency_guard {
     const EXPECTED_REMAINING_SCC: &[&str] = &[
         "auth",
         "dashboard",
+        "dashboard_v3",
         "db",
         "gateway",
-        "gateway_keys",
         "provider_contracts",
         "state",
-        "usage_sync",
     ];
 
     #[test]
@@ -172,11 +171,41 @@ mod dependency_guard {
                 .is_some_and(|edges| edges.contains("gateway_keys")),
             "db must not depend on gateway_keys"
         );
+        assert!(
+            !graph
+                .get("gateway_keys")
+                .is_some_and(|edges| edges.contains("state") || edges.contains("db")),
+            "gateway_keys must not depend on state or db"
+        );
+        assert!(
+            !graph
+                .get("usage_sync")
+                .is_some_and(|edges| edges.contains("state") || edges.contains("db")),
+            "usage_sync must not depend on state or db"
+        );
+
+        let gateway_keys_source =
+            production_source(&read_to_string(&src_root.join("gateway_keys.rs")));
+        let usage_sync_source = production_source(&read_to_string(&src_root.join("usage_sync.rs")));
+        for (name, source) in [
+            ("gateway_keys.rs", &gateway_keys_source),
+            ("usage_sync.rs", &usage_sync_source),
+        ] {
+            assert!(
+                !source.contains("crate::state"),
+                "{name} production source must not import crate::state"
+            );
+            assert!(
+                !source.contains("CoreState"),
+                "{name} production source must not name CoreState"
+            );
+        }
 
         // Clocked `pricing` still has state/dashboard edges (next host
-        // inversion). This lease extracted the seed view and cut db's
-        // back-edge, so the remaining host SCC is measured with that
-        // module excluded.
+        // inversion). This lease cut gateway_keys and usage_sync out of the
+        // measured host SCC by depending on KeyHost/UsageSyncHost instead.
+        // dashboard_v3 joined the remaining cycle when the contract kernel
+        // mounted at the gateway router.
         let mut measured = graph.clone();
         measured.remove("pricing");
         for edges in measured.values_mut() {

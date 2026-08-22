@@ -6,9 +6,10 @@
 //! - sub keys live in the `sub_gateway_keys` table (schema v20) and change
 //!   only through the key lifecycle API.
 //!
-//! The credential snapshot (`credential_snapshot` on `CoreStateInner`) maps
-//! value -> (id, name) and is the single source for both the auth hot path
-//! and forward-log name snapshots; readers never take the config or db locks.
+//! The credential snapshot maps value -> (id, name) and is the single source
+//! for both the auth hot path and forward-log name snapshots; readers never
+//! take the config or db locks. Concrete hosts (`KeyStore` / [`KeyHost`])
+//! live in `state`; this module never names the process-level owner.
 //!
 //! Invalidation model: the table is written only by this module's mutation
 //! entry points (called with the `settings_update` lock held, snapshot
@@ -17,11 +18,10 @@
 //! SQLite or the config store are outside the model and do not take effect
 //! until the next restart.
 
-use crate::db::Database;
 use crate::models::SubGatewayKey;
-use crate::state::CoreStateInner;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::ops::Deref;
 
 pub use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
 
@@ -71,13 +71,120 @@ pub struct CredentialEntry {
 /// non-deleted sub keys.
 pub type CredentialSnapshot = HashMap<String, CredentialEntry>;
 
+/// Persistence operations the key lifecycle needs. Implemented for the
+/// SQLite database and the process host in `state`.
+pub trait KeyStore {
+    fn list_active_sub_gateway_keys(&self) -> anyhow::Result<Vec<SubGatewayKey>>;
+    fn get_sub_gateway_key(&self, id: &str) -> anyhow::Result<Option<SubGatewayKey>>;
+    fn count_active_sub_gateway_keys(&self) -> anyhow::Result<usize>;
+    fn insert_sub_gateway_key(&self, key: &SubGatewayKey) -> anyhow::Result<()>;
+    fn rename_sub_gateway_key(&self, id: &str, name: &str) -> anyhow::Result<bool>;
+    fn set_sub_gateway_key_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool>;
+    fn update_sub_gateway_key_value(&self, id: &str, new_value: &str) -> anyhow::Result<bool>;
+    fn soft_delete_sub_gateway_key(&self, id: &str, now: DateTime<Utc>) -> anyhow::Result<bool>;
+    fn active_sub_gateway_key_values(&self) -> anyhow::Result<Vec<String>>;
+    fn sub_gateway_key_value_exists(&self, value: &str) -> anyhow::Result<bool>;
+    fn random_word(&self) -> String;
+}
+
+/// Process-level key host: store plus the config scalar and credential
+/// snapshot. Concrete adapters must acquire db before config before the
+/// snapshot write lock.
+pub trait KeyHost: KeyStore {
+    fn primary_gateway_key(&self) -> String;
+    fn clone_credential_snapshot(&self) -> CredentialSnapshot;
+    fn replace_credential_snapshot(&self, snapshot: CredentialSnapshot);
+    fn with_credential_snapshot_mut<R>(&self, f: impl FnOnce(&mut CredentialSnapshot) -> R) -> R;
+    /// Stored non-deleted values plus the live snapshot. Hosts must take the
+    /// db lock before the snapshot read lock.
+    fn load_unique_value_inputs(&self) -> anyhow::Result<(Vec<String>, CredentialSnapshot)>;
+    /// Active sub keys plus the primary scalar. Hosts must take the db lock
+    /// before the config lock.
+    fn load_snapshot_rebuild_inputs(&self) -> anyhow::Result<(Vec<SubGatewayKey>, String)>;
+}
+
+impl<T> KeyStore for T
+where
+    T: Deref,
+    T::Target: KeyStore,
+{
+    fn list_active_sub_gateway_keys(&self) -> anyhow::Result<Vec<SubGatewayKey>> {
+        self.deref().list_active_sub_gateway_keys()
+    }
+    fn get_sub_gateway_key(&self, id: &str) -> anyhow::Result<Option<SubGatewayKey>> {
+        self.deref().get_sub_gateway_key(id)
+    }
+    fn count_active_sub_gateway_keys(&self) -> anyhow::Result<usize> {
+        self.deref().count_active_sub_gateway_keys()
+    }
+    fn insert_sub_gateway_key(&self, key: &SubGatewayKey) -> anyhow::Result<()> {
+        self.deref().insert_sub_gateway_key(key)
+    }
+    fn rename_sub_gateway_key(&self, id: &str, name: &str) -> anyhow::Result<bool> {
+        self.deref().rename_sub_gateway_key(id, name)
+    }
+    fn set_sub_gateway_key_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool> {
+        self.deref().set_sub_gateway_key_enabled(id, enabled)
+    }
+    fn update_sub_gateway_key_value(&self, id: &str, new_value: &str) -> anyhow::Result<bool> {
+        self.deref().update_sub_gateway_key_value(id, new_value)
+    }
+    fn soft_delete_sub_gateway_key(&self, id: &str, now: DateTime<Utc>) -> anyhow::Result<bool> {
+        self.deref().soft_delete_sub_gateway_key(id, now)
+    }
+    fn active_sub_gateway_key_values(&self) -> anyhow::Result<Vec<String>> {
+        self.deref().active_sub_gateway_key_values()
+    }
+    fn sub_gateway_key_value_exists(&self, value: &str) -> anyhow::Result<bool> {
+        self.deref().sub_gateway_key_value_exists(value)
+    }
+    fn random_word(&self) -> String {
+        self.deref().random_word()
+    }
+}
+
+impl<T> KeyHost for T
+where
+    T: Deref,
+    T::Target: KeyHost,
+{
+    fn primary_gateway_key(&self) -> String {
+        self.deref().primary_gateway_key()
+    }
+    fn clone_credential_snapshot(&self) -> CredentialSnapshot {
+        self.deref().clone_credential_snapshot()
+    }
+    fn replace_credential_snapshot(&self, snapshot: CredentialSnapshot) {
+        self.deref().replace_credential_snapshot(snapshot)
+    }
+    fn with_credential_snapshot_mut<R>(&self, f: impl FnOnce(&mut CredentialSnapshot) -> R) -> R {
+        self.deref().with_credential_snapshot_mut(f)
+    }
+    fn load_unique_value_inputs(&self) -> anyhow::Result<(Vec<String>, CredentialSnapshot)> {
+        self.deref().load_unique_value_inputs()
+    }
+    fn load_snapshot_rebuild_inputs(&self) -> anyhow::Result<(Vec<SubGatewayKey>, String)> {
+        self.deref().load_snapshot_rebuild_inputs()
+    }
+}
+
 /// Snapshot ground truth. The primary entry is inserted first; cross-tier
 /// value uniqueness (enforced by the API gates) means one value can never
 /// resolve to two ids.
 pub fn build_credential_snapshot(
-    db: &Database,
+    store: &impl KeyStore,
     primary_value: &str,
 ) -> anyhow::Result<CredentialSnapshot> {
+    Ok(assemble_credential_snapshot(
+        store.list_active_sub_gateway_keys()?,
+        primary_value,
+    ))
+}
+
+fn assemble_credential_snapshot(
+    keys: impl IntoIterator<Item = SubGatewayKey>,
+    primary_value: &str,
+) -> CredentialSnapshot {
     let mut snapshot = CredentialSnapshot::new();
     if !primary_value.is_empty() {
         snapshot.insert(
@@ -88,7 +195,7 @@ pub fn build_credential_snapshot(
             },
         );
     }
-    for key in db.list_active_sub_gateway_keys()? {
+    for key in keys {
         if !key.authenticates() {
             continue;
         }
@@ -114,21 +221,20 @@ pub fn build_credential_snapshot(
             },
         );
     }
-    Ok(snapshot)
+    snapshot
 }
 
 /// Rebuilds the snapshot from the database and the config scalar. Called at
 /// every key API entry point (already under `settings_update`) so a snapshot
 /// left inconsistent by a failed rollback converges on the next operation;
 /// startup loading is the natural self-healing point.
-pub fn refresh_snapshot(state: &CoreStateInner) {
-    let next = {
-        let db = state.db.lock();
-        let primary_value = state.config.lock().gateway_key.clone();
-        build_credential_snapshot(&db, &primary_value)
+pub fn refresh_snapshot(host: &impl KeyHost) {
+    let next = match host.load_snapshot_rebuild_inputs() {
+        Ok((keys, primary_value)) => Ok(assemble_credential_snapshot(keys, &primary_value)),
+        Err(error) => Err(error),
     };
     match next {
-        Ok(next) => *state.credential_snapshot.write() = next,
+        Ok(next) => host.replace_credential_snapshot(next),
         Err(error) => {
             eprintln!("warning: failed to rebuild the credential snapshot: {error}");
         }
@@ -140,8 +246,8 @@ pub fn refresh_snapshot(state: &CoreStateInner) {
 /// the same credential can never authenticate under two ids. Shared by the
 /// dashboard settings update, the Tauri settings update, and the sub key
 /// enable path.
-pub fn ensure_primary_value_allowed(db: &Database, value: &str) -> Result<(), KeyError> {
-    let exists = db
+pub fn ensure_primary_value_allowed(store: &impl KeyStore, value: &str) -> Result<(), KeyError> {
+    let exists = store
         .sub_gateway_key_value_exists(value)
         .map_err(|error| KeyError::internal("failed to check key values", error))?;
     if exists {
@@ -168,16 +274,23 @@ fn validate_name(name: &str) -> Result<String, KeyError> {
 /// Generates a fresh value that collides with no snapshot credential (the
 /// primary plus enabled sub keys) and no stored non-deleted sub key value
 /// (disabled entries keep their plaintext).
-fn generate_unique_value(db: &Database, snapshot: &CredentialSnapshot) -> Result<String, KeyError> {
-    let stored_values = db
+fn generate_unique_value(
+    store: &impl KeyStore,
+    snapshot: &CredentialSnapshot,
+) -> Result<String, KeyError> {
+    let stored_values = store
         .active_sub_gateway_key_values()
         .map_err(|error| KeyError::internal("failed to load key values", error))?;
+    generate_unique_value_from(&stored_values, snapshot, store)
+}
+
+fn generate_unique_value_from(
+    stored_values: &[String],
+    snapshot: &CredentialSnapshot,
+    store: &impl KeyStore,
+) -> Result<String, KeyError> {
     loop {
-        let candidate = format!(
-            "ocg-{}-{}",
-            crate::state::random_word(),
-            crate::state::random_word()
-        );
+        let candidate = format!("ocg-{}-{}", store.random_word(), store.random_word());
         if snapshot.contains_key(&candidate) {
             continue;
         }
@@ -190,7 +303,7 @@ fn generate_unique_value(db: &Database, snapshot: &CredentialSnapshot) -> Result
 
 /// Generates a fresh primary key value that collides with no non-deleted sub
 /// key value; used by both primary rotation entry points.
-pub fn generate_primary_value(db: &Database, current: &str) -> Result<String, KeyError> {
+pub fn generate_primary_value(store: &impl KeyStore, current: &str) -> Result<String, KeyError> {
     let mut snapshot = CredentialSnapshot::new();
     if !current.is_empty() {
         snapshot.insert(
@@ -201,13 +314,11 @@ pub fn generate_primary_value(db: &Database, current: &str) -> Result<String, Ke
             },
         );
     }
-    generate_unique_value(db, &snapshot)
+    generate_unique_value(store, &snapshot)
 }
 
-fn active_sub_key(state: &CoreStateInner, id: &str) -> Result<SubGatewayKey, KeyError> {
-    let found = state
-        .db
-        .lock()
+fn active_sub_key(host: &impl KeyHost, id: &str) -> Result<SubGatewayKey, KeyError> {
+    let found = host
         .get_sub_gateway_key(id)
         .map_err(|error| KeyError::internal("failed to load the key", error))?;
     match found {
@@ -222,12 +333,11 @@ fn active_sub_key(state: &CoreStateInner, id: &str) -> Result<SubGatewayKey, Key
 /// (`set_config` gates warn), and dropping it would 401 the primary until
 /// the next rebuild for no security gain.
 fn revoke_snapshot_value(
-    state: &CoreStateInner,
+    host: &impl KeyHost,
     key_id: &str,
     value: &str,
 ) -> Option<CredentialEntry> {
-    let mut snapshot = state.credential_snapshot.write();
-    match snapshot.get(value) {
+    host.with_credential_snapshot_mut(|snapshot| match snapshot.get(value) {
         Some(entry) if entry.id == key_id => snapshot.remove(value),
         Some(entry) => {
             eprintln!(
@@ -238,26 +348,23 @@ fn revoke_snapshot_value(
             None
         }
         None => None,
-    }
+    })
 }
 
-fn restore_snapshot_entry(state: &CoreStateInner, value: &str, entry: CredentialEntry) {
-    state
-        .credential_snapshot
-        .write()
-        .insert(value.to_string(), entry);
+fn restore_snapshot_entry(host: &impl KeyHost, value: &str, entry: CredentialEntry) {
+    host.with_credential_snapshot_mut(|snapshot| {
+        snapshot.insert(value.to_string(), entry);
+    });
 }
 
 /// Creates a new enabled sub key and returns it; the response carries the
 /// full value exactly once. Order: commit the table write first, then
 /// rebuild the snapshot — worst case the new key starts authenticating
 /// slightly late (fail-open).
-pub fn create_sub_key(state: &CoreStateInner, name: &str) -> Result<SubGatewayKey, KeyError> {
+pub fn create_sub_key(host: &impl KeyHost, name: &str) -> Result<SubGatewayKey, KeyError> {
     let name = validate_name(name)?;
-    refresh_snapshot(state);
-    let active_count = state
-        .db
-        .lock()
+    refresh_snapshot(host);
+    let active_count = host
         .count_active_sub_gateway_keys()
         .map_err(|error| KeyError::internal("failed to count keys", error))?;
     if active_count >= MAX_ACTIVE_SUB_KEYS {
@@ -265,26 +372,23 @@ pub fn create_sub_key(state: &CoreStateInner, name: &str) -> Result<SubGatewayKe
             "at most {MAX_ACTIVE_SUB_KEYS} active keys are supported"
         )));
     }
-    let entry = {
-        let db = state.db.lock();
-        let snapshot = state.credential_snapshot.read().clone();
-        SubGatewayKey {
-            id: uuid::Uuid::new_v4().to_string(),
-            key: generate_unique_value(&db, &snapshot)?,
-            name,
-            enabled: true,
-            deleted_at: None,
-            created_at: Utc::now(),
-        }
+    let (stored_values, snapshot) = host
+        .load_unique_value_inputs()
+        .map_err(|error| KeyError::internal("failed to load key values", error))?;
+    let entry = SubGatewayKey {
+        id: uuid::Uuid::new_v4().to_string(),
+        key: generate_unique_value_from(&stored_values, &snapshot, host)?,
+        name,
+        enabled: true,
+        deleted_at: None,
+        created_at: Utc::now(),
     };
-    let insert = state
-        .db
-        .lock()
+    let insert = host
         .insert_sub_gateway_key(&entry)
         .map_err(|error| KeyError::internal("failed to create the key", error));
     match insert {
         Ok(()) => {
-            refresh_snapshot(state);
+            refresh_snapshot(host);
             Ok(entry)
         }
         Err(error) => Err(error),
@@ -293,18 +397,16 @@ pub fn create_sub_key(state: &CoreStateInner, name: &str) -> Result<SubGatewayKe
 
 /// Renames a non-deleted sub key. The snapshot rebuild afterwards keeps
 /// write-time name snapshots current.
-pub fn rename_sub_key(state: &CoreStateInner, id: &str, name: &str) -> Result<(), KeyError> {
+pub fn rename_sub_key(host: &impl KeyHost, id: &str, name: &str) -> Result<(), KeyError> {
     let name = validate_name(name)?;
-    refresh_snapshot(state);
-    let renamed = state
-        .db
-        .lock()
+    refresh_snapshot(host);
+    let renamed = host
         .rename_sub_gateway_key(id, &name)
         .map_err(|error| KeyError::internal("failed to rename the key", error))?;
     if !renamed {
         return Err(KeyError::bad_request("key not found"));
     }
-    refresh_snapshot(state);
+    refresh_snapshot(host);
     Ok(())
 }
 
@@ -317,28 +419,22 @@ pub fn rename_sub_key(state: &CoreStateInner, id: &str, name: &str) -> Result<()
 ///
 /// Disabling is a revocation: the snapshot drops the value before the table
 /// write (fail-closed) and restores it when the write fails.
-pub fn set_sub_key_enabled(
-    state: &CoreStateInner,
-    id: &str,
-    enabled: bool,
-) -> Result<(), KeyError> {
-    refresh_snapshot(state);
-    let current = active_sub_key(state, id)?;
+pub fn set_sub_key_enabled(host: &impl KeyHost, id: &str, enabled: bool) -> Result<(), KeyError> {
+    refresh_snapshot(host);
+    let current = active_sub_key(host, id)?;
     if enabled {
-        let primary_value = state.config.lock().gateway_key.clone();
+        let primary_value = host.primary_gateway_key();
         if current.key == primary_value {
             return Err(KeyError::bad_request(
                 "key value collides with the primary key",
             ));
         }
-        let updated = state
-            .db
-            .lock()
+        let updated = host
             .set_sub_gateway_key_enabled(id, true)
             .map_err(|error| KeyError::internal("failed to enable the key", error));
         return match updated {
             Ok(true) => {
-                refresh_snapshot(state);
+                refresh_snapshot(host);
                 Ok(())
             }
             Ok(false) => Err(KeyError::bad_request("key not found")),
@@ -349,23 +445,21 @@ pub fn set_sub_key_enabled(
     if !current.enabled {
         return Ok(());
     }
-    let revoked = revoke_snapshot_value(state, &current.id, &current.key);
-    let updated = state
-        .db
-        .lock()
+    let revoked = revoke_snapshot_value(host, &current.id, &current.key);
+    let updated = host
         .set_sub_gateway_key_enabled(id, false)
         .map_err(|error| KeyError::internal("failed to disable the key", error));
     match updated {
         Ok(true) => Ok(()),
         Ok(false) => {
             if let Some(entry) = revoked {
-                restore_snapshot_entry(state, &current.key, entry);
+                restore_snapshot_entry(host, &current.key, entry);
             }
             Err(KeyError::bad_request("key not found"))
         }
         Err(error) => {
             if let Some(entry) = revoked {
-                restore_snapshot_entry(state, &current.key, entry);
+                restore_snapshot_entry(host, &current.key, entry);
             }
             Err(error)
         }
@@ -378,28 +472,24 @@ pub fn set_sub_key_enabled(
 /// value but does NOT grant the new value: disabled credentials never
 /// authenticate (spec MUST), so the snapshot entry only appears once the
 /// key is re-enabled (which revalidates the value against the primary).
-pub fn regenerate_sub_key(state: &CoreStateInner, id: &str) -> Result<SubGatewayKey, KeyError> {
-    refresh_snapshot(state);
-    let current = active_sub_key(state, id)?;
-    let new_value = {
-        let db = state.db.lock();
-        let snapshot = state.credential_snapshot.read().clone();
-        generate_unique_value(&db, &snapshot)?
-    };
-    let revoked = revoke_snapshot_value(state, &current.id, &current.key);
+pub fn regenerate_sub_key(host: &impl KeyHost, id: &str) -> Result<SubGatewayKey, KeyError> {
+    refresh_snapshot(host);
+    let current = active_sub_key(host, id)?;
+    let (stored_values, snapshot) = host
+        .load_unique_value_inputs()
+        .map_err(|error| KeyError::internal("failed to load key values", error))?;
+    let new_value = generate_unique_value_from(&stored_values, &snapshot, host)?;
+    let revoked = revoke_snapshot_value(host, &current.id, &current.key);
     if current.enabled {
         let granted = CredentialEntry {
             id: current.id.clone(),
             name: current.name.clone(),
         };
-        state
-            .credential_snapshot
-            .write()
-            .insert(new_value.clone(), granted);
+        host.with_credential_snapshot_mut(|snapshot| {
+            snapshot.insert(new_value.clone(), granted);
+        });
     }
-    let updated = state
-        .db
-        .lock()
+    let updated = host
         .update_sub_gateway_key_value(id, &new_value)
         .map_err(|error| KeyError::internal("failed to regenerate the key", error));
     match updated {
@@ -408,57 +498,53 @@ pub fn regenerate_sub_key(state: &CoreStateInner, id: &str) -> Result<SubGateway
             ..current
         }),
         Ok(false) => {
-            rollback_snapshot_swap(state, &current.key, revoked, &new_value);
+            rollback_snapshot_swap(host, &current.key, revoked, &new_value);
             Err(KeyError::bad_request("key not found"))
         }
         Err(error) => {
-            rollback_snapshot_swap(state, &current.key, revoked, &new_value);
+            rollback_snapshot_swap(host, &current.key, revoked, &new_value);
             Err(error)
         }
     }
 }
 
 fn rollback_snapshot_swap(
-    state: &CoreStateInner,
+    host: &impl KeyHost,
     old_value: &str,
     revoked: Option<CredentialEntry>,
     new_value: &str,
 ) {
     // Remove/insert on the HashMap cannot fail; if this ever changes, the
     // entry-point rebuild on the next key API operation converges anyway.
-    state.credential_snapshot.write().remove(new_value);
+    host.with_credential_snapshot_mut(|snapshot| {
+        snapshot.remove(new_value);
+    });
     if let Some(entry) = revoked {
-        restore_snapshot_entry(state, old_value, entry);
+        restore_snapshot_entry(host, old_value, entry);
     }
 }
 
 /// Soft-deletes a non-deleted sub key: clears the plaintext, keeps id/name/
 /// deleted_at for attribution. Revocation is fail-closed; the snapshot drops
 /// the value before the table write and restores it on failure.
-pub fn delete_sub_key(
-    state: &CoreStateInner,
-    id: &str,
-    now: DateTime<Utc>,
-) -> Result<(), KeyError> {
-    refresh_snapshot(state);
-    let current = active_sub_key(state, id)?;
-    let revoked = revoke_snapshot_value(state, &current.id, &current.key);
-    let deleted = state
-        .db
-        .lock()
+pub fn delete_sub_key(host: &impl KeyHost, id: &str, now: DateTime<Utc>) -> Result<(), KeyError> {
+    refresh_snapshot(host);
+    let current = active_sub_key(host, id)?;
+    let revoked = revoke_snapshot_value(host, &current.id, &current.key);
+    let deleted = host
         .soft_delete_sub_gateway_key(id, now)
         .map_err(|error| KeyError::internal("failed to delete the key", error));
     match deleted {
         Ok(true) => Ok(()),
         Ok(false) => {
             if let Some(entry) = revoked {
-                restore_snapshot_entry(state, &current.key, entry);
+                restore_snapshot_entry(host, &current.key, entry);
             }
             Err(KeyError::bad_request("key not found"))
         }
         Err(error) => {
             if let Some(entry) = revoked {
-                restore_snapshot_entry(state, &current.key, entry);
+                restore_snapshot_entry(host, &current.key, entry);
             }
             Err(error)
         }
@@ -471,10 +557,12 @@ mod tests {
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::Database;
     use crate::models::AppConfig;
+    use crate::state::CoreStateInner;
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn temp_state(label: &str) -> (PathBuf, Arc<CoreStateInner>) {
         let mut dir = std::env::temp_dir();
@@ -492,6 +580,156 @@ mod tests {
 
     fn snapshot_values(state: &CoreStateInner) -> HashSet<String> {
         state.credential_snapshot.read().keys().cloned().collect()
+    }
+
+    struct MemoryKeys {
+        keys: std::sync::Mutex<Vec<SubGatewayKey>>,
+        primary: std::sync::Mutex<String>,
+        snapshot: std::sync::Mutex<CredentialSnapshot>,
+        word: AtomicU64,
+    }
+
+    impl MemoryKeys {
+        fn new(primary: &str) -> Self {
+            let mut snapshot = CredentialSnapshot::new();
+            if !primary.is_empty() {
+                snapshot.insert(
+                    primary.to_string(),
+                    CredentialEntry {
+                        id: PRIMARY_KEY_ID.to_string(),
+                        name: PRIMARY_KEY_NAME.to_string(),
+                    },
+                );
+            }
+            Self {
+                keys: std::sync::Mutex::new(Vec::new()),
+                primary: std::sync::Mutex::new(primary.to_string()),
+                snapshot: std::sync::Mutex::new(snapshot),
+                word: AtomicU64::new(0),
+            }
+        }
+
+        fn active_keys(&self) -> Vec<SubGatewayKey> {
+            self.keys
+                .lock()
+                .expect("memory keys")
+                .iter()
+                .filter(|key| key.is_active())
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl KeyStore for MemoryKeys {
+        fn list_active_sub_gateway_keys(&self) -> anyhow::Result<Vec<SubGatewayKey>> {
+            Ok(self.active_keys())
+        }
+        fn get_sub_gateway_key(&self, id: &str) -> anyhow::Result<Option<SubGatewayKey>> {
+            Ok(self
+                .keys
+                .lock()
+                .expect("memory keys")
+                .iter()
+                .find(|key| key.id == id)
+                .cloned())
+        }
+        fn count_active_sub_gateway_keys(&self) -> anyhow::Result<usize> {
+            Ok(self.active_keys().len())
+        }
+        fn insert_sub_gateway_key(&self, key: &SubGatewayKey) -> anyhow::Result<()> {
+            self.keys.lock().expect("memory keys").push(key.clone());
+            Ok(())
+        }
+        fn rename_sub_gateway_key(&self, id: &str, name: &str) -> anyhow::Result<bool> {
+            let mut keys = self.keys.lock().expect("memory keys");
+            match keys.iter_mut().find(|key| key.id == id && key.is_active()) {
+                Some(key) => {
+                    key.name = name.to_string();
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+        fn set_sub_gateway_key_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool> {
+            let mut keys = self.keys.lock().expect("memory keys");
+            match keys.iter_mut().find(|key| key.id == id && key.is_active()) {
+                Some(key) => {
+                    key.enabled = enabled;
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+        fn update_sub_gateway_key_value(&self, id: &str, new_value: &str) -> anyhow::Result<bool> {
+            let mut keys = self.keys.lock().expect("memory keys");
+            match keys.iter_mut().find(|key| key.id == id && key.is_active()) {
+                Some(key) => {
+                    key.key = new_value.to_string();
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+        fn soft_delete_sub_gateway_key(
+            &self,
+            id: &str,
+            now: DateTime<Utc>,
+        ) -> anyhow::Result<bool> {
+            let mut keys = self.keys.lock().expect("memory keys");
+            match keys.iter_mut().find(|key| key.id == id && key.is_active()) {
+                Some(key) => {
+                    key.key.clear();
+                    key.enabled = false;
+                    key.deleted_at = Some(now);
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+        fn active_sub_gateway_key_values(&self) -> anyhow::Result<Vec<String>> {
+            Ok(self
+                .active_keys()
+                .into_iter()
+                .map(|key| key.key)
+                .filter(|value| !value.is_empty())
+                .collect())
+        }
+        fn sub_gateway_key_value_exists(&self, value: &str) -> anyhow::Result<bool> {
+            Ok(self
+                .active_keys()
+                .iter()
+                .any(|key| key.key == value && !key.key.is_empty()))
+        }
+        fn random_word(&self) -> String {
+            format!("w{:04}", self.word.fetch_add(1, Ordering::Relaxed))
+        }
+    }
+
+    impl KeyHost for MemoryKeys {
+        fn primary_gateway_key(&self) -> String {
+            self.primary.lock().expect("primary").clone()
+        }
+        fn clone_credential_snapshot(&self) -> CredentialSnapshot {
+            self.snapshot.lock().expect("snapshot").clone()
+        }
+        fn replace_credential_snapshot(&self, snapshot: CredentialSnapshot) {
+            *self.snapshot.lock().expect("snapshot") = snapshot;
+        }
+        fn with_credential_snapshot_mut<R>(
+            &self,
+            f: impl FnOnce(&mut CredentialSnapshot) -> R,
+        ) -> R {
+            f(&mut self.snapshot.lock().expect("snapshot"))
+        }
+        fn load_unique_value_inputs(&self) -> anyhow::Result<(Vec<String>, CredentialSnapshot)> {
+            Ok((
+                self.active_sub_gateway_key_values()?,
+                self.clone_credential_snapshot(),
+            ))
+        }
+        fn load_snapshot_rebuild_inputs(&self) -> anyhow::Result<(Vec<SubGatewayKey>, String)> {
+            Ok((self.active_keys(), self.primary_gateway_key()))
+        }
     }
 
     #[test]
@@ -744,5 +982,38 @@ mod tests {
 
         drop(state);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn key_store_seam_enforces_uniqueness_without_process_host() {
+        let store = MemoryKeys::new("ocg-primary");
+        let created = create_sub_key(&store, "Laptop").expect("memory host should create");
+        assert!(ensure_primary_value_allowed(&store, &created.key).is_err());
+        let rotated = generate_primary_value(&store, "ocg-primary").expect("rotate");
+        assert_ne!(rotated, created.key);
+        assert_ne!(rotated, "ocg-primary");
+        assert!(rotated.starts_with("ocg-w"));
+    }
+
+    #[test]
+    fn key_host_seam_revokes_fail_closed_without_process_host() {
+        let store = MemoryKeys::new("ocg-primary");
+        let created = create_sub_key(&store, "Laptop").expect("memory host should create");
+        assert!(store.clone_credential_snapshot().contains_key(&created.key));
+        set_sub_key_enabled(&store, &created.id, false).expect("disable");
+        assert!(!store.clone_credential_snapshot().contains_key(&created.key));
+        *store.primary.lock().expect("primary") = created.key.clone();
+        assert_eq!(
+            set_sub_key_enabled(&store, &created.id, true).unwrap_err(),
+            KeyError::bad_request("key value collides with the primary key")
+        );
+        delete_sub_key(&store, &created.id, Utc::now()).expect("delete");
+        let tombstone = store
+            .get_sub_gateway_key(&created.id)
+            .unwrap()
+            .expect("tombstone");
+        assert!(tombstone.deleted_at.is_some());
+        assert!(tombstone.key.is_empty());
+        assert_eq!(tombstone.name, "Laptop");
     }
 }

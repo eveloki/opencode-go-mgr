@@ -6,14 +6,10 @@
 
 pub mod provider_adapter;
 
-use crate::db::{
-    AccountUsageCalibrationSnapshot, AccountUsageSyncState, AccountUsageSyncSuccessMetadata,
-    Database,
-};
 use crate::go_usage::{GoUsageError, GoUsageSnapshot};
 use crate::kernel::pricing::PricingLimits;
-use crate::models::UsageWindow;
-use crate::state::CoreState;
+use crate::models::{Account, AppConfig, UsageWindow};
+use crate::provider::ProviderUsageSyncState;
 use crate::usage_sync::provider_adapter::supports_authoritative_auto_sync;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::future::FutureExt;
@@ -117,8 +113,76 @@ type RefreshFuture =
 type ClockFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 type JitterFn = Arc<dyn Fn() -> f64 + Send + Sync>;
 type FetchFuture = Pin<Box<dyn Future<Output = Result<GoUsageSnapshot, GoUsageError>> + Send>>;
-type FetchFn = Arc<dyn Fn(crate::models::AppConfig, String) -> FetchFuture + Send + Sync>;
+type FetchFn = Arc<dyn Fn(AppConfig, String) -> FetchFuture + Send + Sync>;
 type CleanupHook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Metadata committed with a successful official calibration. Hosts map this
+/// onto the persistence row without exposing database types here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OfficialUsageSyncSuccessMetadata {
+    pub now: DateTime<Utc>,
+    pub next_eligible_at: DateTime<Utc>,
+    pub mark_expedited: bool,
+}
+
+/// Persistence operations held under one database lock by [`UsageSyncHost`].
+pub trait UsageSyncStore {
+    fn list_accounts(&self) -> anyhow::Result<Vec<Account>>;
+    fn get_account(&self, account_id: &str) -> anyhow::Result<Option<Account>>;
+    fn account_usage_sync_state(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<ProviderUsageSyncState>>;
+    fn pull_account_usage_sync_next_eligible(
+        &self,
+        account_id: &str,
+        proposal: DateTime<Utc>,
+        respect_failure_backoff: bool,
+    ) -> anyhow::Result<()>;
+    fn account_has_local_activity_since(
+        &self,
+        account_id: &str,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<bool>;
+    fn account_usage_with_limits(
+        &self,
+        account_id: &str,
+        limits: &PricingLimits,
+    ) -> anyhow::Result<UsageWindow>;
+    fn commit_official_usage_sync_success(
+        &self,
+        account_id: &str,
+        expected_key_cipher: &str,
+        snapshot: &GoUsageSnapshot,
+        limits: &PricingLimits,
+        metadata: OfficialUsageSyncSuccessMetadata,
+    ) -> anyhow::Result<Option<UsageWindow>>;
+    fn record_account_usage_sync_failure(
+        &self,
+        account_id: &str,
+        now: DateTime<Utc>,
+        failure_streak: i64,
+        next_eligible_at: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
+    fn log_gateway(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()>;
+}
+
+/// Process-level usage-sync host: database/config/proxy/fetch/clock/scheduler
+/// seams the reconciler actually needs. Concrete adapters live in `state`.
+pub trait UsageSyncHost: Clone + Send + Sync + 'static {
+    type Weak: Send + Sync + 'static;
+    type Store: UsageSyncStore + ?Sized;
+
+    fn downgrade(&self) -> Self::Weak;
+    fn upgrade(weak: &Self::Weak) -> Option<Self>;
+    fn usage_runtime(&self) -> &UsageSyncRuntime;
+    fn pricing_limits(&self) -> PricingLimits;
+    fn config(&self) -> AppConfig;
+    fn decrypt_account_key(&self, ciphertext: &str) -> anyhow::Result<String>;
+    fn with_sync_store<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Self::Store) -> R;
+}
 
 #[derive(Clone)]
 struct InflightEntry {
@@ -131,7 +195,7 @@ pub struct UsageSyncRuntime {
     global: AsyncMutex<()>,
     inflight: AsyncMutex<HashMap<String, InflightEntry>>,
     inflight_generation: AtomicU64,
-    /// Arc so the scheduler can wait without pinning `CoreState` alive.
+    /// Arc so the scheduler can wait without pinning the process host alive.
     wake: Arc<Notify>,
     loop_started: AtomicBool,
     /// Optional injectable clock for tests. Production uses `Utc::now`.
@@ -176,7 +240,7 @@ impl UsageSyncRuntime {
 
     pub fn set_fetch_for_test(
         &self,
-        fetch: impl Fn(crate::models::AppConfig, String) -> FetchFuture + Send + Sync + 'static,
+        fetch: impl Fn(AppConfig, String) -> FetchFuture + Send + Sync + 'static,
     ) {
         *self.fetch.lock() = Some(Arc::new(fetch));
     }
@@ -403,69 +467,78 @@ pub fn active_cadence_pull_proposal(
 /// Intentionally allowed to pull earlier than a failure-backoff floor: the
 /// 1–2 minute post-429 event is an explicit override of cadence/backoff
 /// scheduling, tested separately from threshold/cadence pulls.
-pub fn schedule_after_inference_429(state: &CoreState, account_id: &str) {
-    let now = state.usage_sync.now();
-    let jitter = state.usage_sync.jitter01();
+pub fn schedule_after_inference_429(state: &impl UsageSyncHost, account_id: &str) {
+    let now = state.usage_runtime().now();
+    let jitter = state.usage_runtime().jitter01();
     let proposal = compute_inference_429_delay(now, jitter);
-    {
-        let db = state.db.lock();
-        let supported = match db.get_account(account_id) {
+    let scheduled = state.with_sync_store(|store| {
+        let supported = match store.get_account(account_id) {
             Ok(Some(account)) => {
                 supports_authoritative_auto_sync(&account.provider_id, &account.offering_id)
             }
             Ok(None) => false,
             Err(error) => {
-                let _ = db.log_gateway(
+                let _ = store.log_gateway(
                     "warn",
                     "usage_sync",
                     &format!(
                         "failed to resolve provider before post-429 usage sync for {account_id}: {error}"
                     ),
                 );
-                return;
+                return false;
             }
         };
         if !supported {
             // GOAT `/alpha/*` usage is experimental/unavailable and must not be
             // coupled to inference cooldown or eligibility. Zen Free uses its
             // separate egress-IP/global cooldown path.
-            return;
+            return false;
         }
-        if let Err(error) = db.pull_account_usage_sync_next_eligible(account_id, proposal, false) {
-            let _ = db.log_gateway(
+        if let Err(error) = store.pull_account_usage_sync_next_eligible(account_id, proposal, false)
+        {
+            let _ = store.log_gateway(
                 "warn",
                 "usage_sync",
                 &format!("failed to schedule post-429 usage sync for {account_id}: {error}"),
             );
-            return;
+            return false;
         }
+        true
+    });
+    if scheduled {
+        state.usage_runtime().wake();
     }
-    state.usage_sync.wake();
 }
 
-/// Start the background reconciler once per `CoreState`. Safe to call
+/// Start the background reconciler once per process host. Safe to call
 /// repeatedly; the loop is not cancelled by Gateway stop and exits only when
-/// the owning `CoreState` is dropped (weak upgrade fails).
-pub fn spawn_usage_sync_loop(state: CoreState) {
-    if state.usage_sync.loop_started.swap(true, Ordering::AcqRel) {
+/// the owning host is dropped (weak upgrade fails).
+pub fn spawn_usage_sync_loop<H: UsageSyncHost>(state: H) {
+    if state
+        .usage_runtime()
+        .loop_started
+        .swap(true, Ordering::AcqRel)
+    {
         return;
     }
-    let weak = Arc::downgrade(&state);
+    let weak = state.downgrade();
     tokio::spawn(async move {
         loop {
-            let Some(state) = weak.upgrade() else {
+            let Some(state) = H::upgrade(&weak) else {
                 return;
             };
             if let Err(error) = run_scheduler_once(&state).await {
-                let _ = state.db.lock().log_gateway(
-                    "warn",
-                    "usage_sync",
-                    &format!("official usage scheduler tick failed: {error}"),
-                );
+                state.with_sync_store(|store| {
+                    let _ = store.log_gateway(
+                        "warn",
+                        "usage_sync",
+                        &format!("official usage scheduler tick failed: {error}"),
+                    );
+                });
             }
             // Clone the wake handle, then drop state before awaiting so tests
             // and shutdown can release the SQLite file promptly.
-            let wake = state.usage_sync.wake_handle();
+            let wake = state.usage_runtime().wake_handle();
             drop(state);
             tokio::select! {
                 _ = tokio::time::sleep(SCHEDULER_IDLE_TICK) => {}
@@ -475,18 +548,16 @@ pub fn spawn_usage_sync_loop(state: CoreState) {
     });
 }
 
-async fn run_scheduler_once(state: &CoreState) -> anyhow::Result<()> {
-    let now = state.usage_sync.now();
-    let limits = state.pricing_snapshot().limits.clone();
-    let candidates = {
-        let db = state.db.lock();
-        list_auto_candidates(&db, now, &limits)?
-    };
+async fn run_scheduler_once(state: &impl UsageSyncHost) -> anyhow::Result<()> {
+    let now = state.usage_runtime().now();
+    let limits = state.pricing_limits();
+    let candidates = list_auto_candidates(state, now, &limits)?;
     for candidate in candidates {
         match candidate.action {
             CandidateAction::DeferStartup { until } => {
-                let db = state.db.lock();
-                db.pull_account_usage_sync_next_eligible(&candidate.account_id, until, true)?;
+                state.with_sync_store(|store| {
+                    store.pull_account_usage_sync_next_eligible(&candidate.account_id, until, true)
+                })?;
             }
             CandidateAction::Refresh { trigger } => {
                 let _ = refresh_official_usage(state, &candidate.account_id, trigger).await;
@@ -510,11 +581,19 @@ struct SyncCandidate {
 }
 
 fn list_auto_candidates(
-    db: &Database,
+    host: &impl UsageSyncHost,
     now: DateTime<Utc>,
     limits: &PricingLimits,
 ) -> anyhow::Result<Vec<SyncCandidate>> {
-    let accounts = db.list_accounts()?;
+    host.with_sync_store(|store| list_auto_candidates_on(store, now, limits))
+}
+
+fn list_auto_candidates_on(
+    store: &(impl UsageSyncStore + ?Sized),
+    now: DateTime<Utc>,
+    limits: &PricingLimits,
+) -> anyhow::Result<Vec<SyncCandidate>> {
+    let accounts = store.list_accounts()?;
     let mut out = Vec::new();
     for account in accounts {
         if !provider_account_is_auto_sync_candidate(
@@ -526,7 +605,7 @@ fn list_auto_candidates(
         ) {
             continue;
         }
-        let sync = db.account_usage_sync_state(&account.id)?;
+        let sync = store.account_usage_sync_state(&account.id)?;
         let next = sync.as_ref().and_then(|s| s.next_eligible_at);
         if next.is_none() {
             let until = compute_startup_deferral(now, &account.id, deterministic_unit(&account.id));
@@ -549,14 +628,14 @@ fn list_auto_candidates(
             }
 
             let active =
-                db.account_has_local_activity_since(&account.id, now - ACTIVITY_LOOKBACK)?;
+                store.account_has_local_activity_since(&account.id, now - ACTIVITY_LOOKBACK)?;
             if active {
                 if let Some(proposal) = active_cadence_pull_proposal(
                     sync_state.and_then(|s| s.last_success_at),
                     next_at,
                     now,
                 ) {
-                    db.pull_account_usage_sync_next_eligible(&account.id, proposal, true)?;
+                    store.pull_account_usage_sync_next_eligible(&account.id, proposal, true)?;
                     if proposal <= now {
                         out.push(SyncCandidate {
                             account_id: account.id.clone(),
@@ -569,7 +648,7 @@ fn list_auto_candidates(
                 }
             }
 
-            let usage = db.account_usage_with_limits(&account.id, limits)?;
+            let usage = store.account_usage_with_limits(&account.id, limits)?;
             let max_pct = max_go_usage_percent(&usage, limits);
             if should_run_expedited(
                 max_pct,
@@ -579,7 +658,7 @@ fn list_auto_candidates(
                 now,
             ) {
                 let proposal = now;
-                db.pull_account_usage_sync_next_eligible(&account.id, proposal, true)?;
+                store.pull_account_usage_sync_next_eligible(&account.id, proposal, true)?;
                 out.push(SyncCandidate {
                     account_id: account.id,
                     action: CandidateAction::Refresh {
@@ -590,7 +669,7 @@ fn list_auto_candidates(
             continue;
         }
 
-        let usage = db.account_usage_with_limits(&account.id, limits)?;
+        let usage = store.account_usage_with_limits(&account.id, limits)?;
         let max_pct = max_go_usage_percent(&usage, limits);
         let trigger = if !backing_off
             && should_run_expedited(
@@ -630,17 +709,15 @@ fn take_inflight_if_generation(
 
 /// Shared manual/background entry. Enforces throttle (manual), global
 /// concurrency 1, in-flight dedupe, secure fetch, key CAS, and sync metadata.
-pub async fn refresh_official_usage(
-    state: &CoreState,
+pub async fn refresh_official_usage<H: UsageSyncHost>(
+    state: &H,
     account_id: &str,
     trigger: UsageSyncTrigger,
 ) -> Result<OfficialUsageRefreshSuccess, OfficialUsageRefreshError> {
     if trigger == UsageSyncTrigger::Manual {
-        let now = state.usage_sync.now();
+        let now = state.usage_runtime().now();
         let sync = state
-            .db
-            .lock()
-            .account_usage_sync_state(account_id)
+            .with_sync_store(|store| store.account_usage_sync_state(account_id))
             .map_err(|e| OfficialUsageRefreshError::Internal(e.to_string()))?;
         if let Some(until) = manual_next_allowed_at(sync.and_then(|s| s.last_attempt_at), now) {
             let retry_after_secs = (until - now).num_seconds().max(1) as u64;
@@ -652,14 +729,14 @@ pub async fn refresh_official_usage(
     }
 
     let (future, generation) = {
-        let mut inflight = state.usage_sync.inflight.lock().await;
+        let mut inflight = state.usage_runtime().inflight.lock().await;
         if let Some(existing) = inflight.get(account_id) {
             (existing.future.clone(), existing.generation)
         } else {
             let account_id_owned = account_id.to_string();
             let state_cloned = state.clone();
             let generation = state
-                .usage_sync
+                .usage_runtime()
                 .inflight_generation
                 .fetch_add(1, Ordering::Relaxed);
             let shared = async move {
@@ -681,12 +758,12 @@ pub async fn refresh_official_usage(
     };
 
     let result = future.await;
-    let cleanup_hook = state.usage_sync.before_inflight_cleanup.lock().clone();
+    let cleanup_hook = state.usage_runtime().before_inflight_cleanup.lock().clone();
     if let Some(hook) = cleanup_hook {
         hook().await;
     }
     {
-        let mut inflight = state.usage_sync.inflight.lock().await;
+        let mut inflight = state.usage_runtime().inflight.lock().await;
         take_inflight_if_generation(&mut inflight, account_id, generation);
     }
 
@@ -697,23 +774,21 @@ pub async fn refresh_official_usage(
 }
 
 async fn execute_official_usage_refresh(
-    state: &CoreState,
+    state: &impl UsageSyncHost,
     account_id: &str,
     trigger: UsageSyncTrigger,
 ) -> Result<OfficialUsageRefreshSuccess, OfficialUsageRefreshError> {
-    let _guard = state.usage_sync.global.lock().await;
-    let now = state.usage_sync.now();
-    let limits = state.pricing_snapshot().limits.clone();
+    let _guard = state.usage_runtime().global.lock().await;
+    let now = state.usage_runtime().now();
+    let limits = state.pricing_limits();
     let config = state.config();
 
     // Policy exclusions: do not begin an attempt / do not write backoff.
     let account = {
-        let db = state.db.lock();
-        match db.get_account(account_id) {
+        match state.with_sync_store(|store| store.get_account(account_id)) {
             Ok(Some(account)) => account,
             Ok(None) => return Err(OfficialUsageRefreshError::NotFound),
             Err(error) => {
-                drop(db);
                 // DB read failed after scheduler selected the account: treat as
                 // a begun attempt so the due stamp cannot busy-loop.
                 record_attempt_failure(state, account_id, now);
@@ -737,7 +812,7 @@ async fn execute_official_usage_refresh(
         ));
     }
     let key_cipher = account.key_cipher.clone();
-    let plaintext = match state.decrypt_key(&key_cipher) {
+    let plaintext = match state.decrypt_account_key(&key_cipher) {
         Ok(key) => key,
         Err(error) => {
             record_attempt_failure(state, account_id, now);
@@ -746,7 +821,7 @@ async fn execute_official_usage_refresh(
     };
 
     let snapshot = {
-        let fetch = state.usage_sync.fetch.lock().clone();
+        let fetch = state.usage_runtime().fetch.lock().clone();
         let result = if let Some(fetch) = fetch {
             fetch(config.clone(), plaintext.clone()).await
         } else {
@@ -765,50 +840,43 @@ async fn execute_official_usage_refresh(
     };
 
     let active = {
-        let db = state.db.lock();
-        match db.account_has_local_activity_since(account_id, now - ACTIVITY_LOOKBACK) {
+        match state.with_sync_store(|store| {
+            store.account_has_local_activity_since(account_id, now - ACTIVITY_LOOKBACK)
+        }) {
             Ok(active) => active,
             Err(error) => {
-                drop(db);
                 record_attempt_failure(state, account_id, now);
                 return Err(OfficialUsageRefreshError::Internal(error.to_string()));
             }
         }
     };
-    let jitter = state.usage_sync.jitter01();
+    let jitter = state.usage_runtime().jitter01();
     let next_eligible =
         compute_next_after_success(now, active, snapshot.earliest_resets_in_minutes, jitter);
     let next_allowed = now + MANUAL_THROTTLE;
     let usage = {
-        let db = state.db.lock();
-        let committed = db.commit_official_usage_sync_success(
-            account_id,
-            &key_cipher,
-            &AccountUsageCalibrationSnapshot {
-                rolling_percent: snapshot.rolling_percent,
-                weekly_percent: snapshot.weekly_percent,
-                monthly_percent: snapshot.monthly_percent,
-                rolling_resets_in_minutes: snapshot.rolling_resets_in_minutes,
-                weekly_resets_in_minutes: snapshot.weekly_resets_in_minutes,
-            },
-            &limits,
-            AccountUsageSyncSuccessMetadata {
-                now,
-                next_eligible_at: next_eligible,
-                mark_expedited: trigger == UsageSyncTrigger::Expedited,
-            },
-        );
+        let committed = state.with_sync_store(|store| {
+            store.commit_official_usage_sync_success(
+                account_id,
+                &key_cipher,
+                &snapshot,
+                &limits,
+                OfficialUsageSyncSuccessMetadata {
+                    now,
+                    next_eligible_at: next_eligible,
+                    mark_expedited: trigger == UsageSyncTrigger::Expedited,
+                },
+            )
+        });
         match committed {
             Ok(Some(usage)) => usage,
             Ok(None) => {
-                drop(db);
                 record_attempt_failure(state, account_id, now);
                 return Err(OfficialUsageRefreshError::Conflict(
                     "account key or setup changed while refreshing official Go usage",
                 ));
             }
             Err(error) => {
-                drop(db);
                 record_attempt_failure(state, account_id, now);
                 return Err(OfficialUsageRefreshError::Internal(error.to_string()));
             }
@@ -826,24 +894,25 @@ async fn execute_official_usage_refresh(
 /// Record a safe retry/backoff outcome for any begun attempt that did not
 /// succeed. Never logs keys, ciphertext, or upstream bodies. If persistence
 /// itself fails, emit only a sanitized scheduler diagnostic.
-fn record_attempt_failure(state: &CoreState, account_id: &str, now: DateTime<Utc>) {
-    let jitter = state.usage_sync.jitter01();
-    let db = state.db.lock();
-    let current = db.account_usage_sync_state(account_id).ok().flatten();
-    let streak = current.as_ref().map(|s| s.failure_streak).unwrap_or(0) + 1;
-    let next = compute_next_after_failure(now, streak as u32, jitter);
-    if let Err(error) = db.record_account_usage_sync_failure(account_id, now, streak, next) {
-        let _ = db.log_gateway(
-            "warn",
-            "usage_sync",
-            &format!("failed to persist usage-sync backoff for {account_id}: {error}"),
-        );
-    }
+fn record_attempt_failure(state: &impl UsageSyncHost, account_id: &str, now: DateTime<Utc>) {
+    let jitter = state.usage_runtime().jitter01();
+    state.with_sync_store(|store| {
+        let current = store.account_usage_sync_state(account_id).ok().flatten();
+        let streak = current.as_ref().map(|s| s.failure_streak).unwrap_or(0) + 1;
+        let next = compute_next_after_failure(now, streak as u32, jitter);
+        if let Err(error) = store.record_account_usage_sync_failure(account_id, now, streak, next) {
+            let _ = store.log_gateway(
+                "warn",
+                "usage_sync",
+                &format!("failed to persist usage-sync backoff for {account_id}: {error}"),
+            );
+        }
+    });
 }
 
 /// Dashboard helper: map sync metadata onto API fields.
 pub fn dashboard_sync_fields(
-    sync: Option<&AccountUsageSyncState>,
+    sync: Option<&ProviderUsageSyncState>,
     now: DateTime<Utc>,
 ) -> (Option<String>, Option<String>) {
     let last_success = sync.and_then(|s| s.last_success_at.map(|t| t.to_rfc3339()));
@@ -857,13 +926,13 @@ pub fn dashboard_sync_fields(
 mod tests {
     use super::*;
     use crate::crypto::{KeyCipher, StaticKeyCipher};
-    use crate::db::Database;
+    use crate::db::{AccountUsageCalibrationSnapshot, Database};
     use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
     use crate::provider::{
         COMMAND_CODE_PROVIDER_ID, CreditBalance, GOAT_OFFERING_ID, QUOTA_WINDOW_FIVE_HOURS,
         QUOTA_WINDOW_MONTH, QUOTA_WINDOW_WEEK, QuotaWindow, ZEN_FREE_ACCOUNT_ID,
     };
-    use crate::state::CoreStateInner;
+    use crate::state::{CoreState, CoreStateInner};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -1488,10 +1557,7 @@ mod tests {
         }
 
         let limits = state.pricing_snapshot().limits.clone();
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, now, &limits).unwrap()
-        };
+        let candidates = list_auto_candidates(&state, now, &limits).unwrap();
         let ids: Vec<_> = candidates.iter().map(|c| c.account_id.as_str()).collect();
         assert!(ids.contains(&"active"));
         assert!(ids.contains(&"inactive"));
@@ -1557,10 +1623,7 @@ mod tests {
         });
         // First scan pulls expedite and fails into 5m backoff.
         let limits = state.pricing_snapshot().limits.clone();
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, now, &limits).unwrap()
-        };
+        let candidates = list_auto_candidates(&state, now, &limits).unwrap();
         assert!(candidates.iter().any(|c| {
             c.account_id == "hi"
                 && matches!(
@@ -1582,10 +1645,7 @@ mod tests {
 
         // ~30s later the scheduler must not re-select despite still-high usage.
         let soon = now + Duration::seconds(30);
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, soon, &limits).unwrap()
-        };
+        let candidates = list_auto_candidates(&state, soon, &limits).unwrap();
         assert!(!candidates.iter().any(|c| c.account_id == "hi"));
 
         // Repeated failure advances the ladder.
@@ -1657,10 +1717,7 @@ mod tests {
 
         let limits = state.pricing_snapshot().limits.clone();
         let soon = now + Duration::minutes(1);
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, soon, &limits).unwrap()
-        };
+        let candidates = list_auto_candidates(&state, soon, &limits).unwrap();
         assert!(
             !candidates.iter().any(|c| c.account_id == "hi2"),
             "successful retry at high usage must not be re-expedited inside 15m"
@@ -1669,10 +1726,7 @@ mod tests {
         // After the 15m guard, high usage may expedite even though cadence/reset
         // next_eligible is still in the future (sample earliest reset is 180m).
         let later = now + EXPEDITE_GUARD;
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, later, &limits).unwrap()
-        };
+        let candidates = list_auto_candidates(&state, later, &limits).unwrap();
         assert!(candidates.iter().any(|c| {
             c.account_id == "hi2"
                 && matches!(
@@ -1876,10 +1930,7 @@ mod tests {
 
         let limits = state.pricing_snapshot().limits.clone();
         let soon = now + Duration::seconds(30);
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, soon, &limits).unwrap()
-        };
+        let candidates = list_auto_candidates(&state, soon, &limits).unwrap();
         assert!(!candidates.iter().any(|c| c.account_id == "bad"));
 
         state.usage_sync.clear_test_seams();
@@ -1946,10 +1997,7 @@ mod tests {
             .unwrap();
 
         let limits = state.pricing_snapshot().limits.clone();
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, now, &limits).unwrap()
-        };
+        let candidates = list_auto_candidates(&state, now, &limits).unwrap();
         assert!(candidates.iter().any(|c| {
             c.account_id == "wake"
                 && matches!(
@@ -1966,10 +2014,8 @@ mod tests {
             .lock()
             .record_account_usage_sync_failure("wake", now, 1, now + failure_backoff(1))
             .unwrap();
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, now + Duration::seconds(30), &limits).unwrap()
-        };
+        let candidates =
+            list_auto_candidates(&state, now + Duration::seconds(30), &limits).unwrap();
         assert!(!candidates.iter().any(|c| c.account_id == "wake"));
         let sync = state
             .db
@@ -2126,10 +2172,7 @@ mod tests {
             "experimental usage must stay independent from inference 429 handling"
         );
         let limits = state.pricing_snapshot().limits.clone();
-        let candidates = {
-            let db = state.db.lock();
-            list_auto_candidates(&db, now, &limits).unwrap()
-        };
+        let candidates = list_auto_candidates(&state, now, &limits).unwrap();
         assert!(
             !candidates
                 .iter()
@@ -2151,5 +2194,251 @@ mod tests {
         state.usage_sync.clear_test_seams();
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    struct FakeUsageInner {
+        runtime: UsageSyncRuntime,
+        accounts: ParkingMutex<HashMap<String, Account>>,
+        sync: ParkingMutex<HashMap<String, ProviderUsageSyncState>>,
+        decrypts: ParkingMutex<HashMap<String, String>>,
+    }
+
+    #[derive(Clone)]
+    struct FakeUsageHost {
+        inner: Arc<FakeUsageInner>,
+    }
+
+    impl FakeUsageHost {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(FakeUsageInner {
+                    runtime: UsageSyncRuntime::new(),
+                    accounts: ParkingMutex::new(HashMap::new()),
+                    sync: ParkingMutex::new(HashMap::new()),
+                    decrypts: ParkingMutex::new(HashMap::new()),
+                }),
+            }
+        }
+
+        fn insert_ready_go(&self, id: &str, key: &str) {
+            let account = Account {
+                id: id.to_string(),
+                provider_id: crate::provider::default_provider_id(),
+                offering_id: crate::provider::default_offering_id(),
+                credential_kind: crate::provider::default_credential_kind(),
+                quota_scope: crate::provider::default_quota_scope(),
+                name: id.to_string(),
+                username: None,
+                password_cipher: None,
+                key_cipher: format!("cipher:{key}"),
+                enabled: true,
+                account_type: AccountType::Key,
+                setup_step: AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: "2026-08-01".to_string(),
+                expires_on: "2026-09-01".to_string(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                notes: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            self.inner
+                .decrypts
+                .lock()
+                .insert(account.key_cipher.clone(), key.to_string());
+            self.inner.accounts.lock().insert(id.to_string(), account);
+            self.inner.sync.lock().insert(
+                id.to_string(),
+                ProviderUsageSyncState {
+                    account_id: id.to_string(),
+                    last_success_at: None,
+                    last_attempt_at: None,
+                    next_eligible_at: None,
+                    failure_streak: 0,
+                    last_expedited_at: None,
+                },
+            );
+        }
+    }
+
+    impl UsageSyncStore for FakeUsageInner {
+        fn list_accounts(&self) -> anyhow::Result<Vec<Account>> {
+            Ok(self.accounts.lock().values().cloned().collect())
+        }
+        fn get_account(&self, account_id: &str) -> anyhow::Result<Option<Account>> {
+            Ok(self.accounts.lock().get(account_id).cloned())
+        }
+        fn account_usage_sync_state(
+            &self,
+            account_id: &str,
+        ) -> anyhow::Result<Option<ProviderUsageSyncState>> {
+            Ok(self.sync.lock().get(account_id).cloned())
+        }
+        fn pull_account_usage_sync_next_eligible(
+            &self,
+            account_id: &str,
+            proposal: DateTime<Utc>,
+            respect_failure_backoff: bool,
+        ) -> anyhow::Result<()> {
+            let mut sync = self.sync.lock();
+            let Some(current) = sync.get_mut(account_id) else {
+                return Ok(());
+            };
+            if respect_failure_backoff && current.failure_streak > 0 {
+                return Ok(());
+            }
+            current.next_eligible_at = Some(match current.next_eligible_at {
+                Some(existing) => existing.min(proposal),
+                None => proposal,
+            });
+            Ok(())
+        }
+        fn account_has_local_activity_since(
+            &self,
+            _account_id: &str,
+            _since: DateTime<Utc>,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        fn account_usage_with_limits(
+            &self,
+            account_id: &str,
+            _limits: &PricingLimits,
+        ) -> anyhow::Result<UsageWindow> {
+            Ok(UsageWindow {
+                account_id: account_id.to_string(),
+                window_5h: 0.0,
+                window_week: 0.0,
+                window_month: 0.0,
+                resets_in_5h: None,
+                resets_in_week: None,
+                resets_in_month: None,
+            })
+        }
+        fn commit_official_usage_sync_success(
+            &self,
+            account_id: &str,
+            _expected_key_cipher: &str,
+            _snapshot: &GoUsageSnapshot,
+            _limits: &PricingLimits,
+            metadata: OfficialUsageSyncSuccessMetadata,
+        ) -> anyhow::Result<Option<UsageWindow>> {
+            if let Some(current) = self.sync.lock().get_mut(account_id) {
+                current.last_success_at = Some(metadata.now);
+                current.last_attempt_at = Some(metadata.now);
+                current.next_eligible_at = Some(metadata.next_eligible_at);
+                current.failure_streak = 0;
+                if metadata.mark_expedited {
+                    current.last_expedited_at = Some(metadata.now);
+                }
+            }
+            Ok(Some(UsageWindow {
+                account_id: account_id.to_string(),
+                window_5h: 0.0,
+                window_week: 0.0,
+                window_month: 0.0,
+                resets_in_5h: None,
+                resets_in_week: None,
+                resets_in_month: None,
+            }))
+        }
+        fn record_account_usage_sync_failure(
+            &self,
+            account_id: &str,
+            now: DateTime<Utc>,
+            failure_streak: i64,
+            next_eligible_at: DateTime<Utc>,
+        ) -> anyhow::Result<()> {
+            if let Some(current) = self.sync.lock().get_mut(account_id) {
+                current.last_attempt_at = Some(now);
+                current.failure_streak = failure_streak;
+                current.next_eligible_at = Some(next_eligible_at);
+            }
+            Ok(())
+        }
+        fn log_gateway(&self, _level: &str, _category: &str, _message: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl UsageSyncHost for FakeUsageHost {
+        type Weak = std::sync::Weak<FakeUsageInner>;
+        type Store = FakeUsageInner;
+
+        fn downgrade(&self) -> Self::Weak {
+            Arc::downgrade(&self.inner)
+        }
+        fn upgrade(weak: &Self::Weak) -> Option<Self> {
+            weak.upgrade().map(|inner| Self { inner })
+        }
+        fn usage_runtime(&self) -> &UsageSyncRuntime {
+            &self.inner.runtime
+        }
+        fn pricing_limits(&self) -> PricingLimits {
+            crate::kernel::pricing::SEED_LIMITS
+        }
+        fn config(&self) -> AppConfig {
+            AppConfig::default()
+        }
+        fn decrypt_account_key(&self, ciphertext: &str) -> anyhow::Result<String> {
+            self.inner
+                .decrypts
+                .lock()
+                .get(ciphertext)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing test key"))
+        }
+        fn with_sync_store<F, R>(&self, f: F) -> R
+        where
+            F: FnOnce(&Self::Store) -> R,
+        {
+            f(&self.inner)
+        }
+    }
+
+    #[test]
+    fn usage_sync_host_seam_schedules_inference_429_without_process_host() {
+        let host = FakeUsageHost::new();
+        host.insert_ready_go("acc-5", "sk-acc-5");
+        let now = fixed("2026-08-18T12:00:00Z");
+        host.usage_runtime().set_clock_for_test(move || now);
+        host.usage_runtime().set_jitter_for_test(|| 0.0);
+        host.inner
+            .sync
+            .lock()
+            .get_mut("acc-5")
+            .unwrap()
+            .next_eligible_at = Some(now + Duration::hours(20));
+
+        schedule_after_inference_429(&host, "acc-5");
+        let sync = host.inner.sync.lock().get("acc-5").cloned().unwrap();
+        assert_eq!(sync.next_eligible_at, Some(now + INFERENCE_429_DELAY_MIN));
+        assert_eq!(sync.failure_streak, 0);
+    }
+
+    #[tokio::test]
+    async fn usage_sync_host_loop_exits_when_the_host_is_dropped() {
+        let host = FakeUsageHost::new();
+        spawn_usage_sync_loop(host.clone());
+        assert!(
+            host.usage_runtime()
+                .loop_started
+                .load(AtomicOrdering::Acquire)
+        );
+        spawn_usage_sync_loop(host.clone());
+        let weak = host.downgrade();
+        drop(host);
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        assert!(
+            FakeUsageHost::upgrade(&weak).is_none(),
+            "dropping the last host handle must end the scheduler lifetime"
+        );
     }
 }

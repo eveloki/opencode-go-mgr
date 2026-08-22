@@ -664,6 +664,244 @@ impl CoreStateInner {
     }
 }
 
+impl crate::gateway_keys::KeyStore for Database {
+    fn list_active_sub_gateway_keys(&self) -> anyhow::Result<Vec<crate::models::SubGatewayKey>> {
+        Database::list_active_sub_gateway_keys(self)
+    }
+    fn get_sub_gateway_key(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::models::SubGatewayKey>> {
+        Database::get_sub_gateway_key(self, id)
+    }
+    fn count_active_sub_gateway_keys(&self) -> anyhow::Result<usize> {
+        Database::count_active_sub_gateway_keys(self)
+    }
+    fn insert_sub_gateway_key(&self, key: &crate::models::SubGatewayKey) -> anyhow::Result<()> {
+        Database::insert_sub_gateway_key(self, key)
+    }
+    fn rename_sub_gateway_key(&self, id: &str, name: &str) -> anyhow::Result<bool> {
+        Database::rename_sub_gateway_key(self, id, name)
+    }
+    fn set_sub_gateway_key_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool> {
+        Database::set_sub_gateway_key_enabled(self, id, enabled)
+    }
+    fn update_sub_gateway_key_value(&self, id: &str, new_value: &str) -> anyhow::Result<bool> {
+        Database::update_sub_gateway_key_value(self, id, new_value)
+    }
+    fn soft_delete_sub_gateway_key(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<bool> {
+        Database::soft_delete_sub_gateway_key(self, id, now)
+    }
+    fn active_sub_gateway_key_values(&self) -> anyhow::Result<Vec<String>> {
+        Database::active_sub_gateway_key_values(self)
+    }
+    fn sub_gateway_key_value_exists(&self, value: &str) -> anyhow::Result<bool> {
+        Database::sub_gateway_key_value_exists(self, value)
+    }
+    fn random_word(&self) -> String {
+        random_word()
+    }
+}
+
+impl crate::gateway_keys::KeyStore for CoreStateInner {
+    fn list_active_sub_gateway_keys(&self) -> anyhow::Result<Vec<crate::models::SubGatewayKey>> {
+        Database::list_active_sub_gateway_keys(&self.db.lock())
+    }
+    fn get_sub_gateway_key(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::models::SubGatewayKey>> {
+        Database::get_sub_gateway_key(&self.db.lock(), id)
+    }
+    fn count_active_sub_gateway_keys(&self) -> anyhow::Result<usize> {
+        Database::count_active_sub_gateway_keys(&self.db.lock())
+    }
+    fn insert_sub_gateway_key(&self, key: &crate::models::SubGatewayKey) -> anyhow::Result<()> {
+        Database::insert_sub_gateway_key(&self.db.lock(), key)
+    }
+    fn rename_sub_gateway_key(&self, id: &str, name: &str) -> anyhow::Result<bool> {
+        Database::rename_sub_gateway_key(&self.db.lock(), id, name)
+    }
+    fn set_sub_gateway_key_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool> {
+        Database::set_sub_gateway_key_enabled(&self.db.lock(), id, enabled)
+    }
+    fn update_sub_gateway_key_value(&self, id: &str, new_value: &str) -> anyhow::Result<bool> {
+        Database::update_sub_gateway_key_value(&self.db.lock(), id, new_value)
+    }
+    fn soft_delete_sub_gateway_key(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<bool> {
+        Database::soft_delete_sub_gateway_key(&self.db.lock(), id, now)
+    }
+    fn active_sub_gateway_key_values(&self) -> anyhow::Result<Vec<String>> {
+        Database::active_sub_gateway_key_values(&self.db.lock())
+    }
+    fn sub_gateway_key_value_exists(&self, value: &str) -> anyhow::Result<bool> {
+        Database::sub_gateway_key_value_exists(&self.db.lock(), value)
+    }
+    fn random_word(&self) -> String {
+        random_word()
+    }
+}
+
+impl crate::gateway_keys::KeyHost for CoreStateInner {
+    fn primary_gateway_key(&self) -> String {
+        self.config.lock().gateway_key.clone()
+    }
+    fn clone_credential_snapshot(&self) -> crate::gateway_keys::CredentialSnapshot {
+        self.credential_snapshot.read().clone()
+    }
+    fn replace_credential_snapshot(&self, snapshot: crate::gateway_keys::CredentialSnapshot) {
+        *self.credential_snapshot.write() = snapshot;
+    }
+    fn with_credential_snapshot_mut<R>(
+        &self,
+        f: impl FnOnce(&mut crate::gateway_keys::CredentialSnapshot) -> R,
+    ) -> R {
+        f(&mut self.credential_snapshot.write())
+    }
+    fn load_unique_value_inputs(
+        &self,
+    ) -> anyhow::Result<(Vec<String>, crate::gateway_keys::CredentialSnapshot)> {
+        let db = self.db.lock();
+        let stored = Database::active_sub_gateway_key_values(&db)?;
+        let snapshot = self.credential_snapshot.read().clone();
+        Ok((stored, snapshot))
+    }
+    fn load_snapshot_rebuild_inputs(
+        &self,
+    ) -> anyhow::Result<(Vec<crate::models::SubGatewayKey>, String)> {
+        let db = self.db.lock();
+        let keys = Database::list_active_sub_gateway_keys(&db)?;
+        let primary = self.config.lock().gateway_key.clone();
+        Ok((keys, primary))
+    }
+}
+
+impl crate::usage_sync::UsageSyncStore for Database {
+    fn list_accounts(&self) -> anyhow::Result<Vec<crate::models::Account>> {
+        Database::list_accounts(self)
+    }
+    fn get_account(&self, account_id: &str) -> anyhow::Result<Option<crate::models::Account>> {
+        Database::get_account(self, account_id)
+    }
+    fn account_usage_sync_state(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<crate::provider::ProviderUsageSyncState>> {
+        Database::account_usage_sync_state(self, account_id)
+    }
+    fn pull_account_usage_sync_next_eligible(
+        &self,
+        account_id: &str,
+        proposal: chrono::DateTime<chrono::Utc>,
+        respect_failure_backoff: bool,
+    ) -> anyhow::Result<()> {
+        Database::pull_account_usage_sync_next_eligible(
+            self,
+            account_id,
+            proposal,
+            respect_failure_backoff,
+        )
+    }
+    fn account_has_local_activity_since(
+        &self,
+        account_id: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<bool> {
+        Database::account_has_local_activity_since(self, account_id, since)
+    }
+    fn account_usage_with_limits(
+        &self,
+        account_id: &str,
+        limits: &crate::kernel::pricing::PricingLimits,
+    ) -> anyhow::Result<crate::models::UsageWindow> {
+        Database::account_usage_with_limits(self, account_id, limits)
+    }
+    fn commit_official_usage_sync_success(
+        &self,
+        account_id: &str,
+        expected_key_cipher: &str,
+        snapshot: &crate::go_usage::GoUsageSnapshot,
+        limits: &crate::kernel::pricing::PricingLimits,
+        metadata: crate::usage_sync::OfficialUsageSyncSuccessMetadata,
+    ) -> anyhow::Result<Option<crate::models::UsageWindow>> {
+        Database::commit_official_usage_sync_success(
+            self,
+            account_id,
+            expected_key_cipher,
+            &crate::db::AccountUsageCalibrationSnapshot {
+                rolling_percent: snapshot.rolling_percent,
+                weekly_percent: snapshot.weekly_percent,
+                monthly_percent: snapshot.monthly_percent,
+                rolling_resets_in_minutes: snapshot.rolling_resets_in_minutes,
+                weekly_resets_in_minutes: snapshot.weekly_resets_in_minutes,
+            },
+            limits,
+            crate::db::AccountUsageSyncSuccessMetadata {
+                now: metadata.now,
+                next_eligible_at: metadata.next_eligible_at,
+                mark_expedited: metadata.mark_expedited,
+            },
+        )
+    }
+    fn record_account_usage_sync_failure(
+        &self,
+        account_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        failure_streak: i64,
+        next_eligible_at: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()> {
+        Database::record_account_usage_sync_failure(
+            self,
+            account_id,
+            now,
+            failure_streak,
+            next_eligible_at,
+        )
+    }
+    fn log_gateway(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()> {
+        Database::log_gateway(self, level, category, message)
+    }
+}
+
+impl crate::usage_sync::UsageSyncHost for CoreState {
+    type Weak = std::sync::Weak<CoreStateInner>;
+    type Store = Database;
+
+    fn downgrade(&self) -> Self::Weak {
+        Arc::downgrade(self)
+    }
+    fn upgrade(weak: &Self::Weak) -> Option<Self> {
+        weak.upgrade()
+    }
+    fn usage_runtime(&self) -> &crate::usage_sync::UsageSyncRuntime {
+        &self.usage_sync
+    }
+    fn pricing_limits(&self) -> crate::kernel::pricing::PricingLimits {
+        self.pricing_snapshot().limits.clone()
+    }
+    fn config(&self) -> AppConfig {
+        CoreStateInner::config(self)
+    }
+    fn decrypt_account_key(&self, ciphertext: &str) -> anyhow::Result<String> {
+        self.decrypt_key(ciphertext)
+    }
+    fn with_sync_store<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Self::Store) -> R,
+    {
+        let db = self.db.lock();
+        f(&db)
+    }
+}
+
 fn client_root_url_override_from_env() -> crate::Result<Option<String>> {
     match std::env::var(CLIENT_ROOT_URL_ENV) {
         Ok(value) => normalize_client_root_url_override(Some(&value))
@@ -775,6 +1013,31 @@ mod tests {
             normalize_client_root_url_override(Some("https://ocg.example.com/v1/responses"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn process_host_adapts_key_and_usage_sync_seams() {
+        fn assert_key_store<T: crate::gateway_keys::KeyStore>(_: &T) {}
+        fn assert_key_host<T: crate::gateway_keys::KeyHost>(_: &T) {}
+        fn assert_usage_store<T: crate::usage_sync::UsageSyncStore>(_: &T) {}
+        fn assert_usage_host<T: crate::usage_sync::UsageSyncHost>(_: &T) {}
+
+        let dir = temp_data_dir("host-seams");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        assert_key_store(&db);
+        assert_usage_store(&db);
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let inner = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+        assert_key_store(&inner);
+        assert_key_host(&inner);
+        let snapshot =
+            crate::gateway_keys::build_credential_snapshot(&inner, &inner.config().gateway_key)
+                .expect("snapshot rebuild through the host");
+        assert!(snapshot.contains_key(&inner.config().gateway_key));
+        let state = Arc::new(inner);
+        assert_usage_host(&state);
+        drop(state);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
