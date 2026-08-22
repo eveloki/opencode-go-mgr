@@ -4,12 +4,13 @@
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, connection/settings reads, the settings write path, the
 //! access-key lifecycle, the local accounts control plane, and the local/Zen
-//! provider catalog, contracts, and Zen Free control plane. Billable protocol
-//! probes stay off this router.
+//! provider catalog, contracts, Zen Free control plane, and pricing. Billable
+//! protocol probes stay off this router.
 
 mod accounts;
 mod connection;
 mod keys;
+mod pricing;
 mod providers;
 mod settings;
 mod types;
@@ -40,12 +41,21 @@ pub use types::{
     ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
     ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
     EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck, MutationExpectation,
-    PricingRevision, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
+    PricingAdjustment, PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
+    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
+    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
+    PricingTimeWindow, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
     ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
     ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
-    ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
-    V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
-    contract_schema_pretty,
+    ProviderPricing, ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings,
+    SettingsUpdate, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
+    contract_schema, contract_schema_pretty,
+};
+
+#[cfg(debug_assertions)]
+pub use pricing::{
+    OfficialPricingFetchGuard, install_official_pricing_fetch_error_for_tests,
+    install_official_pricing_fetch_for_tests,
 };
 
 /// Must match `dashboard.rs` `SESSION_COOKIE`. V2 owns login; V3 only checks it.
@@ -58,6 +68,16 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/settings",
             get(settings::get_settings).put(settings::put_settings),
+        )
+        .route("/pricing", get(pricing::get_pricing))
+        .route("/pricing/refresh", post(pricing::refresh_pricing))
+        .route(
+            "/pricing/multipliers",
+            put(pricing::put_pricing_multipliers),
+        )
+        .route(
+            "/providers/{provider_id}/{offering_id}/pricing",
+            get(pricing::get_provider_pricing),
         )
         .route(
             "/keys/primary/regenerate",
@@ -314,6 +334,19 @@ fn check_expectation(
     if expectation.expected_revision != state.settings_revision()
         || expectation.process_generation != state.process_generation()
     {
+        Err(V3ApiError::revision_conflict(state))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_pricing_expectation(
+    state: &CoreState,
+    expectation: &MutationExpectation,
+    expected_pricing_revision: &str,
+) -> Result<(), V3ApiError> {
+    check_expectation(state, expectation)?;
+    if expected_pricing_revision != state.pricing_snapshot().revision {
         Err(V3ApiError::revision_conflict(state))
     } else {
         Ok(())
