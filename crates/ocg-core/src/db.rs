@@ -39,7 +39,7 @@ pub const PRE_V22_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v22.";
 /// database receives any migration writes on its way to v23.
 pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 23;
+pub const CURRENT_SCHEMA_VERSION: i32 = 24;
 
 pub struct ForwardLogQueryOptions<'a> {
     pub limit: i64,
@@ -1753,6 +1753,14 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (23);")?;
         }
 
+        // v24: route leg label (`auto`/`proxy`/`direct`) for every forward
+        // attempt. Rows written before this change keep the empty default,
+        // honestly marking "not recorded" instead of guessing a leg.
+        if version < 24 {
+            ensure_column(&tx, "forward_logs", "route", "TEXT NOT NULL DEFAULT ''")?;
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (24);")?;
+        }
+
         // Unreleased #43 drafts numbered client-key columns as v18 and the
         // sub-key table as v19, so those databases already report version
         // >= 18 and skip the notes gate above. ensure_column is idempotent
@@ -3155,7 +3163,7 @@ impl Database {
             "INSERT INTO forward_logs
              (timestamp, model, account_id, account_name, client_key_id, client_key_name,
               route_account_id, provider_id, offering_id, credential_account_id,
-              status, http_status,
+              status, http_status, route,
               prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
               raw_cost_usd, quota_debit, effective_paid_cost_usd,
               pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
@@ -3165,7 +3173,7 @@ impl Database {
               native_cost_value, native_cost_unit, native_cost_currency)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                      ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38)",
+                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)",
             params![
                 log.timestamp.to_rfc3339(),
                 log.model,
@@ -3179,6 +3187,7 @@ impl Database {
                 log.credential_account_id,
                 log.status,
                 log.http_status,
+                log.route,
                 log.prompt_tokens,
                 log.completion_tokens,
                 log.cached_tokens,
@@ -3399,7 +3408,7 @@ impl Database {
 
     pub fn list_forward_logs(&self, limit: i64) -> Result<Vec<ForwardLog>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, model, account_id, account_name, status, http_status,
+            "SELECT id, timestamp, model, account_id, account_name, status, http_status, route,
                     prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
                     pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
                     service_tier, cost_state, error_message, request_id, attempt,
@@ -3444,7 +3453,7 @@ impl Database {
         )?;
 
         let items_sql = format!(
-            "SELECT id, timestamp, model, account_id, account_name, status, http_status,
+            "SELECT id, timestamp, model, account_id, account_name, status, http_status, route,
                     prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
                     pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
                     service_tier, cost_state, error_message, request_id, attempt,
@@ -4768,8 +4777,12 @@ fn forward_log_order(sort_by: Option<&str>, sort_order: Option<&str>) -> String 
 }
 
 fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog> {
-    let raw_cost = row.get::<_, f64>(11)?;
-    let cost_state = row.get::<_, String>(16)?;
+    // SELECT order: id,timestamp,model,account_id,account_name,status,http_status,
+    // route,prompt,completion,cached,cache_creation,cost,pricing_revision,quota,
+    // local_adjustment,service_tier,cost_state,error_message,request_id,attempt,
+    // error_source,error_stage,duration_ms,diagnostic_json,client_key_id,client_key_name
+    let raw_cost = row.get::<_, f64>(12)?;
+    let cost_state = row.get::<_, String>(17)?;
     let cost = matches!(cost_state.as_str(), "priced" | "legacy_estimate").then_some(raw_cost);
     Ok(ForwardLog {
         id: row.get(0)?,
@@ -4777,35 +4790,36 @@ fn forward_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardLog>
         model: row.get(2)?,
         account_id: row.get(3)?,
         account_name: row.get(4)?,
-        client_key_id: row.get(24)?,
-        client_key_name: row.get(25)?,
-        route_account_id: row.get(26)?,
-        provider_id: row.get(27)?,
-        offering_id: row.get(28)?,
-        credential_account_id: row.get(29)?,
+        client_key_id: row.get(25)?,
+        client_key_name: row.get(26)?,
+        route_account_id: row.get(27)?,
+        provider_id: row.get(28)?,
+        offering_id: row.get(29)?,
+        credential_account_id: row.get(30)?,
         status: row.get(5)?,
         http_status: row.get(6)?,
-        prompt_tokens: row.get(7)?,
-        completion_tokens: row.get(8)?,
-        cached_tokens: row.get(9)?,
-        cache_creation_tokens: row.get(10)?,
+        route: row.get(7)?,
+        prompt_tokens: row.get(8)?,
+        completion_tokens: row.get(9)?,
+        cached_tokens: row.get(10)?,
+        cache_creation_tokens: row.get(11)?,
         cost,
-        raw_cost_usd: row.get(30)?,
-        quota_debit: row.get(31)?,
-        effective_paid_cost_usd: row.get(32)?,
-        pricing_revision_id: row.get(12)?,
-        quota_multiplier: row.get(13)?,
-        local_adjustment_multiplier: row.get(14)?,
-        service_tier: row.get(15)?,
+        raw_cost_usd: row.get(31)?,
+        quota_debit: row.get(32)?,
+        effective_paid_cost_usd: row.get(33)?,
+        pricing_revision_id: row.get(13)?,
+        quota_multiplier: row.get(14)?,
+        local_adjustment_multiplier: row.get(15)?,
+        service_tier: row.get(16)?,
         cost_state,
-        error_message: row.get(17)?,
-        request_id: row.get(18)?,
-        attempt: row.get(19)?,
-        error_source: row.get(20)?,
-        error_stage: row.get(21)?,
-        duration_ms: row.get(22)?,
+        error_message: row.get(18)?,
+        request_id: row.get(19)?,
+        attempt: row.get(20)?,
+        error_source: row.get(21)?,
+        error_stage: row.get(22)?,
+        duration_ms: row.get(23)?,
         diagnostic: row
-            .get::<_, Option<String>>(23)?
+            .get::<_, Option<String>>(24)?
             .and_then(|json| serde_json::from_str(&json).ok()),
     })
 }
@@ -5314,6 +5328,7 @@ mod tests {
             client_key_name: None,
             status: status.into(),
             http_status: Some(200),
+            route: String::new(),
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
@@ -5335,6 +5350,66 @@ mod tests {
             duration_ms: None,
             diagnostic: None,
         }
+    }
+
+    #[test]
+    fn v24_adds_route_column_and_historical_rows_stay_unlabeled() {
+        let dir = temp_data_dir("v24-route-column");
+        let db = Database::open(dir.clone()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+
+        // A row written before the column existed keeps the empty default
+        // ("not recorded") — insert it without naming the route column.
+        db.conn
+            .execute(
+                "INSERT INTO forward_logs
+                 (timestamp, model, account_id, account_name, status, cost_state)
+                 VALUES ('2026-01-01T00:00:00Z', 'glm-5.3', 'a1', 'a1', 'success',
+                         'legacy_estimate')",
+                [],
+            )
+            .unwrap();
+
+        let mut modern = forward_log("a1", "success", 0.5);
+        modern.route = "proxy".to_string();
+        modern.model = "gpt-5.6-luna".to_string();
+        db.log_forward(&modern).unwrap();
+
+        let logs = db.list_forward_logs(10).unwrap();
+        assert_eq!(logs.len(), 2);
+        let historical = logs.iter().find(|log| log.model == "glm-5.3").unwrap();
+        assert_eq!(historical.route, "");
+        let labeled = logs.iter().find(|log| log.model == "gpt-5.6-luna").unwrap();
+        assert_eq!(labeled.route, "proxy");
+
+        // The paginated query surface exposes the same column.
+        let page = db
+            .query_forward_logs(ForwardLogQueryOptions {
+                limit: 10,
+                offset: 0,
+                status: None,
+                account_id: None,
+                provider_id: None,
+                offering_id: None,
+                route_account_id: None,
+                credential_account_id: None,
+                model: None,
+                key_id: None,
+                request_id: None,
+                start_time: None,
+                end_time: None,
+                sort_by: None,
+                sort_order: None,
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|log| {
+            (log.model == "glm-5.3" && log.route.is_empty())
+                || (log.model == "gpt-5.6-luna" && log.route == "proxy")
+        }));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -8955,6 +9030,7 @@ mod tests {
             client_key_name: Some("Laptop".into()),
             status: "success".into(),
             http_status: Some(200),
+            route: String::new(),
             prompt_tokens: 1,
             completion_tokens: 1,
             cached_tokens: 0,

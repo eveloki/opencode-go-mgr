@@ -763,23 +763,49 @@ The **Settings** view exposes the persistent gateway configuration:
   modes apply the one global card order only after filtering incompatible,
   disabled, cooling, or already-failed cards; they do not create a provider or
   model routing table.
-- **Outbound proxy** — a process-wide setting shared by every account.
+- **Outbound proxy** — shared by every account. Automatic, manual, and force
+  direct apply one process-wide policy; **Per-model list** (below) splits chat
+  forwarding by model instead.
   `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,
   `ALL_PROXY`, and `NO_PROXY`; Windows also reads the system proxy and connects
   directly when none is configured. `Manual HTTP proxy` strictly routes all
   HTTP/HTTPS targets through one `http://` or `https://` proxy such as
   `http://127.0.0.1:7890`; a proxy failure never silently falls back to a direct
   connection. `Force direct connection` ignores system and environment proxy
-  configuration. Proxy URLs cannot contain credentials. The policy covers core
-  HTTP requests including model forwarding (OpenCode Go, Zen Free, and Custom
-  API), account-key tests and Custom verification, official OpenCode Go usage
-  API, pricing refreshes, release checks, and signed desktop installer
-  downloads; authenticated `GET /v1/models` and protected
+  configuration. Proxy URLs cannot contain credentials. For these three modes,
+  the policy covers model forwarding (OpenCode Go, Zen Free, and Custom API),
+  account-key tests and Custom verification, official OpenCode Go usage API,
+  pricing refreshes, release checks, and signed desktop installer downloads;
+  authenticated `GET /v1/models` and protected
   `GET /dashboard/api/application-models` are local lists and do not use
   this outbound path. The browser sidecar is outside its scope. **Test
   connection** uses the unsaved form values against the current upstream. Any
   HTTP status proves network reachability, without running model inference or
-  incurring model usage.
+  incurring model usage. In list mode it probes only the
+  direction's default leg, not a listed model's real forwarding path.
+- **Per-model list** (fourth proxy mode) — routes chat forwarding per model
+  instead of process-wide. Pick a direction and check models from the known
+  registry; the list accepts exact known model ids only (no patterns or
+  free-text). With the **whitelist** direction, listed models — for example
+  region-restricted ones such as `gpt-5.6-luna`, `grok-4.5`, or
+  `muse-spark-1.2` — connect through the proxy URL while every unlisted model
+  connects directly (ignoring system/environment proxies, exactly like force
+  direct). The **blacklist** direction inverts this: listed models connect
+  directly and everything else uses the proxy URL. Both directions require the
+  proxy URL; an empty list or an empty URL cannot be saved. Non-chat outbound
+  traffic (pricing refreshes, official usage sync, update checks, and signed
+  downloads) always follows the direction's default leg: direct for a
+  whitelist, the proxy URL for a blacklist — so switching from `Manual HTTP
+  proxy` to a whitelist changes that traffic to direct. The account-key test
+  and **Test connection** likewise probe the default leg, so they do not
+  represent the real forwarding path of a listed model. Free-channel models
+  can be listed, but Zen free quota is shared by egress IP, so routing them
+  through a proxy changes which quota they draw from. Every forward-log row
+  (successes included) records the leg it used — `proxy`, `direct`, or `auto`
+  — in its expanded details; rows from before this feature show "not
+  recorded". List mode requires this version or newer; an older binary cannot
+  start on a config saved with `list` mode — switch back to manual or direct
+  mode first when rolling back.
 - **OpenCode Go invite URL** — the restricted HTTPS invite used by managed
   account onboarding. Fresh installs may ship a demo default; replace it with
   your own link before a real signup. Creating a managed draft can also edit

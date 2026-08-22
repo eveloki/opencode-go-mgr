@@ -516,6 +516,14 @@ pub fn command_code_upstream_path(format: ApiFormat) -> Option<&'static str> {
     }
 }
 
+/// Returns (id, preferred protocol) for every known OpenCode catalog model;
+/// backs the proxy list picker's protocol hints.
+pub fn supported_model_protocols() -> impl Iterator<Item = (&'static str, ApiFormat)> {
+    MODEL_PROTOCOLS
+        .iter()
+        .map(|profile| (profile.id, profile.preferred))
+}
+
 /// True when the OpenCode protocol catalog contains the model ID.
 pub fn is_known_model(model: &str) -> bool {
     model_protocol(model).is_some()
