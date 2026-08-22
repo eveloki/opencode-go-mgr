@@ -2,8 +2,9 @@
 //!
 //! Response objects always serialize nullable fields as `T | null` (never omitted).
 //! Request optional fields may be omitted; `expectedRevision` is required on every
-//! control-plane mutation. Plaintext keys must not appear on `Settings` —
-//! `ConnectionInfo` is the only secret-bearing V3 DTO.
+//! control-plane mutation. Plaintext keys must not appear on `Settings` or
+//! provider/Zen/contract DTOs — `ConnectionInfo` is the only secret-bearing V3 DTO.
+//! Protocol path/switch tokens stay `chat_completions`, `responses`, and `messages`.
 
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -14,6 +15,10 @@ use crate::models::{AccountSetupStep as ModelAccountSetupStep, AccountType as Mo
 use crate::provider::{
     ConnectionVerificationStatus as ProviderVerificationStatus, CredentialKind, QuotaScope,
     UpstreamAuthScheme, UpstreamProtocolKind,
+};
+use crate::provider_contracts::{
+    ContractEvidenceSource as DomainContractEvidenceSource,
+    ContractScopeKind as DomainContractScopeKind, ProbeResultKind as DomainProbeResultKind,
 };
 use crate::state::CoreState;
 
@@ -51,6 +56,31 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AccountModelCapabilityWrite",
     "AccountAcknowledgementCreate",
     "AccountAcknowledgementWrite",
+    "ProviderCatalog",
+    "ProviderCatalogEntry",
+    "ProviderCatalogFormField",
+    "ProviderCatalogRiskNotice",
+    "ProviderModelCapability",
+    "ZenFreeSettings",
+    "ZenFreeSettingsUpdate",
+    "ZenFreeModels",
+    "ZenFreeModel",
+    "ProviderContracts",
+    "ProviderContractGroup",
+    "CustomEndpointContract",
+    "ProviderOfferingChoice",
+    "ProviderAccountChoice",
+    "ProtocolSwitches",
+    "EffectiveCatalog",
+    "EffectiveModelContract",
+    "EffectiveModelProtocols",
+    "EffectiveProtocolEvidence",
+    "CapabilitySummary",
+    "CardCapabilitySummary",
+    "ProtocolSwitchUpdate",
+    "ProtocolProbeRequest",
+    "ProtocolProbeResult",
+    "ProtocolProbeResponse",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -843,6 +873,405 @@ impl From<AccountAuthScheme> for UpstreamAuthScheme {
     }
 }
 
+/// Built-in Plan catalog. Model capabilities are a separate DTO.
+///
+/// `pricingRevision` is the live pricing snapshot id, not a CAS token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderCatalog {
+    pub entries: Vec<ProviderCatalogEntry>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// One Provider Registry offering as a wire catalog row. Identity strings are
+/// data copied from the static registry; this DTO does not define them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderCatalogEntry {
+    pub provider_id: String,
+    pub offering_id: String,
+    pub display_name: String,
+    pub display_family: String,
+    pub credential_kind: AccountCredentialKind,
+    pub quota_scope: AccountQuotaScope,
+    pub singleton: bool,
+    pub creation_availability: String,
+    pub creation_unavailable_reason: Option<String>,
+    pub verification_policy: String,
+    pub verification_runtime_availability: String,
+    pub routable: bool,
+    pub managed_registration: bool,
+    pub pricing_availability: String,
+    pub usage_availability: String,
+    pub manual_usage_calibration: bool,
+    pub quota_unit: String,
+    pub model_source: String,
+    pub key_prefix: Option<String>,
+    pub auth_schemes: Vec<AccountAuthScheme>,
+    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
+    pub form_fields: Vec<ProviderCatalogFormField>,
+    pub risk_notice: Option<ProviderCatalogRiskNotice>,
+    pub model_aliases: Vec<String>,
+}
+
+/// One create-form field advertised by a catalog offering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderCatalogFormField {
+    pub id: String,
+    pub kind: String,
+    pub required: bool,
+    pub immutable_after_create: bool,
+}
+
+/// Plan risk notice shown before create. `body` is the acknowledgement text,
+/// not a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderCatalogRiskNotice {
+    pub acknowledgement_id: String,
+    pub version: String,
+    pub source_url: String,
+    pub body: String,
+    pub content_hash: String,
+}
+
+/// One Go protocol-table capability. GOAT/SCNet must not reuse these rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderModelCapability {
+    pub model_id: String,
+    pub provider_id: String,
+    pub offering_id: String,
+    pub preferred_protocol: AccountUpstreamProtocol,
+    pub supported_protocols: Vec<AccountUpstreamProtocol>,
+}
+
+/// Zen Free enablement after a successful settings write.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ZenFreeSettings {
+    pub account_id: String,
+    pub enabled: bool,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// PATCH Zen Free enablement. CAS tokens and `enabled` are required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ZenFreeSettingsUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub enabled: bool,
+}
+
+/// Last successful Zen Free catalog snapshot. `sourceUrl` is the public
+/// official directory, not a credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ZenFreeModels {
+    pub account_id: String,
+    pub models: Vec<ZenFreeModel>,
+    pub refreshed_at: Option<String>,
+    pub source_url: String,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// One persisted Zen Free model and its de-suffixed alias.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ZenFreeModel {
+    pub model_id: String,
+    pub alias: String,
+}
+
+/// Effective provider-scope and custom-endpoint contracts.
+///
+/// Top-level `revision` is the settings CAS token. Nested `revision` values
+/// are display-only and must not be sent as `expectedRevision`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderContracts {
+    pub providers: Vec<ProviderContractGroup>,
+    pub custom_endpoints: Vec<CustomEndpointContract>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// One built-in provider scope. SCNet is a single group with three offerings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderContractGroup {
+    pub scope_kind: ContractScopeKind,
+    pub scope_id: String,
+    pub provider_id: String,
+    pub offerings: Vec<ProviderOfferingChoice>,
+    pub catalog: EffectiveCatalog,
+    pub models: Vec<EffectiveModelContract>,
+    pub protocols: ProtocolSwitches,
+    pub pricing: CapabilitySummary,
+    pub usage: CapabilitySummary,
+    pub card: CardCapabilitySummary,
+    pub catalog_routable: bool,
+    pub production_inference: bool,
+    pub disabled_reasons: Vec<String>,
+    /// Display revision for this scope, distinct from the top-level CAS token.
+    pub revision: u64,
+}
+
+/// One Custom API account scope. Distinct from built-in provider groups.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CustomEndpointContract {
+    pub scope_kind: ContractScopeKind,
+    pub scope_id: String,
+    pub provider_id: String,
+    pub account: ProviderAccountChoice,
+    pub catalog: EffectiveCatalog,
+    pub models: Vec<EffectiveModelContract>,
+    pub protocols: ProtocolSwitches,
+    pub pricing: CapabilitySummary,
+    pub usage: CapabilitySummary,
+    pub card: CardCapabilitySummary,
+    pub catalog_routable: bool,
+    pub production_inference: bool,
+    pub disabled_reasons: Vec<String>,
+    /// Display revision for this endpoint, distinct from the top-level CAS token.
+    pub revision: u64,
+}
+
+/// One offering under a provider scope, with current account cards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderOfferingChoice {
+    pub offering_id: String,
+    pub display_name: String,
+    pub routable: bool,
+    pub accounts: Vec<ProviderAccountChoice>,
+}
+
+/// Secret-free account identity on a contract card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderAccountChoice {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub verification_status: AccountVerificationStatus,
+}
+
+/// Upstream protocol enablement. JSON keys stay the protocol tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ProtocolSwitches {
+    pub chat_completions: bool,
+    pub responses: bool,
+    pub messages: bool,
+}
+
+/// Merged model-id catalog for one contract scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EffectiveCatalog {
+    pub source: String,
+    pub source_url: String,
+    pub refreshed_at: Option<String>,
+    pub models: Vec<String>,
+    pub refresh_supported: bool,
+}
+
+/// One model's preferred protocol and per-protocol evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EffectiveModelContract {
+    pub model_id: String,
+    pub preferred_protocol: AccountUpstreamProtocol,
+    pub protocols: EffectiveModelProtocols,
+    pub routable: bool,
+    pub disabled_reasons: Vec<String>,
+}
+
+/// Per-protocol evidence keyed by snake_case protocol tokens. Missing
+/// protocols serialize as `null` and must not be invented as available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case", deny_unknown_fields)]
+pub struct EffectiveModelProtocols {
+    pub chat_completions: Option<EffectiveProtocolEvidence>,
+    pub responses: Option<EffectiveProtocolEvidence>,
+    pub messages: Option<EffectiveProtocolEvidence>,
+}
+
+/// Merged evidence for one upstream protocol on one model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EffectiveProtocolEvidence {
+    pub protocol: AccountUpstreamProtocol,
+    pub available: bool,
+    pub enabled: bool,
+    pub source: ContractEvidenceSource,
+    pub verified_at: Option<String>,
+    pub observed_at: Option<String>,
+    pub last_probe_result: Option<ProbeResultKind>,
+    pub last_probe_at: Option<String>,
+    pub last_probe_error: Option<String>,
+}
+
+/// Registry pricing or usage availability copied as display data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CapabilitySummary {
+    pub availability: String,
+}
+
+/// Provider-page actions that are actually implemented for this scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CardCapabilitySummary {
+    pub fetch_zen_models: bool,
+    pub discover_models: bool,
+    pub protocol_probe: bool,
+    pub catalog_refresh: bool,
+}
+
+/// PUT one protocol switch. CAS tokens and `enabled` are required. The path
+/// protocol token is not repeated here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProtocolSwitchUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub enabled: bool,
+}
+
+/// POST protocol-probe body. `accountId` may be omitted; `protocols` is the
+/// required explicit probe set. Handlers validate membership and uniqueness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProtocolProbeRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub model_id: String,
+    pub protocols: Vec<AccountUpstreamProtocol>,
+}
+
+/// One requested protocol's probe outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProtocolProbeResult {
+    pub protocol: AccountUpstreamProtocol,
+    pub success: bool,
+    pub skipped: bool,
+    pub error: Option<String>,
+}
+
+/// Protocol-probe mutation result. Identity strings are always present;
+/// `contract` is required `T | null` on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProtocolProbeResponse {
+    pub account_id: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub results: Vec<ProtocolProbeResult>,
+    pub contract: Option<EffectiveModelContract>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ContractScopeKind {
+    Provider,
+    CustomEndpoint,
+}
+
+impl From<DomainContractScopeKind> for ContractScopeKind {
+    fn from(value: DomainContractScopeKind) -> Self {
+        match value {
+            DomainContractScopeKind::Provider => Self::Provider,
+            DomainContractScopeKind::CustomEndpoint => Self::CustomEndpoint,
+        }
+    }
+}
+
+/// How a protocol row was established. Wire values match V2 snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ContractEvidenceSource {
+    Static,
+    Preset,
+    ProbeConfirmed,
+    ProbeObserved,
+}
+
+impl From<DomainContractEvidenceSource> for ContractEvidenceSource {
+    fn from(value: DomainContractEvidenceSource) -> Self {
+        match value {
+            DomainContractEvidenceSource::Static => Self::Static,
+            DomainContractEvidenceSource::Preset => Self::Preset,
+            DomainContractEvidenceSource::ProbeConfirmed => Self::ProbeConfirmed,
+            DomainContractEvidenceSource::ProbeObserved => Self::ProbeObserved,
+        }
+    }
+}
+
+/// Last explicit probe outcome stored on evidence. Distinct from
+/// [`ProtocolProbeResult`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ProbeResultKind {
+    Success,
+    Failure,
+}
+
+impl From<DomainProbeResultKind> for ProbeResultKind {
+    fn from(value: DomainProbeResultKind) -> Self {
+        match value {
+            DomainProbeResultKind::Success => Self::Success,
+            DomainProbeResultKind::Failure => Self::Failure,
+        }
+    }
+}
+
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.
 ///
 /// Response types are generated with the serialize contract so `Option` fields
@@ -867,6 +1296,28 @@ pub fn contract_schema() -> Value {
     include_type::<AccountCustomConfig>(&mut serialize);
     include_type::<AccountModelCapability>(&mut serialize);
     include_type::<AccountAcknowledgement>(&mut serialize);
+    include_type::<ProviderCatalog>(&mut serialize);
+    include_type::<ProviderCatalogEntry>(&mut serialize);
+    include_type::<ProviderCatalogFormField>(&mut serialize);
+    include_type::<ProviderCatalogRiskNotice>(&mut serialize);
+    include_type::<ProviderModelCapability>(&mut serialize);
+    include_type::<ZenFreeSettings>(&mut serialize);
+    include_type::<ZenFreeModels>(&mut serialize);
+    include_type::<ZenFreeModel>(&mut serialize);
+    include_type::<ProviderContracts>(&mut serialize);
+    include_type::<ProviderContractGroup>(&mut serialize);
+    include_type::<CustomEndpointContract>(&mut serialize);
+    include_type::<ProviderOfferingChoice>(&mut serialize);
+    include_type::<ProviderAccountChoice>(&mut serialize);
+    include_type::<ProtocolSwitches>(&mut serialize);
+    include_type::<EffectiveCatalog>(&mut serialize);
+    include_type::<EffectiveModelContract>(&mut serialize);
+    include_type::<EffectiveModelProtocols>(&mut serialize);
+    include_type::<EffectiveProtocolEvidence>(&mut serialize);
+    include_type::<CapabilitySummary>(&mut serialize);
+    include_type::<CardCapabilitySummary>(&mut serialize);
+    include_type::<ProtocolProbeResult>(&mut serialize);
+    include_type::<ProtocolProbeResponse>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -885,6 +1336,9 @@ pub fn contract_schema() -> Value {
     include_type::<AccountModelCapabilityWrite>(&mut deserialize);
     include_type::<AccountAcknowledgementCreate>(&mut deserialize);
     include_type::<AccountAcknowledgementWrite>(&mut deserialize);
+    include_type::<ZenFreeSettingsUpdate>(&mut deserialize);
+    include_type::<ProtocolSwitchUpdate>(&mut deserialize);
+    include_type::<ProtocolProbeRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -1368,6 +1822,709 @@ mod tests {
         assert_eq!(
             defs["V3Error"]["properties"]["code"]["type"], "string",
             "new error codes must not reshape the V3Error catalog definition"
+        );
+    }
+
+    const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
+        "ControlRevision",
+        "MutationAck",
+        "MutationExpectation",
+        "PricingRevision",
+        "V3Error",
+        "ConnectionInfo",
+        "ConnectionSubKey",
+        "Settings",
+        "SettingsUpdate",
+        "ProxySupportedModel",
+        "KeyCreate",
+        "KeyUpdate",
+        "Account",
+        "AccountList",
+        "AccountMutation",
+        "AccountCustomConfig",
+        "AccountModelCapability",
+        "AccountAcknowledgement",
+        "AccountCreate",
+        "AccountManagedCreate",
+        "AccountUpdate",
+        "AccountOrder",
+        "AccountSetupUpdate",
+        "AccountCustomConfigUpdate",
+        "AccountCustomConfigWrite",
+        "AccountModelCapabilitiesUpdate",
+        "AccountModelCapabilityWrite",
+        "AccountAcknowledgementCreate",
+        "AccountAcknowledgementWrite",
+    ];
+
+    fn json_field_names(value: &Value) -> Vec<&str> {
+        match value {
+            Value::Object(map) => {
+                let mut names: Vec<&str> = map.keys().map(String::as_str).collect();
+                names.extend(map.values().flat_map(json_field_names));
+                names
+            }
+            Value::Array(items) => items.iter().flat_map(json_field_names).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn json_string_values(value: &Value) -> Vec<&str> {
+        match value {
+            Value::String(text) => vec![text.as_str()],
+            Value::Array(items) => items.iter().flat_map(json_string_values).collect(),
+            Value::Object(map) => map.values().flat_map(json_string_values).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn assert_secret_free(value: &Value) {
+        for name in json_field_names(value) {
+            assert!(
+                !matches!(
+                    name,
+                    "key"
+                        | "password"
+                        | "passwordCipher"
+                        | "keyCipher"
+                        | "gatewayKey"
+                        | "gateway_key"
+                        | "primaryKey"
+                        | "primary_key"
+                        | "referralCode"
+                        | "referral_code"
+                        | "cipher"
+                        | "apiKey"
+                        | "api_key"
+                        | "token"
+                        | "secret"
+                ),
+                "provider DTO leaked field {name}: {value}"
+            );
+        }
+        for text in json_string_values(value) {
+            assert!(
+                !text.contains("sk-secret")
+                    && !text.contains("ocg-secret")
+                    && !text.contains("pw-secret")
+                    && !text.contains("user:pass@"),
+                "provider DTO leaked secret sample {text}: {value}"
+            );
+        }
+    }
+
+    fn chat_evidence() -> EffectiveProtocolEvidence {
+        EffectiveProtocolEvidence {
+            protocol: AccountUpstreamProtocol::ChatCompletions,
+            available: true,
+            enabled: true,
+            source: ContractEvidenceSource::Static,
+            verified_at: None,
+            observed_at: None,
+            last_probe_result: None,
+            last_probe_at: None,
+            last_probe_error: None,
+        }
+    }
+
+    fn sample_catalog_entry() -> ProviderCatalogEntry {
+        ProviderCatalogEntry {
+            provider_id: "scnet".into(),
+            offering_id: "token-plan-basic".into(),
+            display_name: "SCNet Token Plan Basic".into(),
+            display_family: "SCNet".into(),
+            credential_kind: AccountCredentialKind::ApiKey,
+            quota_scope: AccountQuotaScope::Key,
+            singleton: false,
+            creation_availability: "available".into(),
+            creation_unavailable_reason: None,
+            verification_policy: "required".into(),
+            verification_runtime_availability: "unavailable".into(),
+            routable: false,
+            managed_registration: false,
+            pricing_availability: "unavailable".into(),
+            usage_availability: "unavailable".into(),
+            manual_usage_calibration: false,
+            quota_unit: "credits".into(),
+            model_source: "official_token_plan_usable_models_2026_08_21".into(),
+            key_prefix: Some("sk-tp-".into()),
+            auth_schemes: vec![AccountAuthScheme::Bearer],
+            upstream_protocols: vec![
+                AccountUpstreamProtocol::ChatCompletions,
+                AccountUpstreamProtocol::Messages,
+            ],
+            form_fields: vec![ProviderCatalogFormField {
+                id: "name".into(),
+                kind: "text".into(),
+                required: true,
+                immutable_after_create: false,
+            }],
+            risk_notice: Some(ProviderCatalogRiskNotice {
+                acknowledgement_id: "scnet-token-plan-restrictions".into(),
+                version: "2026-08-21".into(),
+                source_url: "https://www.scnet.cn/docs".into(),
+                body: "interactive use only".into(),
+                content_hash: "abc".into(),
+            }),
+            model_aliases: Vec::new(),
+        }
+    }
+
+    fn sample_contracts() -> ProviderContracts {
+        let goat = ProviderContractGroup {
+            scope_kind: ContractScopeKind::Provider,
+            scope_id: "command-code".into(),
+            provider_id: "command-code".into(),
+            offerings: vec![ProviderOfferingChoice {
+                offering_id: "goat".into(),
+                display_name: "Command Code GOAT".into(),
+                routable: false,
+                accounts: vec![ProviderAccountChoice {
+                    id: "goat-1".into(),
+                    name: "draft".into(),
+                    enabled: false,
+                    verification_status: AccountVerificationStatus::Pending,
+                }],
+            }],
+            catalog: EffectiveCatalog {
+                source: "static".into(),
+                source_url: String::new(),
+                refreshed_at: None,
+                models: Vec::new(),
+                refresh_supported: false,
+            },
+            models: vec![EffectiveModelContract {
+                model_id: "deepseek-v4-flash".into(),
+                preferred_protocol: AccountUpstreamProtocol::ChatCompletions,
+                protocols: EffectiveModelProtocols {
+                    chat_completions: Some(chat_evidence()),
+                    responses: None,
+                    messages: Some(EffectiveProtocolEvidence {
+                        protocol: AccountUpstreamProtocol::Messages,
+                        available: false,
+                        enabled: false,
+                        source: ContractEvidenceSource::Preset,
+                        verified_at: None,
+                        observed_at: None,
+                        last_probe_result: None,
+                        last_probe_at: None,
+                        last_probe_error: None,
+                    }),
+                },
+                routable: false,
+                disabled_reasons: vec!["offering is not routable".into()],
+            }],
+            protocols: ProtocolSwitches {
+                chat_completions: true,
+                responses: false,
+                messages: true,
+            },
+            pricing: CapabilitySummary {
+                availability: "unavailable".into(),
+            },
+            usage: CapabilitySummary {
+                availability: "unavailable".into(),
+            },
+            card: CardCapabilitySummary {
+                fetch_zen_models: false,
+                discover_models: false,
+                protocol_probe: false,
+                catalog_refresh: false,
+            },
+            catalog_routable: false,
+            production_inference: false,
+            disabled_reasons: vec!["offering is not routable".into()],
+            revision: 2,
+        };
+        let scnet = ProviderContractGroup {
+            scope_kind: ContractScopeKind::Provider,
+            scope_id: "scnet".into(),
+            provider_id: "scnet".into(),
+            offerings: vec![
+                ProviderOfferingChoice {
+                    offering_id: "token-plan-basic".into(),
+                    display_name: "SCNet Token Plan Basic".into(),
+                    routable: false,
+                    accounts: Vec::new(),
+                },
+                ProviderOfferingChoice {
+                    offering_id: "token-plan-standard".into(),
+                    display_name: "SCNet Token Plan Standard".into(),
+                    routable: false,
+                    accounts: Vec::new(),
+                },
+                ProviderOfferingChoice {
+                    offering_id: "token-plan-premium".into(),
+                    display_name: "SCNet Token Plan Premium".into(),
+                    routable: false,
+                    accounts: Vec::new(),
+                },
+            ],
+            catalog: EffectiveCatalog {
+                source: "static".into(),
+                source_url: String::new(),
+                refreshed_at: None,
+                models: Vec::new(),
+                refresh_supported: false,
+            },
+            models: Vec::new(),
+            protocols: ProtocolSwitches {
+                chat_completions: true,
+                responses: false,
+                messages: true,
+            },
+            pricing: CapabilitySummary {
+                availability: "unavailable".into(),
+            },
+            usage: CapabilitySummary {
+                availability: "unavailable".into(),
+            },
+            card: CardCapabilitySummary {
+                fetch_zen_models: false,
+                discover_models: false,
+                protocol_probe: false,
+                catalog_refresh: false,
+            },
+            catalog_routable: false,
+            production_inference: false,
+            disabled_reasons: vec!["offering is not routable".into()],
+            revision: 3,
+        };
+        ProviderContracts {
+            providers: vec![goat, scnet],
+            custom_endpoints: vec![CustomEndpointContract {
+                scope_kind: ContractScopeKind::CustomEndpoint,
+                scope_id: "custom-1".into(),
+                provider_id: "custom".into(),
+                account: ProviderAccountChoice {
+                    id: "custom-1".into(),
+                    name: "lan".into(),
+                    enabled: false,
+                    verification_status: AccountVerificationStatus::Pending,
+                },
+                catalog: EffectiveCatalog {
+                    source: "account_declared".into(),
+                    source_url: String::new(),
+                    refreshed_at: None,
+                    models: vec!["local-model".into()],
+                    refresh_supported: true,
+                },
+                models: Vec::new(),
+                protocols: ProtocolSwitches {
+                    chat_completions: true,
+                    responses: true,
+                    messages: true,
+                },
+                pricing: CapabilitySummary {
+                    availability: "unpriced".into(),
+                },
+                usage: CapabilitySummary {
+                    availability: "unavailable".into(),
+                },
+                card: CardCapabilitySummary {
+                    fetch_zen_models: false,
+                    discover_models: true,
+                    protocol_probe: true,
+                    catalog_refresh: true,
+                },
+                catalog_routable: true,
+                production_inference: false,
+                disabled_reasons: vec!["account is not enabled".into()],
+                revision: 8,
+            }],
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        }
+    }
+
+    #[test]
+    fn catalog_type_names_keep_accounts_prefix_and_register_provider_dtos() {
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[..ACCOUNTS_CATALOG_PREFIX.len()],
+            ACCOUNTS_CATALOG_PREFIX
+        );
+        for name in [
+            "ProviderCatalog",
+            "ProviderCatalogEntry",
+            "ProviderCatalogFormField",
+            "ProviderCatalogRiskNotice",
+            "ProviderModelCapability",
+            "ZenFreeSettings",
+            "ZenFreeSettingsUpdate",
+            "ZenFreeModels",
+            "ZenFreeModel",
+            "ProviderContracts",
+            "ProviderContractGroup",
+            "CustomEndpointContract",
+            "ProviderOfferingChoice",
+            "ProviderAccountChoice",
+            "ProtocolSwitches",
+            "EffectiveCatalog",
+            "EffectiveModelContract",
+            "EffectiveModelProtocols",
+            "EffectiveProtocolEvidence",
+            "CapabilitySummary",
+            "CardCapabilitySummary",
+            "ProtocolSwitchUpdate",
+            "ProtocolProbeRequest",
+            "ProtocolProbeResult",
+            "ProtocolProbeResponse",
+        ] {
+            assert!(
+                CATALOG_TYPE_NAMES.contains(&name),
+                "CATALOG_TYPE_NAMES missing {name}"
+            );
+        }
+
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        for name in CATALOG_TYPE_NAMES {
+            assert!(defs.contains_key(*name), "schema missing {name}");
+        }
+        let any_of = schema["anyOf"].as_array().expect("catalog anyOf");
+        for (index, name) in ACCOUNTS_CATALOG_PREFIX.iter().enumerate() {
+            assert_eq!(
+                any_of[index]["$ref"],
+                format!("#/$defs/{name}"),
+                "anyOf prefix drifted at {index}"
+            );
+        }
+        assert_eq!(
+            defs["Account"]["required"],
+            json!([
+                "id",
+                "providerId",
+                "offeringId",
+                "credentialKind",
+                "quotaScope",
+                "name",
+                "username",
+                "enabled",
+                "accountType",
+                "setupStep",
+                "purchaseDate",
+                "expiresOn",
+                "cooldownUntil",
+                "cooldownGenericUntil",
+                "cooldown5hUntil",
+                "cooldownWeekUntil",
+                "cooldownMonthUntil",
+                "cooldownFreeUntil",
+                "lastError",
+                "authError",
+                "notes",
+                "usageSyncLastSuccessAt",
+                "usageSyncNextAllowedAt",
+                "createdAt",
+                "updatedAt",
+                "revision",
+                "processGeneration",
+                "verificationStatus",
+                "connectionVerifiedAt",
+                "verificationError",
+                "planRoutable",
+                "customConfig",
+                "modelCapabilities",
+                "acknowledgements"
+            ])
+        );
+    }
+
+    #[test]
+    fn provider_catalog_emits_nulls_camel_case_and_no_secrets() {
+        let catalog = ProviderCatalog {
+            entries: vec![sample_catalog_entry()],
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let value = serde_json::to_value(&catalog).unwrap();
+        assert_eq!(value["processGeneration"], 9);
+        assert_eq!(value["pricingRevision"], "seed");
+        assert_eq!(value["entries"][0]["providerId"], "scnet");
+        assert_eq!(
+            value["entries"][0]["creationUnavailableReason"],
+            Value::Null
+        );
+        assert_eq!(value["entries"][0]["keyPrefix"], "sk-tp-");
+        assert_eq!(value["entries"][0]["verificationPolicy"], "required");
+        assert_eq!(
+            value["entries"][0]["verificationRuntimeAvailability"],
+            "unavailable"
+        );
+        assert_eq!(value["entries"][0]["routable"], false);
+        assert_eq!(
+            value["entries"][0]["upstreamProtocols"][0],
+            "chat_completions"
+        );
+        assert!(value.get("modelCapabilities").is_none());
+        assert!(value.get("creation_unavailable_reason").is_none());
+        assert_secret_free(&value);
+
+        let schema = contract_schema();
+        let required = schema["$defs"]["ProviderCatalogEntry"]["required"]
+            .as_array()
+            .unwrap();
+        for field in ["creationUnavailableReason", "keyPrefix", "riskNotice"] {
+            assert!(
+                required.iter().any(|value| value == field),
+                "{field} must stay required so responses emit T|null"
+            );
+        }
+    }
+
+    #[test]
+    fn zen_and_contract_responses_keep_cas_distinct_from_display_revisions() {
+        let settings = ZenFreeSettings {
+            account_id: "zen-free".into(),
+            enabled: true,
+            revision: 12,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let settings_value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            settings_value,
+            json!({
+                "accountId": "zen-free",
+                "enabled": true,
+                "revision": 12,
+                "processGeneration": 9,
+                "pricingRevision": "seed"
+            })
+        );
+        assert_secret_free(&settings_value);
+
+        let models = ZenFreeModels {
+            account_id: "zen-free".into(),
+            models: vec![ZenFreeModel {
+                model_id: "hy3-free".into(),
+                alias: "hy3".into(),
+            }],
+            refreshed_at: None,
+            source_url: "https://opencode.ai/zen/v1/models".into(),
+            revision: 12,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let models_value = serde_json::to_value(&models).unwrap();
+        assert_eq!(models_value["refreshedAt"], Value::Null);
+        assert_eq!(models_value["accountId"], "zen-free");
+        assert_eq!(models_value["pricingRevision"], "seed");
+        assert_secret_free(&models_value);
+
+        let contracts = sample_contracts();
+        let contracts_value = serde_json::to_value(&contracts).unwrap();
+        assert_eq!(contracts_value["revision"], 11);
+        assert_eq!(contracts_value["processGeneration"], 9);
+        assert_eq!(contracts_value["providers"][0]["revision"], 2);
+        assert_eq!(contracts_value["providers"][0]["scopeKind"], "provider");
+        assert_eq!(
+            contracts_value["customEndpoints"][0]["scopeKind"],
+            "custom_endpoint"
+        );
+        assert_eq!(
+            contracts_value["providers"][1]["offerings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            contracts_value["providers"][0]["protocols"],
+            json!({
+                "chat_completions": true,
+                "responses": false,
+                "messages": true
+            })
+        );
+        assert!(
+            contracts_value["providers"][0]["protocols"]
+                .as_object()
+                .unwrap()
+                .get("chatCompletions")
+                .is_none()
+        );
+        assert_eq!(
+            contracts_value["providers"][0]["models"][0]["protocols"]["responses"],
+            Value::Null
+        );
+        assert_eq!(
+            contracts_value["providers"][0]["models"][0]["protocols"]["chat_completions"]["lastProbeError"],
+            Value::Null
+        );
+        assert!(
+            contracts_value["providers"][0]
+                .as_object()
+                .unwrap()
+                .get("scopeRevision")
+                .is_none()
+        );
+        assert_eq!(
+            contracts_value["providers"][0]["offerings"][0]["accounts"][0]["verificationStatus"],
+            "pending"
+        );
+        assert_eq!(
+            contracts_value["providers"][0]["card"]["protocolProbe"],
+            false
+        );
+        assert_eq!(
+            contracts_value["customEndpoints"][0]["catalog"]["refreshedAt"],
+            Value::Null
+        );
+        assert!(contracts_value.get("expectedRevision").is_none());
+        assert_secret_free(&contracts_value);
+
+        let schema = contract_schema();
+        let switches = schema["$defs"]["ProtocolSwitches"]["properties"]
+            .as_object()
+            .unwrap();
+        assert!(switches.contains_key("chat_completions"));
+        assert!(switches.contains_key("responses"));
+        assert!(switches.contains_key("messages"));
+        assert!(!switches.contains_key("chatCompletions"));
+        let protocol_required = schema["$defs"]["EffectiveModelProtocols"]["required"]
+            .as_array()
+            .unwrap();
+        for field in ["chat_completions", "responses", "messages"] {
+            assert!(
+                protocol_required.iter().any(|value| value == field),
+                "{field} must stay required so missing protocols emit null"
+            );
+        }
+        assert!(schema["$defs"]["ProviderContractGroup"]["properties"]["revision"].is_object());
+        assert!(
+            schema["$defs"]["ProviderContractGroup"]["properties"]
+                .as_object()
+                .unwrap()
+                .get("scopeRevision")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_mutation_requests_require_cas_allow_omission_and_reject_unknown_fields() {
+        let zen: ZenFreeSettingsUpdate = serde_json::from_value(json!({
+            "expectedRevision": 4,
+            "processGeneration": 9,
+            "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(zen.expectation.expected_revision, 4);
+        assert!(zen.enabled);
+        assert!(
+            serde_json::from_value::<ZenFreeSettingsUpdate>(json!({
+                "expectedRevision": 4,
+                "processGeneration": 9,
+                "enabled": true,
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+
+        let switch: ProtocolSwitchUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "enabled": false
+        }))
+        .unwrap();
+        assert!(!switch.enabled);
+        assert!(
+            serde_json::from_value::<ProtocolSwitchUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "enabled": false,
+                "scopeRevision": 2
+            }))
+            .is_err()
+        );
+
+        assert!(
+            serde_json::from_value::<ProtocolProbeRequest>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "modelId": "gpt-5.6-luna"
+            }))
+            .is_err()
+        );
+        let with_account: ProtocolProbeRequest = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "accountId": "acct-1",
+            "modelId": "gpt-5.6-luna",
+            "protocols": ["chat_completions", "responses"]
+        }))
+        .unwrap();
+        assert_eq!(with_account.account_id.as_deref(), Some("acct-1"));
+        assert_eq!(
+            with_account.protocols,
+            vec![
+                AccountUpstreamProtocol::ChatCompletions,
+                AccountUpstreamProtocol::Responses
+            ]
+        );
+        assert!(
+            serde_json::from_value::<ProtocolProbeRequest>(json!({
+                "expected_revision": 11,
+                "processGeneration": 9,
+                "modelId": "gpt-5.6-luna"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProtocolProbeRequest>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "modelId": "gpt-5.6-luna",
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+
+        let probe = ProtocolProbeResponse {
+            account_id: "acct-1".into(),
+            provider_id: "custom".into(),
+            model_id: "gpt-5.6-luna".into(),
+            results: vec![ProtocolProbeResult {
+                protocol: AccountUpstreamProtocol::ChatCompletions,
+                success: false,
+                skipped: true,
+                error: None,
+            }],
+            contract: None,
+            revision: 12,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let probe_value = serde_json::to_value(&probe).unwrap();
+        assert_eq!(probe_value["accountId"], "acct-1");
+        assert_eq!(probe_value["providerId"], "custom");
+        assert_eq!(probe_value["contract"], Value::Null);
+        assert_eq!(probe_value["pricingRevision"], "seed");
+        assert_eq!(probe_value["results"][0]["protocol"], "chat_completions");
+        assert_eq!(probe_value["results"][0]["error"], Value::Null);
+        assert_secret_free(&probe_value);
+
+        let schema = contract_schema();
+        let probe_request = &schema["$defs"]["ProtocolProbeRequest"];
+        assert_eq!(probe_request["additionalProperties"], false);
+        let required = probe_request["required"].as_array().unwrap();
+        assert!(required.iter().any(|value| value == "expectedRevision"));
+        assert!(required.iter().any(|value| value == "processGeneration"));
+        assert!(required.iter().any(|value| value == "modelId"));
+        assert!(!required.iter().any(|value| value == "accountId"));
+        assert!(required.iter().any(|value| value == "protocols"));
+        let response_required = schema["$defs"]["ProtocolProbeResponse"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(response_required.iter().any(|value| value == "accountId"));
+        assert!(response_required.iter().any(|value| value == "providerId"));
+        assert!(response_required.iter().any(|value| value == "contract"));
+        assert!(
+            response_required
+                .iter()
+                .any(|value| value == "pricingRevision")
         );
     }
 }
