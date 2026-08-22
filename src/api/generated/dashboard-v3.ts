@@ -4,7 +4,29 @@
  * Do not edit. Types only; no HTTP wrappers.
  */
 
-export type DashboardApiV3 = ControlRevision | MutationAck | MutationExpectation | PricingRevision | V3Error;
+export type DashboardApiV3 =
+  | ControlRevision
+  | MutationAck
+  | MutationExpectation
+  | PricingRevision
+  | V3Error
+  | ConnectionInfo
+  | ConnectionSubKey
+  | Settings
+  | SettingsUpdate
+  | ProxySupportedModel;
+/**
+ * Which listed models take the list-mode exception leg.
+ */
+export type ProxyListDirection = "whitelist" | "blacklist";
+/**
+ * Global outbound proxy mode. Wire values stay kebab-case, matching V2.
+ */
+export type ProxyMode = "auto" | "manual" | "direct" | "list";
+/**
+ * Account selection mode. Wire values stay kebab-case, matching V2.
+ */
+export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -22,10 +44,15 @@ export interface MutationAck {
   revision: number;
 }
 /**
- * Required mutation precondition. Wire field is `expectedRevision`.
+ * Required process-scoped mutation precondition.
+ *
+ * Both fields travel at the top level of every mutation request. The random
+ * process generation prevents a revision captured before restart from being
+ * accepted by a fresh process whose in-memory counter reused the same value.
  */
 export interface MutationExpectation {
   expectedRevision: number;
+  processGeneration: number;
 }
 /**
  * Pricing snapshot identity. Distinct from the u64 settings CAS token.
@@ -41,4 +68,85 @@ export interface V3Error {
   currentRevision: number | null;
   message: string;
   processGeneration: number | null;
+}
+/**
+ * Lightweight connection-center payload. The only V3 DTO allowed to carry
+ * plaintext primary and sub Key values.
+ */
+export interface ConnectionInfo {
+  clientRootUrl: string;
+  gatewayPort: number;
+  primaryKey: string;
+  processGeneration: number;
+  revision: number;
+  subKeys: ConnectionSubKey[];
+  upstreamBaseUrl: string;
+}
+/**
+ * One non-deleted sub Key as exposed by [`ConnectionInfo`].
+ */
+export interface ConnectionSubKey {
+  enabled: boolean;
+  id: string;
+  name: string;
+  value: string;
+}
+/**
+ * Application settings contract. Never contains primary/sub Key plaintext
+ * or a field named `gatewayKey` / `key`.
+ */
+export interface Settings {
+  autoStart: boolean | null;
+  autoStartSupported: boolean;
+  clientRootUrl: string;
+  clientRootUrlFromEnv: boolean;
+  connectTimeoutSecs: number;
+  conversationSticky: boolean;
+  dockVisibilitySupported: boolean;
+  gatewayPort: number;
+  nonStreamTimeoutSecs: number;
+  opencodeInviteUrl: string;
+  processGeneration: number;
+  proxyListDirection: ProxyListDirection;
+  proxyListModels: string[];
+  proxyMode: ProxyMode;
+  proxySupportedModels: ProxySupportedModel[];
+  proxyUrl: string;
+  revision: number;
+  routingMode: RoutingMode;
+  showDockIcon: boolean | null;
+  streamIdleTimeoutSecs: number;
+  upstreamBaseUrl: string;
+}
+/**
+ * One known model backing the list-mode checkbox grid.
+ */
+export interface ProxySupportedModel {
+  id: string;
+  preferredProtocol: string;
+  zenFree: boolean;
+}
+/**
+ * PATCH-style settings write. `expectedRevision` and `processGeneration`
+ * are required; every other field may be omitted. Unknown fields, including
+ * any Key material, are rejected.
+ */
+export interface SettingsUpdate {
+  autoStart?: boolean | null;
+  clientRootUrl?: string | null;
+  connectTimeoutSecs?: number | null;
+  conversationSticky?: boolean | null;
+  expectedRevision: number;
+  gatewayPort?: number | null;
+  nonStreamTimeoutSecs?: number | null;
+  opencodeInviteUrl?: string | null;
+  processGeneration: number;
+  proxyListDirection?: ProxyListDirection | null;
+  proxyListModels?: string[] | null;
+  proxyMode?: ProxyMode | null;
+  proxyUrl?: string | null;
+  routingMode?: RoutingMode | null;
+  showDockIcon?: boolean | null;
+  streamIdleTimeoutSecs?: number | null;
+  upstreamBaseUrl?: string | null;
 }

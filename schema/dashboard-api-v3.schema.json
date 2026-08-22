@@ -1,6 +1,78 @@
 {
-  "$comment": "Extensible Dashboard V3 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. ConnectionInfo is the only future plaintext Key DTO.",
+  "$comment": "Extensible Dashboard V3 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. ConnectionInfo is the only plaintext Key DTO.",
   "$defs": {
+    "ConnectionInfo": {
+      "additionalProperties": false,
+      "description": "Lightweight connection-center payload. The only V3 DTO allowed to carry\nplaintext primary and sub Key values.",
+      "properties": {
+        "clientRootUrl": {
+          "type": "string"
+        },
+        "gatewayPort": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "primaryKey": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subKeys": {
+          "items": {
+            "$ref": "#/$defs/ConnectionSubKey"
+          },
+          "type": "array"
+        },
+        "upstreamBaseUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "gatewayPort",
+        "clientRootUrl",
+        "upstreamBaseUrl",
+        "primaryKey",
+        "subKeys",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ConnectionSubKey": {
+      "additionalProperties": false,
+      "description": "One non-deleted sub Key as exposed by [`ConnectionInfo`].",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "value"
+      ],
+      "type": "object"
+    },
     "ControlRevision": {
       "additionalProperties": false,
       "description": "Live CAS token, process generation, and pricing snapshot id.",
@@ -48,16 +120,23 @@
       "type": "object"
     },
     "MutationExpectation": {
-      "description": "Required mutation precondition. Wire field is `expectedRevision`.",
+      "additionalProperties": false,
+      "description": "Required process-scoped mutation precondition.\n\nBoth fields travel at the top level of every mutation request. The random\nprocess generation prevents a revision captured before restart from being\naccepted by a fresh process whose in-memory counter reused the same value.",
       "properties": {
         "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         }
       },
       "required": [
-        "expectedRevision"
+        "expectedRevision",
+        "processGeneration"
       ],
       "type": "object"
     },
@@ -71,6 +150,307 @@
       },
       "required": [
         "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProxyListDirection": {
+      "description": "Which listed models take the list-mode exception leg.",
+      "enum": [
+        "whitelist",
+        "blacklist"
+      ],
+      "type": "string"
+    },
+    "ProxyMode": {
+      "description": "Global outbound proxy mode. Wire values stay kebab-case, matching V2.",
+      "enum": [
+        "auto",
+        "manual",
+        "direct",
+        "list"
+      ],
+      "type": "string"
+    },
+    "ProxySupportedModel": {
+      "additionalProperties": false,
+      "description": "One known model backing the list-mode checkbox grid.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "preferredProtocol": {
+          "type": "string"
+        },
+        "zenFree": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "preferredProtocol",
+        "zenFree"
+      ],
+      "type": "object"
+    },
+    "RoutingMode": {
+      "description": "Account selection mode. Wire values stay kebab-case, matching V2.",
+      "enum": [
+        "strict-priority",
+        "sticky-global",
+        "round-robin"
+      ],
+      "type": "string"
+    },
+    "Settings": {
+      "additionalProperties": false,
+      "description": "Application settings contract. Never contains primary/sub Key plaintext\nor a field named `gatewayKey` / `key`.",
+      "properties": {
+        "autoStart": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "autoStartSupported": {
+          "type": "boolean"
+        },
+        "clientRootUrl": {
+          "type": "string"
+        },
+        "clientRootUrlFromEnv": {
+          "type": "boolean"
+        },
+        "connectTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "conversationSticky": {
+          "type": "boolean"
+        },
+        "dockVisibilitySupported": {
+          "type": "boolean"
+        },
+        "gatewayPort": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nonStreamTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "opencodeInviteUrl": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proxyListDirection": {
+          "$ref": "#/$defs/ProxyListDirection"
+        },
+        "proxyListModels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "proxyMode": {
+          "$ref": "#/$defs/ProxyMode"
+        },
+        "proxySupportedModels": {
+          "items": {
+            "$ref": "#/$defs/ProxySupportedModel"
+          },
+          "type": "array"
+        },
+        "proxyUrl": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "routingMode": {
+          "$ref": "#/$defs/RoutingMode"
+        },
+        "showDockIcon": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "streamIdleTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upstreamBaseUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "processGeneration",
+        "gatewayPort",
+        "upstreamBaseUrl",
+        "proxyMode",
+        "proxyUrl",
+        "proxyListDirection",
+        "proxyListModels",
+        "proxySupportedModels",
+        "opencodeInviteUrl",
+        "clientRootUrl",
+        "clientRootUrlFromEnv",
+        "autoStart",
+        "autoStartSupported",
+        "showDockIcon",
+        "dockVisibilitySupported",
+        "connectTimeoutSecs",
+        "nonStreamTimeoutSecs",
+        "streamIdleTimeoutSecs",
+        "routingMode",
+        "conversationSticky"
+      ],
+      "type": "object"
+    },
+    "SettingsUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH-style settings write. `expectedRevision` and `processGeneration`\nare required; every other field may be omitted. Unknown fields, including\nany Key material, are rejected.",
+      "properties": {
+        "autoStart": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "clientRootUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversationSticky": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gatewayPort": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nonStreamTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "opencodeInviteUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proxyListDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyListDirection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxyListModels": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "proxyMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProxyMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proxyUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routingMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoutingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "showDockIcon": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "streamIdleTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "upstreamBaseUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
       ],
       "type": "object"
     },
@@ -126,6 +506,21 @@
     },
     {
       "$ref": "#/$defs/V3Error"
+    },
+    {
+      "$ref": "#/$defs/ConnectionInfo"
+    },
+    {
+      "$ref": "#/$defs/ConnectionSubKey"
+    },
+    {
+      "$ref": "#/$defs/Settings"
+    },
+    {
+      "$ref": "#/$defs/SettingsUpdate"
+    },
+    {
+      "$ref": "#/$defs/ProxySupportedModel"
     }
   ],
   "title": "DashboardApiV3"
