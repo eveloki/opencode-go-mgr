@@ -168,6 +168,92 @@ mod dependency_guard {
     }
 
     #[test]
+    fn upstream_limit_is_a_pure_dag_leaf_consumed_by_dashboard_without_gateway() {
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let path = src_root.join("upstream_limit.rs");
+        let production = production_source(&read_to_string(&path));
+        for line in production.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("use ") {
+                for prefix in FORBIDDEN_USE_PREFIXES {
+                    assert!(
+                        !trimmed.starts_with(prefix),
+                        "upstream_limit.rs imports I/O or control-plane code: {trimmed}"
+                    );
+                }
+            }
+        }
+        let roots = crate_path_roots(&production);
+        for module in &roots {
+            assert!(
+                !FORBIDDEN_KERNEL_CRATE_MODULES.contains(&module.as_str()),
+                "upstream_limit.rs has a qualified production path into `{module}`"
+            );
+            assert_ne!(
+                module.as_str(),
+                "gateway",
+                "upstream_limit.rs must not depend on gateway"
+            );
+            assert_ne!(
+                module.as_str(),
+                "dashboard",
+                "upstream_limit.rs must not depend on dashboard"
+            );
+            assert_ne!(
+                module.as_str(),
+                "dashboard_v3",
+                "upstream_limit.rs must not depend on dashboard_v3"
+            );
+            assert_ne!(
+                module.as_str(),
+                "state",
+                "upstream_limit.rs must not depend on state"
+            );
+            assert_ne!(
+                module.as_str(),
+                "db",
+                "upstream_limit.rs must not depend on db"
+            );
+            assert_ne!(
+                module.as_str(),
+                "provider",
+                "upstream_limit.rs must not depend on provider adapters"
+            );
+        }
+        assert_eq!(
+            roots,
+            named_set(&["models"]),
+            "upstream_limit.rs may depend only on models for UsageWindowKind, got {roots:?}"
+        );
+        for needle in ["Utc::now", "Instant::now", "SystemTime::now"] {
+            assert!(
+                !production.contains(needle),
+                "upstream_limit.rs must not read a clock (`{needle}`)"
+            );
+        }
+
+        let dashboard = production_source(&read_to_string(&src_root.join("dashboard.rs")));
+        assert!(
+            crate_path_roots(&dashboard).contains("upstream_limit"),
+            "dashboard production source must consume crate::upstream_limit directly"
+        );
+        assert!(
+            !dashboard.contains("gateway::limit"),
+            "dashboard must not reach limit parsers through crate::gateway"
+        );
+        for line in dashboard.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("use ") {
+                assert!(
+                    !trimmed.contains("gateway::limit")
+                        && !trimmed.starts_with("use crate::gateway::limit"),
+                    "dashboard imports gateway limit parsers: {trimmed}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn production_graph_has_the_expected_remaining_scc() {
         let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let lib_source = production_source(&read_to_string(&src_root.join("lib.rs")));
@@ -176,7 +262,8 @@ mod dependency_guard {
             modules.contains("db")
                 && modules.contains("pricing")
                 && modules.contains("kernel")
-                && modules.contains("redaction"),
+                && modules.contains("redaction")
+                && modules.contains("upstream_limit"),
             "lib.rs should declare the production modules under test, got {modules:?}"
         );
 
@@ -277,6 +364,34 @@ mod dependency_guard {
             BTreeSet::new(),
             "redaction must be a production DAG leaf, graph={graph:?}"
         );
+        assert_eq!(
+            graph.get("upstream_limit").cloned().unwrap_or_default(),
+            named_set(&["models"]),
+            "upstream_limit must stay an I/O-free DAG leaf beside models, graph={graph:?}"
+        );
+        assert!(
+            graph
+                .get("dashboard")
+                .is_some_and(|edges| edges.contains("upstream_limit")),
+            "dashboard must consume upstream_limit without a gateway parser edge"
+        );
+        assert!(
+            graph
+                .get("gateway")
+                .is_some_and(|edges| edges.contains("upstream_limit")),
+            "gateway must still depend on the extracted upstream_limit leaf"
+        );
+        assert!(
+            !graph.get("upstream_limit").is_some_and(|edges| {
+                edges.contains("gateway")
+                    || edges.contains("dashboard")
+                    || edges.contains("dashboard_v3")
+                    || edges.contains("state")
+                    || edges.contains("db")
+                    || edges.contains("provider")
+            }),
+            "upstream_limit must not grow a control-plane or adapter edge, graph={graph:?}"
+        );
 
         let gateway_keys_source =
             production_source(&read_to_string(&src_root.join("gateway_keys.rs")));
@@ -335,6 +450,7 @@ mod dependency_guard {
         assert!(
             !host_scc.contains("provider_contracts")
                 && !host_scc.contains("redaction")
+                && !host_scc.contains("upstream_limit")
                 && !host_scc.contains("db")
                 && !host_scc.contains("auth"),
             "inverted contract/redaction leaves must stay outside the host SCC, host_scc={host_scc:?}"

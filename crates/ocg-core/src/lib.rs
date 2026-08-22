@@ -21,6 +21,7 @@ pub mod provider;
 pub mod provider_contracts;
 pub(crate) mod redaction;
 pub mod state;
+pub(crate) mod upstream_limit;
 pub mod usage_sync;
 pub mod zen_models;
 

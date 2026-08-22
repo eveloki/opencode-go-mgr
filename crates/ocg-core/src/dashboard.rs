@@ -4,11 +4,8 @@ use crate::browser::{
     BrowserCapabilities, BrowserOpenResult, BrowserProfileOperationKind, StagedBrowserProfiles,
 };
 use crate::db::{ForwardLogQueryOptions, ReorderAccountsError};
-use crate::gateway::{
-    diagnostics::{
-        api_format_name, redact_known_secret, sanitize_upstream_error_value_with_known_secret,
-    },
-    limit::{parse_reset, parse_usage_limit_window},
+use crate::gateway::diagnostics::{
+    api_format_name, redact_known_secret, sanitize_upstream_error_value_with_known_secret,
 };
 use crate::go_usage::GoUsageError;
 use crate::kernel::pricing::PricingSnapshot;
@@ -21,6 +18,7 @@ use crate::pricing::{
     fetch_official_snapshot, prepare_multiplier_update, stamp_pricing_activation,
 };
 use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
+use crate::upstream_limit::{parse_reset, parse_usage_limit_window};
 use axum::{
     Json, Router,
     body::Body,
