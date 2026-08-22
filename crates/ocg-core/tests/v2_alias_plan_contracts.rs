@@ -40,6 +40,35 @@ fn go_success_replies(keys: &[&str]) -> HashMap<String, VecDeque<FakeReply>> {
     replies
 }
 
+async fn reorder_account_first(harness: &V2Harness, account_id: &str) {
+    let mut account_ids = harness
+        .client
+        .get(harness.dashboard("/accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<Value>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|account| account["id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    account_ids.sort_by_key(|id| if id == account_id { 0 } else { 1 });
+    let response = harness
+        .client
+        .put(harness.dashboard("/accounts/order"))
+        .json(&json!({
+            "account_ids": account_ids,
+            "expected_revision": harness.settings_revision().await
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "account reorder failed: {body}");
+}
+
 /// Catalog is the one Plan source. `/providers` must not diverge.
 #[tokio::test]
 async fn providers_catalog_is_the_only_plan_source() {
@@ -163,10 +192,7 @@ async fn providers_catalog_is_the_only_plan_source() {
         let published_list = alias_name_list(entry);
         assert_eq!(
             published_list,
-            ocg_core::alias::routeable_aliases_for(provider_id, offering_id)
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
+            ocg_core::alias::routeable_aliases_for(provider_id, offering_id),
             "{provider_id}/{offering_id} catalog aliases must match the routeable Alias registry"
         );
         assert!(
@@ -183,7 +209,10 @@ async fn providers_catalog_is_the_only_plan_source() {
         }
         if provider_id == ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID {
             assert!(published_list.iter().any(|alias| alias == FREE_MODEL));
-            assert!(!published_list.iter().any(|alias| alias == GO_ALIAS));
+            assert!(
+                published_list.iter().any(|alias| alias == GO_ALIAS),
+                "Zen must publish the stripped Alias shared with Go: {published_list:?}"
+            );
         }
     }
 
@@ -498,6 +527,7 @@ async fn ambiguous_raw_upstream_id_is_rejected() {
 async fn go_alias_request_still_routes_and_logs_opencode_go() {
     let harness = V2Harness::start_with_chat_success(&[GO_ACCOUNT_KEY]).await;
     let go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
+    reorder_account_first(&harness, go["id"].as_str().unwrap()).await;
     let (status, body) = harness.chat(GO_ALIAS).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(harness.fake_call_keys(), vec![GO_ACCOUNT_KEY.to_string()]);
@@ -523,7 +553,6 @@ async fn zen_free_explicit_free_model_stays_anonymous() {
             "/providers/zen-free",
             &json!({
                 "enabled": true,
-                "free_alias_enabled": false,
                 "expected_revision": revision
             }),
         )
@@ -698,6 +727,7 @@ async fn disabled_draft_is_not_selected_for_alias_routing() {
         goat["enabled"], false,
         "v2-contract: GOAT must create as a disabled draft: {goat}"
     );
+    reorder_account_first(&harness, go["id"].as_str().unwrap()).await;
 
     let (status, body) = harness.chat(GO_ALIAS).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -923,6 +953,7 @@ async fn account_secrets_absent_from_json_errors_and_logs() {
 async fn forward_logs_distinguish_requested_alias_and_upstream_model() {
     let harness = V2Harness::start_with_chat_success(&[GO_ACCOUNT_KEY]).await;
     let go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
+    reorder_account_first(&harness, go["id"].as_str().unwrap()).await;
     let (status, body) = harness.chat(GO_ALIAS).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
@@ -966,6 +997,7 @@ async fn alias_stream_does_not_cross_account_retry_after_output() {
     let harness = start_v2_with_disconnect_upstream().await;
     let first = harness.create_go_account("go-one", GO_ACCOUNT_KEY).await;
     let _second = harness.create_go_account("go-two", GO_ACCOUNT_KEY_2).await;
+    reorder_account_first(&harness, first["id"].as_str().unwrap()).await;
 
     let response = harness
         .client

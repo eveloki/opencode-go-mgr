@@ -30,7 +30,7 @@ the true / false circuit breakers, and protocol conversion actually work.
   - [Account Selection And Failover](#account-selection-and-failover)
   - [Cost Accounting](#cost-accounting)
   - [True And False Circuit Breakers](#true-and-false-circuit-breakers)
-  - [Free model policy](#free-model-policy)
+  - [Zen Free models](#zen-free-models)
 - [CLI](#cli)
 - [Docker](#docker)
   - [Optional Remote Browser](#optional-remote-browser)
@@ -194,7 +194,7 @@ enabled/disabled/deleted state is intact when you upgrade again, and no
 revoked credential can ever come back to life by downgrading. Sub keys
 simply do not authenticate while the older build runs.
 
-### Plan Migration (Schema v23)
+### Plan Migration (Schema v25)
 
 Schema v23 stores Plan verification state, Alias / upstream log identity
 (`requested_model`, `resolved_alias`, `upstream_model`), optional native cost
@@ -205,6 +205,13 @@ beside `data.sqlite`, named `data.sqlite.pre-v23.<timestamp>.bak`. Keep that
 file with your normal backup until the upgraded installation has been
 verified. It is a pre-v23 rollback point, not a replacement for a complete
 backup; never open the migrated database with an older build.
+
+Schema v24 adds the recorded proxy route leg (`auto`, `proxy`, or `direct`) to
+forward logs. Schema v25 adds the persisted provider-model catalog used by Zen Free. A
+successful manual refresh replaces that snapshot atomically; a failed or
+empty refresh leaves the previous snapshot untouched. This additive migration
+does not create separate pre-v24 or pre-v25 backups; the pre-v23 rollback copy described
+above remains the migration safety boundary.
 
 If the source database was older than schema v22, the same startup also keeps
 `data.sqlite.pre-v22.<timestamp>.bak` as the earlier rollback point. On every
@@ -433,11 +440,12 @@ The Applications picker list is the protected
 Go aliases intersected with the active OpenCode Go pricing snapshot. Highspeed
 variants inherit the base model's pricing row. An empty intersection is `[]`,
 not an error. That list is **not** the same as authenticated `GET /v1/models`,
-which publishes currently routeable Go and Zen Free aliases plus eligible
-Custom declared IDs. `application-models` stays Go-only. Both endpoints are
-local lists: no SCNet official table spellings, no unpublished Command Code
-GOAT names, no upstream discovery, and no account selection to fetch a
-catalog. An accepted pricing refresh can
+which publishes currently routeable Go aliases, the saved Zen Free catalog,
+and eligible Custom declared IDs. `application-models` stays Go-only. Both
+endpoints are local reads: no SCNet official table spellings, no unpublished
+Command Code GOAT names, and no request-time upstream discovery or account
+selection. The explicit Zen Free **Fetch models** action is the only catalog
+refresh path. An accepted pricing refresh can
 change which Go aliases `application-models` returns. The view reloads this
 local list whenever you return to it. Model selections and edited snippets are
 cached separately per application while the current dashboard page remains
@@ -547,6 +555,11 @@ are never published as client aliases.
 Custom API is a live trusted-administrator destination. The card stores a
 base URL, one upstream protocol (Chat Completions, Responses, or Messages),
 one auth scheme (Bearer or `x-api-key`), and at least one model capability.
+Use **Fetch models** only as an explicit form action: it sends `GET /models`
+to the configured base URL with the entered Key (or, while editing, the
+stored Custom Key), merges valid returned IDs into the editable list, and
+does not save, verify, enable, or otherwise change the account. The fetch is
+bounded and may report a truncated result; manual model IDs remain supported.
 A trusted administrator may configure any syntactically valid HTTP or HTTPS
 origin, including LAN, loopback, and other self-selected destinations.
 URL-embedded credentials, query strings, and fragments are rejected. The
@@ -699,13 +712,16 @@ press refresh, while offerings without a verified first-party pricing contract
 remain unavailable and cannot be refreshed. A failed fetch or validation keeps
 the last successful snapshot.
 
-For OpenCode Go, the view shows the revision, documentation timestamp, window
+Pricing keeps only the OpenCode Go, Command Code GOAT, and SCNet tabs. Zen Free
+has no price, while Custom API pricing belongs to the administrator's upstream,
+so neither appears in Pricing. For OpenCode Go, the view shows the revision, documentation timestamp, window
 limits, token rates, `Usage`, and the quota-debit multiplier. The allowance is
 not a quota pool and does not route requests: it only derives that debit
 multiplier (`monthly limit / Usage`). Saving a temporary override creates a
 new persistent revision for later estimates. There is no model-level quota
-pool. Command Code GOAT and SCNet Token Plans have no live pricing or usage
-path. Custom API is catalogued as unpriced: successful forwards log
+pool. Command Code GOAT and SCNet Token Plans show dated official package
+references checked on `2026-08-22`, but still have no live pricing or usage
+path and do not become routable. Custom API is catalogued as unpriced: successful forwards log
 `cost_state=unknown` with no quota debit and no official usage refresh.
 
 ### Logs
@@ -828,8 +844,8 @@ The **Settings** view exposes the persistent gateway configuration:
   direct overwrite install described above. Development builds, the CLI, and
   Docker keep the release-link/manual-upgrade path. The host must be able to
   reach GitHub; a failed check or install does not affect gateway forwarding.
-- **Free model routing** — three OpenCode Zen modes (`deny` / `explicit` /
-  `prefer`). See [Free model policy](#free-model-policy).
+- **Zen Free** — enable or disable it from its account card. Use the card's
+  **Fetch models** action to refresh the Free catalog.
 
 Configuration settings are written to SQLite and reloaded on the next start.
 The update check is an on-demand action and is not persisted.
@@ -845,7 +861,7 @@ The gateway is served at `http://<bind>:<port>` and exposes:
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET`  | `/v1/models` | Authenticated local list: published Go/Zen aliases plus eligible Custom IDs (no upstream discovery) |
+| `GET`  | `/v1/models` | Authenticated local list: published Go aliases, the last saved Zen Free catalog, and eligible Custom IDs |
 | `POST` | `/v1beta/models/{model}:generateContent` | Gemini non-stream generation (`/v1/models/...` is also accepted) |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini SSE generation (`/v1/models/...` is also accepted) |
 | `POST` | `/v1beta/models/{model}:countTokens` | Returns `501`; Gemini CLI can fall back to local estimation |
@@ -895,8 +911,9 @@ case-folded spellings such as `GLM-5.2` are accepted.
 Authenticated `GET /v1/models` lists currently routeable published aliases
 (OpenCode Go and Zen Free) in deterministic registry order, then appends
 eligible Custom capability IDs that do not match those aliases (`owned_by` is
-`custom`). It does **not** discover, proxy, or cache an upstream catalog,
-write a forward log, or mutate routing state. Published Go and Zen Free
+`custom`). It does not make an upstream request: Zen discovery happens only
+when an administrator clicks **Fetch models**, and this endpoint reads that
+saved snapshot. It does not write a forward log. Published Go and Zen Free
 aliases do not depend on whether any Go account exists. Eligible Custom IDs
 come from enabled + verified + ready Custom accounts that have a key.
 
@@ -1172,40 +1189,29 @@ next section.
   automatically after `cooldown_until`, or immediately after you reset its
   cooldown in the dashboard.
 
-### Free model policy
+### Zen Free models
 
-Settings expose three OpenCode Zen free-routing modes:
+Zen Free is one credentialless account card with one enable switch. There is
+no separate Deny / Explicit / Prefer policy. Disable the card if you do not
+want Free traffic; otherwise its position in the account list is its routing
+priority.
 
-| Mode | Behavior |
-| --- | --- |
-| **Deny free models** | Reject registered Zen free models (`big-pickle`, `mimo-v2.5-free`, …) and never rewrite Go models onto Zen. Go ids that merely contain `free`, such as `ox-alpha-free`, stay on Go. |
-| **Explicit free only** (default) | Only client-requested Zen free models use `https://opencode.ai/zen`; Go models stay on Go |
-| **Prefer mapped free models** | Current map: `mimo-v2.5` → `mimo-v2.5-free`; prefer free only when a coarse context estimate fits, otherwise or when free is exhausted (IP-shared 429, no key rotation) fall back to Go |
-
-Zen free routing is an explicit allowlist (`big-pickle` plus registered Zen
-promo ids). A `-free` suffix is not enough: official Go docs list
-`ox-alpha-free` (Ox Alpha Free) on
-`https://opencode.ai/zen/go/v1/chat/completions`, so that model stays on Go.
-When free routing is not deny, `GET /v1/models` merges the known live Zen free
-ids into the Go catalog so clients can discover them.
-
-Live-verified Zen free set (2026-08-21, no key required on Zen):
-`big-pickle`, `mimo-v2.5-free`, `hy3-free`, `nemotron-3-ultra-free`,
-`laguna-s-2.1-free` (Chat), and `muse-spark-1.2-contributor-free` (Responses;
-`max_output_tokens` must be at least 16). `deepseek-v4-flash-free` now returns
-unavailable. Official docs still list `nemotron-3.5-lightning-free`, but a live
-ping from this workspace did not complete.
+**Fetch models** calls the official keyless Zen model directory only on user
+request. The backend keeps only IDs ending in `-free`, saves the successful
+snapshot, and derives one additional Alias by removing that suffix. For
+example, `mimo-v2.5-free` is accepted both as itself and as `mimo-v2.5`;
+requests for the shared Alias follow account-card order across Go and Zen.
+The card shows every `Alias → upstream model ID` pair. A failed or empty
+refresh leaves the last saved snapshot active. The reserved Go model
+`ox-alpha-free` is excluded from Zen discovery so it remains Go-only and
+unpriced.
 
 Free and Go cooldowns are **independent**. Zen Free sends no authentication
-headers. Its promo quota is shared per egress IP, so a free `429` cools the
-whole free channel and does **not** rotate keys; when a mapped free request can
-fall through, prefer mode safely continues on Go. A free `401` or `403` blocks
-that route. Multi-account routing still applies on the Go channel. Under
-sticky-global routing, Free and Go currently share one preferred account id
-across channels.
-Successful free-channel rows keep token counts but use `cost_state=free` and do
-not enter Go quota totals; prefer-mode fallbacks that land on Go are priced as
-usual. Free models are promotional, use a separate quota, and may use request
+headers. Its promo quota is shared per egress IP, so a Free `429` cools the
+whole Free channel and does not rotate keys. Routing then continues to later
+compatible account cards in saved order; a Free-only model returns the shared
+cooldown. Successful Free rows keep token counts, use `cost_state=free`, and
+do not enter Go quota totals. Free models are promotional and may use request
 data to improve models — do not submit confidential content.
 
 ## CLI

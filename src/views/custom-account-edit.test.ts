@@ -22,7 +22,6 @@ function customAccount(overrides: Partial<Account> = {}): Account {
     offering_id: "api",
     credential_kind: "api_key",
     quota_scope: "key",
-    free_alias_enabled: false,
     purchase_date: "",
     expires_on: "",
     cooldown_until: null,

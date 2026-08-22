@@ -9,8 +9,7 @@ use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
 use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::{
-    Account, AccountUpdate, ForwardLog, FreeModelRouting, ProxyListDirection, ProxyMode,
-    RoutingMode,
+    Account, AccountUpdate, ForwardLog, ProxyListDirection, ProxyMode, RoutingMode,
 };
 use ocg_core::provider::{
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
@@ -289,7 +288,6 @@ fn build_state_with_routing(
             offering_id: ocg_core::provider::default_offering_id(),
             credential_kind: ocg_core::provider::default_credential_kind(),
             quota_scope: ocg_core::provider::default_quota_scope(),
-            free_alias_enabled: false,
             name: format!("acct-{}", idx + 1),
             username: None,
             password_cipher: None,
@@ -639,8 +637,8 @@ async fn model_discovery_does_not_create_inference_logs() {
     assert_eq!(status, StatusCode::OK);
     assert_local_openai_alias_list(&body);
     assert!(
-        body.contains("big-pickle"),
-        "registered Zen models must appear in the local Alias list: {body}"
+        body.contains("mimo-v2.5-free") && body.contains("nemotron-3-ultra"),
+        "saved Zen Free models and stripped aliases must appear in the local Alias list: {body}"
     );
     assert!(
         calls.lock().unwrap().is_empty(),
@@ -691,12 +689,11 @@ fn expected_local_application_models(state: &Arc<CoreStateInner>) -> Vec<String>
     alias::routeable_aliases_for(OPENCODE_PROVIDER_ID, GO_OFFERING_ID)
         .into_iter()
         .filter(|alias| {
-            priced.contains(*alias)
+            priced.contains(alias)
                 || alias
                     .strip_suffix("-highspeed")
                     .is_some_and(|base| priced.contains(base))
         })
-        .map(str::to_string)
         .collect()
 }
 
@@ -2502,16 +2499,22 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
 async fn registered_zen_promo_routes_to_zen_not_go() {
     let replies = HashMap::from([(
         String::new(),
-        VecDeque::from([MockReply {
-            status: 200,
-            body: SUCCESS_BODY,
-        }]),
+        VecDeque::from([
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+        ]),
     )]);
     let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1"]);
     let (port, gateway_handle) = start_gateway(state).await;
 
-    for model in ["big-pickle", "mimo-v2.5-free"] {
+    for model in ["mimo-v2.5-free", "mimo-v2.5"] {
         let (status, body) = protocol_call(port, "/v1/chat/completions", model).await;
         assert_eq!(status, StatusCode::OK, "{model} {body}");
     }
@@ -2680,7 +2683,7 @@ async fn zen_free_429_is_anonymous_and_cools_the_singleton_egress_route() {
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
         calls
             .lock()
@@ -2910,7 +2913,7 @@ async fn zen_free_401_and_403_stop_without_touching_a_normal_credential() {
 }
 
 #[tokio::test]
-async fn prefer_mode_zen_429_falls_through_to_the_next_normal_card() {
+async fn ordered_zen_candidate_429_falls_through_to_the_next_normal_card() {
     let replies = HashMap::from([
         (
             String::new(),
@@ -2929,9 +2932,6 @@ async fn prefer_mode_zen_429_falls_through_to_the_next_normal_card() {
     ]);
     let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
-    let mut config = state.config();
-    config.free_model_routing = ocg_core::models::FreeModelRouting::Prefer;
-    state.set_config(config).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
@@ -2962,7 +2962,7 @@ async fn prefer_mode_zen_429_falls_through_to_the_next_normal_card() {
 }
 
 #[tokio::test]
-async fn prefer_mode_round_robin_includes_zen_in_the_global_card_order() {
+async fn shared_alias_strict_priority_follows_the_persisted_card_order() {
     let replies = HashMap::from([
         (
             String::new(),
@@ -2980,21 +2980,22 @@ async fn prefer_mode_round_robin_includes_zen_in_the_global_card_order() {
         ),
     ]);
     let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state_with_routing(
-        format!("{mock_base}/zen/go"),
-        &["normal-key"],
-        RoutingMode::RoundRobin,
-        false,
-    );
-    let mut config = state.config();
-    config.free_model_routing = ocg_core::models::FreeModelRouting::Prefer;
-    state.set_config(config).unwrap();
-    let (port, gateway_handle) = start_gateway(state).await;
-
-    for _ in 0..3 {
-        let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
-        assert_eq!(status, 200, "{body}");
-    }
+    let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
+    state
+        .db
+        .lock()
+        .reorder_accounts(&["acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
+    assert_eq!(status, 200, "{body}");
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[ZEN_FREE_ACCOUNT_ID.into(), "acct-1".into()])
+        .unwrap();
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
+    assert_eq!(status, 200, "{body}");
     assert_eq!(
         calls
             .lock()
@@ -3002,7 +3003,7 @@ async fn prefer_mode_round_robin_includes_zen_in_the_global_card_order() {
             .iter()
             .map(|call| call.key.as_str())
             .collect::<Vec<_>>(),
-        ["", "normal-key", ""]
+        ["normal-key", ""]
     );
 
     gateway::stop_gateway(gateway_handle);
@@ -4212,8 +4213,8 @@ async fn list_mode_routes_listed_models_through_the_proxy_leg_and_labels_logs() 
 
 #[tokio::test]
 async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
-    // Prefer mode: the request starts on the listed free twin (proxy leg,
-    // exhausted) and falls back to the unlisted Go model (direct leg).
+    // Card order puts Zen first: the request starts on the listed free twin
+    // (proxy leg, exhausted) and falls back to the unlisted Go model (direct leg).
     let (upstream_base, upstream_calls, stop_upstream) = start_mock_upstream(HashMap::from([(
         "key-1".to_string(),
         VecDeque::from([MockReply {
@@ -4223,7 +4224,7 @@ async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
     )]))
     .await;
     let (proxy_base, proxy_calls, stop_proxy) = start_mock_upstream(HashMap::from([(
-        "key-1".to_string(),
+        String::new(),
         VecDeque::from([MockReply {
             status: 429,
             body: LIMITED_BODY,
@@ -4238,11 +4239,11 @@ async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
         &proxy_base,
         &["mimo-v2.5-free"],
     );
-    {
-        let mut config = state.config();
-        config.free_model_routing = FreeModelRouting::Prefer;
-        state.set_config(config).unwrap();
-    }
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[ZEN_FREE_ACCOUNT_ID.into(), "acct-1".into()])
+        .unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;

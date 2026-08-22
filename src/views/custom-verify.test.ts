@@ -27,7 +27,6 @@ function customAccount(overrides: Partial<Account> = {}): Account {
     offering_id: "api",
     credential_kind: "api_key",
     quota_scope: "key",
-    free_alias_enabled: false,
     purchase_date: "",
     expires_on: "",
     cooldown_until: null,
@@ -133,4 +132,11 @@ test("the form binds every capability to its selected protocol and reserves veri
   // Protocol and auth scheme remain immutable after create.
   assert.match(form, /:disabled="fieldImmutableAfterCreate\('upstream_protocol'\)"/);
   assert.match(form, /:disabled="fieldImmutableAfterCreate\('auth_scheme'\)"/);
+});
+
+test("model discovery ignores responses after the form context changes", () => {
+  assert.match(form, /let discoveryGeneration = 0/);
+  assert.match(form, /\{ flush: "sync" \}/);
+  assert.match(form, /generation !== discoveryGeneration \|\| !modelDiscoveryContextMatches\(context\)/);
+  assert.match(form, /generation === discoveryGeneration && modelDiscoveryContextMatches\(context\)/);
 });

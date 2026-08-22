@@ -93,3 +93,25 @@ test("model capabilities PUT wraps the list and keeps exact model IDs and order"
     expected_revision: 10,
   });
 });
+
+test("model discovery posts only the transient form fields to its protected route", async () => {
+  const requests = mockDashboardFetch(() => ({ models: ["model-a"], truncated: false }));
+
+  await tauriApi.discoverCustomModels({
+    base_url: "https://api.example.com/v1",
+    upstream_protocol: "messages",
+    auth_scheme: "x-api-key",
+    api_key: "new-key",
+    account_id: "custom-1",
+  });
+
+  assert.equal(requests[0]?.url, "/dashboard/api/custom/models/discover");
+  assert.equal(requests[0]?.method, "POST");
+  assert.deepEqual(requests[0]?.body, {
+    base_url: "https://api.example.com/v1",
+    upstream_protocol: "messages",
+    auth_scheme: "x-api-key",
+    api_key: "new-key",
+    account_id: "custom-1",
+  });
+});

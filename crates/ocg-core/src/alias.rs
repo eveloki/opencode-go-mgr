@@ -21,7 +21,7 @@
 //! OpenCode `MODEL_PROTOCOLS` table stays Go-specific.
 
 use crate::custom::custom_model_id_matches;
-use crate::gateway::free_models::{is_free_model, mapped_free_for};
+use crate::gateway::free_models::is_free_model;
 use crate::gateway::protocol::supported_model_ids;
 use crate::provider::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
@@ -40,7 +40,7 @@ pub const AMBIGUOUS_MODEL_ID: &str = "ambiguous_model_id";
 pub struct ProviderMapping {
     pub provider_id: &'static str,
     pub offering_id: &'static str,
-    pub upstream_model: &'static str,
+    pub upstream_model: String,
     /// Production-routeable mappings only. Reserved offerings stay false.
     pub routeable: bool,
 }
@@ -67,10 +67,8 @@ impl ProviderMapping {
 /// A preferred client-facing alias and its provider mappings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasEntry {
-    pub alias: &'static str,
+    pub alias: String,
     pub mappings: Vec<ProviderMapping>,
-    /// OpenCode prefer-mode free twin, when the docs mapping exists.
-    pub prefer_twin: Option<&'static str>,
 }
 
 /// Result of looking up a client-supplied model name.
@@ -80,9 +78,8 @@ pub enum ResolvedModel {
     /// routeable mappings (including Zen prefer overlay).
     Alias {
         requested: String,
-        alias: &'static str,
+        alias: String,
         mappings: Vec<ProviderMapping>,
-        prefer_twin: Option<&'static str>,
     },
     /// Raw upstream ID that uniquely selected one routeable mapping. Pinned to
     /// that provider; no cross-provider fallback or prefer overlay.
@@ -172,30 +169,39 @@ fn registry() -> &'static Registry {
 }
 
 fn build_builtin_registry() -> Registry {
+    build_registry(&crate::zen_models::ZenFreeModelCatalog::default().models)
+}
+
+fn build_registry(zen_free_models: &[String]) -> Registry {
     let mut specs = Vec::new();
     for id in supported_model_ids() {
-        if is_free_model(id) {
-            specs.push(AliasEntry {
-                alias: id,
-                mappings: vec![zen_mapping(id)],
-                prefer_twin: None,
-            });
+        if id == "big-pickle" || is_free_model(id) {
+            continue;
         } else {
             specs.push(AliasEntry {
-                alias: id,
+                alias: id.to_string(),
                 mappings: go_alias_mappings(id),
-                prefer_twin: mapped_free_for(id),
             });
         }
     }
-    registry_from_entries(specs)
+    let mut registry = registry_from_entries(specs);
+    for model in zen_free_models {
+        if !is_free_model(model) {
+            continue;
+        }
+        if let Some(alias) = crate::zen_models::stripped_free_alias(model) {
+            insert_mapping(&mut registry, model, zen_mapping(model));
+            insert_mapping(&mut registry, alias, zen_mapping(model));
+        }
+    }
+    registry
 }
 
 fn go_mapping(upstream_model: &'static str) -> ProviderMapping {
     ProviderMapping {
         provider_id: OPENCODE_PROVIDER_ID,
         offering_id: GO_OFFERING_ID,
-        upstream_model,
+        upstream_model: upstream_model.to_string(),
         routeable: true,
     }
 }
@@ -204,7 +210,7 @@ fn goat_deepseek_v4_flash_mapping() -> ProviderMapping {
     ProviderMapping {
         provider_id: COMMAND_CODE_PROVIDER_ID,
         offering_id: GOAT_OFFERING_ID,
-        upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.to_string(),
         routeable: false,
     }
 }
@@ -217,20 +223,20 @@ fn go_alias_mappings(upstream_model: &'static str) -> Vec<ProviderMapping> {
     mappings
 }
 
-fn zen_mapping(upstream_model: &'static str) -> ProviderMapping {
+fn zen_mapping(upstream_model: &str) -> ProviderMapping {
     ProviderMapping {
         provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
         offering_id: ANONYMOUS_FREE_OFFERING_ID,
-        upstream_model,
+        upstream_model: upstream_model.to_string(),
         routeable: true,
     }
 }
 
-fn custom_mapping(upstream_model: &'static str) -> ProviderMapping {
+fn custom_mapping(upstream_model: &str) -> ProviderMapping {
     ProviderMapping {
         provider_id: CUSTOM_PROVIDER_ID,
         offering_id: CUSTOM_API_OFFERING_ID,
-        upstream_model,
+        upstream_model: upstream_model.to_string(),
         routeable: true,
     }
 }
@@ -254,7 +260,7 @@ fn registry_from_entries(entries: Vec<AliasEntry>) -> Registry {
     let mut raw_folded: BTreeMap<String, Vec<ProviderMapping>> = BTreeMap::new();
     for entry in entries {
         debug_assert!(
-            !looks_raw_shaped(entry.alias),
+            !looks_raw_shaped(&entry.alias),
             "published aliases must be kebab-case without slash, space, or underscore"
         );
         for mapping in &entry.mappings {
@@ -273,6 +279,29 @@ fn registry_from_entries(entries: Vec<AliasEntry>) -> Registry {
         aliases,
         raw_exact,
         raw_folded,
+    }
+}
+
+fn insert_mapping(registry: &mut Registry, alias: &str, mapping: ProviderMapping) {
+    let key = alias.to_ascii_lowercase();
+    let entry = registry.aliases.entry(key).or_insert_with(|| AliasEntry {
+        alias: alias.to_string(),
+        mappings: Vec::new(),
+    });
+    if !entry.mappings.contains(&mapping) {
+        entry.mappings.push(mapping.clone());
+    }
+    for (index, raw_key) in [
+        (&mut registry.raw_exact, mapping.upstream_model.clone()),
+        (
+            &mut registry.raw_folded,
+            mapping.upstream_model.to_lowercase(),
+        ),
+    ] {
+        let mappings = index.entry(raw_key).or_default();
+        if !mappings.contains(&mapping) {
+            mappings.push(mapping.clone());
+        }
     }
 }
 
@@ -321,16 +350,66 @@ pub fn resolve_with_custom(
             requested,
             alias,
             mut mappings,
-            prefer_twin,
         }) => {
             if custom_hit && !mappings.iter().any(|mapping| mapping.is_custom_api()) {
-                mappings.push(custom_mapping(alias));
+                mappings.push(custom_mapping(&alias));
             }
             Ok(ResolvedModel::Alias {
                 requested,
                 alias,
                 mappings,
-                prefer_twin,
+            })
+        }
+        Ok(ResolvedModel::PinnedRaw { requested, mapping }) => {
+            if custom_hit && !mapping.is_custom_api() {
+                return Err(ResolveError::Ambiguous {
+                    requested,
+                    mappings: vec![mapping, custom_mapping(CUSTOM_DYNAMIC_UPSTREAM)],
+                });
+            }
+            Ok(ResolvedModel::PinnedRaw { requested, mapping })
+        }
+        Err(ResolveError::Unknown { requested }) if custom_hit => Ok(ResolvedModel::PinnedRaw {
+            requested,
+            mapping: custom_mapping(CUSTOM_DYNAMIC_UPSTREAM),
+        }),
+        other => other,
+    }
+}
+
+/// Resolve against the current persisted Zen Free catalog and eligible Custom
+/// capabilities. Zen mappings are rebuilt from the small bounded snapshot so a
+/// successful manual refresh takes effect without restarting the Gateway.
+pub fn resolve_with_provider_models(
+    requested: &str,
+    zen_free_models: &[String],
+    custom_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    let registry = build_registry(zen_free_models);
+    resolve_with_custom_in(&registry, requested, custom_model_ids)
+}
+
+fn resolve_with_custom_in(
+    registry: &Registry,
+    requested: &str,
+    custom_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    let custom_hit = custom_model_ids
+        .iter()
+        .any(|id| custom_model_id_matches(id, requested));
+    match resolve_in(registry, requested) {
+        Ok(ResolvedModel::Alias {
+            requested,
+            alias,
+            mut mappings,
+        }) => {
+            if custom_hit && !mappings.iter().any(|mapping| mapping.is_custom_api()) {
+                mappings.push(custom_mapping(&alias));
+            }
+            Ok(ResolvedModel::Alias {
+                requested,
+                alias,
+                mappings,
             })
         }
         Ok(ResolvedModel::PinnedRaw { requested, mapping }) => {
@@ -377,9 +456,8 @@ fn resolve_in(registry: &Registry, requested: &str) -> Result<ResolvedModel, Res
     if let Some(entry) = registry.aliases.get(&folded) {
         return Ok(ResolvedModel::Alias {
             requested: original,
-            alias: entry.alias,
+            alias: entry.alias.clone(),
             mappings: entry.mappings.clone(),
-            prefer_twin: entry.prefer_twin,
         });
     }
     if let Some(mappings) = registry.raw_exact.get(trimmed) {
@@ -395,18 +473,18 @@ fn resolve_in(registry: &Registry, requested: &str) -> Result<ResolvedModel, Res
 
 /// Preferred aliases present in the registry, including fail-closed-only names.
 /// Client `GET /v1/models` uses [`published_routeable_aliases`] instead.
-pub fn published_aliases() -> Vec<&'static str> {
+pub fn published_aliases() -> Vec<String> {
     registry()
         .aliases
         .values()
-        .map(|entry| entry.alias)
+        .map(|entry| entry.alias.clone())
         .collect()
 }
 
 /// A routeable preferred alias advertised by `GET /v1/models`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedAlias {
-    pub alias: &'static str,
+    pub alias: String,
     pub owned_by: &'static str,
 }
 
@@ -421,6 +499,10 @@ pub fn published_routeable_aliases() -> Vec<PublishedAlias> {
     published_routeable_in(registry())
 }
 
+pub fn published_routeable_aliases_with_zen(zen_free_models: &[String]) -> Vec<PublishedAlias> {
+    published_routeable_in(&build_registry(zen_free_models))
+}
+
 fn published_routeable_in(registry: &Registry) -> Vec<PublishedAlias> {
     registry
         .aliases
@@ -431,7 +513,7 @@ fn published_routeable_in(registry: &Registry) -> Vec<PublishedAlias> {
                 .iter()
                 .find(|mapping| mapping.routeable)
                 .map(|mapping| PublishedAlias {
-                    alias: entry.alias,
+                    alias: entry.alias.clone(),
                     owned_by: mapping.provider_id,
                 })
         })
@@ -442,7 +524,7 @@ fn published_routeable_in(registry: &Registry) -> Vec<PublishedAlias> {
 /// provider/offering, in deterministic registry order. Raw upstream IDs are
 /// never returned. Unroutable mappings (GOAT / SCNet / Custom today) yield an
 /// empty list without a hardcoded per-plan alias set.
-pub fn routeable_aliases_for(provider_id: &str, offering_id: &str) -> Vec<&'static str> {
+pub fn routeable_aliases_for(provider_id: &str, offering_id: &str) -> Vec<String> {
     routeable_aliases_for_in(registry(), provider_id, offering_id)
 }
 
@@ -450,7 +532,7 @@ fn routeable_aliases_for_in(
     registry: &Registry,
     provider_id: &str,
     offering_id: &str,
-) -> Vec<&'static str> {
+) -> Vec<String> {
     registry
         .aliases
         .values()
@@ -461,8 +543,16 @@ fn routeable_aliases_for_in(
                     && mapping.offering_id == offering_id
             })
         })
-        .map(|entry| entry.alias)
+        .map(|entry| entry.alias.clone())
         .collect()
+}
+
+pub fn routeable_aliases_for_with_zen(
+    provider_id: &str,
+    offering_id: &str,
+    zen_free_models: &[String],
+) -> Vec<String> {
+    routeable_aliases_for_in(&build_registry(zen_free_models), provider_id, offering_id)
 }
 
 pub fn is_published_alias(name: &str) -> bool {
@@ -498,19 +588,13 @@ mod tests {
     #[test]
     fn alias_lookup_is_case_insensitive_kebab() {
         let resolved = resolve("GLM-5.2").expect("case-folded alias");
-        assert!(matches!(
-            resolved,
-            ResolvedModel::Alias {
-                alias: "glm-5.2",
-                ..
-            }
-        ));
+        assert!(matches!(resolved, ResolvedModel::Alias { alias, .. } if alias == "glm-5.2"));
         assert!(is_published_alias("Grok-4.5"));
         assert!(is_published_alias(" glm-5.2 "));
         for alias in published_aliases() {
             assert_eq!(alias, alias.to_lowercase());
             assert!(!alias.is_empty());
-            assert!(!looks_raw_shaped(alias));
+            assert!(!looks_raw_shaped(&alias));
         }
     }
 
@@ -525,23 +609,20 @@ mod tests {
         }
         assert!(matches!(
             resolve("glm-5.2").unwrap(),
-            ResolvedModel::Alias {
-                alias: "glm-5.2",
-                ..
-            }
+            ResolvedModel::Alias { alias, .. } if alias == "glm-5.2"
         ));
     }
 
     #[test]
-    fn go_named_free_ids_are_aliases_not_zen() {
-        let resolved = resolve("deepseek-v4-flash-free").expect("Go alias");
+    fn discovered_free_ids_and_stripped_aliases_share_the_zen_mapping() {
+        let resolved = resolve("deepseek-v4-flash-free").expect("Zen model id");
         match resolved {
             ResolvedModel::Alias {
                 alias, mappings, ..
             } => {
                 assert_eq!(alias, "deepseek-v4-flash-free");
                 assert_eq!(mappings.len(), 1);
-                assert!(mappings[0].is_opencode_go());
+                assert!(mappings[0].is_zen_free());
                 assert_eq!(mappings[0].upstream_model, "deepseek-v4-flash-free");
             }
             other => panic!("expected alias, got {other:?}"),
@@ -549,37 +630,79 @@ mod tests {
     }
 
     #[test]
-    fn prefer_twins_are_recorded_on_go_aliases() {
-        match resolve("deepseek-v4-flash").unwrap() {
-            ResolvedModel::Alias { prefer_twin, .. } => {
-                assert_eq!(prefer_twin, None);
-            }
-            other => panic!("expected alias, got {other:?}"),
-        }
+    fn shared_aliases_record_go_and_zen_mappings_in_the_registry() {
         match resolve("mimo-v2.5").unwrap() {
-            ResolvedModel::Alias { prefer_twin, .. } => {
-                assert_eq!(prefer_twin, Some("mimo-v2.5-free"));
+            ResolvedModel::Alias { mappings, .. } => {
+                assert_eq!(mappings.len(), 2);
+                assert!(mappings[0].is_opencode_go());
+                assert!(mappings[1].is_zen_free());
+                assert_eq!(mappings[1].upstream_model, "mimo-v2.5-free");
             }
             other => panic!("expected alias, got {other:?}"),
         }
         match resolve("glm-5.2").unwrap() {
-            ResolvedModel::Alias { prefer_twin, .. } => assert_eq!(prefer_twin, None),
+            ResolvedModel::Alias { mappings, .. } => assert_eq!(mappings.len(), 1),
             other => panic!("expected alias, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn refreshed_zen_models_publish_raw_and_stripped_aliases() {
+        let models = vec!["brand-new-coder-free".to_string()];
+        for requested in ["brand-new-coder-free", "brand-new-coder"] {
+            match resolve_with_provider_models(requested, &models, &[]).unwrap() {
+                ResolvedModel::Alias {
+                    alias, mappings, ..
+                } => {
+                    assert_eq!(alias, requested);
+                    assert_eq!(mappings.len(), 1);
+                    assert!(mappings[0].is_zen_free());
+                    assert_eq!(mappings[0].upstream_model, "brand-new-coder-free");
+                }
+                other => panic!("expected dynamic Zen alias, got {other:?}"),
+            }
+        }
+        let published = published_routeable_aliases_with_zen(&models);
+        assert!(
+            published
+                .iter()
+                .any(|entry| entry.alias == "brand-new-coder")
+        );
+        assert!(
+            published
+                .iter()
+                .any(|entry| entry.alias == "brand-new-coder-free")
+        );
+    }
+
+    #[test]
+    fn refreshed_catalog_cannot_steal_go_only_ox_alpha_free() {
+        let models = vec!["ox-alpha-free".to_string()];
+        match resolve_with_provider_models("ox-alpha-free", &models, &[]).unwrap() {
+            ResolvedModel::Alias { mappings, .. } => {
+                assert!(mappings.iter().all(ProviderMapping::is_opencode_go));
+            }
+            other => panic!("expected Go alias, got {other:?}"),
+        }
+        assert!(resolve_with_provider_models("ox-alpha", &models, &[]).is_err());
     }
 
     #[test]
     fn registry_covers_every_opencode_protocol_id() {
         let aliases = published_aliases();
         for id in supported_model_ids() {
+            if id == "big-pickle" || (is_free_model(id) && !free_model_ids().any(|free| free == id))
+            {
+                continue;
+            }
             assert!(
-                aliases.contains(&id),
+                aliases.iter().any(|alias| alias == id),
                 "MODEL_PROTOCOLS id `{id}` must have an alias"
             );
         }
         for id in free_model_ids() {
             assert!(
-                aliases.contains(&id),
+                aliases.iter().any(|alias| alias == id),
                 "free model `{id}` must have an alias"
             );
             assert!(resolve(id).unwrap().routeable_mappings()[0].is_zen_free());
@@ -593,7 +716,7 @@ mod tests {
     fn published_routeable_aliases_use_routeable_provider_ownership() {
         let published = published_routeable_aliases();
         assert!(!published.is_empty());
-        let ids: Vec<&str> = published.iter().map(|item| item.alias).collect();
+        let ids: Vec<&str> = published.iter().map(|item| item.alias.as_str()).collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted, "GET /v1/models order must be deterministic");
@@ -603,9 +726,9 @@ mod tests {
             "builtin aliases currently all have a routeable mapping"
         );
         for item in &published {
-            assert!(!looks_raw_shaped(item.alias));
+            assert!(!looks_raw_shaped(&item.alias));
             assert_ne!(item.alias, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM);
-            match resolve(item.alias).unwrap() {
+            match resolve(&item.alias).unwrap() {
                 ResolvedModel::Alias { mappings, .. } => {
                     let routeable = mappings
                         .iter()
@@ -624,11 +747,11 @@ mod tests {
             .find(|item| item.alias == "glm-5.2")
             .expect("Go alias");
         assert_eq!(go.owned_by, OPENCODE_PROVIDER_ID);
-        let go_named_free = published
+        let zen_free = published
             .iter()
             .find(|item| item.alias == "deepseek-v4-flash-free")
-            .expect("Go alias whose name contains free");
-        assert_eq!(go_named_free.owned_by, OPENCODE_PROVIDER_ID);
+            .expect("discovered Zen model id");
+        assert_eq!(zen_free.owned_by, OPENCODE_ZEN_FREE_PROVIDER_ID);
         let goat_alias = published
             .iter()
             .find(|item| item.alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS)
@@ -673,10 +796,15 @@ mod tests {
                     .iter()
                     .filter(|mapping| mapping.routeable)
                     .collect::<Vec<_>>();
-                assert_eq!(routeable.len(), 1);
-                assert!(routeable[0].is_opencode_go());
+                assert_eq!(routeable.len(), 2);
+                assert!(routeable.iter().any(|mapping| mapping.is_opencode_go()));
+                assert!(routeable.iter().any(|mapping| mapping.is_zen_free()));
                 assert_eq!(
-                    routeable[0].upstream_model,
+                    routeable
+                        .iter()
+                        .find(|mapping| mapping.is_opencode_go())
+                        .unwrap()
+                        .upstream_model,
                     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS
                 );
             }
@@ -715,19 +843,17 @@ mod tests {
     fn unique_raw_id_pins_to_one_mapping() {
         let registry = registry_from_entries(vec![
             AliasEntry {
-                alias: "widget",
+                alias: "widget".into(),
                 mappings: vec![go_mapping("widget")],
-                prefer_twin: None,
             },
             AliasEntry {
-                alias: "gadget",
+                alias: "gadget".into(),
                 mappings: vec![ProviderMapping {
                     provider_id: OPENCODE_PROVIDER_ID,
                     offering_id: GO_OFFERING_ID,
-                    upstream_model: "vendor.gadget-v1",
+                    upstream_model: "vendor.gadget-v1".into(),
                     routeable: true,
                 }],
-                prefer_twin: None,
             },
         ]);
         match resolve_in(&registry, "vendor.gadget-v1").unwrap() {
@@ -740,21 +866,17 @@ mod tests {
         // Alias still wins when a kebab string is both an alias and a raw ID.
         assert!(matches!(
             resolve_in(&registry, "widget").unwrap(),
-            ResolvedModel::Alias {
-                alias: "widget",
-                ..
-            }
+            ResolvedModel::Alias { alias, .. } if alias == "widget"
         ));
         // Exact slash-form raw IDs pin without collapsing onto a kebab alias.
         let slash_registry = registry_from_entries(vec![AliasEntry {
-            alias: "widget",
+            alias: "widget".into(),
             mappings: vec![ProviderMapping {
                 provider_id: OPENCODE_PROVIDER_ID,
                 offering_id: GO_OFFERING_ID,
-                upstream_model: "vendor/widget-v1",
+                upstream_model: "vendor/widget-v1".into(),
                 routeable: true,
             }],
-            prefer_twin: None,
         }]);
         match resolve_in(&slash_registry, "vendor/widget-v1").unwrap() {
             ResolvedModel::PinnedRaw { mapping, .. } => {
@@ -772,14 +894,12 @@ mod tests {
     fn overlapping_raw_ids_return_ambiguous_model_id() {
         let registry = registry_from_entries(vec![
             AliasEntry {
-                alias: "alpha",
+                alias: "alpha".into(),
                 mappings: vec![go_mapping("shared-raw")],
-                prefer_twin: None,
             },
             AliasEntry {
-                alias: "beta",
+                alias: "beta".into(),
                 mappings: vec![zen_mapping("shared-raw")],
-                prefer_twin: None,
             },
         ]);
         match resolve_in(&registry, "shared-raw") {
@@ -796,21 +916,20 @@ mod tests {
         // Preferred aliases still resolve even when their upstream IDs overlap.
         assert!(matches!(
             resolve_in(&registry, "alpha").unwrap(),
-            ResolvedModel::Alias { alias: "alpha", .. }
+            ResolvedModel::Alias { alias, .. } if alias == "alpha"
         ));
     }
 
     #[test]
     fn fail_closed_raw_mapping_is_not_routeable() {
         let registry = registry_from_entries(vec![AliasEntry {
-            alias: "visible",
+            alias: "visible".into(),
             mappings: vec![ProviderMapping {
                 provider_id: "command-code",
                 offering_id: "goat",
-                upstream_model: "goat-only-raw",
+                upstream_model: "goat-only-raw".into(),
                 routeable: false,
             }],
-            prefer_twin: None,
         }]);
         match resolve_in(&registry, "goat-only-raw") {
             Ok(ResolvedModel::PinnedRaw { mapping, .. }) => {
@@ -835,9 +954,8 @@ mod tests {
                 assert!(
                     ResolvedModel::Alias {
                         requested: "visible".into(),
-                        alias: "visible",
+                        alias: "visible".into(),
                         mappings: mappings.clone(),
-                        prefer_twin: None,
                     }
                     .routeable_mappings()
                     .is_empty()
@@ -869,19 +987,40 @@ mod tests {
             assert_ne!(*alias, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM);
             assert!(!alias.contains('/'));
         }
-        assert!(go.contains(&"glm-5.2"));
-        assert!(go.contains(&COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS));
-        assert!(go.contains(&"minimax-m2.7-highspeed"));
-        assert!(go.contains(&"deepseek-v4-flash-free"));
-        assert!(!zen.contains(&"glm-5.2"));
-        assert!(!zen.contains(&"deepseek-v4-flash-free"));
+        assert!(go.iter().any(|alias| alias == "glm-5.2"));
+        assert!(
+            go.iter()
+                .any(|alias| alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS)
+        );
+        assert!(go.iter().any(|alias| alias == "minimax-m2.7-highspeed"));
+        assert!(!go.iter().any(|alias| alias == "deepseek-v4-flash-free"));
+        assert!(!zen.iter().any(|alias| alias == "glm-5.2"));
+        assert!(zen.iter().any(|alias| alias == "deepseek-v4-flash-free"));
         for id in free_model_ids() {
-            assert!(zen.contains(&id), "Zen catalog must include `{id}`");
-            assert!(!go.contains(&id), "Go catalog must not include free `{id}`");
+            assert!(
+                zen.iter().any(|alias| alias == id),
+                "Zen catalog must include `{id}`"
+            );
+            assert!(
+                !go.iter().any(|alias| alias == id),
+                "Go catalog must not include free `{id}`"
+            );
         }
         for id in supported_model_ids().filter(|id| !is_free_model(id)) {
-            assert!(go.contains(&id), "Go catalog must include `{id}`");
-            assert!(!zen.contains(&id), "Zen catalog must not include Go `{id}`");
+            if id != "big-pickle" {
+                assert!(
+                    go.iter().any(|alias| alias == id),
+                    "Go catalog must include `{id}`"
+                );
+            }
+            let has_free_twin = free_model_ids().any(|free| {
+                crate::zen_models::stripped_free_alias(free).is_some_and(|alias| alias == id)
+            });
+            assert_eq!(
+                zen.iter().any(|alias| alias == id),
+                has_free_twin,
+                "Zen stripped aliases must match the refreshed Free catalog for `{id}`"
+            );
         }
 
         assert!(routeable_aliases_for(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_empty());
@@ -900,9 +1039,8 @@ mod tests {
     #[test]
     fn catalog_aliases_keep_every_routeable_offering_not_first_wins_owner() {
         let registry = registry_from_entries(vec![AliasEntry {
-            alias: "shared",
+            alias: "shared".into(),
             mappings: vec![zen_mapping("shared"), go_mapping("shared")],
-            prefer_twin: None,
         }]);
         let published = published_routeable_in(&registry);
         assert_eq!(published.len(), 1);

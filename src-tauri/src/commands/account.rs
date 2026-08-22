@@ -43,7 +43,6 @@ pub(crate) fn create_account_inner(
         offering_id: offering.offering_id.to_string(),
         credential_kind: offering.credential_kind,
         quota_scope: offering.quota_scope,
-        free_alias_enabled: false,
         name: input.name,
         username: input.username,
         password_cipher: match input.password.as_deref().map(str::trim) {

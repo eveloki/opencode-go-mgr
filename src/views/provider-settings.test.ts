@@ -80,8 +80,7 @@ test("Zen card toggles use the dedicated provider-settings call with the setting
   const api = readFileSync(new URL("../api/tauri.ts", import.meta.url), "utf8");
 
   assert.match(accounts, /providerApi\.updateProviderSettings\(account\.id, \{/);
-  assert.match(accounts, /const enabled = patch\.enabled \?\? account\.enabled/);
-  assert.match(accounts, /free_alias_enabled: enabled && \(patch\.free_alias_enabled \?\? account\.free_alias_enabled\)/);
+  assert.match(accounts, /saveZenProviderSettings\(account, !account\.enabled\)/);
   assert.match(accounts, /expected_revision: revision/);
   assert.match(accounts, /settingsRevision\.value = result\.revision/);
   assert.match(accounts, /error\.status !== 409/);
@@ -89,7 +88,8 @@ test("Zen card toggles use the dedicated provider-settings call with the setting
   assert.match(accounts, /message\.warning\(t\("账号设置已被其他操作修改，已重新加载最新状态，请重试"\)\)/);
   // Never a generic account PATCH for the Zen Free singleton.
   assert.doesNotMatch(accounts, /setAccountFreeAlias/);
-  assert.doesNotMatch(api, /free_alias_enabled\?: boolean/);
+  assert.doesNotMatch(accounts, /toggle-free-alias|free_alias_enabled/);
+  assert.doesNotMatch(api, /free_alias_enabled/);
 });
 
 test("non-Zen accounts keep the legacy toggle endpoint", () => {
@@ -132,12 +132,24 @@ test("pricing catalog fetches the provider catalog explicitly and keeps the Go t
 
 test("pricing catalog uses one keyboard-accessible plan-family tab switcher with Go selected first", () => {
   const catalog = readFileSync(new URL("../components/PricingCatalog.vue", import.meta.url), "utf8");
+  const reference = readFileSync(new URL("../components/ProviderPricingReference.vue", import.meta.url), "utf8");
 
   assert.match(catalog, /v-model:value="activePlanId"/);
   assert.match(catalog, /display-directive="if"/);
   assert.match(catalog, /<n-tab-pane[\s\S]*?v-for="group in planGroups"[\s\S]*?:name="group\.plan\.id"/);
   assert.match(catalog, /const activePlanId = ref<PlanId>\("opencode-go"\)/);
+  assert.match(catalog, /PRICING_PLAN_DEFINITIONS/);
+  assert.match(catalog, /kind="goat"/);
+  assert.match(catalog, /kind="scnet"/);
   assert.doesNotMatch(catalog, /<section\s+v-for="group in planGroups"/);
+  assert.doesNotMatch(reference, /provider-usage|used|remaining|percentage/);
+  assert.match(reference, /当前仍是禁用草稿/);
+  assert.match(reference, /禁止共享账号、自动化脚本、自定义应用后端及非交互批量调用/);
+  assert.match(
+    reference,
+    /<dd>\s*<span>\$\{\{ GOAT_PRICING_REFERENCE\.monthlyPriceUsd \}\}<\/span>\s*<small>\{\{ t\("另加处理费"\) \}\}<\/small>\s*<\/dd>/,
+  );
+  assert.doesNotMatch(reference, /<\/dd>\s*<small>\{\{ t\("另加处理费"\) \}\}<\/small>/);
 });
 
 test("account form uses the catalog display name and does not invent GOAT availability", () => {

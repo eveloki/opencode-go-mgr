@@ -160,6 +160,21 @@
           class="full-width-field"
         >
           <div class="capability-rows">
+            <div class="capability-actions">
+              <n-button
+                size="small"
+                secondary
+                :loading="discoveringModels"
+                :disabled="!canDiscoverModels"
+                @click="discoverModels"
+              >
+                {{ t("获取模型") }}
+              </n-button>
+              <span v-if="discoverySuccess" class="field-hint">{{ discoverySuccess }}</span>
+            </div>
+            <n-alert v-if="discoveryError" type="error" :show-icon="false">
+              {{ discoveryError }}
+            </n-alert>
             <div
               v-for="(cap, index) in form.modelCapabilities"
               :key="index"
@@ -244,7 +259,7 @@ import {
   NTag,
 } from "naive-ui";
 import { MinusCircleOutlined, PlusOutlined } from "@vicons/antd";
-import type { Account, AccountInput } from "../api/tauri";
+import { tauriApi, type Account, type AccountInput } from "../api/tauri";
 import type { ProviderCatalogEntry, ProviderCatalogFormField } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
@@ -294,6 +309,15 @@ type FormModel = {
   modelCapabilities: AccountCreateCapability[];
 };
 
+type ModelDiscoveryContext = {
+  show: boolean;
+  accountId: string;
+  baseUrl: string;
+  upstreamProtocol: FormModel["upstreamProtocol"];
+  authScheme: FormModel["authScheme"];
+  key: string;
+};
+
 const props = withDefaults(defineProps<{
   show: boolean;
   account: Account | null;
@@ -323,6 +347,10 @@ const formRef = ref<FormInst | null>(null);
 const form = ref<FormModel>(blankForm());
 const nameWasEdited = ref(false);
 const formError = ref("");
+const discoveringModels = ref(false);
+const discoveryError = ref("");
+const discoverySuccess = ref("");
+let discoveryGeneration = 0;
 
 const isEdit = computed(() => !!props.account);
 const title = computed(() => {
@@ -408,6 +436,12 @@ const authSchemeOptions = computed(() => {
 });
 
 const riskNotice = computed(() => catalogEntry.value?.risk_notice ?? null);
+
+const canDiscoverModels = computed(() => isCustomPlan.value
+  && !!form.value.baseUrl.trim()
+  && !!form.value.upstreamProtocol
+  && !!form.value.authScheme
+  && (!!form.value.key.trim() || !!props.account?.id));
 
 const rules = computed<FormRules>(() => {
   const base: FormRules = {
@@ -506,8 +540,42 @@ watch(() => props.show, (show) => {
     nameWasEdited.value = isEdit.value;
     formRef.value?.restoreValidation();
     formError.value = "";
+    discoveryError.value = "";
+    discoverySuccess.value = "";
   }
 });
+
+function currentModelDiscoveryContext(): ModelDiscoveryContext {
+  return {
+    show: props.show,
+    accountId: props.account?.id ?? "",
+    baseUrl: form.value.baseUrl,
+    upstreamProtocol: form.value.upstreamProtocol,
+    authScheme: form.value.authScheme,
+    key: form.value.key,
+  };
+}
+
+function modelDiscoveryContextMatches(expected: ModelDiscoveryContext): boolean {
+  const current = currentModelDiscoveryContext();
+  return current.show === expected.show
+    && current.accountId === expected.accountId
+    && current.baseUrl === expected.baseUrl
+    && current.upstreamProtocol === expected.upstreamProtocol
+    && current.authScheme === expected.authScheme
+    && current.key === expected.key;
+}
+
+watch(
+  () => currentModelDiscoveryContext(),
+  () => {
+    discoveryGeneration += 1;
+    discoveringModels.value = false;
+    discoveryError.value = "";
+    discoverySuccess.value = "";
+  },
+  { flush: "sync" },
+);
 
 watch(() => props.plan, (plan) => {
   if (!isEdit.value && plan && !form.value.offeringId) {
@@ -595,6 +663,56 @@ watch(
 
 function removeCapability(index: number) {
   form.value.modelCapabilities.splice(index, 1);
+}
+
+async function discoverModels() {
+  if (!canDiscoverModels.value || !form.value.upstreamProtocol || !form.value.authScheme) return;
+  const context = currentModelDiscoveryContext();
+  const generation = ++discoveryGeneration;
+  discoveringModels.value = true;
+  discoveryError.value = "";
+  discoverySuccess.value = "";
+  try {
+    const result = await tauriApi.discoverCustomModels({
+      base_url: form.value.baseUrl.trim(),
+      upstream_protocol: form.value.upstreamProtocol,
+      auth_scheme: form.value.authScheme,
+      ...(form.value.key.trim() ? { api_key: form.value.key.trim() } : {}),
+      ...(props.account?.id ? { account_id: props.account.id } : {}),
+    });
+    if (generation !== discoveryGeneration || !modelDiscoveryContextMatches(context)) return;
+    const seen = new Set<string>();
+    const merged = [...form.value.modelCapabilities, ...result.models.map((model_id) => ({
+      model_id,
+      protocol: form.value.upstreamProtocol!,
+    }))].filter((capability) => {
+      const modelId = capability.model_id.trim();
+      const identity = modelId.toLowerCase();
+      if (!modelId || seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    }).map((capability) => ({
+      model_id: capability.model_id.trim(),
+      protocol: form.value.upstreamProtocol!,
+    }));
+    form.value.modelCapabilities = merged;
+    if (result.models.length === 0) {
+      discoverySuccess.value = t("未获取到模型，请手动添加模型 ID");
+    } else if (result.truncated) {
+      discoverySuccess.value = t("已获取 {count} 个模型（结果已截断）", { count: result.models.length });
+    } else {
+      discoverySuccess.value = t("已获取 {count} 个模型", { count: result.models.length });
+    }
+  } catch (error) {
+    if (generation !== discoveryGeneration || !modelDiscoveryContextMatches(context)) return;
+    discoveryError.value = error instanceof Error
+      ? error.message
+      : t("获取模型失败，请检查配置后重试");
+  } finally {
+    if (generation === discoveryGeneration && modelDiscoveryContextMatches(context)) {
+      discoveringModels.value = false;
+    }
+  }
 }
 
 async function handleSave() {
@@ -692,6 +810,12 @@ async function handleSave() {
 
 .capability-rows {
   display: grid;
+  gap: 8px;
+}
+
+.capability-actions {
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
 

@@ -51,7 +51,6 @@ export interface Account {
   offering_id: string;
   credential_kind: AccountCredentialKind;
   quota_scope: AccountQuotaScope;
-  free_alias_enabled: boolean;
   /** Shared control-plane revision for optimistic account/settings writes. */
   revision?: number;
   purchase_date: string;
@@ -102,6 +101,19 @@ export interface AccountModelCapabilityInput {
   source?: string;
 }
 
+export interface CustomModelDiscoveryInput {
+  base_url: string;
+  upstream_protocol: "chat_completions" | "responses" | "messages";
+  auth_scheme: "bearer" | "x-api-key";
+  api_key?: string;
+  account_id?: string;
+}
+
+export interface CustomModelDiscoveryResult {
+  models: string[];
+  truncated: boolean;
+}
+
 export interface AccountAcknowledgementInput {
   acknowledgement_id: string;
   version: string;
@@ -144,7 +156,6 @@ export interface ManagedAccountInput {
 }
 
 export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
-export type FreeModelRouting = "deny" | "explicit" | "prefer";
 export type ProxyMode = "auto" | "manual" | "direct" | "list";
 /** Which leg the listed models take in list proxy mode. */
 export type ProxyListDirection = "whitelist" | "blacklist";
@@ -193,7 +204,6 @@ export interface AppConfig {
   stream_idle_timeout_secs: number;
   routing_mode: RoutingMode;
   conversation_sticky: boolean;
-  free_model_routing: FreeModelRouting;
 }
 
 /** Sub key entry in the lightweight connection payload. */
@@ -641,6 +651,11 @@ export const tauriApi = {
           ? {}
           : { expected_revision: expectedRevision }),
       }),
+    }),
+  discoverCustomModels: (input: CustomModelDiscoveryInput) =>
+    request<CustomModelDiscoveryResult>("/custom/models/discover", {
+      method: "POST",
+      body: jsonBody(input),
     }),
   getBrowserCapabilities: () => request<BrowserCapabilities>("/browser/capabilities"),
   openAccountBrowser: (id: string, target: BrowserTarget) =>

@@ -169,15 +169,16 @@ Desktop 三个角色模型的持久化行为。
   `/claude-desktop/v1/models`；Gemini 同时接受 `/v1beta/models/{model}:*` 与
   `/v1/models/{model}:*`，其中 `generateContent`、`streamGenerateContent` 进入
   转换链，`countTokens`、`embedContent` 返回 `501`。带鉴权的 `GET /v1/models`
-  是当前可路由已公布别名（OpenCode Go 与 Zen Free）加上合格 Custom 声明 ID 的本地
-  读取，**零上游发现**。已公布 Go/Zen 别名不依赖 Go 账号；Custom ID 来自
+  是当前可路由 Go 别名、已保存 Zen Free 模型快照，加上合格 Custom 声明 ID 的本地
+  读取；这条 GET 本身不访问上游。Go/Zen 别名不依赖 Go 账号；Custom ID 来自
   enabled+verified+ready+非空 Key 的 Custom 能力。受保护的
   `GET /dashboard/api/application-models` 是另一份本地列表：当前可路由
   的 OpenCode Go 别名与当前 Go 价格快照求交（highspeed 变体继承基价行；空交集为
-  `[]`）。它不含 Custom ID。不要在这两条路径上重新引入上游
-  目录抓取、按上游过滤或可用性探测。Claude Desktop `/claude-desktop/v1/models`
+  `[]`）。它不含 Custom ID。不要在这两条读取路径上引入请求时的上游
+  目录抓取、按上游过滤或可用性探测；管理员显式点击 Zen Free“获取模型”是唯一
+  目录刷新例外。Claude Desktop `/claude-desktop/v1/models`
   仍然只公布三个角色别名。
-- `alias.rs` 是硬编码的客户端 Alias 注册表。首选别名是稳定的小写 kebab-case
+- `alias.rs` 以硬编码 Go/Plan 映射为基础，并叠加已保存的 Zen Free 模型快照。首选别名是稳定的小写 kebab-case
   （沿用现有 OpenCode Go ID）。大小写折叠的 kebab 拼写可接受；含 `/`、`_` 或
   空白的名称视为原始 ID，不得折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个
   mapping 时钉在该 mapping；之后才检查可路由性，因此不可路由 mapping 会被识别但
@@ -191,6 +192,12 @@ Desktop 三个角色模型的持久化行为。
   `resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`。没有
   `requested_alias` 字段。`native_cost_value` / `native_cost_unit` /
   `native_cost_currency` 可选。
+- `zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的账号卡显式刷新通过全局代理
+  请求固定无 Key endpoint `https://opencode.ai/zen/v1/models`，不跟随重定向，只保留
+  合法且以 `-free` 结尾的 ID；完整成功快照先持久化，再切换运行时。每个模型同时公布
+  原 ID 与去掉 `-free` 的 Alias。失败或过滤结果为空时保留旧快照，`/v1/models` 只读
+  取这份快照。Go 所有的 `ox-alpha-free` 是保留排除项，不得获得 Zen mapping 或
+  去后缀 `ox-alpha` Alias。
 - `protocol.rs`、`protocol_stream.rs` 在 Chat Completions、Responses、
   Anthropic Messages 与客户端 Gemini generateContent 之间转换。Gemini 不能成为
   上游格式。已知模型用硬编码 `MODEL_PROTOCOLS`（`preferred` + `supported`）：
@@ -241,8 +248,9 @@ Desktop 三个角色模型的持久化行为。
   crate 不得对 Token Plan 发真实请求。
 - `gateway/materialize.rs` 只解析一次客户端协议，解析 Alias，再按候选物化
   model / protocol / endpoint / auth。适配器不得用可计费推理路径试探协议支持。
-  OpenCode `MODEL_PROTOCOLS` 表仍只服务 Go。Custom 按账号把协议、隔离 origin 与
-  鉴权方案重新物化为该卡声明值。
+  OpenCode `MODEL_PROTOCOLS` 表仍只服务 Go。表中未知的动态 Zen `-free` ID 默认按
+  Chat 物化，不用推理请求试探协议。Custom 按账号把协议、隔离 origin 与鉴权方案
+  重新物化为该卡声明值。
 - `selector.rs` 选下一个账号并跳过禁用、冷却、本次已失败的账号。Zen free 额度
   按出口 IP 共享：任一账号存在有效 `cooldown_free_until` 即视为整条 free 通道
   耗尽，不换 Key。`limit.rs` 解析上游 429 中的重置时长；`pricing.rs` 从当前
@@ -264,8 +272,9 @@ Desktop 三个角色模型的持久化行为。
 - `forwarder.rs` 向 `handler.rs` 返回显式动作：只有能证明请求尚未发出的
   DNS/TCP/TLS 建连失败可以在同一账号重试一次；`401`/`403` 与 Go 通道 `429`
   可以切换账号。推理 `401` 原样返回、不换号、不写 `auth_error`（Go 会把模型不
-  存在也打成 401）。面板 Ping / Key 验证的 401 仍记录 `auth_error`。free 通道 `429` 冷却按 IP 共享的 free 池，不换 Key；prefer
-  随后回落 Go。`408`、`5xx`、建连后的失败、响应体超时和流式中断均不得重放，
+  存在也打成 401）。面板 Ping / Key 验证的 401 仍记录 `auth_error`。free 通道 `429`
+  冷却按 IP 共享的 free 池，不换 Key，并按持久化卡片顺序继续尝试后续兼容候选。
+  `408`、`5xx`、建连后的失败、响应体超时和流式中断均不得重放，
   无法确认的结果记为 `outcome_unknown`。共享 reqwest client 只设置 30 秒建连
   超时；非流式请求使用 900 秒总时限，流式请求按 chunk 执行 300 秒空闲时限。
 
@@ -368,7 +377,9 @@ Desktop 三个角色模型的持久化行为。
   `Database::open` 会在任何 v23 写入前创建并校验一份不会覆盖的同目录回滚副本
   `data.sqlite.pre-v23.<timestamp>.bak`。源库早于 v22 时还会保留
   `data.sqlite.pre-v22.<timestamp>.bak`。请与常规备份一起保存；它们只是回滚点，
-  不是完整备份，也不是允许旧二进制打开已迁移数据库的许可。每次
+  不是完整备份，也不是允许旧二进制打开已迁移数据库的许可。schema v24 为转发日志新增
+  实际代理路由段；schema v25 新增 `provider_model_catalogs`，保存 Zen Free 最后一次成功
+  过滤的模型快照；这个加法迁移不会单独创建 pre-v24 或 pre-v25 备份。每次
   `Database::open` 都会禁用遗留的已启用 Command Code GOAT 与全部三个 SCNet Token
   Plan tier，且不改 `updated_at`。Custom API 的 enabled 状态予以保留。验证与配置
   保持不变，只有既有未验证的 GOAT 行会重置为 `pending`；Go、Zen Free 和未知
@@ -777,13 +788,13 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
       会话时映射 API 返回 `401`。
 - [ ] 打开 **应用** 视图，确认 16 个教程完整可选；逐项抽查复制结果不含掩码
       Key，并实际启动 Claude Desktop 与 Gemini CLI 各完成一次文本和工具调用。
-- [ ] 覆盖 schema v16 迁移、schema v23（`data.sqlite.pre-v23.*.bak` 回滚、别名 /
-      上游日志身份、可选原生成本、未 `verified` 的 GOAT 行保持禁用 `pending`）、旧账号 `key + ready`、托管状态机
+- [ ] 覆盖 schema v16 迁移、schema v25（`data.sqlite.pre-v23.*.bak` 回滚、别名 /
+      上游日志身份、可选原生成本、未 `verified` 的 GOAT 行保持禁用 `pending`、Zen Free 模型快照持久化）、旧账号 `key + ready`、托管状态机
       （前进一格 / 回退更早步骤、禁止跳步）、Pending 路由隔离、邀请 URL 白名单与
       演示默认写回，以及 Key 验证的 `2xx`/`429`/`401`/`403`/网络/`5xx` 分支；确认
       任何 DTO 和日志都没有明文 Key。
 - [ ] 确认带鉴权的 `GET /v1/models` 与受保护的
-      `GET /dashboard/api/application-models` 是本地列表（无上游发现）。
+      `GET /dashboard/api/application-models` 是本地读取，GET 本身不访问上游。
       `/v1/models` 是当前可路由已公布别名加上合格 Custom ID；`application-models`
       是 Go 可路由别名 ∩ 当前价格快照（highspeed 继承基价行），不得包含 Custom。
       未知模型在 Chat / Responses / Messages / Gemini 上返回 `400`，除非命中该
@@ -867,7 +878,8 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 - **`auto_start` 受能力门控**。只有 Windows release / 已安装的 Tauri 进程注入
   注册表同步钩子；开发构建、CLI、Docker、macOS、Linux 面板必须保持隐藏。
 - **本地 Alias 列表保持本地**。带鉴权的 `GET /v1/models` 与面板
-  `application-models` 不得再增加上游发现路径。不要把两份列表写成同一份；不要
+  `application-models` 不得增加请求时上游发现。显式 Zen Free 刷新是唯一目录抓取
+  例外，且只能访问固定官方 endpoint。不要把两份列表写成同一份；不要
   发明 `requested_alias` 日志字段。
 - **不要重新发明 `cargo test` 体验**。CLI 用 `parking_lot::Mutex`，不可重入。
   函数需要调用另一个持锁函数时，先 `drop` 掉外层 guard。

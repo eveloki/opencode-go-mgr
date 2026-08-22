@@ -12,7 +12,6 @@ function account(id: string, provider_id: string, offering_id: string, credentia
     offering_id,
     credential_kind,
     quota_scope: credential_kind === "none" ? "egress-ip" : "key",
-    free_alias_enabled: false,
     name: id,
     username: "",
     password: "",

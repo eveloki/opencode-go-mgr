@@ -62,7 +62,7 @@ test("provider usage is read per account without a request body", async () => {
   assert.equal(usage.account_id, "account-1");
 });
 
-test("provider settings PATCH sends both flags with the revision guard", async () => {
+test("provider settings PATCH sends the enabled state with the revision guard", async () => {
   const requests = mockDashboardFetch(() => ({
     account: { id: "zen" },
     revision: 12,
@@ -70,7 +70,6 @@ test("provider settings PATCH sends both flags with the revision guard", async (
 
   const result = await providerApi.updateProviderSettings("zen", {
     enabled: false,
-    free_alias_enabled: true,
     expected_revision: 11,
   });
 
@@ -78,7 +77,6 @@ test("provider settings PATCH sends both flags with the revision guard", async (
   assert.equal(requests[0]?.method, "PATCH");
   assert.deepEqual(requests[0]?.body, {
     enabled: false,
-    free_alias_enabled: true,
     expected_revision: 11,
   });
   assert.equal(result.revision, 12);
@@ -92,4 +90,20 @@ test("zen toggles go through provider settings, never the generic account patch"
   assert.match(accounts, /expected_revision: revision/);
   assert.match(accounts, /error\.status !== 409/);
   assert.doesNotMatch(accounts, /setAccountFreeAlias/);
+});
+
+test("Zen model catalog GET and refresh use the account-scoped routes", async () => {
+  const requests = mockDashboardFetch(() => ({
+    account_id: "zen",
+    models: [{ model_id: "coder-free", alias: "coder" }],
+    refreshed_at: null,
+    source_url: "https://opencode.ai/zen/v1/models",
+  }));
+  await providerApi.getProviderModels("zen");
+  const refreshed = await providerApi.refreshProviderModels("zen");
+  assert.equal(requests[0]?.url, "/dashboard/api/accounts/zen/provider-models");
+  assert.equal(requests[0]?.method, "GET");
+  assert.equal(requests[1]?.url, "/dashboard/api/accounts/zen/provider-models/refresh");
+  assert.equal(requests[1]?.method, "POST");
+  assert.equal(refreshed.models[0]?.alias, "coder");
 });

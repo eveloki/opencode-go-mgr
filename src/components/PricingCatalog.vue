@@ -130,6 +130,16 @@
             </n-spin>
         </template>
 
+        <ProviderPricingReference
+          v-else-if="group.content.kind === 'goat-reference'"
+          kind="goat"
+        />
+
+        <ProviderPricingReference
+          v-else-if="group.content.kind === 'scnet-reference'"
+          kind="scnet"
+        />
+
         <template v-else-if="pricingDisplay(group).state === 'available-table' && group.content.snapshot">
             <dl class="pricing-ledger pricing-ledger--compact">
               <div>
@@ -188,6 +198,7 @@ import type {
 } from "../api/tauri";
 import { providerApi } from "../api/providers.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
+import ProviderPricingReference from "./ProviderPricingReference.vue";
 import { locale, t } from "../i18n/index.ts";
 import {
   buildPricingTableRows,
@@ -196,10 +207,10 @@ import {
   formatPricingRate,
 } from "../views/pricing-view";
 import type { PricingTableRow } from "../views/pricing-view";
-import { PLAN_DEFINITIONS } from "../views/plans.ts";
 import type { PlanId } from "../views/plans.ts";
 import {
   buildPlanPricingGroups,
+  PRICING_PLAN_DEFINITIONS,
   resolvePlanPricingDisplay,
 } from "../views/pricing-plans.ts";
 import type { PlanPricingGroup, ProviderSnapshots } from "../views/pricing-plans.ts";
@@ -271,7 +282,7 @@ async function loadProviderCatalog() {
 // catalog marks as pricing-available. Failures are swallowed so a missing
 // endpoint or an in-flight backend change never breaks the page.
 async function loadProviderSnapshots(catalogValue: ProviderCatalogEntry[]) {
-  const availablePlans = PLAN_DEFINITIONS.map((plan) => {
+  const availablePlans = PRICING_PLAN_DEFINITIONS.map((plan) => {
     const entry = plan.offering_ids
       .map((offeringId) => catalogValue.find((item) => (
         item.provider_id === plan.provider_id && item.offering_id === offeringId

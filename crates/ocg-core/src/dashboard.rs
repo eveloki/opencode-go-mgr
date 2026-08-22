@@ -9,7 +9,7 @@ use crate::gateway::{
         api_format_name, redact_known_secret, sanitize_upstream_error_value_with_known_secret,
     },
     limit::{parse_reset, parse_usage_limit_window},
-    protocol::{supported_model_ids, supported_model_protocols},
+    protocol::{ApiFormat, supported_model_ids, supported_model_protocols},
 };
 use crate::go_usage::GoUsageError;
 use crate::models::*;
@@ -50,6 +50,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         )
         .route("/models/capabilities", get(provider_model_capabilities))
         .route(
+            "/custom/models/discover",
+            post(discover_custom_models_route),
+        )
+        .route(
             "/providers/{provider_id}/{offering_id}/pricing",
             get(provider_pricing),
         )
@@ -68,6 +72,11 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/accounts/{id}/provider-settings",
             patch(update_zen_free_settings_for_account),
+        )
+        .route("/accounts/{id}/provider-models", get(get_zen_free_models))
+        .route(
+            "/accounts/{id}/provider-models/refresh",
+            post(refresh_zen_free_models),
         )
         .route("/accounts/{id}/toggle", post(toggle_account))
         .route("/accounts/{id}/verify", post(verify_account_connection))
@@ -497,7 +506,6 @@ struct DashboardAccount {
     offering_id: String,
     credential_kind: crate::provider::CredentialKind,
     quota_scope: crate::provider::QuotaScope,
-    free_alias_enabled: bool,
     name: String,
     username: String,
     password: String,
@@ -573,7 +581,6 @@ fn dashboard_account(state: &CoreState, account: Account) -> DashboardAccount {
         offering_id: account.offering_id.clone(),
         credential_kind: account.credential_kind,
         quota_scope: account.quota_scope,
-        free_alias_enabled: account.free_alias_enabled,
         name: account.name,
         username: account.username.unwrap_or_default(),
         password: String::new(),
@@ -961,7 +968,8 @@ struct ProviderCatalogEntry {
 
 /// Built-in provider/offering pairs only. Command Code GOAT and SCNet remain
 /// unroutable. Custom API is routable after explicit verification.
-async fn provider_catalog() -> Json<Vec<ProviderCatalogEntry>> {
+async fn provider_catalog(State(state): State<CoreState>) -> Json<Vec<ProviderCatalogEntry>> {
+    let zen_catalog = state.zen_free_model_catalog();
     Json(
         crate::provider::BUILTIN_PLANS
             .iter()
@@ -1011,16 +1019,72 @@ async fn provider_catalog() -> Json<Vec<ProviderCatalogEntry>> {
                     body: notice.body,
                     content_hash: notice.content_hash(),
                 }),
-                model_aliases: alias::routeable_aliases_for(
+                model_aliases: alias::routeable_aliases_for_with_zen(
                     plan.offering.provider_id,
                     plan.offering.offering_id,
-                )
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+                    &zen_catalog.models,
+                ),
             })
             .collect(),
     )
+}
+
+#[derive(Debug, Serialize)]
+struct ZenFreeModelsResponse {
+    account_id: &'static str,
+    models: Vec<crate::zen_models::ZenFreeModelView>,
+    refreshed_at: Option<DateTime<Utc>>,
+    source_url: String,
+}
+
+fn zen_free_models_response(
+    catalog: &crate::zen_models::ZenFreeModelCatalog,
+) -> ZenFreeModelsResponse {
+    ZenFreeModelsResponse {
+        account_id: crate::provider::ZEN_FREE_ACCOUNT_ID,
+        models: crate::zen_models::model_views(catalog),
+        refreshed_at: catalog.refreshed_at,
+        source_url: catalog.source_url.clone(),
+    }
+}
+
+fn require_zen_free_account(id: &str) -> Result<(), ApiError> {
+    if id != crate::provider::ZEN_FREE_ACCOUNT_ID {
+        return Err(ApiError::bad_request(
+            "provider model refresh is available only for the Zen Free account",
+        ));
+    }
+    Ok(())
+}
+
+async fn get_zen_free_models(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+) -> Result<Json<ZenFreeModelsResponse>, ApiError> {
+    require_zen_free_account(&id)?;
+    let catalog = state.zen_free_model_catalog();
+    Ok(Json(zen_free_models_response(&catalog)))
+}
+
+async fn refresh_zen_free_models(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+) -> Result<Json<ZenFreeModelsResponse>, ApiError> {
+    require_zen_free_account(&id)?;
+    let _guard = state.zen_free_models_refresh.try_lock().map_err(|_| {
+        ApiError::status(
+            StatusCode::CONFLICT,
+            "Zen Free model refresh is already running",
+        )
+    })?;
+    let config = state.config();
+    let catalog = crate::zen_models::fetch_catalog(&config)
+        .await
+        .map_err(|message| ApiError::status(StatusCode::BAD_GATEWAY, message))?;
+    state
+        .activate_zen_free_model_catalog(catalog.clone())
+        .map_err(ApiError::internal)?;
+    Ok(Json(zen_free_models_response(&catalog)))
 }
 
 #[derive(Debug, Serialize)]
@@ -1191,27 +1255,10 @@ async fn provider_account_usage(
     }))
 }
 
-fn free_model_routing_from_zen(enabled: bool, free_alias_enabled: bool) -> FreeModelRouting {
-    match (enabled, free_alias_enabled) {
-        (false, _) => FreeModelRouting::Deny,
-        (true, false) => FreeModelRouting::Explicit,
-        (true, true) => FreeModelRouting::Prefer,
-    }
-}
-
-fn zen_settings_from_free_model_routing(mode: FreeModelRouting) -> (bool, bool) {
-    match mode {
-        FreeModelRouting::Deny => (false, false),
-        FreeModelRouting::Explicit => (true, false),
-        FreeModelRouting::Prefer => (true, true),
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ZenFreeSettingsInput {
     enabled: bool,
-    free_alias_enabled: bool,
     #[serde(default)]
     expected_revision: Option<u64>,
 }
@@ -1228,19 +1275,12 @@ async fn apply_zen_free_settings(
 ) -> Result<Json<ZenFreeSettingsResponse>, ApiError> {
     let _settings_update = state.settings_update.lock();
     check_key_revision(state, input.expected_revision)?;
-    if input.free_alias_enabled && !input.enabled {
-        return Err(ApiError::bad_request(
-            "free aliases cannot be enabled while Zen Free is disabled",
-        ));
+    {
+        let db = state.db.lock();
+        db.set_zen_free_enabled(input.enabled)
+            .map_err(ApiError::internal)?;
     }
-    let mut config = state.config();
-    config.free_model_routing =
-        free_model_routing_from_zen(input.enabled, input.free_alias_enabled);
-    // The state facade commits the database-owned row and legacy AppConfig
-    // projection atomically, then performs the sole shared revision bump.
-    state
-        .set_config_and_zen_free_settings(config, input.enabled, input.free_alias_enabled)
-        .map_err(ApiError::internal)?;
+    let revision = state.bump_settings_revision();
     let account = state
         .db
         .lock()
@@ -1249,7 +1289,7 @@ async fn apply_zen_free_settings(
         .ok_or_else(|| ApiError::internal("Zen Free singleton is missing"))?;
     Ok(Json(ZenFreeSettingsResponse {
         account: dashboard_account(state, account),
-        revision: state.settings_revision(),
+        revision,
     }))
 }
 
@@ -1437,7 +1477,6 @@ fn create_account_inner(
         offering_id: offering.offering_id.to_string(),
         credential_kind: offering.credential_kind,
         quota_scope: offering.quota_scope,
-        free_alias_enabled: false,
         name,
         username: clean_optional(input.username),
         password_cipher: encrypted_optional(&state, &input.password)?,
@@ -1559,7 +1598,6 @@ async fn create_managed_account(
         offering_id: crate::provider::default_offering_id(),
         credential_kind: crate::provider::default_credential_kind(),
         quota_scope: crate::provider::default_quota_scope(),
-        free_alias_enabled: false,
         name,
         username: clean_optional(input.username),
         password_cipher: None,
@@ -1952,7 +1990,6 @@ struct DashboardAccountUpdate {
     offering_id: Option<String>,
     credential_kind: Option<crate::provider::CredentialKind>,
     quota_scope: Option<crate::provider::QuotaScope>,
-    free_alias_enabled: Option<bool>,
     #[serde(default)]
     expected_revision: Option<u64>,
 }
@@ -1963,7 +2000,6 @@ impl DashboardAccountUpdate {
             || self.offering_id.is_some()
             || self.credential_kind.is_some()
             || self.quota_scope.is_some()
-            || self.free_alias_enabled.is_some()
     }
 
     fn into_account_update(self) -> AccountUpdate {
@@ -1995,7 +2031,6 @@ impl From<AccountUpdate> for DashboardAccountUpdate {
             offering_id: None,
             credential_kind: None,
             quota_scope: None,
-            free_alias_enabled: None,
             expected_revision: None,
         }
     }
@@ -2355,6 +2390,66 @@ async fn verify_account_connection(
         return complete_custom_verification(&state, job).await;
     }
     Ok(Json(dashboard_account(&state, account)))
+}
+
+async fn discover_custom_models_route(
+    State(state): State<CoreState>,
+    Json(input): Json<CustomModelDiscoveryInput>,
+) -> Result<Json<CustomModelDiscoveryResult>, ApiError> {
+    let supplied_key = input
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty());
+    let stored_key = if supplied_key.is_none()
+        && let Some(account_id) = input
+            .account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    {
+        let account = state
+            .db
+            .lock()
+            .get_account(account_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("account not found"))?;
+        require_custom_plan(
+            &account,
+            "model discovery is only available for Custom API accounts",
+        )?;
+        if account.key_cipher.is_empty() {
+            None
+        } else {
+            Some(
+                state
+                    .decrypt_key(&account.key_cipher)
+                    .map_err(ApiError::internal)?,
+            )
+        }
+    } else {
+        None
+    };
+    let api_key = supplied_key
+        .map(str::to_owned)
+        .or(stored_key)
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "Custom model discovery requires an API key or an existing Custom account with a stored key",
+            )
+        })?;
+    let config = AccountCustomConfigInput {
+        base_url: input.base_url,
+        upstream_protocol: input.upstream_protocol,
+        auth_scheme: input.auth_scheme,
+    };
+    crate::custom::discover_custom_models(&state.config(), &config, &api_key)
+        .await
+        .map(Json)
+        // In particular, upstream 401/403 stay a dashboard 400 rather than
+        // looking like an expired dashboard session to the frontend.
+        .map_err(|failure| ApiError::bad_request(failure.message))
 }
 
 struct CustomVerificationJob {
@@ -3268,32 +3363,49 @@ struct SettingsResponse {
 async fn get_settings(State(state): State<CoreState>) -> Json<SettingsResponse> {
     let _settings_update = state.settings_update.lock();
     let auto_start_supported = state.auto_start_supported();
-    let mut config = state.settings_config();
-    // The Zen singleton is the canonical representation of the new routing
-    // surface. Project it back for old settings clients rather than exposing
-    // a stale legacy enum after a provider-settings mutation.
-    if let Ok(Some(zen)) = state
-        .db
-        .lock()
-        .get_account(crate::provider::ZEN_FREE_ACCOUNT_ID)
-    {
-        config.free_model_routing =
-            free_model_routing_from_zen(zen.enabled, zen.free_alias_enabled);
-    }
+    let config = state.settings_config();
     Json(SettingsResponse {
         config,
         revision: state.settings_revision(),
         auto_start_supported,
         dock_visibility_supported: state.dock_visibility_supported(),
         client_root_url_from_env: state.client_root_url_from_env(),
-        proxy_supported_models: supported_model_protocols()
-            .map(|(id, preferred)| ProxySupportedModel {
+        proxy_supported_models: proxy_supported_models(&state),
+    })
+}
+
+fn proxy_supported_models(state: &CoreState) -> Vec<ProxySupportedModel> {
+    let zen_catalog = state.zen_free_model_catalog();
+    let zen_ids = zen_catalog
+        .models
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut models = supported_model_protocols()
+        .filter_map(|(id, preferred)| {
+            let legacy_zen = id == "big-pickle" || crate::gateway::free_models::is_free_model(id);
+            (!legacy_zen || zen_ids.contains(id)).then(|| ProxySupportedModel {
                 id: id.to_string(),
                 preferred_protocol: api_format_name(preferred),
-                zen_free: crate::gateway::free_models::free_model_ids().any(|free| free == id),
+                zen_free: legacy_zen,
             })
-            .collect(),
-    })
+        })
+        .collect::<Vec<_>>();
+    let mut known = models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for id in &zen_catalog.models {
+        if known.insert(id.clone()) {
+            models.push(ProxySupportedModel {
+                id: id.clone(),
+                preferred_protocol: api_format_name(ApiFormat::ChatCompletions),
+                zen_free: true,
+            });
+        }
+    }
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models
 }
 
 #[derive(Deserialize)]
@@ -3673,7 +3785,7 @@ async fn update_settings(
     let previous_config = state.config();
     config.claude_desktop_models = previous_config.claude_desktop_models.clone();
     config.validate().map_err(ApiError::bad_request)?;
-    validate_proxy_list(&mut config).map_err(ApiError::bad_request)?;
+    validate_proxy_list(&state, &mut config).map_err(ApiError::bad_request)?;
     validate_upstream_url(&config.upstream_base_url)?;
     config.client_root_url =
         normalize_client_root_url(&config.client_root_url).map_err(ApiError::bad_request)?;
@@ -3691,11 +3803,7 @@ async fn update_settings(
             "Dock visibility is unavailable in this runtime",
         ));
     }
-    let (zen_enabled, zen_free_alias_enabled) =
-        zen_settings_from_free_model_routing(config.free_model_routing);
-    state
-        .set_config_and_zen_free_settings(config, zen_enabled, zen_free_alias_enabled)
-        .map_err(ApiError::internal)?;
+    state.set_config(config).map_err(ApiError::internal)?;
     let runtime_sync = (|| -> anyhow::Result<()> {
         if auto_start_supported {
             state.sync_auto_start(next_auto_start)?;
@@ -3706,15 +3814,7 @@ async fn update_settings(
         Ok(())
     })();
     if let Err(sync_error) = runtime_sync {
-        let (previous_zen_enabled, previous_zen_free_alias_enabled) =
-            zen_settings_from_free_model_routing(previous_config.free_model_routing);
-        let config_rollback_error = state
-            .set_config_and_zen_free_settings(
-                previous_config.clone(),
-                previous_zen_enabled,
-                previous_zen_free_alias_enabled,
-            )
-            .err();
+        let config_rollback_error = state.set_config(previous_config.clone()).err();
         let auto_start_rollback_error = auto_start_supported
             .then(|| state.sync_auto_start(previous_config.auto_start).err())
             .flatten();
@@ -3746,17 +3846,21 @@ async fn update_settings(
 /// enforces list contents (non-empty, exact known registry ids, deduped);
 /// `AppConfig::validate` deliberately stays registry-free so future registry
 /// shrinks never brick the load path of persisted configs.
-fn validate_proxy_list(config: &mut AppConfig) -> Result<(), String> {
+fn validate_proxy_list(state: &CoreState, config: &mut AppConfig) -> Result<(), String> {
     if config.proxy_mode != ProxyMode::List {
         return Ok(());
     }
     if config.proxy_list_models.is_empty() {
         return Err("list proxy mode requires at least one model".to_string());
     }
+    let known = proxy_supported_models(state)
+        .into_iter()
+        .map(|model| model.id)
+        .collect::<std::collections::HashSet<_>>();
     let mut deduped: Vec<String> = Vec::new();
     for model in config.proxy_list_models.iter() {
         let model = model.trim();
-        if !supported_model_ids().any(|supported| supported == model) {
+        if !known.contains(model) {
             return Err(format!("unknown model in proxy list: `{model}`"));
         }
         if !deduped.iter().any(|existing| existing == model) {
@@ -4111,7 +4215,6 @@ fn local_application_models(snapshot: &crate::pricing::PricingSnapshot) -> Vec<S
     )
     .into_iter()
     .filter(|alias| application_alias_is_priced(alias, &priced))
-    .map(str::to_string)
     .collect()
 }
 
@@ -4579,7 +4682,6 @@ mod tests {
             offering_id: crate::provider::default_offering_id(),
             credential_kind: crate::provider::default_credential_kind(),
             quota_scope: crate::provider::default_quota_scope(),
-            free_alias_enabled: false,
             name: id.into(),
             username: None,
             password_cipher: None,
@@ -5213,7 +5315,6 @@ mod tests {
             offering_id: crate::provider::default_offering_id(),
             credential_kind: crate::provider::default_credential_kind(),
             quota_scope: crate::provider::default_quota_scope(),
-            free_alias_enabled: false,
             name: "main".into(),
             username: Some("user".into()),
             password_cipher: Some(state.encrypt_key("password-secret").unwrap()),
@@ -5265,7 +5366,6 @@ mod tests {
             offering_id: crate::provider::default_offering_id(),
             credential_kind: crate::provider::default_credential_kind(),
             quota_scope: crate::provider::default_quota_scope(),
-            free_alias_enabled: false,
             name: "verify".into(),
             username: None,
             password_cipher: None,
@@ -5818,7 +5918,6 @@ mod tests {
             offering_id: crate::provider::default_offering_id(),
             credential_kind: crate::provider::default_credential_kind(),
             quota_scope: crate::provider::default_quota_scope(),
-            free_alias_enabled: false,
             name: "usage".into(),
             username: None,
             password_cipher: None,
@@ -6498,6 +6597,16 @@ mod tests {
         let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
         let db = Database::open(dir.clone()).unwrap();
         let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+        state
+            .activate_zen_free_model_catalog(crate::zen_models::ZenFreeModelCatalog {
+                models: vec![
+                    "mimo-v2.5-free".to_string(),
+                    "brand-new-promo-free".to_string(),
+                ],
+                refreshed_at: Some(Utc::now()),
+                source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.to_string(),
+            })
+            .unwrap();
 
         let Json(response) = get_settings(State(state.clone())).await;
         let encoded = serde_json::to_value(&response).unwrap();
@@ -6511,7 +6620,8 @@ mod tests {
                 && model["zen_free"].as_bool().is_some()
         }));
         assert!(models.iter().any(|model| model["id"] == "gpt-5.6-luna"));
-        // The free-channel hint follows the Zen promo allowlist, not the -free suffix.
+        // The free-channel hint follows the active Zen catalog. Go's
+        // ox-alpha-free remains a Go model despite its suffix.
         assert!(
             models
                 .iter()
@@ -6522,13 +6632,14 @@ mod tests {
                 .iter()
                 .any(|model| model["id"] == "ox-alpha-free" && model["zen_free"] == false)
         );
-        // Suffixless Zen free ids must be flagged too — the exact case the old
-        // ends-with check would have missed.
         assert!(
             models
                 .iter()
-                .any(|model| model["id"] == "big-pickle" && model["zen_free"] == true)
+                .any(|model| model["id"] == "brand-new-promo-free"
+                    && model["preferred_protocol"] == "chat_completions"
+                    && model["zen_free"] == true)
         );
+        assert!(!models.iter().any(|model| model["id"] == "big-pickle"));
         // Flattened config fields stay at the top level next to the extras.
         assert!(encoded["proxy_mode"].is_string());
         assert!(encoded["proxy_list_direction"].is_string());
@@ -6822,7 +6933,11 @@ mod tests {
 
     #[tokio::test]
     async fn provider_catalog_is_the_plan_source_and_keeps_unverified_plans_unroutable() {
-        let catalog = super::provider_catalog().await.0;
+        let dir = temp_data_dir("provider-catalog-source");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir, cipher).unwrap());
+        let catalog = super::provider_catalog(State(state)).await.0;
         assert_eq!(catalog.len(), 7);
         let go = catalog
             .iter()
@@ -6836,14 +6951,11 @@ mod tests {
                 crate::provider::OPENCODE_PROVIDER_ID,
                 crate::provider::GO_OFFERING_ID
             )
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
         );
         assert!(go.model_aliases.contains(&"glm-5.2".to_string()));
         assert!(!go.model_aliases.iter().any(|alias| alias.contains('/')));
         assert!(
-            go.model_aliases
+            !go.model_aliases
                 .iter()
                 .any(|alias| alias == "deepseek-v4-flash-free")
         );
@@ -6865,15 +6977,13 @@ mod tests {
                 crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
                 crate::provider::ANONYMOUS_FREE_OFFERING_ID
             )
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
         );
         assert!(zen.model_aliases.contains(&"mimo-v2.5-free".to_string()));
         assert!(
-            !zen.model_aliases
+            zen.model_aliases
                 .contains(&"deepseek-v4-flash-free".to_string())
         );
+        assert!(zen.model_aliases.contains(&"deepseek-v4-flash".to_string()));
         assert!(!zen.model_aliases.iter().any(|alias| alias.contains('/')));
 
         let goat = catalog

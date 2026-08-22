@@ -285,7 +285,6 @@ async fn key_command(
                 offering_id: ocg_core::provider::GO_OFFERING_ID.to_string(),
                 credential_kind: ocg_core::provider::CredentialKind::ApiKey,
                 quota_scope: ocg_core::provider::QuotaScope::Key,
-                free_alias_enabled: false,
                 name,
                 username: username.and_then(|s| {
                     let trimmed = s.trim().to_string();
@@ -945,7 +944,6 @@ mod tests {
                 offering_id: plan.offering.offering_id.to_string(),
                 credential_kind: plan.offering.credential_kind,
                 quota_scope: plan.offering.quota_scope,
-                free_alias_enabled: false,
                 name: format!("{}-cli", plan.offering.offering_id),
                 username: None,
                 password_cipher: None,
@@ -1085,11 +1083,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(zen_after.enabled, zen_before.enabled);
-        assert_eq!(zen_after.free_alias_enabled, zen_before.free_alias_enabled);
-        assert_eq!(
-            state_after.config().free_model_routing,
-            config_before.free_model_routing
-        );
+        assert_eq!(state_after.config().gateway_key, config_before.gateway_key);
         assert!(profile.join("Cookies").is_file());
 
         let _ = std::fs::remove_dir_all(dir);

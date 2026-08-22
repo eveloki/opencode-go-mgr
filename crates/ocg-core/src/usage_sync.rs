@@ -1028,7 +1028,6 @@ mod tests {
             offering_id: crate::provider::default_offering_id(),
             credential_kind: crate::provider::default_credential_kind(),
             quota_scope: crate::provider::default_quota_scope(),
-            free_alias_enabled: false,
             name: id.to_string(),
             username: None,
             password_cipher: None,

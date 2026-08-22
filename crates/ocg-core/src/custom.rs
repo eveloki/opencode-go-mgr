@@ -9,7 +9,10 @@ use crate::custom_http::{
     self, CustomHttpClient, CustomHttpError, join_custom_endpoint, json_content_headers,
 };
 use crate::gateway::protocol::ApiFormat;
-use crate::models::{AccountCustomConfig, AccountModelCapability, AppConfig};
+use crate::models::{
+    AccountCustomConfig, AccountCustomConfigInput, AccountModelCapability, AppConfig,
+    CustomModelDiscoveryResult,
+};
 use crate::provider::ConnectionVerificationStatus;
 use crate::provider::{
     CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, UpstreamAuthScheme, UpstreamProtocolKind,
@@ -18,13 +21,21 @@ use crate::provider::{
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
 /// Upper bound for a Custom verification response. The probe only needs a 2xx
 /// JSON object; anything larger is rejected without certifying the account.
 pub const MAX_CUSTOM_VERIFICATION_BODY_BYTES: usize = 64 * 1024;
+
+/// Discovery is an interactive dashboard aid, not an unbounded upstream
+/// directory mirror. These caps keep a malicious or accidental endpoint from
+/// consuming arbitrary memory or issuing an unbounded cursor chain.
+pub const MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES: usize = 256 * 1024;
+pub const MAX_CUSTOM_MODEL_DISCOVERY_MODELS: usize = 1_000;
+pub const MAX_CUSTOM_MODEL_DISCOVERY_PAGES: usize = 10;
+pub const CUSTOM_MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 30;
 
 /// Dashboard conflict when a stale Custom probe no longer matches the account.
 pub const CUSTOM_VERIFICATION_CONFLICT_MESSAGE: &str =
@@ -174,6 +185,299 @@ impl CustomVerificationContract {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomVerifyFailure {
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomModelDiscoveryFailure {
+    pub message: String,
+}
+
+impl fmt::Display for CustomModelDiscoveryFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CustomModelDiscoveryFailure {}
+
+/// Fetch declared model IDs from the one safe endpoint formed by the Custom
+/// base URL. This never probes completion endpoints and never writes account
+/// state. OpenAI- and Anthropic-compatible list envelopes both use `data`.
+pub async fn discover_custom_models(
+    config: &AppConfig,
+    input: &AccountCustomConfigInput,
+    api_key: &str,
+) -> Result<CustomModelDiscoveryResult, CustomModelDiscoveryFailure> {
+    tokio::time::timeout(
+        Duration::from_secs(CUSTOM_MODEL_DISCOVERY_TIMEOUT_SECS),
+        discover_custom_models_inner(config, input, api_key),
+    )
+    .await
+    .map_err(|_| CustomModelDiscoveryFailure {
+        message: format!(
+            "Custom model discovery timed out after {CUSTOM_MODEL_DISCOVERY_TIMEOUT_SECS} seconds"
+        ),
+    })?
+}
+
+async fn discover_custom_models_inner(
+    config: &AppConfig,
+    input: &AccountCustomConfigInput,
+    api_key: &str,
+) -> Result<CustomModelDiscoveryResult, CustomModelDiscoveryFailure> {
+    if api_key.trim().is_empty() {
+        return Err(CustomModelDiscoveryFailure {
+            message: "Custom model discovery requires an API key".to_string(),
+        });
+    }
+    let mut url = join_custom_endpoint(&input.base_url, "models").map_err(|error| {
+        CustomModelDiscoveryFailure {
+            message: format!("invalid Custom model discovery endpoint: {error}"),
+        }
+    })?;
+    let client = custom_http::build_custom_http_client(config).map_err(|error| {
+        CustomModelDiscoveryFailure {
+            message: format!("failed to build Custom HTTP client: {error}"),
+        }
+    })?;
+    let headers = model_discovery_headers(input.upstream_protocol);
+    let timeout = Some(model_discovery_request_timeout(config));
+    let mut models = Vec::new();
+    let mut seen_models = HashSet::new();
+    let mut seen_cursors = HashSet::new();
+
+    for page in 0..MAX_CUSTOM_MODEL_DISCOVERY_PAGES {
+        let response = client
+            .send_isolated(
+                reqwest::Method::GET,
+                url.clone(),
+                input.auth_scheme,
+                api_key,
+                headers.clone(),
+                None,
+                timeout,
+            )
+            .await
+            .map_err(|error| CustomModelDiscoveryFailure {
+                message: format!("Custom model discovery network or timeout error: {error}"),
+            })?;
+        let status = response.status();
+        let body = read_custom_model_discovery_body(response).await?;
+        if !status.is_success() {
+            return Err(CustomModelDiscoveryFailure {
+                message: discovery_status_message(status),
+            });
+        }
+        let page_result = parse_model_discovery_page(&body)?;
+        for model in page_result.models {
+            if seen_models.insert(model.to_ascii_lowercase()) {
+                models.push(model);
+                if models.len() >= MAX_CUSTOM_MODEL_DISCOVERY_MODELS {
+                    return Ok(CustomModelDiscoveryResult {
+                        models,
+                        truncated: true,
+                    });
+                }
+            }
+        }
+        if !page_result.has_more {
+            return Ok(CustomModelDiscoveryResult {
+                models,
+                truncated: false,
+            });
+        }
+        if page + 1 >= MAX_CUSTOM_MODEL_DISCOVERY_PAGES {
+            return Ok(CustomModelDiscoveryResult {
+                models,
+                truncated: true,
+            });
+        }
+        let cursor = page_result.cursor.or(page_result.last_valid_id).ok_or_else(|| CustomModelDiscoveryFailure {
+            message: "Custom model discovery response has_more=true but contains no valid model ID for after_id".to_string(),
+        })?;
+        advance_model_discovery_cursor(&mut url, &mut seen_cursors, &cursor)?;
+    }
+    unreachable!("bounded discovery loop always returns")
+}
+
+fn model_discovery_request_timeout(config: &AppConfig) -> Duration {
+    Duration::from_secs(
+        config
+            .non_stream_timeout_secs
+            .min(CUSTOM_MODEL_DISCOVERY_TIMEOUT_SECS),
+    )
+}
+
+fn model_discovery_headers(protocol: UpstreamProtocolKind) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    if protocol == UpstreamProtocolKind::Messages {
+        headers.insert(
+            reqwest::header::HeaderName::from_static("anthropic-version"),
+            reqwest::header::HeaderValue::from_static("2023-06-01"),
+        );
+    }
+    headers
+}
+
+struct CustomModelDiscoveryPage {
+    models: Vec<String>,
+    has_more: bool,
+    last_valid_id: Option<String>,
+    cursor: Option<String>,
+}
+
+fn parse_model_discovery_page(
+    body: &[u8],
+) -> Result<CustomModelDiscoveryPage, CustomModelDiscoveryFailure> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| CustomModelDiscoveryFailure {
+        message: "Custom model discovery did not return JSON with a data array".to_string(),
+    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| CustomModelDiscoveryFailure {
+            message: "Custom model discovery did not return a JSON object with a data array"
+                .to_string(),
+        })?;
+    let data = object
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CustomModelDiscoveryFailure {
+            message: "Custom model discovery response is missing a data array".to_string(),
+        })?;
+    let has_more = match object.get("has_more") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(CustomModelDiscoveryFailure {
+                message: "Custom model discovery response has an invalid has_more value"
+                    .to_string(),
+            });
+        }
+    };
+    let cursor = match object.get("last_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.chars().any(char::is_control) => Some(
+            crate::provider::validate_custom_model_id(value).map_err(|_| {
+                CustomModelDiscoveryFailure {
+                    message: "Custom model discovery response has an invalid last_id cursor"
+                        .to_string(),
+                }
+            })?,
+        ),
+        Some(_) => {
+            return Err(CustomModelDiscoveryFailure {
+                message: "Custom model discovery response has an invalid last_id cursor"
+                    .to_string(),
+            });
+        }
+    };
+    let mut models = Vec::new();
+    let mut last_valid_id = None;
+    for item in data {
+        let Some(id) = item
+            .as_object()
+            .and_then(|item| item.get("id"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if id.chars().any(char::is_control) {
+            continue;
+        }
+        let Ok(id) = crate::provider::validate_custom_model_id(id) else {
+            continue;
+        };
+        last_valid_id = Some(id.clone());
+        models.push(id);
+    }
+    Ok(CustomModelDiscoveryPage {
+        models,
+        has_more,
+        last_valid_id,
+        cursor,
+    })
+}
+
+fn advance_model_discovery_cursor(
+    url: &mut reqwest::Url,
+    seen_cursors: &mut HashSet<String>,
+    cursor: &str,
+) -> Result<(), CustomModelDiscoveryFailure> {
+    if !seen_cursors.insert(cursor.to_ascii_lowercase()) {
+        return Err(CustomModelDiscoveryFailure {
+            message: "Custom model discovery cursor loop detected".to_string(),
+        });
+    }
+    // The base endpoint was validated above and has no query. Only this
+    // encoded cursor is added; no upstream-provided URL is ever followed.
+    // Replacing rather than appending avoids a multi-page after_id chain.
+    url.set_query(None);
+    url.query_pairs_mut().append_pair("after_id", cursor);
+    Ok(())
+}
+
+async fn read_custom_model_discovery_body(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, CustomModelDiscoveryFailure> {
+    if let Some(length) = response.content_length()
+        && length > MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES as u64
+    {
+        return Err(oversized_model_discovery_body());
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| CustomModelDiscoveryFailure {
+            message: format!("Custom model discovery response body failed: {error}"),
+        })?;
+        model_discovery_body_size_allowed(body.len().saturating_add(chunk.len()))?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn model_discovery_body_size_allowed(size: usize) -> Result<(), CustomModelDiscoveryFailure> {
+    if size > MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES {
+        Err(oversized_model_discovery_body())
+    } else {
+        Ok(())
+    }
+}
+
+fn oversized_model_discovery_body() -> CustomModelDiscoveryFailure {
+    CustomModelDiscoveryFailure {
+        message: format!(
+            "Custom model discovery response exceeded the {MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES}-byte limit"
+        ),
+    }
+}
+
+fn discovery_status_message(status: StatusCode) -> String {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => format!(
+            "Custom model discovery authentication failed (upstream returned {})",
+            status.as_u16()
+        ),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => format!(
+            "Custom model discovery is unsupported at this endpoint (upstream returned {})",
+            status.as_u16()
+        ),
+        StatusCode::TOO_MANY_REQUESTS => {
+            "Custom model discovery is rate limited by the upstream (429)".to_string()
+        }
+        status if status.is_server_error() => format!(
+            "Custom model discovery upstream server error ({})",
+            status.as_u16()
+        ),
+        _ => format!(
+            "Custom model discovery upstream returned {}",
+            status.as_u16()
+        ),
+    }
 }
 
 impl fmt::Display for CustomVerifyFailure {
@@ -363,6 +667,83 @@ mod tests {
         .unwrap();
         assert_eq!(messages["stream"], false);
         assert_eq!(messages["max_tokens"], 1);
+    }
+
+    #[test]
+    fn model_discovery_page_uses_last_id_and_ignores_unsafe_data_ids() {
+        let page = parse_model_discovery_page(
+            br#"{"data":[{"id":"Model-A"},{"id":"  "},{"id":"model-b\n"}],"has_more":true,"last_id":"Model-A"}"#,
+        )
+        .unwrap();
+        assert_eq!(page.models, vec!["Model-A"]);
+        assert_eq!(page.cursor.as_deref(), Some("Model-A"));
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn model_discovery_cursor_replaces_query_and_rejects_loops() {
+        let mut url = join_custom_endpoint("https://api.example.com/v1", "models").unwrap();
+        let mut cursors = HashSet::new();
+        advance_model_discovery_cursor(&mut url, &mut cursors, "first").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.example.com/v1/models?after_id=first"
+        );
+        advance_model_discovery_cursor(&mut url, &mut cursors, "second").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.example.com/v1/models?after_id=second"
+        );
+        assert!(advance_model_discovery_cursor(&mut url, &mut cursors, "SECOND").is_err());
+    }
+
+    #[test]
+    fn malformed_model_discovery_shapes_are_actionable() {
+        assert!(parse_model_discovery_page(br#"[]"#).is_err());
+        assert!(parse_model_discovery_page(br#"{"data":{}}"#).is_err());
+        assert!(parse_model_discovery_page(br#"{"data":[],"has_more":"yes"}"#).is_err());
+        assert!(parse_model_discovery_page(br#"{"data":[],"last_id":42}"#).is_err());
+    }
+
+    #[test]
+    fn model_discovery_headers_are_protocol_specific() {
+        let chat = model_discovery_headers(UpstreamProtocolKind::ChatCompletions);
+        assert_eq!(
+            chat.get(reqwest::header::ACCEPT).unwrap(),
+            "application/json"
+        );
+        assert!(chat.get("anthropic-version").is_none());
+
+        let messages = model_discovery_headers(UpstreamProtocolKind::Messages);
+        assert_eq!(messages.get("anthropic-version").unwrap(), "2023-06-01");
+        assert!(messages.get(reqwest::header::AUTHORIZATION).is_none());
+        assert!(messages.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn model_discovery_response_body_limit_is_enforced() {
+        assert!(model_discovery_body_size_allowed(MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES).is_ok());
+        assert!(
+            model_discovery_body_size_allowed(MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES + 1).is_err()
+        );
+    }
+
+    #[test]
+    fn model_discovery_timeout_is_shorter_than_the_general_request_timeout() {
+        let mut config = AppConfig {
+            non_stream_timeout_secs: 900,
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            model_discovery_request_timeout(&config),
+            Duration::from_secs(CUSTOM_MODEL_DISCOVERY_TIMEOUT_SECS)
+        );
+
+        config.non_stream_timeout_secs = 7;
+        assert_eq!(
+            model_discovery_request_timeout(&config),
+            Duration::from_secs(7)
+        );
     }
 
     #[test]

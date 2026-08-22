@@ -42,13 +42,7 @@
         class="account-add-option"
         :class="{
           'account-add-option--disabled': option.disabled,
-          'account-add-option--selectable': !option.disabled && !option.managed,
         }"
-        :tabindex="option.disabled || option.managed ? -1 : 0"
-        :role="option.disabled || option.managed ? undefined : 'button'"
-        :aria-disabled="option.disabled"
-        @click="handleSelect(option)"
-        @keydown.enter.space.prevent="handleSelect(option)"
       >
         <div class="account-add-option__header">
           <n-icon :component="planIcon(option.plan.id)" size="28" aria-hidden="true" />
@@ -110,6 +104,16 @@
             {{ managedReason }}
           </n-tooltip>
         </n-space>
+
+        <n-space v-else-if="!option.disabled" :size="8" class="account-add-option__actions">
+          <n-button
+            size="small"
+            :type="option.plan.id === 'custom-endpoint' ? 'primary' : 'default'"
+            @click.stop="handleSelect(option)"
+          >
+            {{ t(planActionLabel(option.plan)) }}
+          </n-button>
+        </n-space>
       </div>
     </div>
 
@@ -146,7 +150,7 @@ import {
   SwapOutlined,
 } from "@vicons/antd";
 import type { Component } from "vue";
-import { t } from "../i18n/index.ts";
+import { t, type MessageKey } from "../i18n/index.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import { buildPlanOptions, type PlanOption } from "../views/account-plan-options.ts";
 import type { PlanDefinition } from "../views/plans.ts";
@@ -195,6 +199,8 @@ function planDescription(plan: PlanDefinition): string {
   switch (plan.id) {
     case "opencode-go":
       return t("已有 OpenCode Go Key，直接添加并参与账号路由。");
+    case "zen-free":
+      return t("Zen Free 已由系统管理，请在账号列表中启用。");
     case "scnet":
       return t("订阅制方案：额度、计费与续费由服务商订阅条款管理。");
     case "custom-endpoint":
@@ -202,6 +208,12 @@ function planDescription(plan: PlanDefinition): string {
     default:
       return "";
   }
+}
+
+function planActionLabel(plan: PlanDefinition): MessageKey {
+  if (plan.id === "custom-endpoint") return "添加账号";
+  if (plan.id === "command-code-goat" || plan.id === "scnet") return "创建草稿";
+  return "添加账号";
 }
 
 function handleSelect(option: PlanOption): void {
@@ -235,12 +247,16 @@ function handleSelect(option: PlanOption): void {
   font: inherit;
   text-align: left;
   background: var(--ocg-surface);
+  cursor: default;
+}
+
+button.account-add-option {
   cursor: pointer;
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
-.account-add-option--selectable:hover,
-.account-add-option--selectable:focus-visible {
+button.account-add-option:not(:disabled):hover,
+button.account-add-option:not(:disabled):focus-visible {
   border-color: var(--ocg-primary);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--ocg-primary) 14%, transparent);
   transform: translateY(-1px);

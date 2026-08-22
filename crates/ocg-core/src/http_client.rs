@@ -64,9 +64,22 @@ impl ForwardRouteSet {
 /// Stale entries — ids a newer registry removed — are dropped here so they
 /// stay inert even if a client explicitly requests that exact id, matching the
 /// load-path tolerance contract ("removed entries match nothing").
-fn normalized_known_list(models: &[String]) -> Vec<String> {
+fn normalized_known_list(
+    models: &[String],
+    zen_catalog: &crate::zen_models::ZenFreeModelCatalog,
+) -> Vec<String> {
     let known: std::collections::HashSet<String> = crate::gateway::protocol::supported_model_ids()
+        .filter(|id| {
+            (*id != "big-pickle" && !crate::gateway::free_models::is_free_model(id))
+                || zen_catalog.models.iter().any(|model| model == id)
+        })
         .map(normalize_model_name)
+        .chain(
+            zen_catalog
+                .models
+                .iter()
+                .map(|model| normalize_model_name(model)),
+        )
         .collect();
     models
         .iter()
@@ -143,7 +156,10 @@ pub(crate) fn build(config: &AppConfig) -> crate::Result<reqwest::Client> {
 
 /// Builds the full route set from one config generation. List mode builds both
 /// legs; every other mode builds exactly the process-wide client.
-pub(crate) fn build_route_set(config: &AppConfig) -> crate::Result<ForwardRouteSet> {
+pub(crate) fn build_route_set(
+    config: &AppConfig,
+    zen_catalog: &crate::zen_models::ZenFreeModelCatalog,
+) -> crate::Result<ForwardRouteSet> {
     match config.proxy_mode {
         ProxyMode::List => {
             let (default_builder, exception_builder, default_label, exception_label) =
@@ -162,7 +178,7 @@ pub(crate) fn build_route_set(config: &AppConfig) -> crate::Result<ForwardRouteS
                     ),
                 };
             Ok(ForwardRouteSet {
-                list: normalized_known_list(&config.proxy_list_models),
+                list: normalized_known_list(&config.proxy_list_models, zen_catalog),
                 default_client: leg_client(default_builder, config)?,
                 exception_client: Some(leg_client(exception_builder, config)?),
                 default_label,
@@ -191,6 +207,10 @@ mod tests {
     use axum::http::StatusCode;
     use axum::response::Redirect;
     use axum::routing::get;
+
+    fn zen_catalog() -> crate::zen_models::ZenFreeModelCatalog {
+        crate::zen_models::ZenFreeModelCatalog::default()
+    }
 
     #[test]
     fn no_redirect_builder_keeps_global_proxy_and_disables_follow() {
@@ -246,10 +266,13 @@ mod tests {
     #[test]
     fn client_for_resolves_both_directions_and_tolerates_stale_entries() {
         // Whitelist: listed -> proxy leg, unlisted/unknown/stale -> direct leg.
-        let whitelist = build_route_set(&list_config(
-            ProxyListDirection::Whitelist,
-            &["gpt-5.6-luna", "removed-model"],
-        ))
+        let whitelist = build_route_set(
+            &list_config(
+                ProxyListDirection::Whitelist,
+                &["gpt-5.6-luna", "removed-model"],
+            ),
+            &zen_catalog(),
+        )
         .unwrap();
         assert_eq!(whitelist.client_for("gpt-5.6-luna").1, RouteLabel::Proxy);
         assert_eq!(
@@ -265,20 +288,29 @@ mod tests {
         );
 
         // Blacklist inverts both legs.
-        let blacklist =
-            build_route_set(&list_config(ProxyListDirection::Blacklist, &["grok-4.5"])).unwrap();
+        let blacklist = build_route_set(
+            &list_config(ProxyListDirection::Blacklist, &["grok-4.5"]),
+            &zen_catalog(),
+        )
+        .unwrap();
         assert_eq!(blacklist.client_for("grok-4.5").1, RouteLabel::Direct);
         assert_eq!(blacklist.client_for("glm-5.3").1, RouteLabel::Proxy);
 
         // Empty list: whitelist = all direct, blacklist = all proxy.
-        let empty_whitelist =
-            build_route_set(&list_config(ProxyListDirection::Whitelist, &[])).unwrap();
+        let empty_whitelist = build_route_set(
+            &list_config(ProxyListDirection::Whitelist, &[]),
+            &zen_catalog(),
+        )
+        .unwrap();
         assert_eq!(
             empty_whitelist.client_for("gpt-5.6-luna").1,
             RouteLabel::Direct
         );
-        let empty_blacklist =
-            build_route_set(&list_config(ProxyListDirection::Blacklist, &[])).unwrap();
+        let empty_blacklist = build_route_set(
+            &list_config(ProxyListDirection::Blacklist, &[]),
+            &zen_catalog(),
+        )
+        .unwrap();
         assert_eq!(
             empty_blacklist.client_for("gpt-5.6-luna").1,
             RouteLabel::Proxy
@@ -296,9 +328,28 @@ mod tests {
                 proxy_url: "http://127.0.0.1:7890".to_string(),
                 ..AppConfig::default()
             };
-            let route_set = build_route_set(&config).unwrap();
+            let route_set = build_route_set(&config, &zen_catalog()).unwrap();
             assert_eq!(route_set.client_for("gpt-5.6-luna").1, label);
         }
+    }
+
+    #[test]
+    fn refreshed_zen_models_are_known_and_removed_models_become_inert() {
+        let config = list_config(
+            ProxyListDirection::Whitelist,
+            &["brand-new-promo-free", "mimo-v2.5-free"],
+        );
+        let refreshed = crate::zen_models::ZenFreeModelCatalog {
+            models: vec!["brand-new-promo-free".to_string()],
+            refreshed_at: None,
+            source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.to_string(),
+        };
+        let routes = build_route_set(&config, &refreshed).unwrap();
+        assert_eq!(
+            routes.client_for("brand-new-promo-free").1,
+            RouteLabel::Proxy
+        );
+        assert_eq!(routes.client_for("mimo-v2.5-free").1, RouteLabel::Direct);
     }
 
     #[tokio::test]

@@ -116,7 +116,6 @@ export interface ProviderUsageResponse {
 
 export interface ProviderSettingsUpdate {
   enabled: boolean;
-  free_alias_enabled: boolean;
   /** Settings revision guard; omit only when no revision has been loaded. */
   expected_revision?: number;
 }
@@ -124,6 +123,18 @@ export interface ProviderSettingsUpdate {
 export interface ProviderSettingsResponse {
   account: Account;
   revision: number;
+}
+
+export interface ZenFreeModelEntry {
+  model_id: string;
+  alias: string;
+}
+
+export interface ZenFreeModelsResponse {
+  account_id: string;
+  models: ZenFreeModelEntry[];
+  refreshed_at: string | null;
+  source_url: string;
 }
 
 export const providerApi = {
@@ -139,4 +150,13 @@ export const providerApi = {
       method: "PATCH",
       body: jsonBody(update),
     }),
+  getProviderModels: (accountId: string) =>
+    request<ZenFreeModelsResponse>(
+      `/accounts/${encodeURIComponent(accountId)}/provider-models`,
+    ),
+  refreshProviderModels: (accountId: string) =>
+    request<ZenFreeModelsResponse>(
+      `/accounts/${encodeURIComponent(accountId)}/provider-models/refresh`,
+      { method: "POST" },
+    ),
 };

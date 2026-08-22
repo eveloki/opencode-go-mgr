@@ -13,7 +13,7 @@
 //! origin only and still uses `/provider/v1/chat/completions`.
 
 use crate::custom::join_custom_protocol_url;
-use crate::gateway::free_models::{is_free_model, resolve_upstream_base};
+use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
     ApiFormat, RequestPlan, command_code_model_protocol, command_code_supports_upstream,
     command_code_upstream_path, opencode_supports_upstream,
@@ -187,13 +187,17 @@ pub(crate) fn resolve_route(
             if account.id != ZEN_FREE_ACCOUNT_ID {
                 return Err("Zen Free route must use the reserved singleton account".to_string());
             }
-            if plan.channel != UpstreamChannel::Free || !is_free_model(&plan.model) {
+            if plan.channel != UpstreamChannel::Free {
                 return Err(format!(
                     "Zen Free does not support routed model `{}` on this channel",
                     plan.model
                 ));
             }
-            if !opencode_supports_upstream(&plan.model, plan.upstream) {
+            let supported = opencode_supports_upstream(&plan.model, plan.upstream)
+                || (!crate::gateway::protocol::is_known_model(&plan.model)
+                    && plan.model.ends_with("-free")
+                    && plan.upstream == ApiFormat::ChatCompletions);
+            if !supported {
                 return Err(format!(
                     "Zen Free has no verified support for model `{}` over {:?}",
                     plan.model, plan.upstream

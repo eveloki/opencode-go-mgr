@@ -282,6 +282,15 @@ difference, and the Claude Desktop three-role persistence behavior.
   support. The OpenCode `MODEL_PROTOCOLS` table stays Go-specific. Custom
   rematerializes per account to that card's declared protocol, isolated
   origin, and auth scheme.
+- `zen_models.rs` owns the only Zen Free model-discovery path. A protected,
+  explicit account-card refresh calls the fixed keyless
+  `https://opencode.ai/zen/v1/models` endpoint through the global proxy,
+  follows no redirects, keeps only valid IDs ending in `-free`, and persists
+  the complete successful snapshot before swapping runtime state. Each model
+  publishes both its raw ID and an Alias with the suffix removed. Failed or
+  empty refreshes preserve the previous snapshot; `/v1/models` only reads it.
+  The Go-owned `ox-alpha-free` ID is a reserved exclusion and must never gain
+  a Zen mapping or stripped `ox-alpha` Alias.
 - `selector.rs` filters account cards by capability, enabled/ready state,
   credential validity, cooldown, and request-local failures before applying
   the persisted global manual order. Strict priority, global sticky, and
@@ -316,8 +325,8 @@ difference, and the Claude Desktop three-role persistence behavior.
   returned as-is without rotating accounts or persisting `auth_error` (Go uses
   401 for `ModelError` as well as invalid keys). Dashboard ping / key
   verification still record `auth_error` on 401. A free-channel
-  `429` cools the IP-shared free pool and does not rotate keys; prefer mode
-  then falls back to Go. `408`, `5xx`, post-connect failures, body timeouts,
+  `429` cools the IP-shared free pool and does not rotate keys; routing then
+  continues with later compatible cards in persisted order. `408`, `5xx`, post-connect failures, body timeouts,
   and stream interruptions are never replayed, and ambiguous results are
   logged as `outcome_unknown`. The shared reqwest client has only a 30-second
   connect timeout; non-stream requests use a 900-second total deadline and
@@ -455,8 +464,12 @@ difference, and the Claude Desktop three-role persistence behavior.
   `data.sqlite.pre-v23.<timestamp>.bak` before any v23 write. A source older
   than v22 also keeps `data.sqlite.pre-v22.<timestamp>.bak`. Preserve those
   files with the normal backup; they are rollback points, not a general backup
-  or a license to run an older binary on the migrated database. On every
-  `Database::open`, enabled leftovers for Command Code GOAT and all three SCNet
+  or a license to run an older binary on the migrated database. Schema v24
+  adds the actual proxy route leg to forward logs. Schema v25 adds
+  `provider_model_catalogs`; the Zen Free refresh stores its
+  last successful filtered model snapshot there. This additive migration does
+  not create separate pre-v24 or pre-v25 backups. On every `Database::open`, enabled
+  leftovers for Command Code GOAT and all three SCNet
   Token Plan tiers are disabled without changing `updated_at`. Custom API
   enabled state is preserved. Verification and configuration remain intact,
   except an existing unverified GOAT row is reset to `pending`; Go, Zen Free,
@@ -974,16 +987,16 @@ most of them; the manual parts need a real desktop.
       and selectable. Spot-check that copied results contain no masked key,
       and actually launch Claude Desktop and Gemini CLI once each for a text
       and a tool call.
-- [ ] Cover schema v16 migration, schema v23 (`data.sqlite.pre-v23.*.bak`
+- [ ] Cover schema v16 migration, schema v25 (`data.sqlite.pre-v23.*.bak`
       rollback, Alias / upstream log identity, optional native cost, unverified
-      GOAT rows stay disabled `pending`), legacy `key + ready`, managed transitions (forward one step /
+      GOAT rows stay disabled `pending`, Zen Free catalog persistence), legacy `key + ready`, managed transitions (forward one step /
       rewind earlier steps / no skip-forward), pending-route isolation, the
       invite URL allowlist and demo-default write-back, and the
       `2xx`/`429`/`401`/`403`/network/`5xx` key-verification branches. Confirm
       that no DTO or log contains a plaintext key.
 - [ ] Confirm authenticated `GET /v1/models` and protected
-      `GET /dashboard/api/application-models` are local lists (no upstream
-      discovery). `/v1/models` is currently routeable published aliases plus
+      `GET /dashboard/api/application-models` are local reads and make no
+      upstream request. `/v1/models` is currently routeable published aliases plus
       eligible Custom IDs; `application-models` is Go routeable aliases ∩ the
       active pricing snapshot (highspeed inherits the base row) and must not
       include Custom. Unknown models return `400` on Chat / Responses /
@@ -1096,7 +1109,9 @@ most of them; the manual parts need a real desktop.
   process injects the registry sync hook; development builds, the CLI,
   Docker, macOS, and Linux dashboards must keep hiding the switch.
 - **Local Alias lists stay local.** Authenticated `GET /v1/models` and
-  dashboard `application-models` must not grow an upstream discovery path.
+  dashboard `application-models` must not grow request-time upstream discovery.
+  The explicit Zen Free refresh is the only directory-fetch exception and is
+  restricted to the fixed official endpoint.
   Do not equate the two lists; do not invent a `requested_alias` log field.
 - **Don't re-invent `cargo test` ergonomics.** The CLI uses
   `parking_lot::Mutex`, which is not re-entrant. When a function needs to

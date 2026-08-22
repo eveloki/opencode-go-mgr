@@ -2,8 +2,8 @@ import type { Account, AccountCredentialKind, AccountQuotaScope } from "../api/t
 
 /**
  * Built-in provider/offering registry. The backend owns the DTO fields
- * (`provider_id`, `offering_id`, `credential_kind`, `quota_scope`,
- * `free_alias_enabled`); this module only holds the frontend's static
+ * (`provider_id`, `offering_id`, `credential_kind`, `quota_scope`); this
+ * module only holds the frontend's static
  * knowledge of the built-in pairs so forms and cards can branch without
  * inventing new endpoints.
  */

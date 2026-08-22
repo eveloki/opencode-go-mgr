@@ -74,9 +74,17 @@ fn slash_raw_pin_is_chat_only_and_not_an_opencode_protocol_row() {
                 mappings
                     .iter()
                     .filter(|mapping| mapping.routeable)
-                    .all(|mapping| mapping.is_opencode_go())
+                    .all(|mapping| mapping.is_opencode_go() || mapping.is_zen_free())
+            );
+            assert!(mappings.iter().any(|mapping| mapping.is_opencode_go()));
+            assert!(mappings.iter().any(|mapping| mapping.is_zen_free()));
+            assert!(
+                mappings
+                    .iter()
+                    .filter(|mapping| mapping.is_command_code_goat())
+                    .all(|mapping| !mapping.routeable)
             );
         }
-        other => panic!("expected Go alias, got {other:?}"),
+        other => panic!("expected shared Go/Zen alias, got {other:?}"),
     }
 }

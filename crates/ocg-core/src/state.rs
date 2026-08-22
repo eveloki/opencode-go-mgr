@@ -1,8 +1,7 @@
 use crate::crypto::KeyCipher;
 use crate::db::Database;
 use crate::models::{
-    AppConfig, FreeModelRouting, normalize_client_root_url, normalize_opencode_invite_url,
-    normalize_proxy_url,
+    AppConfig, normalize_client_root_url, normalize_opencode_invite_url, normalize_proxy_url,
 };
 use crate::pricing::{
     PricingEstimate, PricingSnapshot, embedded_seed, ensure_current_adjustment_policy,
@@ -126,6 +125,8 @@ pub struct CoreStateInner {
     http_client: Mutex<Arc<crate::http_client::ForwardRouteSet>>,
     pricing: RwLock<Arc<PricingSnapshot>>,
     pub pricing_refresh: tokio::sync::Mutex<()>,
+    zen_free_models: RwLock<Arc<crate::zen_models::ZenFreeModelCatalog>>,
+    pub zen_free_models_refresh: tokio::sync::Mutex<()>,
     pub routing: crate::gateway::routing::RoutingRuntime,
     pub browser: crate::browser::BrowserRuntime,
     /// Official Go usage sync gates (concurrency, dedupe, clock/jitter seams).
@@ -192,7 +193,8 @@ impl CoreStateInner {
                 snapshot
             }
         };
-        let http_client = crate::http_client::build_route_set(&config)?;
+        let zen_free_models = db.zen_free_model_catalog()?.unwrap_or_default();
+        let http_client = crate::http_client::build_route_set(&config, &zen_free_models)?;
         Ok(Self {
             db: Mutex::new(db),
             config: Mutex::new(config),
@@ -216,6 +218,8 @@ impl CoreStateInner {
             http_client: Mutex::new(Arc::new(http_client)),
             pricing: RwLock::new(Arc::new(pricing)),
             pricing_refresh: tokio::sync::Mutex::new(()),
+            zen_free_models: RwLock::new(Arc::new(zen_free_models)),
+            zen_free_models_refresh: tokio::sync::Mutex::new(()),
             routing: crate::gateway::routing::RoutingRuntime::new(),
             browser: crate::browser::BrowserRuntime::new(),
             usage_sync: crate::usage_sync::UsageSyncRuntime::new(),
@@ -267,6 +271,25 @@ impl CoreStateInner {
 
     pub fn pricing_snapshot(&self) -> Arc<PricingSnapshot> {
         self.pricing.read().clone()
+    }
+
+    pub fn zen_free_model_catalog(&self) -> Arc<crate::zen_models::ZenFreeModelCatalog> {
+        self.zen_free_models.read().clone()
+    }
+
+    pub fn activate_zen_free_model_catalog(
+        &self,
+        catalog: crate::zen_models::ZenFreeModelCatalog,
+    ) -> crate::Result<()> {
+        let route_set = crate::http_client::build_route_set(&self.config(), &catalog)?;
+        let db = self.db.lock();
+        let mut active = self.zen_free_models.write();
+        let mut http_client = self.http_client.lock();
+        db.set_zen_free_model_catalog(&catalog)?;
+        *active = Arc::new(catalog);
+        *http_client = Arc::new(route_set);
+        self.routing.reset();
+        Ok(())
     }
 
     pub fn activate_pricing_snapshot(&self, snapshot: PricingSnapshot) -> crate::Result<()> {
@@ -454,46 +477,17 @@ impl CoreStateInner {
             .map_err(anyhow::Error::msg)?;
         // validate() enforces the non-blank primary key on every write path.
         config.validate().map_err(anyhow::Error::msg)?;
-        let http_client = crate::http_client::build_route_set(&config)?;
+        let zen_catalog = self.zen_free_model_catalog();
+        let http_client = crate::http_client::build_route_set(&config, &zen_catalog)?;
         Ok((config, http_client))
     }
 
     pub fn set_config(&self, config: AppConfig) -> crate::Result<()> {
-        let (zen_enabled, zen_free_alias_enabled) = match config.free_model_routing {
-            FreeModelRouting::Deny => (false, false),
-            FreeModelRouting::Explicit => (true, false),
-            FreeModelRouting::Prefer => (true, true),
-        };
-        self.set_config_and_zen_free_settings(config, zen_enabled, zen_free_alias_enabled)
-    }
-
-    /// Atomically persists AppConfig and the database-owned Zen singleton,
-    /// then publishes the already-committed config to in-memory readers.
-    /// Callers serialize all Zen mutations through `settings_update`.
-    pub fn set_config_and_zen_free_settings(
-        &self,
-        config: AppConfig,
-        zen_enabled: bool,
-        zen_free_alias_enabled: bool,
-    ) -> crate::Result<()> {
-        let expected_zen_settings = match config.free_model_routing {
-            FreeModelRouting::Deny => (false, false),
-            FreeModelRouting::Explicit => (true, false),
-            FreeModelRouting::Prefer => (true, true),
-        };
-        anyhow::ensure!(
-            (zen_enabled, zen_free_alias_enabled) == expected_zen_settings,
-            "Zen Free settings must match AppConfig.free_model_routing"
-        );
         let (config, http_client) = self.prepare_config(config)?;
         let config_json = serde_json::to_string(&config)?;
         {
             let db = self.db.lock();
-            db.set_config_and_update_zen_free_settings(
-                &config_json,
-                zen_enabled,
-                zen_free_alias_enabled,
-            )?;
+            db.set_config(&config_json)?;
         }
         self.apply_persisted_config(config, http_client);
         Ok(())
@@ -869,7 +863,6 @@ mod tests {
             offering_id: crate::provider::default_offering_id(),
             credential_kind: crate::provider::default_credential_kind(),
             quota_scope: crate::provider::default_quota_scope(),
-            free_alias_enabled: false,
             name: "existing-account".into(),
             username: None,
             password_cipher: None,
@@ -976,7 +969,6 @@ mod tests {
                 offering_id: crate::provider::default_offering_id(),
                 credential_kind: crate::provider::default_credential_kind(),
                 quota_scope: crate::provider::default_quota_scope(),
-                free_alias_enabled: false,
                 name: id.into(),
                 username: None,
                 password_cipher: None,
@@ -1288,7 +1280,6 @@ mod tests {
                 offering_id: crate::provider::default_offering_id(),
                 credential_kind: crate::provider::default_credential_kind(),
                 quota_scope: crate::provider::default_quota_scope(),
-                free_alias_enabled: false,
                 name: id.into(),
                 username: None,
                 password_cipher: None,

@@ -1614,7 +1614,6 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
         .patch(format!("{base}/providers/zen-free"))
         .json(&json!({
             "enabled": true,
-            "free_alias_enabled": true,
             "expected_revision": before
         }))
         .send()
@@ -1624,10 +1623,12 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
     let zen: serde_json::Value = zen.json().await.unwrap();
     let revision = zen["revision"].as_u64().unwrap();
     assert_eq!(revision, before + 1);
-    assert_eq!(zen["account"]["free_alias_enabled"], true);
-    assert_eq!(
-        state.config().free_model_routing,
-        ocg_core::models::FreeModelRouting::Prefer
+    assert!(zen["account"].get("free_alias_enabled").is_none());
+    assert!(
+        serde_json::to_value(state.config())
+            .unwrap()
+            .get("free_model_routing")
+            .is_none()
     );
 
     let free_until = Utc::now() + chrono::Duration::minutes(5);
@@ -1673,7 +1674,6 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
         .patch(format!("{base}/providers/zen-free"))
         .json(&json!({
             "enabled": false,
-            "free_alias_enabled": false,
             "expected_revision": before
         }))
         .send()
@@ -1681,15 +1681,13 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
         .unwrap();
     assert_eq!(stale.status(), StatusCode::CONFLICT);
 
-    let mut legacy = state.config();
-    legacy.free_model_routing = ocg_core::models::FreeModelRouting::Explicit;
-    let legacy = client
+    let settings_save = client
         .post(format!("{base}/settings"))
-        .json(&settings_payload_at(&legacy, revision))
+        .json(&settings_payload_at(&state.config(), revision))
         .send()
         .await
         .unwrap();
-    assert_eq!(legacy.status(), StatusCode::OK);
+    assert_eq!(settings_save.status(), StatusCode::OK);
     let listed: serde_json::Value = client
         .get(format!("{base}/accounts"))
         .send()
@@ -1705,7 +1703,7 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
         .find(|account| account["id"] == ZEN_FREE_ACCOUNT_ID)
         .unwrap();
     assert_eq!(zen_card["enabled"], true);
-    assert_eq!(zen_card["free_alias_enabled"], false);
+    assert!(zen_card.get("free_alias_enabled").is_none());
 
     gateway::stop_gateway(handle);
 }

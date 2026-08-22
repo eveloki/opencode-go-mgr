@@ -255,7 +255,8 @@ pub async fn models(
 }
 
 fn published_alias_models_response(state: &CoreState) -> axum::response::Response {
-    let published = alias::published_routeable_aliases();
+    let zen_catalog = state.zen_free_model_catalog();
+    let published = alias::published_routeable_aliases_with_zen(&zen_catalog.models);
     let mut data: Vec<serde_json::Value> = published
         .iter()
         .map(|item| {
@@ -271,7 +272,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
     for id in custom_ids {
         if published
             .iter()
-            .any(|item| crate::custom::custom_model_id_matches(item.alias, &id))
+            .any(|item| crate::custom::custom_model_id_matches(&item.alias, &id))
             || data.iter().any(|item| {
                 item.get("id")
                     .and_then(|value| value.as_str())
@@ -372,7 +373,12 @@ async fn proxy_handler_inner(
         parsed.requested_model.clone()
     };
     let custom_model_ids = eligible_custom_model_ids(&state);
-    let resolved = match alias::resolve_with_custom(&routing_model, &custom_model_ids) {
+    let zen_catalog = state.zen_free_model_catalog();
+    let resolved = match alias::resolve_with_provider_models(
+        &routing_model,
+        &zen_catalog.models,
+        &custom_model_ids,
+    ) {
         Ok(resolved) => resolved,
         Err(error) => {
             return local_protocol_failure(
@@ -463,7 +469,12 @@ async fn gemini_proxy_handler(
     let client_model = parsed.requested_model.clone();
     let routing_model = parsed.requested_model.clone();
     let custom_model_ids = eligible_custom_model_ids(&state);
-    let resolved = match alias::resolve_with_custom(&routing_model, &custom_model_ids) {
+    let zen_catalog = state.zen_free_model_catalog();
+    let resolved = match alias::resolve_with_provider_models(
+        &routing_model,
+        &zen_catalog.models,
+        &custom_model_ids,
+    ) {
         Ok(resolved) => resolved,
         Err(error) => {
             return local_protocol_failure(
@@ -1304,10 +1315,7 @@ mod tests {
         let resolved = crate::alias::resolve(mapped).expect("mapped Go alias");
         assert!(matches!(
             resolved,
-            crate::alias::ResolvedModel::Alias {
-                alias: "glm-5.2",
-                ..
-            }
+            crate::alias::ResolvedModel::Alias { ref alias, .. } if alias == "glm-5.2"
         ));
         let plan = materialize_parsed_request(
             &parsed,

@@ -59,7 +59,6 @@ fn build_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf
             offering_id: ocg_core::provider::default_offering_id(),
             credential_kind: ocg_core::provider::default_credential_kind(),
             quota_scope: ocg_core::provider::default_quota_scope(),
-            free_alias_enabled: false,
             name: format!("acct-{}", idx + 1),
             username: None,
             password_cipher: None,
@@ -120,7 +119,7 @@ fn assert_local_openai_alias_list(body: &Value) {
         assert_eq!(item["owned_by"], published.owned_by);
         assert_eq!(item["created"], 0);
         assert!(
-            alias::is_published_alias(published.alias),
+            alias::is_published_alias(&published.alias),
             "advertised `{}` is not an alias",
             published.alias
         );
@@ -135,11 +134,19 @@ fn assert_local_openai_alias_list(body: &Value) {
     assert_eq!(go["owned_by"], ocg_core::provider::OPENCODE_PROVIDER_ID);
     let go_named_free = data
         .iter()
-        .find(|item| item["id"] == "deepseek-v4-flash-free")
+        .find(|item| item["id"] == "ox-alpha-free")
         .expect("Go alias whose name contains free");
     assert_eq!(
         go_named_free["owned_by"],
         ocg_core::provider::OPENCODE_PROVIDER_ID
+    );
+    let zen_raw = data
+        .iter()
+        .find(|item| item["id"] == "deepseek-v4-flash-free")
+        .expect("Zen raw free model id");
+    assert_eq!(
+        zen_raw["owned_by"],
+        ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
     );
     let zen = data
         .iter()
@@ -348,13 +355,13 @@ async fn ambiguous_model_id_is_structured_across_client_formats() {
                 alias::ProviderMapping {
                     provider_id: ocg_core::provider::OPENCODE_PROVIDER_ID,
                     offering_id: ocg_core::provider::GO_OFFERING_ID,
-                    upstream_model: "shared-raw",
+                    upstream_model: "shared-raw".into(),
                     routeable: true,
                 },
                 alias::ProviderMapping {
                     provider_id: ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
                     offering_id: ocg_core::provider::ANONYMOUS_FREE_OFFERING_ID,
-                    upstream_model: "shared-raw",
+                    upstream_model: "shared-raw".into(),
                     routeable: true,
                 },
             ],

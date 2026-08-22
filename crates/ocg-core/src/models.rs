@@ -27,8 +27,6 @@ pub struct Account {
     pub credential_kind: CredentialKind,
     #[serde(default = "default_quota_scope")]
     pub quota_scope: QuotaScope,
-    #[serde(default)]
-    pub free_alias_enabled: bool,
     pub name: String,
     pub username: Option<String>,
     pub password_cipher: Option<String>,
@@ -321,6 +319,26 @@ pub struct AccountCustomConfigInput {
     pub auth_scheme: UpstreamAuthScheme,
 }
 
+/// One explicitly user-triggered, non-persisting Custom API model-list probe.
+/// A create form supplies `api_key`; an edit form may instead identify the
+/// existing Custom account so the dashboard can use its already stored key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomModelDiscoveryInput {
+    pub base_url: String,
+    pub upstream_protocol: UpstreamProtocolKind,
+    pub auth_scheme: UpstreamAuthScheme,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomModelDiscoveryResult {
+    pub models: Vec<String>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountModelCapability {
     pub account_id: String,
@@ -469,18 +487,6 @@ fn format_date(date: NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum FreeModelRouting {
-    /// Reject free model ids; never map Go requests onto free twins.
-    Deny,
-    /// Only explicit free model ids use the Zen free channel (default).
-    #[default]
-    Explicit,
-    /// Prefer mapped free twins when context fits; fall back to Go.
-    Prefer,
-}
-
 /// Upstream product channel for account selection and cooldown windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamChannel {
@@ -556,8 +562,6 @@ pub struct AppConfig {
     pub stream_idle_timeout_secs: u64,
     pub routing_mode: RoutingMode,
     pub conversation_sticky: bool,
-    #[serde(default)]
-    pub free_model_routing: FreeModelRouting,
     pub claude_desktop_models: ClaudeDesktopModels,
 }
 
@@ -580,7 +584,6 @@ impl Default for AppConfig {
             stream_idle_timeout_secs: 300,
             routing_mode: RoutingMode::StrictPriority,
             conversation_sticky: false,
-            free_model_routing: FreeModelRouting::Explicit,
             claude_desktop_models: ClaudeDesktopModels::default(),
         }
     }
@@ -1126,7 +1129,7 @@ mod tests {
     use super::{
         AccountInput, AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS,
         CLAUDE_DESKTOP_SONNET_ALIAS, ClaudeDesktopModels, DEFAULT_OPENCODE_INVITE_URL,
-        FreeModelRouting, MAX_ACCOUNT_NOTES_CHARS, ProxyListDirection, ProxyMode, RoutingMode,
+        MAX_ACCOUNT_NOTES_CHARS, ProxyListDirection, ProxyMode, RoutingMode,
         normalize_account_notes, normalize_opencode_invite_url, normalize_proxy_url,
         normalize_purchase_date, purchase_expires_on,
     };
@@ -1241,7 +1244,6 @@ mod tests {
         .expect("missing routing fields should default");
         assert_eq!(missing.routing_mode, RoutingMode::StrictPriority);
         assert!(!missing.conversation_sticky);
-        assert_eq!(missing.free_model_routing, FreeModelRouting::Explicit);
         assert_eq!(missing.proxy_mode, ProxyMode::Auto);
         assert!(missing.proxy_url.is_empty());
 

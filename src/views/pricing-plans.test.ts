@@ -3,6 +3,7 @@ import test from "node:test";
 import type { PricingSnapshot } from "../api/tauri.ts";
 import type { StoredProviderPricingSnapshot } from "../api/providers.ts";
 import {
+  buildPlanPricingGroups,
   resolvePlanPricingDisplay,
   type PlanPricingContent,
   type PlanPricingGroup,
@@ -111,4 +112,29 @@ test("pricing copy is kind-aware and never turns missing data into a price table
     })).messageKey,
     "只在你主动刷新时访问官方文档；刷新失败会继续使用当前快照。",
   );
+});
+
+test("Pricing includes only Go, GOAT, and SCNet in stable order", () => {
+  for (const catalog of [null, []]) {
+    const groups = buildPlanPricingGroups(catalog, goSnapshot(), {});
+    assert.deepEqual(groups.map(({ plan }) => plan.id), [
+      "opencode-go",
+      "command-code-goat",
+      "scnet",
+    ]);
+    assert.ok(groups.every(({ plan }) => plan.id !== "zen-free" && plan.id !== "custom-endpoint"));
+  }
+});
+
+test("GOAT and SCNet render dated reference panels without changing runtime availability", () => {
+  const groups = buildPlanPricingGroups(null, goSnapshot(), {});
+  const goat = groups.find(({ plan }) => plan.id === "command-code-goat")!;
+  const scnet = groups.find(({ plan }) => plan.id === "scnet")!;
+
+  assert.equal(goat.pricingAvailability, "unavailable");
+  assert.equal(goat.content.kind, "goat-reference");
+  assert.equal(resolvePlanPricingDisplay(goat).state, "reference");
+  assert.equal(scnet.pricingAvailability, "unavailable");
+  assert.equal(scnet.content.kind, "scnet-reference");
+  assert.equal(resolvePlanPricingDisplay(scnet).state, "reference");
 });

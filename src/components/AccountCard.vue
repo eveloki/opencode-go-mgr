@@ -115,24 +115,6 @@
           </n-tooltip>
         </div>
 
-        <div v-if="isZen && accountIsReady(account) && account.enabled" class="account-action account-action--secondary">
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-switch
-                :value="account.free_alias_enabled"
-                :loading="freeAliasSaving"
-                :aria-label="account.free_alias_enabled
-                  ? t('禁用 {name} 的 Free 别名', { name: account.name })
-                  : t('启用 {name} 的 Free 别名', { name: account.name })"
-                @update:value="emit('toggle-free-alias')"
-              />
-            </template>
-            {{ account.free_alias_enabled
-              ? t("禁用 {name} 的 Free 别名", { name: account.name })
-              : t("启用 {name} 的 Free 别名", { name: account.name }) }}
-          </n-tooltip>
-        </div>
-
         <div v-if="isGo && accountIsReady(account)" class="account-action account-action--secondary">
           <n-tooltip trigger="hover">
             <template #trigger>
@@ -149,6 +131,24 @@
               </n-button>
             </template>
             {{ usageRefreshTooltip(account, now) }}
+          </n-tooltip>
+        </div>
+
+        <div v-if="isZen && accountIsReady(account)" class="account-action account-action--secondary">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button
+                circle
+                quaternary
+                size="small"
+                :aria-label="t('获取模型')"
+                :loading="modelRefreshing"
+                @click="emit('refresh-models')"
+              >
+                <template #icon><n-icon :component="ReloadOutlined" /></template>
+              </n-button>
+            </template>
+            {{ t("获取模型") }}
           </n-tooltip>
         </div>
 
@@ -273,6 +273,24 @@
         {{ t("验证连接") }}
       </n-button>
     </div>
+    <div v-else-if="isZen" class="custom-endpoint">
+      <div class="custom-endpoint__meta">
+        <n-popover trigger="click" placement="bottom-start" :width="360">
+          <template #trigger>
+            <n-button text type="primary" size="small">
+              {{ t("{count} 个模型", { count: providerModels?.models.length ?? 0 }) }}
+            </n-button>
+          </template>
+          <div class="zen-model-list">
+            <div v-for="model in providerModels?.models ?? []" :key="model.model_id" class="zen-model-list__item">
+              <code>{{ model.alias }}</code>
+              <span aria-hidden="true">→</span>
+              <code>{{ model.model_id }}</code>
+            </div>
+          </div>
+        </n-popover>
+      </div>
+    </div>
     <div v-else-if="isGo && !quotaLimitsFailed">
       <div v-if="usageLoadError" class="usage-load-error" role="alert">
         <span>{{ t("用量加载失败") }}</span>
@@ -324,7 +342,7 @@ import {
   ThunderboltOutlined,
 } from "@vicons/antd";
 import type { Account, UsageWindow } from "../api/tauri";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
+import type { ProviderCatalogEntry, ZenFreeModelsResponse } from "../api/providers.ts";
 import { isCooling, isUsageLimitReached } from "../views/accounts-usage.ts";
 import type { UsageKey } from "../views/accounts-usage.ts";
 import {
@@ -360,6 +378,7 @@ import UsageStrip from "./UsageStrip.vue";
 const props = defineProps<{
   account: Account;
   catalog: readonly ProviderCatalogEntry[] | null;
+  providerModels: ZenFreeModelsResponse | null;
   usage: UsageWindow;
   limits: UsageLimitView[];
   edits: AccountUsageEdits | undefined;
@@ -370,7 +389,7 @@ const props = defineProps<{
   usageLoading: boolean;
   usageLoadError: string | null;
   usageRefreshLoading: boolean;
-  freeAliasSaving: boolean;
+  modelRefreshing: boolean;
   /** Connection verification in flight for a pending/failed Custom account. */
   verifying: boolean;
   quotaLimitsFailed: boolean;
@@ -382,9 +401,9 @@ const emit = defineEmits<{
   "order-drag-start": [event: PointerEvent];
   ping: [];
   toggle: [];
-  "toggle-free-alias": [];
   verify: [];
   "refresh-usage": [];
+  "refresh-models": [];
   "reload-usage": [];
   "open-wizard": [];
   "menu-select": [key: string | number];
@@ -555,6 +574,24 @@ const usageEditorAvailable = computed(() => {
   margin: 0;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
+}
+
+.zen-model-list {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.zen-model-list__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.zen-model-list__item code {
+  overflow-wrap: anywhere;
 }
 
 .account-plan-warning {

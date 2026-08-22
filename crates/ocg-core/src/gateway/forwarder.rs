@@ -770,7 +770,7 @@ async fn forward_request_impl(
                 sanitized,
                 cooldown.num_seconds()
             );
-            let action = action_for_usage_limit(window, plan.allow_go_fallback);
+            let action = action_for_usage_limit(window);
             let failure = attempt_context.failure(FailureSpec {
                 error_source: "upstream",
                 error_stage: "upstream_http",
@@ -2387,16 +2387,13 @@ fn rate_limit_window_and_cooldown(
     (window, cooldown)
 }
 
-fn action_for_usage_limit(
-    window: Option<UsageWindowKind>,
-    allow_go_fallback: bool,
-) -> ForwardAction {
+fn action_for_usage_limit(window: Option<UsageWindowKind>) -> ForwardAction {
     if window == Some(UsageWindowKind::Free) {
-        if allow_go_fallback {
-            ForwardAction::ExhaustFreeChannel
-        } else {
-            ForwardAction::Return
-        }
+        // Free is an ordinary provider candidate. Exhausting its shared IP
+        // quota continues through the remaining account-card order; a
+        // Free-only alias naturally returns the shared cooldown once no other
+        // compatible candidate remains.
+        ForwardAction::ExhaustFreeChannel
     } else {
         ForwardAction::TryNextAccount
     }
@@ -2799,21 +2796,18 @@ mod stream_usage_tests {
             );
         }
         assert_eq!(
-            action_for_usage_limit(Some(UsageWindowKind::Free), true),
+            action_for_usage_limit(Some(UsageWindowKind::Free)),
             ForwardAction::ExhaustFreeChannel
         );
         assert_eq!(
-            action_for_usage_limit(Some(UsageWindowKind::Free), false),
-            ForwardAction::Return
+            action_for_usage_limit(Some(UsageWindowKind::Free)),
+            ForwardAction::ExhaustFreeChannel
         );
         assert_eq!(
-            action_for_usage_limit(Some(UsageWindowKind::FiveHours), true),
+            action_for_usage_limit(Some(UsageWindowKind::FiveHours)),
             ForwardAction::TryNextAccount
         );
-        assert_eq!(
-            action_for_usage_limit(None, false),
-            ForwardAction::TryNextAccount
-        );
+        assert_eq!(action_for_usage_limit(None), ForwardAction::TryNextAccount);
     }
 
     #[test]

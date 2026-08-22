@@ -22,7 +22,6 @@ function draftAccount(overrides: Partial<Account> = {}): Account {
     offering_id: "api",
     credential_kind: "api_key",
     quota_scope: "key",
-    free_alias_enabled: false,
     purchase_date: "2026-08-21",
     expires_on: "2026-09-21",
     cooldown_until: null,

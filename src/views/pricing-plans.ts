@@ -22,6 +22,8 @@ export type PricingAvailability = "available" | "unavailable" | "not_applicable"
  */
 export type PlanPricingContent =
   | { kind: "opencode-go"; snapshot: PricingSnapshot | null }
+  | { kind: "goat-reference"; snapshot: null }
+  | { kind: "scnet-reference"; snapshot: null }
   | { kind: "free"; snapshot: null }
   | { kind: "api-key"; snapshot: StoredProviderPricingSnapshot | null }
   | { kind: "subscription"; snapshot: StoredProviderPricingSnapshot | null }
@@ -36,6 +38,7 @@ export interface PlanPricingGroup {
 
 export type PlanPricingState =
   | "error"
+  | "reference"
   | "unavailable"
   | "unpriced"
   | "not_applicable"
@@ -54,6 +57,18 @@ export interface PlanPricingDisplay {
  */
 export type ProviderSnapshots = Partial<Record<PlanId, ProviderPricingResponse>>;
 
+export const PRICING_PLAN_IDS = [
+  "opencode-go",
+  "command-code-goat",
+  "scnet",
+] as const satisfies readonly PlanId[];
+
+const pricingPlanIdSet = new Set<PlanId>(PRICING_PLAN_IDS);
+
+export const PRICING_PLAN_DEFINITIONS = PLAN_DEFINITIONS.filter(
+  (plan) => pricingPlanIdSet.has(plan.id),
+);
+
 function defaultPricingAvailability(plan: PlanDefinition): PricingAvailability {
   if (plan.id === "opencode-go") return "available";
   if (plan.id === "zen-free") return "not_applicable";
@@ -69,6 +84,14 @@ function buildContent(
 ): PlanPricingContent {
   if (plan.id === "opencode-go") {
     return { kind: "opencode-go", snapshot: opencodeSnapshot };
+  }
+
+  if (plan.id === "command-code-goat") {
+    return { kind: "goat-reference", snapshot: null };
+  }
+
+  if (plan.id === "scnet") {
+    return { kind: "scnet-reference", snapshot: null };
   }
 
   if (plan.id === "zen-free") {
@@ -108,6 +131,13 @@ export function resolvePlanPricingDisplay(
 ): PlanPricingDisplay {
   if (error) {
     return { state: "error", messageKey: "加载额度价格表失败: {error}", error };
+  }
+  if (group.content.kind === "goat-reference" || group.content.kind === "scnet-reference") {
+    return {
+      state: "reference",
+      messageKey: "以下为官方套餐参考，不是 OCG Manager 实时计价或用量。",
+      error: null,
+    };
   }
   if (group.pricingAvailability === "unavailable") {
     const messageKey = group.content.kind === "api-key"
@@ -150,7 +180,9 @@ export function resolvePlanPricingDisplay(
 }
 
 /**
- * Groups the pricing page by the five v2 plan families in registry order.
+ * Groups the pricing page by the three paid plans users compare here. Zen Free
+ * has no price and Custom API pricing belongs to its administrator, so neither
+ * appears in Pricing even though both remain in the shared Plan registry.
  *
  * The OpenCode Go group is always rendered when a Go pricing snapshot has been
  * fetched, even if the provider catalog is still loading, failed, or empty.
@@ -162,7 +194,7 @@ export function buildPlanPricingGroups(
   opencodeSnapshot: PricingSnapshot | null,
   providerSnapshots: ProviderSnapshots,
 ): PlanPricingGroup[] {
-  return PLAN_DEFINITIONS.map((plan) => {
+  return PRICING_PLAN_DEFINITIONS.map((plan) => {
     // For families with multiple offerings (SCNet), the catalog should list all
     // of them with the same pricing_availability; read the first present entry.
     const entry = plan.offering_ids

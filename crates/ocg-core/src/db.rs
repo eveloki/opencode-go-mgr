@@ -39,7 +39,7 @@ pub const PRE_V22_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v22.";
 /// database receives any migration writes on its way to v23.
 pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 24;
+pub const CURRENT_SCHEMA_VERSION: i32 = 25;
 
 pub struct ForwardLogQueryOptions<'a> {
     pub limit: i64,
@@ -278,8 +278,8 @@ fn insert_account_row(
     verification_status: ConnectionVerificationStatus,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at, provider_id, offering_id, credential_kind, quota_scope, free_alias_enabled, verification_status, connection_verified_at, verification_error)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, NULL, NULL)",
+        "INSERT INTO accounts (id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, sort_order, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, auth_error, account_type, setup_step, notes, created_at, updated_at, provider_id, offering_id, credential_kind, quota_scope, verification_status, connection_verified_at, verification_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts), ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, NULL, NULL)",
         params![
             account.id,
             account.name,
@@ -306,7 +306,6 @@ fn insert_account_row(
             account.offering_id,
             account.credential_kind.as_str(),
             account.quota_scope.as_str(),
-            account.free_alias_enabled as i32,
             verification_status.as_str(),
         ],
     )?;
@@ -1405,11 +1404,7 @@ impl Database {
                             .map(str::to_owned)
                     })
                     .unwrap_or_else(|| "explicit".to_string());
-                let (zen_enabled, free_alias_enabled) = match free_mode.as_str() {
-                    "deny" => (false, false),
-                    "prefer" => (true, true),
-                    _ => (true, false),
-                };
+                let zen_enabled = free_mode != "deny";
 
                 legacy_free_cooldown = tx.query_row(
                     "SELECT MAX(value) FROM (
@@ -1439,7 +1434,7 @@ impl Database {
                         ANONYMOUS_FREE_OFFERING_ID,
                         CredentialKind::None.as_str(),
                         QuotaScope::EgressIp.as_str(),
-                        free_alias_enabled as i32,
+                        0,
                         ZEN_FREE_ACCOUNT_NAME,
                         zen_enabled as i32,
                         purchase_date,
@@ -1463,7 +1458,7 @@ impl Database {
                         ANONYMOUS_FREE_OFFERING_ID,
                         CredentialKind::None.as_str(),
                         QuotaScope::EgressIp.as_str(),
-                        free_alias_enabled as i32,
+                        0,
                         ZEN_FREE_ACCOUNT_NAME,
                         zen_enabled as i32,
                         legacy_free_cooldown,
@@ -1761,6 +1756,22 @@ impl Database {
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (24);")?;
         }
 
+        // v25: last successful provider model-catalog snapshots. Zen Free
+        // refreshes replace this row atomically only after validation/filtering.
+        if version < 25 {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS provider_model_catalogs (
+                    provider_id TEXT NOT NULL,
+                    offering_id TEXT NOT NULL,
+                    models_json TEXT NOT NULL,
+                    refreshed_at TEXT,
+                    source_url TEXT NOT NULL,
+                    PRIMARY KEY (provider_id, offering_id)
+                );
+                INSERT OR REPLACE INTO schema_version (version) VALUES (25);",
+            )?;
+        }
+
         // Unreleased #43 drafts numbered client-key columns as v18 and the
         // sub-key table as v19, so those databases already report version
         // >= 18 and skip the notes gate above. ensure_column is idempotent
@@ -1878,6 +1889,16 @@ impl Database {
             Self::upsert_free_channel_cooldown(&tx, &until)?;
         }
 
+        // `free_alias_enabled` was a development-era projection of the former
+        // Deny/Explicit/Prefer policy. Zen Free is now enabled or disabled as a
+        // normal ordered provider account; keep the legacy column inert without
+        // rewriting timestamps or requiring a destructive table rebuild.
+        tx.execute(
+            "UPDATE accounts SET free_alias_enabled = 0
+             WHERE free_alias_enabled <> 0",
+            [],
+        )?;
+
         tx.commit()?;
         Ok(())
     }
@@ -1915,6 +1936,67 @@ impl Database {
             ],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn zen_free_model_catalog(&self) -> Result<Option<crate::zen_models::ZenFreeModelCatalog>> {
+        self.conn
+            .query_row(
+                "SELECT models_json, refreshed_at, source_url
+                 FROM provider_model_catalogs
+                 WHERE provider_id = ?1 AND offering_id = ?2",
+                params![OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID],
+                |row| {
+                    let models_json: String = row.get(0)?;
+                    let refreshed_at: Option<String> = row.get(1)?;
+                    let models = serde_json::from_str(&models_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+                    })?;
+                    let refreshed_at = refreshed_at
+                        .map(|value| {
+                            DateTime::parse_from_rfc3339(&value)
+                                .map(|value| value.with_timezone(&Utc))
+                                .map_err(|error| {
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        1,
+                                        Type::Text,
+                                        Box::new(error),
+                                    )
+                                })
+                        })
+                        .transpose()?;
+                    Ok(crate::zen_models::ZenFreeModelCatalog {
+                        models,
+                        refreshed_at,
+                        source_url: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn set_zen_free_model_catalog(
+        &self,
+        catalog: &crate::zen_models::ZenFreeModelCatalog,
+    ) -> Result<()> {
+        let models_json = serde_json::to_string(&catalog.models)?;
+        self.conn.execute(
+            "INSERT INTO provider_model_catalogs
+             (provider_id, offering_id, models_json, refreshed_at, source_url)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider_id, offering_id) DO UPDATE SET
+                 models_json = excluded.models_json,
+                 refreshed_at = excluded.refreshed_at,
+                 source_url = excluded.source_url",
+            params![
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+                models_json,
+                catalog.refreshed_at.map(|value| value.to_rfc3339()),
+                catalog.source_url,
+            ],
+        )?;
         Ok(())
     }
 
@@ -2175,40 +2257,36 @@ impl Database {
         Ok(())
     }
 
-    /// Persist the legacy AppConfig projection and the canonical Zen singleton
-    /// settings in one SQLite transaction. Callers must validate and serialize
-    /// the config before entering this persistence boundary.
-    pub fn set_config_and_update_zen_free_settings(
-        &self,
-        config_json: &str,
-        enabled: bool,
-        free_alias_enabled: bool,
-    ) -> Result<()> {
+    pub fn set_config(&self, config_json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('config', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [config_json],
+        )?;
+        Ok(())
+    }
+
+    /// The Zen Free singleton has one canonical user setting: enabled.
+    /// The retired `free_alias_enabled` column is forced to zero for rollback
+    /// compatibility but no longer participates in runtime behavior.
+    pub fn set_zen_free_enabled(&self, enabled: bool) -> Result<()> {
         ensure_enabled_offering_is_routable(
             OPENCODE_ZEN_FREE_PROVIDER_ID,
             ANONYMOUS_FREE_OFFERING_ID,
             enabled,
         )?;
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO settings (key, value) VALUES ('config', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [config_json],
-        )?;
-        let changed = tx.execute(
-            "UPDATE accounts SET enabled = ?2, free_alias_enabled = ?3, updated_at = ?4
-             WHERE id = ?1 AND provider_id = ?5 AND offering_id = ?6",
+        let changed = self.conn.execute(
+            "UPDATE accounts SET enabled = ?2, free_alias_enabled = 0, updated_at = ?3
+             WHERE id = ?1 AND provider_id = ?4 AND offering_id = ?5",
             params![
                 ZEN_FREE_ACCOUNT_ID,
                 enabled as i32,
-                free_alias_enabled as i32,
                 Utc::now().to_rfc3339(),
                 OPENCODE_ZEN_FREE_PROVIDER_ID,
                 ANONYMOUS_FREE_OFFERING_ID,
             ],
         )?;
         anyhow::ensure!(changed == 1, "Zen Free singleton is missing");
-        tx.commit()?;
         Ok(())
     }
 
@@ -2908,7 +2986,7 @@ impl Database {
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, offering_id, credential_kind, quota_scope, free_alias_enabled FROM accounts WHERE id = ?1"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, offering_id, credential_kind, quota_scope FROM accounts WHERE id = ?1"
         )?;
         let account = stmt.query_row([id], account_from_row).optional()?;
         Ok(account)
@@ -2916,7 +2994,7 @@ impl Database {
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, offering_id, credential_kind, quota_scope, free_alias_enabled FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
+            "SELECT id, name, username, password_cipher, key_cipher, enabled, referral_code, recharge_date, cooldown_until, cooldown_generic_until, cooldown_5h_until, cooldown_week_until, cooldown_month_until, cooldown_free_until, last_error, created_at, updated_at, auth_error, account_type, setup_step, notes, provider_id, offering_id, credential_kind, quota_scope FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC"
         )?;
         let rows = stmt.query_map([], account_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
@@ -4964,7 +5042,7 @@ fn forward_log_native_from_row(row: &Row<'_>) -> rusqlite::Result<ForwardLogNati
 fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     // SELECT order: id,name,username,password,key,enabled,referral,recharge,
     // cooldown_until,generic,5h,week,month,free,last_error,created,updated,auth,type,setup,notes,
-    // provider,offering,credential,quota_scope,free_alias_enabled
+    // provider,offering,credential,quota_scope
     let created_at = row.get::<_, String>(15)?;
     let purchase_date = match row.get::<_, Option<String>>(7)? {
         Some(value) if normalize_purchase_date(&value).is_ok() => value,
@@ -5017,7 +5095,6 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         offering_id: row.get(22)?,
         credential_kind,
         quota_scope,
-        free_alias_enabled: row.get::<_, i32>(25)? != 0,
         name: row.get(1)?,
         username: row.get(2)?,
         password_cipher: row.get(3)?,
@@ -5193,7 +5270,6 @@ mod tests {
             offering_id: default_offering_id(),
             credential_kind: default_credential_kind(),
             quota_scope: default_quota_scope(),
-            free_alias_enabled: false,
             name: id.into(),
             username: None,
             password_cipher: None,
@@ -6221,8 +6297,8 @@ mod tests {
     }
 
     #[test]
-    fn zen_settings_and_config_commit_atomically_and_generic_update_is_rejected() {
-        let dir = temp_data_dir("zen-config-atomic");
+    fn zen_enabled_has_a_dedicated_writer_and_generic_update_is_rejected() {
+        let dir = temp_data_dir("zen-enabled-writer");
         let db = Database::open(dir.clone()).expect("db should open");
         db.set_setting("config", r#"{"marker":"before"}"#)
             .expect("initial config should save");
@@ -6257,37 +6333,26 @@ mod tests {
                  END;"
             ))
             .expect("failure trigger should install");
+        db.set_config(r#"{"marker":"after"}"#)
+            .expect("ordinary config should save independently");
         let error = db
-            .set_config_and_update_zen_free_settings(
-                r#"{"marker":"after-failed"}"#,
-                !zen_before.enabled,
-                !zen_before.free_alias_enabled,
-            )
+            .set_zen_free_enabled(!zen_before.enabled)
             .expect_err("Zen row failure must abort the config write");
         assert!(error.to_string().contains("forced Zen settings failure"));
         assert_eq!(
             db.get_setting("config").unwrap().as_deref(),
-            Some(r#"{"marker":"before"}"#)
+            Some(r#"{"marker":"after"}"#)
         );
         let zen_after_failure = db.get_account(ZEN_FREE_ACCOUNT_ID).unwrap().unwrap();
         assert_eq!(zen_after_failure.enabled, zen_before.enabled);
-        assert_eq!(
-            zen_after_failure.free_alias_enabled,
-            zen_before.free_alias_enabled
-        );
 
         db.conn
             .execute("DROP TRIGGER reject_zen_provider_settings", [])
             .expect("failure trigger should drop");
-        db.set_config_and_update_zen_free_settings(r#"{"marker":"after"}"#, true, true)
-            .expect("config and Zen settings should commit together");
-        assert_eq!(
-            db.get_setting("config").unwrap().as_deref(),
-            Some(r#"{"marker":"after"}"#)
-        );
+        db.set_zen_free_enabled(true)
+            .expect("Zen enabled setting should save");
         let zen_after = db.get_account(ZEN_FREE_ACCOUNT_ID).unwrap().unwrap();
         assert!(zen_after.enabled);
-        assert!(zen_after.free_alias_enabled);
 
         drop(db);
         fs::remove_dir_all(dir).expect("test data dir should be removed");
@@ -9193,7 +9258,7 @@ mod tests {
         db.conn
             .execute_batch(
                 "DELETE FROM schema_version;
-                 INSERT INTO schema_version (version) VALUES (24);",
+                 INSERT INTO schema_version (version) VALUES (26);",
             )
             .unwrap();
         drop(db);
@@ -9207,8 +9272,30 @@ mod tests {
             "{error}"
         );
         let conn = Connection::open(dir.join("data.sqlite")).unwrap();
-        assert_eq!(schema_version_on(&conn).unwrap(), 24);
+        assert_eq!(schema_version_on(&conn).unwrap(), 26);
         drop(conn);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn zen_free_model_catalog_survives_reopen() {
+        let dir = temp_data_dir("zen-free-model-catalog");
+        let refreshed_at = Utc::now();
+        {
+            let db = Database::open(dir.clone()).unwrap();
+            db.set_zen_free_model_catalog(&crate::zen_models::ZenFreeModelCatalog {
+                models: vec!["persisted-coder-free".into()],
+                refreshed_at: Some(refreshed_at),
+                source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.into(),
+            })
+            .unwrap();
+        }
+        {
+            let db = Database::open(dir.clone()).unwrap();
+            let catalog = db.zen_free_model_catalog().unwrap().unwrap();
+            assert_eq!(catalog.models, ["persisted-coder-free"]);
+            assert_eq!(catalog.refreshed_at, Some(refreshed_at));
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 

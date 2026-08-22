@@ -347,7 +347,7 @@ async fn overlap_keeps_go_mapping_and_undeclared_models_are_excluded() {
     );
     let harness = V2Harness::start_with_upstream(Some(replies)).await;
     let go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
-    let _custom = create_verified_enabled_custom(
+    let custom = create_verified_enabled_custom(
         &harness,
         "custom-overlap",
         CUSTOM_ACCOUNT_KEY,
@@ -365,6 +365,46 @@ async fn overlap_keeps_go_mapping_and_undeclared_models_are_excluded() {
         "bearer",
     )
     .await;
+
+    // The stripped Zen alias intentionally shares `deepseek-v4-flash` with
+    // Go. Put Go first so this overlap test proves that Custom cannot steal a
+    // published alias without contradicting the account-order contract.
+    let mut account_ids = harness
+        .client
+        .get(harness.dashboard("/accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<Value>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|account| account["id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    account_ids.sort_by_key(|id| {
+        if id == go["id"].as_str().unwrap() {
+            0
+        } else {
+            1
+        }
+    });
+    let response = harness
+        .client
+        .put(harness.dashboard("/accounts/order"))
+        .json(&json!({
+            "account_ids": account_ids,
+            "expected_revision": harness.settings_revision().await
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        decode_json_value(response).await
+    );
+    let _ = custom;
 
     let (status, body) = harness.chat(GO_ALIAS).await;
     assert_eq!(status, StatusCode::OK, "{body}");

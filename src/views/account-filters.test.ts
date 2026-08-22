@@ -21,7 +21,6 @@ function account(overrides: Partial<Account>): Account {
     offering_id: "go",
     credential_kind: "api_key",
     quota_scope: "key",
-    free_alias_enabled: false,
     purchase_date: "2026-08-01",
     expires_on: "2026-09-01",
     cooldown_until: null,

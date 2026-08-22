@@ -44,7 +44,9 @@ export function buildPlanOptions(
         plan,
         label: planFamilyLabel(plan, catalog),
         disabled: true,
-        disabledReason: "单例方案由系统自动管理",
+        disabledReason: plan.id === "zen-free"
+          ? "Zen Free 已由系统管理，请在账号列表中启用。"
+          : "单例方案由系统自动管理",
         creationHint: "",
         managed: false,
       };

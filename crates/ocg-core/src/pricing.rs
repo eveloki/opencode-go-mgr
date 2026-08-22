@@ -2193,7 +2193,6 @@ mod tests {
     fn zen_free_models_do_not_enter_go_quota() {
         for model_id in [
             "mimo-v2.5-free",
-            "big-pickle",
             "hy3-free",
             "muse-spark-1.2-contributor-free",
         ] {
@@ -2211,9 +2210,9 @@ mod tests {
         let go_named_free = embedded_seed().estimate("ox-alpha-free", 1000, 100, 0, 0, None);
         assert_eq!(go_named_free.cost_state, "unpriced");
         assert_ne!(go_named_free.cost_state, "free");
-        let suffix_is_not_zen =
+        let suffix_follows_zen_catalog_naming =
             embedded_seed().estimate("brand-new-promo-free", 1000, 100, 0, 0, None);
-        assert_eq!(suffix_is_not_zen.cost_state, "unpriced");
+        assert_eq!(suffix_follows_zen_catalog_naming.cost_state, "free");
     }
 
     #[test]

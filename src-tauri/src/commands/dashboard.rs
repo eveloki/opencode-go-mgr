@@ -107,7 +107,6 @@ mod tests {
                 offering_id: ocg_core::provider::default_offering_id(),
                 credential_kind: ocg_core::provider::default_credential_kind(),
                 quota_scope: ocg_core::provider::default_quota_scope(),
-                free_alias_enabled: false,
                 name: name.into(),
                 username: None,
                 password_cipher: None,

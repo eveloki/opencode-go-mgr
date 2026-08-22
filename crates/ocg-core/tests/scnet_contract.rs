@@ -70,7 +70,6 @@ fn scnet_account(id: &str, offering_id: &str, enabled: bool) -> Account {
         offering_id: offering_id.into(),
         credential_kind: ocg_core::provider::CredentialKind::ApiKey,
         quota_scope: ocg_core::provider::QuotaScope::Key,
-        free_alias_enabled: false,
         name: id.into(),
         username: None,
         password_cipher: None,
@@ -322,7 +321,9 @@ async fn alias_adapter_and_selector_do_not_expose_token_plans() {
             );
         }
         assert!(
-            !alias::published_aliases().contains(model),
+            !alias::published_aliases()
+                .iter()
+                .any(|alias| alias == model),
             "official Token Plan spelling `{model}` must not be a published alias"
         );
     }

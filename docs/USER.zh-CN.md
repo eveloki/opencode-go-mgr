@@ -29,7 +29,7 @@
   - [账号选择与切换](#账号选择与切换)
   - [用量估算](#用量估算)
   - [真熔断与假熔断](#真熔断与假熔断)
-  - [Free 模型策略](#free-模型策略)
+  - [Zen Free 模型](#zen-free-模型)
 - [CLI](#cli)
 - [Docker](#docker)
   - [可选远程浏览器](#可选远程浏览器)
@@ -176,7 +176,7 @@ Release 后，后续签名桌面版可在 **设置** 中一键下载并安装。
 删除状态在再次升级后完好如初，任何已撤销的凭证都不可能因降级而复活。只是
 旧版本运行期间子 Key 暂时无法鉴权。
 
-### Plan 迁移（schema v23）
+### Plan 迁移（schema v25）
 
 schema v23 保存 Plan 验证状态、别名 / 上游日志身份（`requested_model`、
 `resolved_alias`、`upstream_model`）、可选的原生成本（`native_cost_value`、
@@ -185,6 +185,11 @@ schema v23 保存 Plan 验证状态、别名 / 上游日志身份（`requested_m
 不会覆盖的回滚副本：`data.sqlite.pre-v23.<timestamp>.bak`。在确认升级后的安装
 可用前，请把它和常规备份一起保留。它只是 v23 之前的回滚点，不能替代完整备份；
 不要用旧版程序打开已迁移的数据库。
+
+schema v24 为转发日志新增实际代理路由段（`auto` / `proxy` / `direct`）；schema v25
+新增供应商模型目录快照表，用于保存 Zen Free 模型。手动刷新成功后原子
+替换快照；失败或过滤结果为空时保留旧快照。这个加法迁移不会单独生成 pre-v24 或 pre-v25
+备份；上文的 pre-v23 回滚副本仍是迁移安全边界。
 
 若源库还早于 schema v22，同一次启动还会额外保留
 `data.sqlite.pre-v22.<timestamp>.bak` 作为更早的回滚点。每次
@@ -366,9 +371,10 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 应用选择器列表来自受保护的 `GET /dashboard/api/application-models`：当前可路由
 的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。
 空交集是 `[]`，不是错误。这份列表 **不是** 带鉴权的 `GET /v1/models`：后者公布
-当前可路由的 Go 与 Zen Free 别名，并并入合格 Custom 声明 ID。`application-models`
-仍只含 Go。两条路径都是本地列表：不含 SCNet 官方可用模型表拼写、未公布的
-Command Code GOAT 名称，也不发现上游、不选账号去抓目录。确认价格刷新后，
+当前可路由的 Go 别名、已保存 Zen Free 目录，并并入合格 Custom 声明 ID。
+`application-models` 仍只含 Go。两条路径都是本地读取：不含 SCNet 官方可用模型表
+拼写或未公布的 Command Code GOAT 名称，GET 本身不访问上游、不选账号抓目录；只有
+管理员显式点击 Zen Free“获取模型”才刷新官方目录。确认价格刷新后，
 `application-models` 返回的 Go 别名
 可能变化。每次返回应用页都会重新加载这份本地列表。模型选择和编辑过的代码片段
 按应用分别缓存在当前页面里，刷新页面后重置。
@@ -466,6 +472,11 @@ Bearer 或 `x-api-key`。拼接后的 endpoint 必须保持已配置的 scheme�
 base-path 前缀。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；
 连接与请求超时按配置的连接超时夹到 5–60 秒。
 
+**获取模型** 是表单中的显式操作：它仅使用当前配置的 base URL 发出 `GET /models`，
+并使用新建表单输入的 Key 或编辑时已保存的 Custom Key。返回的合法 ID 会合并到仍可
+编辑的模型列表；该操作不会保存、验证、启用或以其他方式修改账号。获取有边界，可能
+提示结果被截断；仍可手动填写模型 ID。
+
 创建与更新后账号仍为禁用 `pending`。验证对第一个声明模型发送一次协议正确、非流式、
 token 受限的 JSON 请求；只有 `2xx` JSON object 才算成功。验证不会发现或改写能力，
 也永不自动启用账号。验证成功后必须显式启用。合格账号（enabled + verified + ready +
@@ -562,10 +573,13 @@ Key 的额度。
 在点击刷新后才会访问 `https://opencode.ai/docs/go/`；没有已验证第一方价格合约的
 offering 会保持 unavailable，不能刷新。抓取或校验失败时继续使用最后一次成功快照。
 
-对 OpenCode Go，页面展示 revision、文档更新时间、窗口额度、token 单价、`Usage` 和
+价格页只保留 OpenCode Go、Command Code GOAT 与 SCNet 三个标签；Zen Free 无价格，
+Custom API 的价格由管理员自己的上游决定，因此不在价格页展示。对 OpenCode Go，页面
+展示 revision、文档更新时间、窗口额度、token 单价、`Usage` 和
 额度扣减倍率。allowance 不是额度池、不会参与路由，只用于推导扣减倍率（“月额度 /
 Usage”）。临时覆盖会创建新的持久化 revision，供后续估算使用；不存在按模型划分的
-额度池。Command Code GOAT 与 SCNet Token Plans 没有已上线的计价或用量路径。
+额度池。Command Code GOAT 与 SCNet Token Plans 显示截至 `2026-08-22` 核对的官方
+套餐参考与来源链接，但仍没有已上线的计价或用量路径，也不会因此变为可路由。
 Custom API 在目录中为 unpriced：成功转发记 `cost_state=unknown`，不扣额度，也
 没有官方用量刷新。
 
@@ -654,8 +668,8 @@ account、模型、状态、时间范围与客户端 Key 筛选。每条存储�
   并可下载、校验签名、安装对应平台的包。v1.4.1 必须先完成上文的一次直接覆盖
   安装；开发构建、CLI、Docker 仍显示发布页并手动升级。主机必须能访问 GitHub；
   检查或安装失败不影响 Gateway 转发。
-- **Free 模型路由**：三档 OpenCode Zen 策略（`deny` / `explicit` / `prefer`）。
-  见 [Free 模型策略](#free-模型策略)。
+- **Zen Free**：在账号卡上直接启用或关闭；通过卡片的 **获取模型** 动作刷新 Free
+  模型目录。
 
 配置项写入 SQLite，下次启动时重新加载；检查更新是按需动作，不会持久化。
 
@@ -670,7 +684,7 @@ Gateway 监听 `http://<bind>:<port>`，暴露：
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET`  | `/v1/models` | 带鉴权的本地列表：已公布 Go/Zen 别名加上合格 Custom ID（不发现上游） |
+| `GET`  | `/v1/models` | 带鉴权的本地列表：Go 别名、已保存 Zen Free 目录与合格 Custom ID；GET 本身不访问上游 |
 | `POST` | `/v1beta/models/{model}:generateContent` | Gemini 非流式生成；`/v1/...` 同样可用 |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini SSE 生成；`/v1/...` 同样可用 |
 | `POST` | `/v1beta/models/{model}:countTokens` | 返回 `501`，Gemini CLI 可回退到本地估算 |
@@ -936,35 +950,24 @@ Go 快照。
   即使本地估算值更低。账号在 `cooldown_until` 到期后自动恢复，也可以在面板里
   手动解除。
 
-### Free 模型策略
+### Zen Free 模型
 
-设置页可选择三档 OpenCode Zen free 路由：
+Zen Free 是一张不需要 Key 的特殊账号卡，只保留一个启用开关，不再有 Deny / Explicit /
+Prefer 三态。无需 Free 时直接关闭卡片；启用时，账号列表中的卡片顺序就是它的路由
+优先级。
 
-| 档位 | 行为 |
-| --- | --- |
-| **禁止 Free 模型** | 拒绝已登记的 Zen free 模型（`big-pickle`、`mimo-v2.5-free` 等），也不把 Go 模型改写到 Zen。Go 上只是名字带 `free` 的模型（如 `ox-alpha-free`）仍走 Go。 |
-| **仅显式使用 Free 模型**（默认） | 只有客户端显式请求 Zen free 才走 `https://opencode.ai/zen`；Go 模型仍走 Go 上游 |
-| **自动优先同名 Free 模型** | 当前映射：`mimo-v2.5` → `mimo-v2.5-free`；上下文粗估装得下才降级，free 耗尽（按 IP 共享，不换 Key）或超长后回落 Go |
-
-Zen free 路由是显式名单（`big-pickle` 与已登记的 Zen 促销 id），不是 `-free`
-后缀。官方 Go 文档把 `ox-alpha-free`（Ox Alpha Free）列在
-`https://opencode.ai/zen/go/v1/chat/completions`，因此该模型走 Go。free 路由
-不是 deny 时，`GET /v1/models` 会把当前已知仍可用的 Zen free id 并入 Go 目录，
-方便客户端发现。
-
-2026-08-21 实测仍可用的 Zen free：`big-pickle`、`mimo-v2.5-free`、`hy3-free`、
-`nemotron-3-ultra-free`、`laguna-s-2.1-free`（Chat），以及
-`muse-spark-1.2-contributor-free`（Responses；`max_output_tokens` 至少 16）。
-`deepseek-v4-flash-free` 已返回 unavailable。官方文档仍列出
-`nemotron-3.5-lightning-free`，但本次探测没有打通。
+点击 **获取模型** 才会请求官方无鉴权 Zen 模型目录。后端只保留 ID 以 `-free` 结尾的
+模型，成功结果会持久化，并为每个模型额外生成一个去掉 `-free` 的 Alias。例如
+`mimo-v2.5-free` 既可以按原 ID 请求，也可以按 `mimo-v2.5` 请求；当这个 Alias 同时
+存在 Go 与 Zen 映射时，按账号卡顺序选择。卡片会展示每个 `Alias → 上游模型 ID`
+映射。刷新失败或过滤结果为空时，继续使用上一次成功快照。保留的 Go 模型
+`ox-alpha-free` 会从 Zen 发现结果中排除，继续只走 Go 且按无价格处理。
 
 Free 与 Go 使用**独立冷却窗口**。Zen Free 不发送鉴权头，促销额度按出口 IP 共享；
-free `429` 会冷却整条 free 通道，**不会**换 Key 重试。映射到 free 的请求可以安全
-回落时，prefer 会继续走 Go；free `401` 或 `403` 会阻断该路由。Go 通道仍按现有方案
-做多账号轮询。sticky-global 路由下，Free 与 Go 目前共享同一个全局偏好账号（跨通道
-不单独记粘性）。成功的 free 通道请求会记录 token，但 `cost_state=free`，不计入 Go
-额度；prefer 回落到 Go 的请求仍按 Go 计价。Free 为限时促销，额度独立，且请求数据
-可能用于改进模型——不要提交机密内容。
+Free `429` 会冷却整条 Free 通道，不换 Key，并继续尝试账号顺序中后续兼容卡片；只有
+Free 映射的模型则返回共享冷却。成功的 Free 请求会记录 token，使用
+`cost_state=free`，且不计入 Go 额度。Free 为限时促销，请求数据可能用于改进模型——
+不要提交机密内容。
 
 ## CLI
 

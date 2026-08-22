@@ -11,8 +11,7 @@
 //!    results may follow account order, sticky, and fallback. A unique raw
 //!    upstream ID is pinned to its single mapping; overlapping raw IDs return
 //!    [`crate::alias::AMBIGUOUS_MODEL_ID`].
-//! 3. Build candidate plans from [`ResolvedModel`] mappings (and Alias
-//!    `prefer_twin` when Prefer-mode context fits). Match accounts in saved
+//! 3. Build candidate plans from [`ResolvedModel`] mappings. Match accounts in saved
 //!    account order through [`super::provider_adapter::supports_plan`], using
 //!    mapping order only as the per-account tie-break. Protocol selection
 //!    uses the OpenCode `MODEL_PROTOCOLS` table for Go/Zen upstream models
@@ -30,16 +29,15 @@
 
 use crate::alias::{ProviderMapping, ResolveError, ResolvedModel};
 use crate::custom::CustomAccountRuntime;
-use crate::gateway::free_models::{decide_route, resolve_upstream_base};
+use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
     ApiFormat, CustomRouteSpec, MaterializeSpec, ParsedClientRequest, ProtocolError, RequestPlan,
     materialize_parsed_request,
 };
 use crate::gateway::provider_adapter;
 use crate::gateway::routing::RoutingCandidate;
-use crate::models::{Account, AppConfig, FreeModelRouting, UpstreamChannel};
+use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::pricing::normalize_model_name;
-use crate::provider::{ANONYMOUS_FREE_OFFERING_ID, OPENCODE_ZEN_FREE_PROVIDER_ID};
 use axum::http::StatusCode;
 use bytes::Bytes;
 
@@ -94,7 +92,7 @@ pub(crate) fn resolved_alias_from_model(resolved: &ResolvedModel) -> Option<Stri
 /// Registry alias for a unique raw mapping, when one is published.
 pub(crate) fn registry_alias_for_mapping(mapping: &ProviderMapping) -> Option<String> {
     for published in crate::alias::published_aliases() {
-        match crate::alias::resolve(published) {
+        match crate::alias::resolve(&published) {
             Ok(ResolvedModel::Alias {
                 alias, mappings, ..
             }) => {
@@ -171,7 +169,7 @@ pub(crate) fn materialize_account_routes(
     resolved: &ResolvedModel,
     client_model: &str,
     routing_model: &str,
-    client_body: &Bytes,
+    _client_body: &Bytes,
     free_available: bool,
     custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
 ) -> Result<MaterializedRouteSet, ProtocolError> {
@@ -204,10 +202,7 @@ pub(crate) fn materialize_account_routes(
             )
         }
         ResolvedModel::Alias {
-            mappings,
-            prefer_twin,
-            alias,
-            ..
+            mappings, alias, ..
         } => {
             let routeable: Vec<ProviderMapping> = mappings
                 .iter()
@@ -216,17 +211,6 @@ pub(crate) fn materialize_account_routes(
                 .collect();
             let zen_only =
                 !routeable.is_empty() && routeable.iter().all(|mapping| mapping.is_zen_free());
-            if zen_only {
-                decide_route(
-                    config.free_model_routing,
-                    routing_model,
-                    parsed.client,
-                    parsed.client,
-                    client_body,
-                )
-                .map_err(ProtocolError::new)?;
-            }
-
             let mut plans = Vec::new();
             let mut rejected = Vec::new();
             let mut first_materialization_error = None;
@@ -259,45 +243,6 @@ pub(crate) fn materialize_account_routes(
                 }
             }
 
-            if let Some(twin) = *prefer_twin
-                && should_overlay_prefer_twin(config, alias, parsed, client_body)
-                && free_available
-                && !plans
-                    .iter()
-                    .any(|candidate| candidate.plan.channel == UpstreamChannel::Free)
-            {
-                let twin_mapping = ProviderMapping {
-                    provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
-                    offering_id: ANONYMOUS_FREE_OFFERING_ID,
-                    upstream_model: twin,
-                    routeable: true,
-                };
-                match materialize_mapping_plan(
-                    config,
-                    parsed,
-                    client_model,
-                    routing_model,
-                    &twin_mapping,
-                    resolved_alias.clone(),
-                    Some(routing_model.to_string()),
-                    true,
-                ) {
-                    Ok(plan) => plans.push(MappingPlan {
-                        mapping: twin_mapping,
-                        plan,
-                    }),
-                    Err(error) => {
-                        rejected.push(format!(
-                            "{}/{} mapping `{}`: {error}",
-                            twin_mapping.provider_id,
-                            twin_mapping.offering_id,
-                            twin_mapping.upstream_model
-                        ));
-                        first_materialization_error.get_or_insert(error);
-                    }
-                }
-            }
-
             // Preserve the existing pure-builtin 400 when every actual
             // mapping rejects the request. Mixed resolutions continue so a
             // compatible Custom account can still be materialized below.
@@ -323,25 +268,6 @@ pub(crate) fn materialize_account_routes(
     }
 }
 
-fn should_overlay_prefer_twin(
-    config: &AppConfig,
-    alias: &str,
-    parsed: &ParsedClientRequest,
-    client_body: &Bytes,
-) -> bool {
-    if config.free_model_routing != FreeModelRouting::Prefer {
-        return false;
-    }
-    decide_route(
-        FreeModelRouting::Prefer,
-        alias,
-        parsed.client,
-        parsed.client,
-        client_body,
-    )
-    .is_ok_and(|decision| decision.allow_go_fallback && decision.channel == UpstreamChannel::Free)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn materialize_mapping_plan(
     config: &AppConfig,
@@ -365,9 +291,20 @@ fn materialize_mapping_plan(
     } else if original_model.is_some() {
         mapping.upstream_model.to_string()
     } else {
-        upstream_model_for(routing_model, mapping.upstream_model)
+        upstream_model_for(routing_model, &mapping.upstream_model)
     };
-    let forced_upstream = mapping.is_custom_api().then_some(parsed.client);
+    let forced_upstream = if mapping.is_custom_api() {
+        Some(parsed.client)
+    } else if mapping.is_zen_free()
+        && !crate::gateway::protocol::is_known_model(&mapping.upstream_model)
+    {
+        // The official Zen catalog does not expose protocol metadata. Current
+        // discovered `-free` entries use Chat Completions; known exceptions
+        // continue to use the verified static protocol table above.
+        Some(ApiFormat::ChatCompletions)
+    } else {
+        None
+    };
     materialize_channel_plan(
         config,
         parsed,
@@ -557,14 +494,15 @@ mod tests {
     use crate::gateway::provider_adapter::install_goat_loopback_route_for_test;
     use crate::models::{
         Account, AccountCustomConfig, AccountModelCapability, AccountSetupStep, AccountType,
-        AppConfig, FreeModelRouting,
+        AppConfig,
     };
     use crate::provider::{
-        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
-        COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID,
-        ConnectionVerificationStatus, CredentialKind, GO_OFFERING_ID, GOAT_OFFERING_ID,
-        OPENCODE_PROVIDER_ID, QuotaScope, UpstreamAuthScheme, UpstreamProtocolKind,
-        ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
+        ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID,
+        CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, CredentialKind,
+        GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+        QuotaScope, UpstreamAuthScheme, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
+        ZEN_FREE_ACCOUNT_NAME,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -594,7 +532,6 @@ mod tests {
             offering_id: offering_id.into(),
             credential_kind,
             quota_scope,
-            free_alias_enabled: false,
             name: id.into(),
             username: None,
             password_cipher: None,
@@ -726,11 +663,8 @@ mod tests {
     }
 
     #[test]
-    fn prefer_twin_builds_go_and_free_candidates() {
-        let config = AppConfig {
-            free_model_routing: FreeModelRouting::Prefer,
-            ..AppConfig::default()
-        };
+    fn shared_alias_builds_go_and_free_candidates_in_account_order() {
+        let config = AppConfig::default();
         let set = routes_for(
             "mimo-v2.5",
             &[go_account("go-1"), zen_account()],
@@ -744,11 +678,8 @@ mod tests {
         assert_eq!(set.routes[1].plan.channel, UpstreamChannel::Free);
         assert_eq!(set.routes[1].plan.model, "mimo-v2.5-free");
         assert_eq!(set.routes[1].plan.client_model, "mimo-v2.5");
-        assert_eq!(
-            set.routes[1].plan.original_model.as_deref(),
-            Some("mimo-v2.5")
-        );
-        assert!(set.routes[1].plan.allow_go_fallback);
+        assert!(set.routes[1].plan.original_model.is_none());
+        assert!(!set.routes[1].plan.allow_go_fallback);
         let free_identity = native_log_identity(&set.routes[1].plan);
         assert_eq!(free_identity.requested_model, "mimo-v2.5");
         assert_eq!(free_identity.resolved_alias.as_deref(), Some("mimo-v2.5"));
@@ -756,11 +687,8 @@ mod tests {
     }
 
     #[test]
-    fn pinned_raw_skips_prefer_overlay() {
-        let config = AppConfig {
-            free_model_routing: FreeModelRouting::Prefer,
-            ..AppConfig::default()
-        };
+    fn pinned_raw_stays_pinned_to_its_provider() {
+        let config = AppConfig::default();
         let body = chat_body("vendor.gadget-v1");
         let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
         let resolved = ResolvedModel::PinnedRaw {
@@ -768,7 +696,7 @@ mod tests {
             mapping: crate::alias::ProviderMapping {
                 provider_id: OPENCODE_PROVIDER_ID,
                 offering_id: GO_OFFERING_ID,
-                upstream_model: "deepseek-v4-flash",
+                upstream_model: "deepseek-v4-flash".into(),
                 routeable: true,
             },
         };
@@ -807,22 +735,21 @@ mod tests {
         let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
         let resolved = ResolvedModel::Alias {
             requested: "widget".into(),
-            alias: "widget",
+            alias: "widget".into(),
             mappings: vec![
                 crate::alias::ProviderMapping {
                     provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
                     offering_id: ANONYMOUS_FREE_OFFERING_ID,
-                    upstream_model: "mimo-v2.5-free",
+                    upstream_model: "mimo-v2.5-free".into(),
                     routeable: true,
                 },
                 crate::alias::ProviderMapping {
                     provider_id: OPENCODE_PROVIDER_ID,
                     offering_id: GO_OFFERING_ID,
-                    upstream_model: "glm-5.2",
+                    upstream_model: "glm-5.2".into(),
                     routeable: true,
                 },
             ],
-            prefer_twin: None,
         };
         let set = materialize_account_routes(
             &[go_account("go-1"), zen_account()],
@@ -855,7 +782,7 @@ mod tests {
             mapping: crate::alias::ProviderMapping {
                 provider_id: COMMAND_CODE_PROVIDER_ID,
                 offering_id: GOAT_OFFERING_ID,
-                upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+                upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
                 routeable: true,
             },
         };
@@ -963,13 +890,13 @@ mod tests {
                 crate::alias::ProviderMapping {
                     provider_id: OPENCODE_PROVIDER_ID,
                     offering_id: GO_OFFERING_ID,
-                    upstream_model: "shared-raw",
+                    upstream_model: "shared-raw".into(),
                     routeable: true,
                 },
                 crate::alias::ProviderMapping {
                     provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
                     offering_id: ANONYMOUS_FREE_OFFERING_ID,
-                    upstream_model: "shared-raw",
+                    upstream_model: "shared-raw".into(),
                     routeable: true,
                 },
             ],

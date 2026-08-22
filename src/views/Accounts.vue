@@ -98,6 +98,7 @@
           :key="account.id"
           :account="account"
           :catalog="providerCatalog"
+          :provider-models="zenFreeModels"
           :usage="getUsage(account.id)"
           :limits="usageLimits"
           :edits="usageEdits[account.id]"
@@ -108,7 +109,7 @@
           :usage-loading="!!usageLoading[account.id]"
           :usage-load-error="usageLoadErrors[account.id] ?? null"
           :usage-refresh-loading="!!usageRefreshLoading[account.id]"
-          :free-alias-saving="!!freeAliasSaving[account.id]"
+          :model-refreshing="!!modelRefreshing[account.id]"
           :verifying="!!verifying[account.id]"
           :quota-limits-failed="!!quotaLimitsError"
           :menu-options="accountMenuOptions(account, now)"
@@ -116,9 +117,9 @@
           @order-drag-start="startAccountDrag($event, account.id)"
           @ping="pingAccount(account.id)"
           @toggle="toggleAccount(account.id)"
-          @toggle-free-alias="toggleFreeAlias(account.id)"
           @verify="verifyCustomAccount(account.id)"
           @refresh-usage="refreshAccountUsage(account.id)"
+          @refresh-models="refreshProviderModels(account.id)"
           @reload-usage="loadAccountUsage(account.id)"
           @open-wizard="openManagedWizard(account.id)"
           @menu-select="handleMenuSelect($event, account.id)"
@@ -255,6 +256,7 @@ import {
 import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, tauriApi } from "../api/tauri";
 import { providerApi } from "../api/providers.ts";
+import type { ProviderCatalogEntry, ZenFreeModelsResponse } from "../api/providers.ts";
 import type {
   Account,
   AccountInput,
@@ -270,7 +272,6 @@ import {
   executeCustomAccountEdit,
   isCustomApiAccount,
 } from "./custom-account.ts";
-import { toggleZenFreeAlias, toggleZenFreeEnabled } from "./zen-free-settings.ts";
 import { useAccountUsage } from "./useAccountUsage.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
 import {
@@ -285,7 +286,6 @@ import {
   planFamilyLabel,
   type PlanDefinition,
 } from "./plans.ts";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -311,8 +311,8 @@ const accountListLoading = ref(true);
 const accountListError = ref("");
 const pinging = ref<Record<string, boolean>>({});
 const verifying = ref<Record<string, boolean>>({});
-const freeAliasSaving = ref<Record<string, boolean>>({});
 const providerSettingsSaving = ref<Record<string, boolean>>({});
+const modelRefreshing = ref<Record<string, boolean>>({});
 /** Settings revision from `GET /settings`, used for conditional Zen writes. */
 const settingsRevision = ref<number | null>(null);
 const showModal = ref(false);
@@ -338,6 +338,7 @@ const now = ref(Date.now());
 const planFilter = ref<AccountPlanFilter>("all");
 const statusFilter = ref<AccountStatusFilter>("all");
 const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
+const zenFreeModels = ref<ZenFreeModelsResponse | null>(null);
 const catalogLoading = ref(false);
 const catalogError = ref("");
 const selectedPlanForCreate = ref<PlanDefinition | null>(null);
@@ -706,8 +707,8 @@ function removeAccountState(id: string): void {
   delete usageLoadErrors.value[id];
   delete pinging.value[id];
   delete verifying.value[id];
-  delete freeAliasSaving.value[id];
   delete providerSettingsSaving.value[id];
+  delete modelRefreshing.value[id];
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -806,12 +807,25 @@ async function loadProviderCatalog(): Promise<void> {
   }
 }
 
+async function loadZenFreeModels(): Promise<void> {
+  const zen = accounts.value.find(isZenFreeAccount);
+  if (!zen) {
+    zenFreeModels.value = null;
+    return;
+  }
+  try {
+    zenFreeModels.value = await providerApi.getProviderModels(zen.id);
+  } catch {
+    zenFreeModels.value = null;
+  }
+}
+
 async function initializeAccounts() {
   const registrationOptions = loadRegistrationOptions();
   const catalogPromise = loadProviderCatalog();
   await loadQuotaLimits();
   await loadAccounts();
-  await Promise.allSettled([registrationOptions, catalogPromise]);
+  await Promise.allSettled([registrationOptions, catalogPromise, loadZenFreeModels()]);
 }
 
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
@@ -980,7 +994,7 @@ async function toggleAccount(id: string) {
   // The Zen Free singleton only accepts the dedicated provider-settings write;
   // never fall back to the generic account PATCH/toggle for it.
   if (account && isZenFreeAccount(account)) {
-    await saveZenProviderSettings(account, toggleZenFreeEnabled(account));
+    await saveZenProviderSettings(account, !account.enabled);
     return;
   }
   try {
@@ -989,21 +1003,6 @@ async function toggleAccount(id: string) {
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
     message.error(t("切换失败: {error}", { error: dashboardErrorDetail(e) }));
-  }
-}
-
-async function toggleFreeAlias(id: string) {
-  const account = accounts.value.find((item) => item.id === id);
-  if (!account || !account.enabled || !isZenFreeAccount(account) || freeAliasSaving.value[id]) return;
-  freeAliasSaving.value[id] = true;
-  try {
-    await saveZenProviderSettings(
-      account,
-      toggleZenFreeAlias(account),
-      t("Free 别名设置已保存"),
-    );
-  } finally {
-    freeAliasSaving.value[id] = false;
   }
 }
 
@@ -1060,24 +1059,21 @@ async function recoverAccountMutationConflict(error: unknown): Promise<boolean> 
 }
 
 /**
- * Both Zen card toggles (enabled + free alias) write through the dedicated
- * provider-settings endpoint with both current flags preserved and the latest
- * settings revision attached. A 409 means the settings were changed elsewhere:
+ * The Zen card's enabled switch writes through the dedicated provider-settings
+ * endpoint with the latest settings revision attached. A 409 means the settings were changed elsewhere:
  * reload accounts/settings and ask the user to retry, in the same style as the
  * settings-page conflict recovery.
  */
 async function saveZenProviderSettings(
   account: Account,
-  patch: { enabled?: boolean; free_alias_enabled?: boolean },
+  enabled: boolean,
   successMessage?: string,
 ): Promise<void> {
   if (providerSettingsSaving.value[account.id]) return;
   providerSettingsSaving.value[account.id] = true;
   try {
-    const enabled = patch.enabled ?? account.enabled;
     const result = await runWithFreshSettingsRevision((revision) => providerApi.updateProviderSettings(account.id, {
       enabled,
-      free_alias_enabled: enabled && (patch.free_alias_enabled ?? account.free_alias_enabled),
       expected_revision: revision,
     }));
     settingsRevision.value = result.revision;
@@ -1089,6 +1085,22 @@ async function saveZenProviderSettings(
     }
   } finally {
     providerSettingsSaving.value[account.id] = false;
+  }
+}
+
+async function refreshProviderModels(id: string) {
+  const account = accounts.value.find((item) => item.id === id);
+  if (!account || !isZenFreeAccount(account) || modelRefreshing.value[id]) return;
+  modelRefreshing.value[id] = true;
+  try {
+    const result = await providerApi.refreshProviderModels(id);
+    zenFreeModels.value = result;
+    await loadProviderCatalog();
+    message.success(t("已获取 {count} 个模型", { count: result.models.length }));
+  } catch (error) {
+    message.error(`${t("获取模型失败，请检查配置后重试")}: ${dashboardErrorDetail(error)}`);
+  } finally {
+    modelRefreshing.value[id] = false;
   }
 }
 

@@ -38,7 +38,7 @@ When docs disagree, prefer the source below and fix the other side.
 | User-visible product behavior / 用户可见行为 | Code + [USER.md](USER.md) / [USER.zh-CN.md](USER.zh-CN.md) |
 | Plan catalog / Plan 目录 | `crates/ocg-core/src/provider.rs` (`BUILTIN_PLANS`); USER Accounts mirrors live vs pending families |
 | Client aliases / 客户端别名 | `crates/ocg-core/src/alias.rs`; USER Aliases / 别名 mirrors the contract |
-| Local `GET /v1/models` / 本地客户端模型列表 | `crates/ocg-core/src/gateway/handler.rs`; authenticated published Go/Zen aliases ∪ eligible Custom IDs; no upstream discovery |
+| Local `GET /v1/models` / 本地客户端模型列表 | `crates/ocg-core/src/gateway/handler.rs`; authenticated Go aliases ∪ saved Zen Free aliases ∪ eligible Custom IDs; the GET itself makes no upstream request |
 | Applications picker list / 应用选择器列表 | `crates/ocg-core/src/dashboard.rs` (`GET /dashboard/api/application-models`); Go routeable aliases ∩ active pricing; no Custom |
 | Custom API HTTP / Custom API HTTP | `crates/ocg-core/src/custom.rs` + `custom_http.rs`; trusted-admin destinations, Direct/Manual/Auto, no redirects, isolated auth |
 | SCNet official snapshot / SCNet 官方快照 | `crates/ocg-core/src/provider.rs` (`SCNET_TOKEN_PLAN_*`); adapter input only, never client aliases |
