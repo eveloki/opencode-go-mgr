@@ -2,23 +2,16 @@ use crate::alias;
 use crate::gateway::diagnostics::{
     ErrorDiagnostic, REQUEST_ID_HEADER, RequestTrace, emit_failure, serialize_diagnostic,
 };
-use crate::gateway::forwarder::{
-    ForwardAction, UpstreamPayloadTooLargeResponse, forward_request, rate_limited_response,
+use crate::gateway::executor::GatewayExecutor;
+use crate::gateway::forwarder::UpstreamPayloadTooLargeResponse;
+use crate::gateway::materialize::protocol_error_from_resolve;
+use crate::gateway::protocol::{ProtocolError, parse_client_request, parse_gemini_request};
+use crate::gateway::response::{
+    local_protocol_failure, protocol_error_from, protocol_error_response,
 };
-use crate::gateway::materialize::{
-    diagnostic_forced_upstream, materialize_account_routes, protocol_error_from_resolve,
-    resolved_alias_from_model,
-};
-use crate::gateway::protocol::{
-    MaterializeSpec, ProtocolError, RequestPlan, format_error, format_protocol_error,
-    materialize_parsed_request, parse_client_request, parse_gemini_request,
-};
-use crate::gateway::routing::resolve_conversation_key;
-use crate::gateway::selector::AccountSelector;
 use crate::kernel::protocol::ApiFormat;
-use crate::models::UpstreamChannel;
 use crate::models::{
-    AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
+    CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
 };
 use crate::state::CoreState;
 use axum::body::{Body, Bytes};
@@ -426,7 +419,7 @@ async fn proxy_handler_inner(
         }
     };
 
-    execute_plan(
+    GatewayExecutor::run(
         state,
         trace,
         client_body,
@@ -523,7 +516,7 @@ async fn gemini_proxy_handler(
             );
         }
     };
-    execute_plan(
+    GatewayExecutor::run(
         state,
         trace,
         body,
@@ -538,380 +531,6 @@ async fn gemini_proxy_handler(
         contracts,
     )
     .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn execute_plan(
-    state: CoreState,
-    trace: RequestTrace,
-    client_body: Bytes,
-    headers: HeaderMap,
-    client_format: ApiFormat,
-    parsed: crate::gateway::protocol::ParsedClientRequest,
-    resolved: alias::ResolvedModel,
-    client_model: String,
-    routing_model: String,
-    config: AppConfig,
-    client_key_id: Option<String>,
-    contracts: std::sync::Arc<crate::provider_contracts::EffectiveContractSet>,
-) -> axum::response::Response {
-    // One logical client request, including safe retries and account fallback,
-    // must use one immutable pricing revision from start to finish.
-    let pricing_snapshot = state.pricing_snapshot();
-    // Routing snapshot captured once at entry: every attempt (including after
-    // free fallback rewrites the model) resolves its leg from this snapshot,
-    // and a concurrent settings switch only affects requests starting later.
-    let route_snapshot = state.forward_route_set();
-    let conversation_key = if config.conversation_sticky {
-        resolve_conversation_key(client_format, &routing_model, &headers, &client_body)
-    } else {
-        None
-    };
-    let (diagnostic_model, diagnostic_channel) = match &resolved {
-        alias::ResolvedModel::Alias {
-            alias, mappings, ..
-        } => {
-            let zen_only = mappings
-                .iter()
-                .filter(|mapping| mapping.routeable)
-                .all(|mapping| mapping.is_zen_free());
-            (
-                (*alias).to_string(),
-                if zen_only {
-                    UpstreamChannel::Free
-                } else {
-                    UpstreamChannel::Go
-                },
-            )
-        }
-        alias::ResolvedModel::PinnedRaw { mapping, .. } => (
-            if mapping.upstream_model.is_empty() {
-                routing_model.clone()
-            } else {
-                mapping.upstream_model.to_string()
-            },
-            if mapping.is_zen_free() {
-                UpstreamChannel::Free
-            } else {
-                UpstreamChannel::Go
-            },
-        ),
-    };
-    let diagnostic_forced_upstream = diagnostic_forced_upstream(&resolved, parsed.client);
-    let requested_plan = match materialize_parsed_request(
-        &parsed,
-        &MaterializeSpec {
-            client_model: client_model.clone(),
-            upstream_model: diagnostic_model,
-            resolved_alias: resolved_alias_from_model(&resolved),
-            channel: diagnostic_channel,
-            upstream_base_override: None,
-            original_model: None,
-            allow_go_fallback: false,
-            forced_upstream: diagnostic_forced_upstream,
-            custom_route: None,
-        },
-    ) {
-        Ok(plan) => plan,
-        Err(error) => {
-            return local_protocol_failure(
-                &state,
-                &trace,
-                client_format,
-                error,
-                Some(client_body.len()),
-                Some(&client_body),
-            );
-        }
-    };
-
-    let mut last_error: Option<String> = None;
-    let mut failed_ids: Vec<String> = Vec::new();
-    let mut attempt = 0u32;
-
-    loop {
-        let (accounts, free_cooldown) = {
-            let db = state.db.lock();
-            let accounts = match db.list_accounts() {
-                Ok(accounts) => accounts,
-                Err(error) => {
-                    let message = format!("failed to select account: {error}");
-                    record_plan_failure(
-                        &state,
-                        &trace,
-                        &client_body,
-                        attempt.max(1),
-                        client_format,
-                        &requested_plan,
-                        "gateway",
-                        "account_selection",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                    );
-                    return protocol_error_response(
-                        client_format,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                        None,
-                    );
-                }
-            };
-            let free_cooldown = match db.free_channel_cooldown_until() {
-                Ok(cooldown) => cooldown,
-                Err(error) => {
-                    let message = format!("failed to read free-channel cooldown: {error}");
-                    return protocol_error_response(
-                        client_format,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                        None,
-                    );
-                }
-            };
-            (accounts, free_cooldown)
-        };
-        let free_available =
-            free_cooldown.is_none() && !AccountSelector::free_channel_exhausted(&accounts);
-        let custom_runtimes = match state.db.lock().list_custom_account_runtimes() {
-            Ok(runtimes) => crate::custom::custom_runtimes_by_account(&runtimes),
-            Err(error) => {
-                let message = format!("failed to load Custom accounts: {error}");
-                return protocol_error_response(
-                    client_format,
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &message,
-                    None,
-                );
-            }
-        };
-        let route_set = match materialize_account_routes(
-            &accounts,
-            &config,
-            &parsed,
-            &resolved,
-            &client_model,
-            &routing_model,
-            &client_body,
-            free_available,
-            &custom_runtimes,
-            &contracts,
-        ) {
-            Ok(route_set) => route_set,
-            Err(error) => {
-                return local_protocol_failure(
-                    &state,
-                    &trace,
-                    client_format,
-                    error,
-                    Some(client_body.len()),
-                    Some(&client_body),
-                );
-            }
-        };
-        let excluded = failed_ids.iter().map(String::as_str).collect::<Vec<_>>();
-        let routing_candidates = route_set
-            .routes
-            .iter()
-            .map(|route| route.routing.clone())
-            .collect::<Vec<_>>();
-        let selected = state.routing.select_candidate(
-            &routing_candidates,
-            config.routing_mode,
-            config.conversation_sticky,
-            conversation_key.as_deref(),
-            &excluded,
-        );
-        let Some(selected) = selected else {
-            if route_set.free_only
-                && let Some(until) = free_cooldown
-            {
-                record_plan_failure(
-                    &state,
-                    &trace,
-                    &client_body,
-                    attempt.max(1),
-                    client_format,
-                    &requested_plan,
-                    "gateway",
-                    "account_selection",
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "free channel is rate-limited",
-                );
-                return rate_limited_response(client_format, until);
-            }
-            let now = chrono::Utc::now();
-            let soonest = route_set
-                .routes
-                .iter()
-                .filter_map(|route| {
-                    route
-                        .routing
-                        .account
-                        .cooldown_ends_at_for(route.routing.channel, now)
-                })
-                .min();
-            return match soonest {
-                Some(until) => {
-                    record_plan_failure(
-                        &state,
-                        &trace,
-                        &client_body,
-                        attempt.max(1),
-                        client_format,
-                        &requested_plan,
-                        "gateway",
-                        "account_selection",
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "all compatible accounts are rate-limited",
-                    );
-                    rate_limited_response(client_format, until)
-                }
-                None => {
-                    let msg = last_error.clone().unwrap_or_else(|| {
-                        route_set.incompatibility.unwrap_or_else(|| {
-                            "no compatible provider accounts are available".to_string()
-                        })
-                    });
-                    record_plan_failure(
-                        &state,
-                        &trace,
-                        &client_body,
-                        attempt.max(1),
-                        client_format,
-                        &requested_plan,
-                        "gateway",
-                        "account_selection",
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        &msg,
-                    );
-                    protocol_error_response(
-                        client_format,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        &msg,
-                        None,
-                    )
-                }
-            };
-        };
-        let route = route_set
-            .routes
-            .into_iter()
-            .find(|route| {
-                route.routing.account.id == selected.account.id
-                    && route.routing.channel == selected.channel
-                    && route.routing.resolved_model == selected.resolved_model
-            })
-            .expect("selected routing candidate must retain its request plan");
-        let account = route.routing.account;
-        let active_plan = route.plan;
-
-        let mut retried_same_account = false;
-        loop {
-            attempt = attempt.saturating_add(1);
-            // Re-resolve the leg on every attempt: free fallback or sticky
-            // rewrites can swap `active_plan.model` mid-request.
-            let (client, route) = route_snapshot.client_for(&active_plan.model);
-            match forward_request(
-                client,
-                route,
-                &state,
-                &account,
-                &config,
-                &active_plan,
-                &trace,
-                &client_body,
-                attempt,
-                !retried_same_account,
-                headers.clone(),
-                pricing_snapshot.clone(),
-                client_key_id.as_deref(),
-            )
-            .await
-            {
-                Ok(result) => match result.action {
-                    ForwardAction::Return => return result.response,
-                    ForwardAction::RetrySameAccount if !retried_same_account => {
-                        retried_same_account = true;
-                        let _ = state.db.lock().log_gateway_diagnostic(
-                                "warn",
-                                "gateway",
-                                &format!(
-                                    "account {} attempt ended before any downstream response data was emitted; retrying once: {:?}",
-                                    account.name, result.error_message
-                                ),
-                                Some(&trace.request_id),
-                                Some(attempt as i64),
-                                Some("gateway"),
-                                Some("retry"),
-                                Some(trace.elapsed_ms() as i64),
-                                None,
-                            );
-                        continue;
-                    }
-                    ForwardAction::RetrySameAccount => return result.response,
-                    ForwardAction::ExhaustFreeChannel => {
-                        last_error = result.error_message.clone();
-                        failed_ids.push(account.id.clone());
-                        let _ = state.db.lock().log_gateway_diagnostic(
-                            "warn",
-                            "gateway",
-                            &format!(
-                                "Zen Free route {} was exhausted before output; continuing through the global account order: {:?}",
-                                account.name, result.error_message
-                            ),
-                            Some(&trace.request_id),
-                            Some(attempt as i64),
-                            Some("upstream"),
-                            Some("free_fallback"),
-                            Some(trace.elapsed_ms() as i64),
-                            None,
-                        );
-                        break;
-                    }
-                    ForwardAction::TryNextAccount => {
-                        last_error = result.error_message.clone();
-                        failed_ids.push(account.id.clone());
-                        let _ = state.db.lock().log_gateway_diagnostic(
-                            "warn",
-                            "gateway",
-                            &format!(
-                                "account {} was rejected, switching to next: {:?}",
-                                account.name, result.error_message
-                            ),
-                            Some(&trace.request_id),
-                            Some(attempt as i64),
-                            Some("upstream"),
-                            Some("upstream_http"),
-                            Some(trace.elapsed_ms() as i64),
-                            None,
-                        );
-                        break;
-                    }
-                },
-                Err(e) => {
-                    let message = format!("forward error: {e}");
-                    record_plan_failure(
-                        &state,
-                        &trace,
-                        &client_body,
-                        attempt,
-                        client_format,
-                        &active_plan,
-                        "gateway",
-                        "internal",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("account {} forward failed locally: {e}", account.name),
-                    );
-                    return protocol_error_response(
-                        client_format,
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &message,
-                        None,
-                    );
-                }
-            }
-        }
-    }
 }
 
 /// Candidate credential values a client may present, in fixed priority
@@ -1045,110 +664,6 @@ fn local_failure_response(
         format,
         ProtocolError::with_status(status, message.to_string()),
     )
-}
-
-fn local_protocol_failure(
-    state: &CoreState,
-    trace: &RequestTrace,
-    format: ApiFormat,
-    error: ProtocolError,
-    client_body_bytes: Option<usize>,
-    summary_body: Option<&[u8]>,
-) -> axum::response::Response {
-    let stage = if error.message.starts_with("invalid JSON request") {
-        "parse"
-    } else {
-        "validation"
-    };
-    let mut diagnostic = ErrorDiagnostic::new(trace, 1, "client", stage, format);
-    diagnostic.client_body_bytes = client_body_bytes;
-    diagnostic.downstream_status = Some(error.status.as_u16());
-    if let Some(body) = summary_body {
-        diagnostic = diagnostic.with_request_summary(body);
-    }
-    let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
-    let encoded = serialize_diagnostic(diagnostic);
-    let _ = state.db.lock().log_gateway_diagnostic(
-        if error.status.is_server_error() {
-            "error"
-        } else {
-            "warn"
-        },
-        "gateway_request",
-        &error.message,
-        Some(&trace.request_id),
-        Some(1),
-        Some("client"),
-        Some(stage),
-        Some(duration_ms),
-        Some(&encoded),
-    );
-    emit_failure(&encoded);
-    protocol_error_from(format, error)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_plan_failure(
-    state: &CoreState,
-    trace: &RequestTrace,
-    client_body: &[u8],
-    attempt: u32,
-    client_format: ApiFormat,
-    plan: &RequestPlan,
-    error_source: &str,
-    error_stage: &str,
-    status: StatusCode,
-    message: &str,
-) {
-    let mut diagnostic =
-        ErrorDiagnostic::new(trace, attempt, error_source, error_stage, client_format)
-            .with_request_summary(client_body);
-    diagnostic.client_body_bytes = Some(client_body.len());
-    diagnostic.upstream_body_bytes = Some(plan.body.len());
-    diagnostic.upstream_format =
-        Some(crate::gateway::diagnostics::api_format_name(plan.upstream).to_string());
-    diagnostic.model = Some(plan.model.clone());
-    diagnostic.stream = Some(plan.stream);
-    diagnostic.downstream_status = Some(status.as_u16());
-    let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
-    let encoded = serialize_diagnostic(diagnostic);
-    let _ = state.db.lock().log_gateway_diagnostic(
-        if status.is_server_error() {
-            "error"
-        } else {
-            "warn"
-        },
-        "gateway_request",
-        message,
-        Some(&trace.request_id),
-        Some(attempt as i64),
-        Some(error_source),
-        Some(error_stage),
-        Some(duration_ms),
-        Some(&encoded),
-    );
-    emit_failure(&encoded);
-}
-
-fn protocol_error_response(
-    format: ApiFormat,
-    status: StatusCode,
-    message: &str,
-    upstream: Option<&serde_json::Value>,
-) -> axum::response::Response {
-    (
-        status,
-        axum::Json(format_error(format, status, message, upstream)),
-    )
-        .into_response()
-}
-
-fn protocol_error_from(format: ApiFormat, error: ProtocolError) -> axum::response::Response {
-    (
-        error.status,
-        axum::Json(format_protocol_error(format, &error, None)),
-    )
-        .into_response()
 }
 
 #[cfg(test)]
@@ -1390,5 +905,18 @@ mod tests {
             ..AppConfig::default()
         };
         config.validate().expect("scalar-key config validates");
+    }
+
+    #[test]
+    fn production_source_delegates_orchestration_to_gateway_executor() {
+        let source = include_str!("handler.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("production source precedes tests");
+        assert!(production.contains("GatewayExecutor::run"));
+        assert!(!production.contains("async fn execute_plan"));
+        assert!(!production.contains("select_candidate"));
+        assert!(!production.contains("materialize_account_routes"));
     }
 }
