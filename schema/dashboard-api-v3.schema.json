@@ -814,6 +814,43 @@
       ],
       "type": "string"
     },
+    "AccountUsageUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/accounts/{id}/usage` body. CAS tokens, `window`, and `percent` are\nrequired; `resetsInMinutes` may be omitted. Unknown fields are rejected.\nWindow tokens stay the V2 identifiers `window_5h` / `window_week` /\n`window_month`.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "percent": {
+          "format": "double",
+          "type": "number"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resetsInMinutes": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "window": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "window",
+        "percent"
+      ],
+      "type": "object"
+    },
     "AccountVerificationStatus": {
       "description": "Connection-verification status. Wire values match V2 snake_case.",
       "enum": [
@@ -1006,6 +1043,47 @@
         "revision",
         "processGeneration",
         "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "CreditBalance": {
+      "additionalProperties": false,
+      "description": "One credit balance row as projected for provider usage. Distinct from the\nstored provider credit row.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "amount": {
+          "format": "double",
+          "type": "number"
+        },
+        "balanceKind": {
+          "type": "string"
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "balanceKind",
+        "amount",
+        "unit",
+        "source",
+        "observedAt",
+        "updatedAt"
       ],
       "type": "object"
     },
@@ -3182,6 +3260,86 @@
       ],
       "type": "object"
     },
+    "ProviderUsage": {
+      "additionalProperties": false,
+      "description": "GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.\n\n`pricingRevision` is present when live Go quota windows use one captured\npricing snapshot.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "availability": {
+          "$ref": "#/$defs/UsageAvailability"
+        },
+        "creditBalances": {
+          "items": {
+            "$ref": "#/$defs/CreditBalance"
+          },
+          "type": "array"
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "freeCooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offeringId": {
+          "type": "string"
+        },
+        "pricingRevision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "quotaWindows": {
+          "items": {
+            "$ref": "#/$defs/QuotaWindow"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "syncState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageSyncState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "offeringId",
+        "availability",
+        "experimental",
+        "freeCooldownUntil",
+        "quotaWindows",
+        "creditBalances",
+        "syncState",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
     "ProxyListDirection": {
       "description": "Which listed models take the list-mode exception leg.",
       "enum": [
@@ -3218,6 +3376,74 @@
         "id",
         "preferredProtocol",
         "zenFree"
+      ],
+      "type": "object"
+    },
+    "QuotaWindow": {
+      "additionalProperties": false,
+      "description": "One live or synthetic quota window. Distinct from `provider::QuotaWindow`.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "calibrationOffset": {
+          "format": "double",
+          "type": "number"
+        },
+        "limitValue": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resetsAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "used": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "windowKind",
+        "used",
+        "limitValue",
+        "startedAt",
+        "resetsAt",
+        "calibrationOffset",
+        "unit",
+        "source",
+        "observedAt",
+        "updatedAt"
       ],
       "type": "object"
     },
@@ -3480,6 +3706,154 @@
       "required": [
         "expectedRevision",
         "processGeneration"
+      ],
+      "type": "object"
+    },
+    "UsageAvailability": {
+      "description": "Registry usage availability. Wire values stay snake_case.",
+      "enum": [
+        "available",
+        "unavailable",
+        "local_state"
+      ],
+      "type": "string"
+    },
+    "UsageMutation": {
+      "additionalProperties": false,
+      "description": "PATCH `/accounts/{id}/usage` envelope. Calibration does not bump revision.",
+      "properties": {
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageWindow"
+        }
+      },
+      "required": [
+        "usage",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "UsageSyncState": {
+      "additionalProperties": false,
+      "description": "Official-usage sync metadata as projected for provider usage. Distinct from\nthe stored `provider_usage_sync_state` row.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "failureStreak": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "lastAttemptAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastExpeditedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastSuccessAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextEligibleAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "lastSuccessAt",
+        "lastAttemptAt",
+        "nextEligibleAt",
+        "failureStreak",
+        "lastExpeditedAt"
+      ],
+      "type": "object"
+    },
+    "UsageWindow": {
+      "additionalProperties": false,
+      "description": "GET `/accounts/{id}/usage` body. Distinct from `models::UsageWindow`.\n\n`revision` is the settings CAS token and is not advanced by calibration.\n`pricingRevision` is present when the projection uses the live Go snapshot.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "pricingRevision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resetsIn5h": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resetsInMonth": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resetsInWeek": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "window5h": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowMonth": {
+          "format": "double",
+          "type": "number"
+        },
+        "windowWeek": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "accountId",
+        "window5h",
+        "windowWeek",
+        "windowMonth",
+        "resetsIn5h",
+        "resetsInWeek",
+        "resetsInMonth",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
       ],
       "type": "object"
     },
@@ -3894,6 +4268,30 @@
     },
     {
       "$ref": "#/$defs/DailyCostQuery"
+    },
+    {
+      "$ref": "#/$defs/UsageWindow"
+    },
+    {
+      "$ref": "#/$defs/UsageMutation"
+    },
+    {
+      "$ref": "#/$defs/AccountUsageUpdate"
+    },
+    {
+      "$ref": "#/$defs/ProviderUsage"
+    },
+    {
+      "$ref": "#/$defs/QuotaWindow"
+    },
+    {
+      "$ref": "#/$defs/CreditBalance"
+    },
+    {
+      "$ref": "#/$defs/UsageSyncState"
+    },
+    {
+      "$ref": "#/$defs/UsageAvailability"
     }
   ],
   "title": "DashboardApiV3"

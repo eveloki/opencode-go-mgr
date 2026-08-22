@@ -88,7 +88,15 @@ export type DashboardApiV3 =
   | ForwardLogModels
   | GatewayLogQuery
   | ForwardLogQuery
-  | DailyCostQuery;
+  | DailyCostQuery
+  | UsageWindow
+  | UsageMutation
+  | AccountUsageUpdate
+  | ProviderUsage
+  | QuotaWindow
+  | CreditBalance
+  | UsageSyncState
+  | UsageAvailability;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -158,6 +166,10 @@ export type PricingRefreshPolicy = "keep_current" | "use_official";
  * Registry pricing availability. Wire values stay snake_case.
  */
 export type PricingAvailability = "available" | "unavailable" | "not_applicable" | "unpriced";
+/**
+ * Registry usage availability. Wire values stay snake_case.
+ */
+export type UsageAvailability = "available" | "unavailable" | "local_state";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -1110,4 +1122,104 @@ export interface ForwardLogQuery {
  */
 export interface DailyCostQuery {
   days?: number | null;
+}
+/**
+ * GET `/accounts/{id}/usage` body. Distinct from `models::UsageWindow`.
+ *
+ * `revision` is the settings CAS token and is not advanced by calibration.
+ * `pricingRevision` is present when the projection uses the live Go snapshot.
+ */
+export interface UsageWindow {
+  accountId: string;
+  pricingRevision: string | null;
+  processGeneration: number;
+  resetsIn5h: string | null;
+  resetsInMonth: string | null;
+  resetsInWeek: string | null;
+  revision: number;
+  window5h: number;
+  windowMonth: number;
+  windowWeek: number;
+}
+/**
+ * PATCH `/accounts/{id}/usage` envelope. Calibration does not bump revision.
+ */
+export interface UsageMutation {
+  processGeneration: number;
+  revision: number;
+  usage: UsageWindow;
+}
+/**
+ * PATCH `/accounts/{id}/usage` body. CAS tokens, `window`, and `percent` are
+ * required; `resetsInMinutes` may be omitted. Unknown fields are rejected.
+ * Window tokens stay the V2 identifiers `window_5h` / `window_week` /
+ * `window_month`.
+ */
+export interface AccountUsageUpdate {
+  expectedRevision: number;
+  percent: number;
+  processGeneration: number;
+  resetsInMinutes?: number | null;
+  window: string;
+}
+/**
+ * GET `/accounts/{id}/provider-usage` body. Distinct from stored quota rows.
+ *
+ * `pricingRevision` is present when live Go quota windows use one captured
+ * pricing snapshot.
+ */
+export interface ProviderUsage {
+  accountId: string;
+  availability: UsageAvailability;
+  creditBalances: CreditBalance[];
+  experimental: boolean;
+  freeCooldownUntil: string | null;
+  offeringId: string;
+  pricingRevision: string | null;
+  processGeneration: number;
+  providerId: string;
+  quotaWindows: QuotaWindow[];
+  revision: number;
+  syncState: UsageSyncState | null;
+}
+/**
+ * One credit balance row as projected for provider usage. Distinct from the
+ * stored provider credit row.
+ */
+export interface CreditBalance {
+  accountId: string;
+  amount: number;
+  balanceKind: string;
+  observedAt: string | null;
+  source: string;
+  unit: string;
+  updatedAt: string;
+}
+/**
+ * One live or synthetic quota window. Distinct from `provider::QuotaWindow`.
+ */
+export interface QuotaWindow {
+  accountId: string;
+  calibrationOffset: number;
+  limitValue: number | null;
+  observedAt: string | null;
+  resetsAt: string | null;
+  source: string;
+  startedAt: string | null;
+  unit: string;
+  updatedAt: string;
+  used: number;
+  windowKind: string;
+}
+/**
+ * Official-usage sync metadata as projected for provider usage. Distinct from
+ * the stored `provider_usage_sync_state` row.
+ */
+export interface UsageSyncState {
+  accountId: string;
+  failureStreak: number;
+  lastAttemptAt: string | null;
+  lastExpeditedAt: string | null;
+  lastSuccessAt: string | null;
+  nextEligibleAt: string | null;
 }
