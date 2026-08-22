@@ -98,6 +98,64 @@
       ],
       "type": "object"
     },
+    "KeyCreate": {
+      "additionalProperties": false,
+      "description": "POST `/keys` body. CAS tokens are required; `name` is required. Unknown\nfields, including any Key material, are rejected.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name"
+      ],
+      "type": "object"
+    },
+    "KeyUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/keys/{id}` body. CAS tokens are required; `name` and `enabled`\nmay be omitted. Unknown fields, including any Key material, are rejected.",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "MutationAck": {
       "additionalProperties": false,
       "description": "Successful control-plane mutation acknowledgement.",
@@ -521,6 +579,12 @@
     },
     {
       "$ref": "#/$defs/ProxySupportedModel"
+    },
+    {
+      "$ref": "#/$defs/KeyCreate"
+    },
+    {
+      "$ref": "#/$defs/KeyUpdate"
     }
   ],
   "title": "DashboardApiV3"

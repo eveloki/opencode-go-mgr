@@ -246,6 +246,7 @@ test("release workflow keeps reusable quality checks out of the native build mat
   assert.match(quality, /\n  web:/);
   assert.match(quality, /\n  rust:/);
   assert.match(quality, /pnpm run test:web/);
+  assert.match(quality, /pnpm run contract:v3:check/);
   assert.match(quality, /pnpm run typecheck/);
   assert.match(quality, /pnpm exec vite build/);
   assert.match(quality, /cargo test --workspace --locked/);

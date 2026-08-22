@@ -14,7 +14,9 @@ export type DashboardApiV3 =
   | ConnectionSubKey
   | Settings
   | SettingsUpdate
-  | ProxySupportedModel;
+  | ProxySupportedModel
+  | KeyCreate
+  | KeyUpdate;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -149,4 +151,23 @@ export interface SettingsUpdate {
   showDockIcon?: boolean | null;
   streamIdleTimeoutSecs?: number | null;
   upstreamBaseUrl?: string | null;
+}
+/**
+ * POST `/keys` body. CAS tokens are required; `name` is required. Unknown
+ * fields, including any Key material, are rejected.
+ */
+export interface KeyCreate {
+  expectedRevision: number;
+  name: string;
+  processGeneration: number;
+}
+/**
+ * PATCH `/keys/{id}` body. CAS tokens are required; `name` and `enabled`
+ * may be omitted. Unknown fields, including any Key material, are rejected.
+ */
+export interface KeyUpdate {
+  enabled?: boolean | null;
+  expectedRevision: number;
+  name?: string | null;
+  processGeneration: number;
 }

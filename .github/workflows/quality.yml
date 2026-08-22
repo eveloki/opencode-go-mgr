@@ -41,6 +41,7 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run contract:v3:check
       - run: pnpm run test:web
       - run: pnpm run typecheck
       - run: pnpm exec vite build
