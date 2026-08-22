@@ -16,7 +16,24 @@ export type DashboardApiV3 =
   | SettingsUpdate
   | ProxySupportedModel
   | KeyCreate
-  | KeyUpdate;
+  | KeyUpdate
+  | Account
+  | AccountList
+  | AccountMutation
+  | AccountCustomConfig
+  | AccountModelCapability
+  | AccountAcknowledgement
+  | AccountCreate
+  | AccountManagedCreate
+  | AccountUpdate
+  | AccountOrder
+  | AccountSetupUpdate
+  | AccountCustomConfigUpdate
+  | AccountCustomConfigWrite
+  | AccountModelCapabilitiesUpdate
+  | AccountModelCapabilityWrite
+  | AccountAcknowledgementCreate
+  | AccountAcknowledgementWrite;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -29,6 +46,34 @@ export type ProxyMode = "auto" | "manual" | "direct" | "list";
  * Account selection mode. Wire values stay kebab-case, matching V2.
  */
 export type RoutingMode = "strict-priority" | "sticky-global" | "round-robin";
+/**
+ * Wire identity matching V2 `key` / `managed`.
+ */
+export type AccountType = "key" | "managed";
+/**
+ * Wire identity matching V2 `api_key` / `none`.
+ */
+export type AccountCredentialKind = "api_key" | "none";
+/**
+ * Custom auth scheme. Wire values match V2 kebab-case.
+ */
+export type AccountAuthScheme = "bearer" | "x-api-key";
+/**
+ * Custom/upstream protocol. Wire values match V2 snake_case.
+ */
+export type AccountUpstreamProtocol = "chat_completions" | "responses" | "messages";
+/**
+ * Wire identity matching V2 `key` / `egress-ip`.
+ */
+export type AccountQuotaScope = "key" | "egress-ip";
+/**
+ * Managed-setup wizard step. Wire values match V2 snake_case.
+ */
+export type AccountSetupStep = "google_account" | "opencode_registration" | "payment" | "key_verification" | "ready";
+/**
+ * Connection-verification status. Wire values match V2 snake_case.
+ */
+export type AccountVerificationStatus = "not_required" | "pending" | "verified" | "failed";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -170,4 +215,207 @@ export interface KeyUpdate {
   expectedRevision: number;
   name?: string | null;
   processGeneration: number;
+}
+/**
+ * Secret-free account resource. Distinct from `models::Account`.
+ *
+ * Responses emit `T | null` for every optional field. Plaintext upstream
+ * keys, passwords, ciphers, gateway Keys, and referral codes never appear.
+ */
+export interface Account {
+  accountType: AccountType;
+  acknowledgements: AccountAcknowledgement[];
+  authError: string | null;
+  connectionVerifiedAt: string | null;
+  cooldown5hUntil: string | null;
+  cooldownFreeUntil: string | null;
+  cooldownGenericUntil: string | null;
+  cooldownMonthUntil: string | null;
+  cooldownUntil: string | null;
+  cooldownWeekUntil: string | null;
+  createdAt: string;
+  credentialKind: AccountCredentialKind;
+  customConfig: AccountCustomConfig | null;
+  enabled: boolean;
+  expiresOn: string;
+  id: string;
+  lastError: string | null;
+  modelCapabilities: AccountModelCapability[];
+  name: string;
+  notes: string | null;
+  offeringId: string;
+  planRoutable: boolean;
+  processGeneration: number;
+  providerId: string;
+  purchaseDate: string;
+  quotaScope: AccountQuotaScope;
+  revision: number;
+  setupStep: AccountSetupStep;
+  updatedAt: string;
+  usageSyncLastSuccessAt: string | null;
+  usageSyncNextAllowedAt: string | null;
+  username: string | null;
+  verificationError: string | null;
+  verificationStatus: AccountVerificationStatus;
+}
+/**
+ * One persisted Plan risk acknowledgement as returned on an account.
+ */
+export interface AccountAcknowledgement {
+  acceptedAt: string;
+  accountId: string;
+  acknowledgementId: string;
+  contentHash: string;
+  version: string;
+}
+/**
+ * Nested Custom HTTP destination as returned on an account.
+ */
+export interface AccountCustomConfig {
+  accountId: string;
+  authScheme: AccountAuthScheme;
+  baseUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  upstreamProtocol: AccountUpstreamProtocol;
+}
+/**
+ * One declared Custom model capability as returned on an account.
+ */
+export interface AccountModelCapability {
+  accountId: string;
+  modelId: string;
+  protocol: AccountUpstreamProtocol;
+  source: string;
+  verifiedAt: string | null;
+}
+/**
+ * GET `/accounts` and PUT `/accounts/order` envelope.
+ */
+export interface AccountList {
+  accounts: Account[];
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * Successful single-account mutation. `account` is `null` after delete.
+ */
+export interface AccountMutation {
+  account: Account | null;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * POST `/accounts` body. CAS tokens and `name` are required. `key`,
+ * `password`, and `referralCode` are write-only and never echoed.
+ */
+export interface AccountCreate {
+  acknowledgements?: AccountAcknowledgementWrite[];
+  customConfig?: AccountCustomConfigWrite | null;
+  expectedRevision: number;
+  key: string;
+  modelCapabilities?: AccountModelCapabilityWrite[];
+  name: string;
+  notes?: string | null;
+  offeringId?: string | null;
+  password?: string | null;
+  processGeneration: number;
+  providerId?: string | null;
+  purchaseDate?: string | null;
+  referralCode?: string | null;
+  username?: string | null;
+}
+/**
+ * Create-time Plan risk acknowledgement. Nested under `AccountCreate`.
+ */
+export interface AccountAcknowledgementWrite {
+  acknowledgementId: string;
+  version: string;
+}
+/**
+ * Create-time Custom destination (no timestamps). Nested under `AccountCreate`.
+ */
+export interface AccountCustomConfigWrite {
+  authScheme: AccountAuthScheme;
+  baseUrl: string;
+  upstreamProtocol: AccountUpstreamProtocol;
+}
+/**
+ * One declared Custom model capability on create or replace.
+ */
+export interface AccountModelCapabilityWrite {
+  modelId: string;
+  protocol: AccountUpstreamProtocol;
+  source?: string | null;
+}
+/**
+ * POST `/accounts/managed` body. CAS tokens and `name` are required.
+ */
+export interface AccountManagedCreate {
+  expectedRevision: number;
+  name: string;
+  notes?: string | null;
+  processGeneration: number;
+  username?: string | null;
+}
+/**
+ * PATCH `/accounts/{id}` body. CAS tokens are required; other fields may be
+ * omitted. Write-only `key` / `password` / `referralCode` are accepted and
+ * never echoed. Unknown fields, including provider binding, are rejected.
+ */
+export interface AccountUpdate {
+  enabled?: boolean | null;
+  expectedRevision: number;
+  key?: string | null;
+  name?: string | null;
+  notes?: string | null;
+  password?: string | null;
+  processGeneration: number;
+  purchaseDate?: string | null;
+  referralCode?: string | null;
+  username?: string | null;
+}
+/**
+ * PUT `/accounts/order` body. CAS tokens and the complete id set are required.
+ */
+export interface AccountOrder {
+  accountIds: string[];
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * PATCH `/accounts/{id}/setup` body. CAS tokens and `setupStep` are required.
+ */
+export interface AccountSetupUpdate {
+  expectedRevision: number;
+  processGeneration: number;
+  setupStep: AccountSetupStep;
+}
+/**
+ * PUT `/accounts/{id}/custom-config` body. Protocol and auth scheme are
+ * immutable after create; the handler enforces that.
+ */
+export interface AccountCustomConfigUpdate {
+  authScheme: AccountAuthScheme;
+  baseUrl: string;
+  expectedRevision: number;
+  processGeneration: number;
+  upstreamProtocol: AccountUpstreamProtocol;
+}
+/**
+ * PUT `/accounts/{id}/model-capabilities` body.
+ */
+export interface AccountModelCapabilitiesUpdate {
+  capabilities: AccountModelCapabilityWrite[];
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * POST `/accounts/{id}/acknowledgements` body.
+ */
+export interface AccountAcknowledgementCreate {
+  acknowledgementId: string;
+  expectedRevision: number;
+  processGeneration: number;
+  version: string;
 }

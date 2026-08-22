@@ -1,6 +1,829 @@
 {
   "$comment": "Extensible Dashboard V3 contract catalog. Add new $defs for later DTOs; do not rename or reshape existing definitions. ConnectionInfo is the only plaintext Key DTO.",
   "$defs": {
+    "Account": {
+      "additionalProperties": false,
+      "description": "Secret-free account resource. Distinct from `models::Account`.\n\nResponses emit `T | null` for every optional field. Plaintext upstream\nkeys, passwords, ciphers, gateway Keys, and referral codes never appear.",
+      "properties": {
+        "accountType": {
+          "$ref": "#/$defs/AccountType"
+        },
+        "acknowledgements": {
+          "items": {
+            "$ref": "#/$defs/AccountAcknowledgement"
+          },
+          "type": "array"
+        },
+        "authError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connectionVerifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldown5hUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownFreeUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownGenericUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownMonthUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldownWeekUntil": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "credentialKind": {
+          "$ref": "#/$defs/AccountCredentialKind"
+        },
+        "customConfig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCustomConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "expiresOn": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lastError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelCapabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapability"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offeringId": {
+          "type": "string"
+        },
+        "planRoutable": {
+          "type": "boolean"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "purchaseDate": {
+          "type": "string"
+        },
+        "quotaScope": {
+          "$ref": "#/$defs/AccountQuotaScope"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "setupStep": {
+          "$ref": "#/$defs/AccountSetupStep"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "usageSyncLastSuccessAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usageSyncNextAllowedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verificationError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verificationStatus": {
+          "$ref": "#/$defs/AccountVerificationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "providerId",
+        "offeringId",
+        "credentialKind",
+        "quotaScope",
+        "name",
+        "username",
+        "enabled",
+        "accountType",
+        "setupStep",
+        "purchaseDate",
+        "expiresOn",
+        "cooldownUntil",
+        "cooldownGenericUntil",
+        "cooldown5hUntil",
+        "cooldownWeekUntil",
+        "cooldownMonthUntil",
+        "cooldownFreeUntil",
+        "lastError",
+        "authError",
+        "notes",
+        "usageSyncLastSuccessAt",
+        "usageSyncNextAllowedAt",
+        "createdAt",
+        "updatedAt",
+        "revision",
+        "processGeneration",
+        "verificationStatus",
+        "connectionVerifiedAt",
+        "verificationError",
+        "planRoutable",
+        "customConfig",
+        "modelCapabilities",
+        "acknowledgements"
+      ],
+      "type": "object"
+    },
+    "AccountAcknowledgement": {
+      "additionalProperties": false,
+      "description": "One persisted Plan risk acknowledgement as returned on an account.",
+      "properties": {
+        "acceptedAt": {
+          "type": "string"
+        },
+        "accountId": {
+          "type": "string"
+        },
+        "acknowledgementId": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "acknowledgementId",
+        "version",
+        "contentHash",
+        "acceptedAt"
+      ],
+      "type": "object"
+    },
+    "AccountAcknowledgementCreate": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/acknowledgements` body.",
+      "properties": {
+        "acknowledgementId": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "acknowledgementId",
+        "version"
+      ],
+      "type": "object"
+    },
+    "AccountAcknowledgementWrite": {
+      "additionalProperties": false,
+      "description": "Create-time Plan risk acknowledgement. Nested under `AccountCreate`.",
+      "properties": {
+        "acknowledgementId": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "acknowledgementId",
+        "version"
+      ],
+      "type": "object"
+    },
+    "AccountAuthScheme": {
+      "description": "Custom auth scheme. Wire values match V2 kebab-case.",
+      "enum": [
+        "bearer",
+        "x-api-key"
+      ],
+      "type": "string"
+    },
+    "AccountCreate": {
+      "additionalProperties": false,
+      "description": "POST `/accounts` body. CAS tokens and `name` are required. `key`,\n`password`, and `referralCode` are write-only and never echoed.",
+      "properties": {
+        "acknowledgements": {
+          "items": {
+            "$ref": "#/$defs/AccountAcknowledgementWrite"
+          },
+          "type": "array"
+        },
+        "customConfig": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountCustomConfigWrite"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "modelCapabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapabilityWrite"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offeringId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purchaseDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "referralCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name",
+        "key"
+      ],
+      "type": "object"
+    },
+    "AccountCredentialKind": {
+      "description": "Wire identity matching V2 `api_key` / `none`.",
+      "enum": [
+        "api_key",
+        "none"
+      ],
+      "type": "string"
+    },
+    "AccountCustomConfig": {
+      "additionalProperties": false,
+      "description": "Nested Custom HTTP destination as returned on an account.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "authScheme": {
+          "$ref": "#/$defs/AccountAuthScheme"
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "accountId",
+        "baseUrl",
+        "upstreamProtocol",
+        "authScheme",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "AccountCustomConfigUpdate": {
+      "additionalProperties": false,
+      "description": "PUT `/accounts/{id}/custom-config` body. Protocol and auth scheme are\nimmutable after create; the handler enforces that.",
+      "properties": {
+        "authScheme": {
+          "$ref": "#/$defs/AccountAuthScheme"
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "baseUrl",
+        "upstreamProtocol",
+        "authScheme"
+      ],
+      "type": "object"
+    },
+    "AccountCustomConfigWrite": {
+      "additionalProperties": false,
+      "description": "Create-time Custom destination (no timestamps). Nested under `AccountCreate`.",
+      "properties": {
+        "authScheme": {
+          "$ref": "#/$defs/AccountAuthScheme"
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "baseUrl",
+        "upstreamProtocol",
+        "authScheme"
+      ],
+      "type": "object"
+    },
+    "AccountList": {
+      "additionalProperties": false,
+      "description": "GET `/accounts` and PUT `/accounts/order` envelope.",
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/Account"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "accounts",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountManagedCreate": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/managed` body. CAS tokens and `name` are required.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "name"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapabilitiesUpdate": {
+      "additionalProperties": false,
+      "description": "PUT `/accounts/{id}/model-capabilities` body.",
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapabilityWrite"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapability": {
+      "additionalProperties": false,
+      "description": "One declared Custom model capability as returned on an account.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "source": {
+          "type": "string"
+        },
+        "verifiedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId",
+        "modelId",
+        "protocol",
+        "verifiedAt",
+        "source"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapabilityWrite": {
+      "additionalProperties": false,
+      "description": "One declared Custom model capability on create or replace.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "modelId",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "AccountMutation": {
+      "additionalProperties": false,
+      "description": "Successful single-account mutation. `account` is `null` after delete.",
+      "properties": {
+        "account": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Account"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "account",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountOrder": {
+      "additionalProperties": false,
+      "description": "PUT `/accounts/order` body. CAS tokens and the complete id set are required.",
+      "properties": {
+        "accountIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "accountIds"
+      ],
+      "type": "object"
+    },
+    "AccountQuotaScope": {
+      "description": "Wire identity matching V2 `key` / `egress-ip`.",
+      "enum": [
+        "key",
+        "egress-ip"
+      ],
+      "type": "string"
+    },
+    "AccountSetupStep": {
+      "description": "Managed-setup wizard step. Wire values match V2 snake_case.",
+      "enum": [
+        "google_account",
+        "opencode_registration",
+        "payment",
+        "key_verification",
+        "ready"
+      ],
+      "type": "string"
+    },
+    "AccountSetupUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/accounts/{id}/setup` body. CAS tokens and `setupStep` are required.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "setupStep": {
+          "$ref": "#/$defs/AccountSetupStep"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "setupStep"
+      ],
+      "type": "object"
+    },
+    "AccountType": {
+      "description": "Wire identity matching V2 `key` / `managed`.",
+      "enum": [
+        "key",
+        "managed"
+      ],
+      "type": "string"
+    },
+    "AccountUpdate": {
+      "additionalProperties": false,
+      "description": "PATCH `/accounts/{id}` body. CAS tokens are required; other fields may be\nomitted. Write-only `key` / `password` / `referralCode` are accepted and\nnever echoed. Unknown fields, including provider binding, are rejected.",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "purchaseDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "referralCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountUpstreamProtocol": {
+      "description": "Custom/upstream protocol. Wire values match V2 snake_case.",
+      "enum": [
+        "chat_completions",
+        "responses",
+        "messages"
+      ],
+      "type": "string"
+    },
+    "AccountVerificationStatus": {
+      "description": "Connection-verification status. Wire values match V2 snake_case.",
+      "enum": [
+        "not_required",
+        "pending",
+        "verified",
+        "failed"
+      ],
+      "type": "string"
+    },
     "ConnectionInfo": {
       "additionalProperties": false,
       "description": "Lightweight connection-center payload. The only V3 DTO allowed to carry\nplaintext primary and sub Key values.",
@@ -585,6 +1408,57 @@
     },
     {
       "$ref": "#/$defs/KeyUpdate"
+    },
+    {
+      "$ref": "#/$defs/Account"
+    },
+    {
+      "$ref": "#/$defs/AccountList"
+    },
+    {
+      "$ref": "#/$defs/AccountMutation"
+    },
+    {
+      "$ref": "#/$defs/AccountCustomConfig"
+    },
+    {
+      "$ref": "#/$defs/AccountModelCapability"
+    },
+    {
+      "$ref": "#/$defs/AccountAcknowledgement"
+    },
+    {
+      "$ref": "#/$defs/AccountCreate"
+    },
+    {
+      "$ref": "#/$defs/AccountManagedCreate"
+    },
+    {
+      "$ref": "#/$defs/AccountUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountOrder"
+    },
+    {
+      "$ref": "#/$defs/AccountSetupUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountCustomConfigUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountCustomConfigWrite"
+    },
+    {
+      "$ref": "#/$defs/AccountModelCapabilitiesUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountModelCapabilityWrite"
+    },
+    {
+      "$ref": "#/$defs/AccountAcknowledgementCreate"
+    },
+    {
+      "$ref": "#/$defs/AccountAcknowledgementWrite"
     }
   ],
   "title": "DashboardApiV3"
