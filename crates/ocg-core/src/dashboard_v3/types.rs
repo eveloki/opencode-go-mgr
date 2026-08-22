@@ -10,6 +10,11 @@ use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::models::{AccountSetupStep as ModelAccountSetupStep, AccountType as ModelAccountType};
+use crate::provider::{
+    ConnectionVerificationStatus as ProviderVerificationStatus, CredentialKind, QuotaScope,
+    UpstreamAuthScheme, UpstreamProtocolKind,
+};
 use crate::state::CoreState;
 
 /// JSON Schema `$defs` names for the kernel catalog.
@@ -29,6 +34,23 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ProxySupportedModel",
     "KeyCreate",
     "KeyUpdate",
+    "Account",
+    "AccountList",
+    "AccountMutation",
+    "AccountCustomConfig",
+    "AccountModelCapability",
+    "AccountAcknowledgement",
+    "AccountCreate",
+    "AccountManagedCreate",
+    "AccountUpdate",
+    "AccountOrder",
+    "AccountSetupUpdate",
+    "AccountCustomConfigUpdate",
+    "AccountCustomConfigWrite",
+    "AccountModelCapabilitiesUpdate",
+    "AccountModelCapabilityWrite",
+    "AccountAcknowledgementCreate",
+    "AccountAcknowledgementWrite",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -37,6 +59,10 @@ pub const ERROR_MISSING_EXPECTED_REVISION: &str = "missingExpectedRevision";
 pub const ERROR_REVISION_CONFLICT: &str = "revisionConflict";
 pub const ERROR_INVALID_REQUEST: &str = "invalidRequest";
 pub const ERROR_INTERNAL: &str = "internal";
+pub const ERROR_NOT_FOUND: &str = "notFound";
+pub const ERROR_CONFLICT: &str = "conflict";
+pub const ERROR_PRECONDITION_FAILED: &str = "preconditionFailed";
+pub const ERROR_SERVICE_UNAVAILABLE: &str = "serviceUnavailable";
 
 /// Live CAS token, process generation, and pricing snapshot id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -164,6 +190,58 @@ impl V3Error {
             message: message.into(),
             current_revision: None,
             process_generation: None,
+        }
+    }
+
+    pub fn not_found(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_NOT_FOUND.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
+        }
+    }
+
+    pub fn conflict(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_CONFLICT.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
+        }
+    }
+
+    pub fn precondition_failed(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_PRECONDITION_FAILED.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
+        }
+    }
+
+    pub fn service_unavailable(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_SERVICE_UNAVAILABLE.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
         }
     }
 }
@@ -329,6 +407,442 @@ pub enum RoutingMode {
     RoundRobin,
 }
 
+/// Secret-free account resource. Distinct from `models::Account`.
+///
+/// Responses emit `T | null` for every optional field. Plaintext upstream
+/// keys, passwords, ciphers, gateway Keys, and referral codes never appear.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Account {
+    pub id: String,
+    pub provider_id: String,
+    pub offering_id: String,
+    pub credential_kind: AccountCredentialKind,
+    pub quota_scope: AccountQuotaScope,
+    pub name: String,
+    pub username: Option<String>,
+    pub enabled: bool,
+    pub account_type: AccountType,
+    pub setup_step: AccountSetupStep,
+    pub purchase_date: String,
+    pub expires_on: String,
+    pub cooldown_until: Option<String>,
+    pub cooldown_generic_until: Option<String>,
+    pub cooldown_5h_until: Option<String>,
+    pub cooldown_week_until: Option<String>,
+    pub cooldown_month_until: Option<String>,
+    pub cooldown_free_until: Option<String>,
+    pub last_error: Option<String>,
+    pub auth_error: Option<String>,
+    pub notes: Option<String>,
+    pub usage_sync_last_success_at: Option<String>,
+    pub usage_sync_next_allowed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub verification_status: AccountVerificationStatus,
+    pub connection_verified_at: Option<String>,
+    pub verification_error: Option<String>,
+    pub plan_routable: bool,
+    pub custom_config: Option<AccountCustomConfig>,
+    pub model_capabilities: Vec<AccountModelCapability>,
+    pub acknowledgements: Vec<AccountAcknowledgement>,
+}
+
+/// GET `/accounts` and PUT `/accounts/order` envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountList {
+    pub accounts: Vec<Account>,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// Successful single-account mutation. `account` is `null` after delete.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountMutation {
+    pub account: Option<Account>,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// Nested Custom HTTP destination as returned on an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountCustomConfig {
+    pub account_id: String,
+    pub base_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
+    pub auth_scheme: AccountAuthScheme,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One declared Custom model capability as returned on an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountModelCapability {
+    pub account_id: String,
+    pub model_id: String,
+    pub protocol: AccountUpstreamProtocol,
+    pub verified_at: Option<String>,
+    pub source: String,
+}
+
+/// One persisted Plan risk acknowledgement as returned on an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountAcknowledgement {
+    pub account_id: String,
+    pub acknowledgement_id: String,
+    pub version: String,
+    pub content_hash: String,
+    pub accepted_at: String,
+}
+
+/// POST `/accounts` body. CAS tokens and `name` are required. `key`,
+/// `password`, and `referralCode` are write-only and never echoed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountCreate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offering_id: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referral_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purchase_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_config: Option<AccountCustomConfigWrite>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acknowledgements: Vec<AccountAcknowledgementWrite>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_capabilities: Vec<AccountModelCapabilityWrite>,
+}
+
+/// POST `/accounts/managed` body. CAS tokens and `name` are required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountManagedCreate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// PATCH `/accounts/{id}` body. CAS tokens are required; other fields may be
+/// omitted. Write-only `key` / `password` / `referralCode` are accepted and
+/// never echoed. Unknown fields, including provider binding, are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referral_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purchase_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// PUT `/accounts/order` body. CAS tokens and the complete id set are required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountOrder {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub account_ids: Vec<String>,
+}
+
+/// PATCH `/accounts/{id}/setup` body. CAS tokens and `setupStep` are required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountSetupUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub setup_step: AccountSetupStep,
+}
+
+/// PUT `/accounts/{id}/custom-config` body. Protocol and auth scheme are
+/// immutable after create; the handler enforces that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountCustomConfigUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub base_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
+    pub auth_scheme: AccountAuthScheme,
+}
+
+/// Create-time Custom destination (no timestamps). Nested under `AccountCreate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountCustomConfigWrite {
+    pub base_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
+    pub auth_scheme: AccountAuthScheme,
+}
+
+/// PUT `/accounts/{id}/model-capabilities` body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountModelCapabilitiesUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub capabilities: Vec<AccountModelCapabilityWrite>,
+}
+
+/// One declared Custom model capability on create or replace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountModelCapabilityWrite {
+    pub model_id: String,
+    pub protocol: AccountUpstreamProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// POST `/accounts/{id}/acknowledgements` body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountAcknowledgementCreate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub acknowledgement_id: String,
+    pub version: String,
+}
+
+/// Create-time Plan risk acknowledgement. Nested under `AccountCreate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountAcknowledgementWrite {
+    pub acknowledgement_id: String,
+    pub version: String,
+}
+
+/// Wire identity matching V2 `api_key` / `none`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AccountCredentialKind {
+    ApiKey,
+    None,
+}
+
+impl From<CredentialKind> for AccountCredentialKind {
+    fn from(value: CredentialKind) -> Self {
+        match value {
+            CredentialKind::ApiKey => Self::ApiKey,
+            CredentialKind::None => Self::None,
+        }
+    }
+}
+
+/// Wire identity matching V2 `key` / `egress-ip`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+#[schemars(rename_all = "kebab-case")]
+pub enum AccountQuotaScope {
+    Key,
+    EgressIp,
+}
+
+impl From<QuotaScope> for AccountQuotaScope {
+    fn from(value: QuotaScope) -> Self {
+        match value {
+            QuotaScope::Key => Self::Key,
+            QuotaScope::EgressIp => Self::EgressIp,
+        }
+    }
+}
+
+/// Wire identity matching V2 `key` / `managed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AccountType {
+    Key,
+    Managed,
+}
+
+impl From<ModelAccountType> for AccountType {
+    fn from(value: ModelAccountType) -> Self {
+        match value {
+            ModelAccountType::Key => Self::Key,
+            ModelAccountType::Managed => Self::Managed,
+        }
+    }
+}
+
+impl From<AccountType> for ModelAccountType {
+    fn from(value: AccountType) -> Self {
+        match value {
+            AccountType::Key => Self::Key,
+            AccountType::Managed => Self::Managed,
+        }
+    }
+}
+
+/// Managed-setup wizard step. Wire values match V2 snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AccountSetupStep {
+    GoogleAccount,
+    OpencodeRegistration,
+    Payment,
+    KeyVerification,
+    Ready,
+}
+
+impl From<ModelAccountSetupStep> for AccountSetupStep {
+    fn from(value: ModelAccountSetupStep) -> Self {
+        match value {
+            ModelAccountSetupStep::GoogleAccount => Self::GoogleAccount,
+            ModelAccountSetupStep::OpencodeRegistration => Self::OpencodeRegistration,
+            ModelAccountSetupStep::Payment => Self::Payment,
+            ModelAccountSetupStep::KeyVerification => Self::KeyVerification,
+            ModelAccountSetupStep::Ready => Self::Ready,
+        }
+    }
+}
+
+impl From<AccountSetupStep> for ModelAccountSetupStep {
+    fn from(value: AccountSetupStep) -> Self {
+        match value {
+            AccountSetupStep::GoogleAccount => Self::GoogleAccount,
+            AccountSetupStep::OpencodeRegistration => Self::OpencodeRegistration,
+            AccountSetupStep::Payment => Self::Payment,
+            AccountSetupStep::KeyVerification => Self::KeyVerification,
+            AccountSetupStep::Ready => Self::Ready,
+        }
+    }
+}
+
+/// Connection-verification status. Wire values match V2 snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AccountVerificationStatus {
+    NotRequired,
+    Pending,
+    Verified,
+    Failed,
+}
+
+impl From<ProviderVerificationStatus> for AccountVerificationStatus {
+    fn from(value: ProviderVerificationStatus) -> Self {
+        match value {
+            ProviderVerificationStatus::NotRequired => Self::NotRequired,
+            ProviderVerificationStatus::Pending => Self::Pending,
+            ProviderVerificationStatus::Verified => Self::Verified,
+            ProviderVerificationStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+/// Custom/upstream protocol. Wire values match V2 snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AccountUpstreamProtocol {
+    ChatCompletions,
+    Responses,
+    Messages,
+}
+
+impl From<UpstreamProtocolKind> for AccountUpstreamProtocol {
+    fn from(value: UpstreamProtocolKind) -> Self {
+        match value {
+            UpstreamProtocolKind::ChatCompletions => Self::ChatCompletions,
+            UpstreamProtocolKind::Responses => Self::Responses,
+            UpstreamProtocolKind::Messages => Self::Messages,
+        }
+    }
+}
+
+impl From<AccountUpstreamProtocol> for UpstreamProtocolKind {
+    fn from(value: AccountUpstreamProtocol) -> Self {
+        match value {
+            AccountUpstreamProtocol::ChatCompletions => Self::ChatCompletions,
+            AccountUpstreamProtocol::Responses => Self::Responses,
+            AccountUpstreamProtocol::Messages => Self::Messages,
+        }
+    }
+}
+
+/// Custom auth scheme. Wire values match V2 kebab-case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+#[schemars(rename_all = "kebab-case")]
+pub enum AccountAuthScheme {
+    Bearer,
+    XApiKey,
+}
+
+impl From<UpstreamAuthScheme> for AccountAuthScheme {
+    fn from(value: UpstreamAuthScheme) -> Self {
+        match value {
+            UpstreamAuthScheme::Bearer => Self::Bearer,
+            UpstreamAuthScheme::XApiKey => Self::XApiKey,
+        }
+    }
+}
+
+impl From<AccountAuthScheme> for UpstreamAuthScheme {
+    fn from(value: AccountAuthScheme) -> Self {
+        match value {
+            AccountAuthScheme::Bearer => Self::Bearer,
+            AccountAuthScheme::XApiKey => Self::XApiKey,
+        }
+    }
+}
+
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.
 ///
 /// Response types are generated with the serialize contract so `Option` fields
@@ -347,6 +861,12 @@ pub fn contract_schema() -> Value {
     include_type::<ConnectionSubKey>(&mut serialize);
     include_type::<Settings>(&mut serialize);
     include_type::<ProxySupportedModel>(&mut serialize);
+    include_type::<Account>(&mut serialize);
+    include_type::<AccountList>(&mut serialize);
+    include_type::<AccountMutation>(&mut serialize);
+    include_type::<AccountCustomConfig>(&mut serialize);
+    include_type::<AccountModelCapability>(&mut serialize);
+    include_type::<AccountAcknowledgement>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -354,6 +874,17 @@ pub fn contract_schema() -> Value {
     include_type::<SettingsUpdate>(&mut deserialize);
     include_type::<KeyCreate>(&mut deserialize);
     include_type::<KeyUpdate>(&mut deserialize);
+    include_type::<AccountCreate>(&mut deserialize);
+    include_type::<AccountManagedCreate>(&mut deserialize);
+    include_type::<AccountUpdate>(&mut deserialize);
+    include_type::<AccountOrder>(&mut deserialize);
+    include_type::<AccountSetupUpdate>(&mut deserialize);
+    include_type::<AccountCustomConfigUpdate>(&mut deserialize);
+    include_type::<AccountCustomConfigWrite>(&mut deserialize);
+    include_type::<AccountModelCapabilitiesUpdate>(&mut deserialize);
+    include_type::<AccountModelCapabilityWrite>(&mut deserialize);
+    include_type::<AccountAcknowledgementCreate>(&mut deserialize);
+    include_type::<AccountAcknowledgementWrite>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -680,5 +1211,163 @@ mod tests {
                 "MutationAck must not expose {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn account_response_emits_nulls_and_never_carries_secrets() {
+        let account = Account {
+            id: "acct-1".into(),
+            provider_id: "opencode".into(),
+            offering_id: "go".into(),
+            credential_kind: AccountCredentialKind::ApiKey,
+            quota_scope: AccountQuotaScope::Key,
+            name: "main".into(),
+            username: None,
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            purchase_date: "2026-01-31".into(),
+            expires_on: "2026-02-28".into(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            usage_sync_last_success_at: None,
+            usage_sync_next_allowed_at: None,
+            created_at: "2026-01-31T00:00:00Z".into(),
+            updated_at: "2026-01-31T00:00:00Z".into(),
+            revision: 4,
+            process_generation: 9,
+            verification_status: AccountVerificationStatus::NotRequired,
+            connection_verified_at: None,
+            verification_error: None,
+            plan_routable: true,
+            custom_config: None,
+            model_capabilities: Vec::new(),
+            acknowledgements: Vec::new(),
+        };
+        let value = serde_json::to_value(&account).unwrap();
+        let object = value.as_object().unwrap();
+        for forbidden in [
+            "key",
+            "password",
+            "passwordCipher",
+            "keyCipher",
+            "gatewayKey",
+            "gateway_key",
+            "primaryKey",
+            "referralCode",
+            "referral_code",
+        ] {
+            assert!(
+                !object.contains_key(forbidden),
+                "Account must not expose {forbidden}"
+            );
+        }
+        assert_eq!(value["username"], Value::Null);
+        assert_eq!(value["notes"], Value::Null);
+        assert_eq!(value["customConfig"], Value::Null);
+        assert_eq!(value["cooldown5hUntil"], Value::Null);
+        assert_eq!(value["verificationStatus"], "not_required");
+        assert_eq!(value["quotaScope"], "key");
+        assert_eq!(value["processGeneration"], 9);
+
+        let listed = AccountList {
+            accounts: vec![account.clone()],
+            revision: 4,
+            process_generation: 9,
+        };
+        let listed_value = serde_json::to_value(&listed).unwrap();
+        assert_eq!(listed_value["accounts"][0]["id"], "acct-1");
+        assert_eq!(listed_value["revision"], 4);
+
+        let deleted = AccountMutation {
+            account: None,
+            revision: 5,
+            process_generation: 9,
+        };
+        let deleted_value = serde_json::to_value(&deleted).unwrap();
+        assert_eq!(deleted_value["account"], Value::Null);
+        assert_eq!(deleted_value["revision"], 5);
+    }
+
+    #[test]
+    fn account_requests_accept_write_only_secrets_and_reject_unknown_fields() {
+        let created: AccountCreate = serde_json::from_value(json!({
+            "expectedRevision": 3,
+            "processGeneration": 9,
+            "name": "Go",
+            "key": "sk-secret",
+            "password": "pw-secret",
+            "referralCode": "ref-1"
+        }))
+        .unwrap();
+        assert_eq!(created.expectation.expected_revision, 3);
+        assert_eq!(created.key, "sk-secret");
+        assert_eq!(created.password.as_deref(), Some("pw-secret"));
+        assert_eq!(created.referral_code.as_deref(), Some("ref-1"));
+        assert!(created.provider_id.is_none());
+        assert!(created.custom_config.is_none());
+        assert!(
+            serde_json::from_value::<AccountCreate>(json!({
+                "expectedRevision": 3,
+                "processGeneration": 9,
+                "name": "Go",
+                "key": "sk-secret",
+                "gatewayKey": "ocg-secret"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AccountUpdate>(json!({
+                "expectedRevision": 3,
+                "processGeneration": 9,
+                "providerId": "opencode"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AccountManagedCreate>(json!({
+                "expectedRevision": 3,
+                "processGeneration": 9,
+                "name": "draft",
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+
+        let patched: AccountUpdate = serde_json::from_value(json!({
+            "expectedRevision": 4,
+            "processGeneration": 9,
+            "enabled": false
+        }))
+        .unwrap();
+        assert_eq!(patched.enabled, Some(false));
+        assert!(patched.key.is_none());
+        assert!(patched.name.is_none());
+    }
+
+    #[test]
+    fn service_unavailable_error_emits_stable_code_and_cas_tokens() {
+        let error = V3Error::service_unavailable("browser stop failed", 11, 9);
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["code"], ERROR_SERVICE_UNAVAILABLE);
+        assert_eq!(value["code"], "serviceUnavailable");
+        assert_eq!(value["message"], "browser stop failed");
+        assert_eq!(value["currentRevision"], 11);
+        assert_eq!(value["processGeneration"], 9);
+
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        assert!(defs.contains_key("V3Error"));
+        assert_eq!(
+            defs["V3Error"]["properties"]["code"]["type"], "string",
+            "new error codes must not reshape the V3Error catalog definition"
+        );
     }
 }

@@ -2928,12 +2928,25 @@ impl Database {
         input: &AccountCustomConfigInput,
         allow_protocol_auth_change: bool,
     ) -> Result<AccountCustomConfig> {
+        self.commit_account_custom_config(account_id, input, allow_protocol_auth_change)?;
+        self.account_custom_config(account_id)?
+            .ok_or_else(|| anyhow::anyhow!("custom config was not persisted"))
+    }
+
+    /// Persist and commit a Custom account config without performing a
+    /// fallible post-commit read. Callers that publish an external revision
+    /// can therefore advance it immediately after this method returns `Ok`.
+    pub(crate) fn commit_account_custom_config(
+        &self,
+        account_id: &str,
+        input: &AccountCustomConfigInput,
+        allow_protocol_auth_change: bool,
+    ) -> Result<()> {
         anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
         let tx = self.conn.unchecked_transaction()?;
         persist_account_custom_config_on(&tx, account_id, input, allow_protocol_auth_change)?;
         tx.commit()?;
-        self.account_custom_config(account_id)?
-            .ok_or_else(|| anyhow::anyhow!("custom config was not persisted"))
+        Ok(())
     }
 
     pub fn list_account_model_capabilities(
@@ -3041,11 +3054,22 @@ impl Database {
         account_id: &str,
         capabilities: &[AccountModelCapabilityInput],
     ) -> Result<Vec<AccountModelCapability>> {
+        self.commit_account_model_capabilities(account_id, capabilities)?;
+        self.list_account_model_capabilities(account_id)
+    }
+
+    /// Persist and commit declared model capabilities without performing a
+    /// fallible post-commit read. See [`Self::commit_account_custom_config`].
+    pub(crate) fn commit_account_model_capabilities(
+        &self,
+        account_id: &str,
+        capabilities: &[AccountModelCapabilityInput],
+    ) -> Result<()> {
         anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
         let tx = self.conn.unchecked_transaction()?;
         persist_account_model_capabilities_on(&tx, account_id, capabilities)?;
         tx.commit()?;
-        self.list_account_model_capabilities(account_id)
+        Ok(())
     }
 
     pub fn list_account_acknowledgements(
@@ -3068,12 +3092,26 @@ impl Database {
         notice: PlanRiskNotice,
         accepted_at: DateTime<Utc>,
     ) -> Result<AccountAcknowledgement> {
-        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
-        persist_account_acknowledgement_on(&self.conn, account_id, notice, accepted_at)?;
+        self.commit_account_acknowledgement(account_id, notice, accepted_at)?;
         self.list_account_acknowledgements(account_id)?
             .into_iter()
             .find(|row| row.acknowledgement_id == notice.acknowledgement_id)
             .ok_or_else(|| anyhow::anyhow!("acknowledgement was not persisted"))
+    }
+
+    /// Persist and commit a risk acknowledgement without performing a
+    /// fallible post-commit read. See [`Self::commit_account_custom_config`].
+    pub(crate) fn commit_account_acknowledgement(
+        &self,
+        account_id: &str,
+        notice: PlanRiskNotice,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<()> {
+        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
+        let tx = self.conn.unchecked_transaction()?;
+        persist_account_acknowledgement_on(&tx, account_id, notice, accepted_at)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn account_has_acknowledgement(

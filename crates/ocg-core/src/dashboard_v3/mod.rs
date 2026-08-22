@@ -2,9 +2,10 @@
 //!
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
-//! generation, connection/settings reads, the settings write path, and the
-//! access-key lifecycle.
+//! generation, connection/settings reads, the settings write path, the
+//! access-key lifecycle, and the local accounts control plane.
 
+mod accounts;
 mod connection;
 mod keys;
 mod settings;
@@ -14,7 +15,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -22,11 +23,18 @@ use serde_json::Value;
 use crate::state::CoreState;
 
 pub use types::{
-    CATALOG_TYPE_NAMES, ConnectionInfo, ConnectionSubKey, ControlRevision, ERROR_INTERNAL,
-    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
-    ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, KeyCreate, KeyUpdate, MutationAck,
-    MutationExpectation, PricingRevision, ProxyListDirection, ProxyMode, ProxySupportedModel,
-    RoutingMode, Settings, SettingsUpdate, V3Error, contract_schema, contract_schema_pretty,
+    Account, AccountAcknowledgement, AccountAcknowledgementCreate, AccountAcknowledgementWrite,
+    AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
+    AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountList, AccountManagedCreate,
+    AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
+    AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
+    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus,
+    CATALOG_TYPE_NAMES, ConnectionInfo, ConnectionSubKey, ControlRevision, ERROR_CONFLICT,
+    ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
+    ERROR_NOT_FOUND, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
+    ERROR_UNAUTHORIZED, KeyCreate, KeyUpdate, MutationAck, MutationExpectation, PricingRevision,
+    ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
+    V3Error, contract_schema, contract_schema_pretty,
 };
 
 /// Must match `dashboard.rs` `SESSION_COOKIE`. V2 owns login; V3 only checks it.
@@ -50,6 +58,39 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             patch(keys::update_key).delete(keys::delete_key),
         )
         .route("/keys/{id}/regenerate", post(keys::regenerate_key))
+        .route(
+            "/accounts",
+            get(accounts::list_accounts).post(accounts::create_account),
+        )
+        .route("/accounts/managed", post(accounts::create_managed_account))
+        .route("/accounts/order", put(accounts::reorder_accounts))
+        .route(
+            "/accounts/{id}",
+            get(accounts::get_account)
+                .patch(accounts::update_account)
+                .delete(accounts::delete_account),
+        )
+        .route("/accounts/{id}/toggle", post(accounts::toggle_account))
+        .route(
+            "/accounts/{id}/setup",
+            patch(accounts::advance_account_setup),
+        )
+        .route(
+            "/accounts/{id}/reset-cooldown",
+            post(accounts::reset_account_cooldown),
+        )
+        .route(
+            "/accounts/{id}/custom-config",
+            put(accounts::put_account_custom_config),
+        )
+        .route(
+            "/accounts/{id}/model-capabilities",
+            put(accounts::put_account_model_capabilities),
+        )
+        .route(
+            "/accounts/{id}/acknowledgements",
+            post(accounts::create_account_acknowledgement),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }
 
@@ -92,6 +133,50 @@ impl V3ApiError {
             status: StatusCode::BAD_REQUEST,
             body: V3Error::invalid_request_at(
                 message,
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn not_found(state: &CoreState) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            body: V3Error::not_found(
+                "account not found",
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn conflict_at(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            body: V3Error::conflict(
+                message,
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn precondition_failed_at(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::PRECONDITION_FAILED,
+            body: V3Error::precondition_failed(
+                message,
+                state.settings_revision(),
+                state.process_generation(),
+            ),
+        }
+    }
+
+    fn service_unavailable(state: &CoreState, message: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: V3Error::service_unavailable(
+                message.to_string(),
                 state.settings_revision(),
                 state.process_generation(),
             ),
