@@ -4,15 +4,14 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-pub const OPENCODE_PROVIDER_ID: &str = "opencode";
-pub const COMMAND_CODE_PROVIDER_ID: &str = "command-code";
-pub const OPENCODE_ZEN_FREE_PROVIDER_ID: &str = "opencode-zen-free";
-pub const SCNET_PROVIDER_ID: &str = "scnet";
-pub const CUSTOM_PROVIDER_ID: &str = "custom";
-
-pub const GO_OFFERING_ID: &str = "go";
-pub const GOAT_OFFERING_ID: &str = "goat";
-pub const ANONYMOUS_FREE_OFFERING_ID: &str = "anonymous-free";
+pub use crate::kernel::ids::{
+    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
+    CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+    SCNET_TOKEN_PLAN_OFFERING_IDS, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
+    SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID, ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
+};
 
 /// Official Command Code Provider API v1 base. Catalog `routable` stays false;
 /// this constant is the transport contract, not a production enablement flag.
@@ -26,18 +25,9 @@ pub const COMMAND_CODE_GOAT_MESSAGES_PATH: &str = "/messages";
 /// Documented official discovery path. Billing/schema is unproven; must not be
 /// used for connection verification or model enablement.
 pub const COMMAND_CODE_GOAT_MODELS_PATH: &str = "/models";
-/// Client-facing Alias. Go still owns the published kebab alias; GOAT maps it
-/// internally to the slash raw ID and stays non-routeable.
-pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS: &str = "deepseek-v4-flash";
-/// Unique exact upstream raw ID for Command Code GOAT.
-pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM: &str = "deepseek/deepseek-v4-flash";
 pub const COMMAND_CODE_GOAT_QUOTA_5H: f64 = 14.0;
 pub const COMMAND_CODE_GOAT_QUOTA_WEEK: f64 = 35.0;
 pub const COMMAND_CODE_GOAT_QUOTA_MONTH: f64 = 70.0;
-pub const SCNET_TOKEN_PLAN_BASIC_OFFERING_ID: &str = "token-plan-basic";
-pub const SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID: &str = "token-plan-standard";
-pub const SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID: &str = "token-plan-premium";
-pub const CUSTOM_API_OFFERING_ID: &str = "api";
 
 pub const SCNET_TOKEN_PLAN_KEY_PREFIX: &str = "sk-tp-";
 pub const SCNET_RISK_ACKNOWLEDGEMENT_ID: &str = "scnet-token-plan-restrictions";
@@ -53,12 +43,6 @@ pub const SCNET_RISK_ACKNOWLEDGEMENT_CONTENT_HASH: &str =
 pub const SCNET_TOKEN_PLAN_OFFICIAL_BASIC_NAME: &str = "基础版";
 pub const SCNET_TOKEN_PLAN_OFFICIAL_STANDARD_NAME: &str = "标准版";
 pub const SCNET_TOKEN_PLAN_OFFICIAL_PREMIUM_NAME: &str = "高级版";
-pub const SCNET_TOKEN_PLAN_OFFERING_IDS: [&str; 3] = [
-    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-    SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID,
-    SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
-];
-
 /// Catalog `model_source` shared by token-plan-basic/standard/premium.
 /// Official usable-model table only; not a client alias registry.
 pub const SCNET_TOKEN_PLAN_MODEL_SOURCE: &str = "official_token_plan_usable_models_2026_08_21";
@@ -106,11 +90,6 @@ pub const QUOTA_WINDOW_FIVE_HOURS: &str = "five_hours";
 pub const QUOTA_WINDOW_WEEK: &str = "week";
 pub const QUOTA_WINDOW_MONTH: &str = "month";
 pub const QUOTA_WINDOW_FREE: &str = "free";
-
-/// Reserved account row representing the egress-IP-scoped OpenCode Zen free
-/// route. It is created by schema migration, never by the generic account API.
-pub const ZEN_FREE_ACCOUNT_ID: &str = "00000000-0000-0000-0000-000000000002";
-pub const ZEN_FREE_ACCOUNT_NAME: &str = "OpenCode Zen Free";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

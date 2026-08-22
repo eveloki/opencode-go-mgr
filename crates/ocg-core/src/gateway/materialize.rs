@@ -33,13 +33,14 @@ use crate::alias::{ProviderMapping, ResolveError, ResolvedModel};
 use crate::custom::CustomAccountRuntime;
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
-    ApiFormat, CustomRouteSpec, MaterializeSpec, ParsedClientRequest, ProtocolError, RequestPlan,
+    CustomRouteSpec, MaterializeSpec, ParsedClientRequest, ProtocolError, RequestPlan,
     materialize_parsed_request,
 };
 use crate::gateway::provider_adapter;
 use crate::gateway::routing::RoutingCandidate;
+use crate::kernel::ids::normalize_model_name;
+use crate::kernel::protocol::ApiFormat;
 use crate::models::{Account, AppConfig, UpstreamChannel};
-use crate::pricing::normalize_model_name;
 use crate::provider::ProviderAdapterKind;
 use crate::provider_contracts::{
     ContractScope, EffectiveContractSet, NO_ENABLED_UPSTREAM_PROTOCOL,

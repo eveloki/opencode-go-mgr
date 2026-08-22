@@ -8,20 +8,20 @@ use crate::gateway::diagnostics::{
 use crate::gateway::limit::{parse_free_reset_or_default, parse_reset, parse_usage_limit_window};
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
-    ApiFormat, RequestPlan, UsageCounts, error_body, extract_usage, format_error,
-    has_complete_usage, has_usage, merge_stream_usage, transform_response,
+    RequestPlan, UsageCounts, error_body, extract_usage, format_error, has_complete_usage,
+    has_usage, merge_stream_usage, transform_response,
 };
 use crate::gateway::protocol_stream::StreamConverter;
 use crate::gateway::provider_adapter::{self, UpstreamAuth};
 use crate::gateway::selector::AccountSelector;
 use crate::http_client::RouteLabel;
+use crate::kernel::ids::{OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID};
+use crate::kernel::pricing::PricingSnapshot;
+use crate::kernel::protocol::ApiFormat;
 use crate::models::{
     Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
 };
-use crate::pricing::PricingSnapshot;
-use crate::provider::{
-    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, is_command_code_goat, is_custom_api,
-};
+use crate::provider::{is_command_code_goat, is_custom_api};
 use crate::state::CoreState;
 use anyhow::Result;
 use axum::body::Body;
@@ -3114,8 +3114,8 @@ mod stream_outcome_guard_tests {
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::Database;
     use crate::gateway::diagnostics::RequestTrace;
-    use crate::gateway::protocol::ApiFormat;
     use crate::http_client::RouteLabel;
+    use crate::kernel::protocol::ApiFormat;
     use crate::models::{Account, AccountSetupStep, AccountType};
     use crate::state::CoreStateInner;
     use chrono::Utc;

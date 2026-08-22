@@ -118,8 +118,8 @@ fn spawn_forward_log_backfill(state: CoreState) {
     // The primary key attributes under its fixed hardcoded id (see
     // `gateway_keys::PRIMARY_KEY_ID`); no config or db lock is needed.
     let (key_id, key_name) = (
-        crate::gateway_keys::PRIMARY_KEY_ID.to_string(),
-        crate::gateway_keys::PRIMARY_KEY_NAME.to_string(),
+        crate::kernel::ids::PRIMARY_KEY_ID.to_string(),
+        crate::kernel::ids::PRIMARY_KEY_NAME.to_string(),
     );
     // Fast path: one bounded step inline. Fresh databases (and tests) have no
     // NULL rows, so this records the completion marker and never spawns.

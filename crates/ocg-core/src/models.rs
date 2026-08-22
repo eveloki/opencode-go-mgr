@@ -4,14 +4,14 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::kernel::ids::ZEN_FREE_ACCOUNT_ID;
 use crate::provider::{
     ConnectionVerificationStatus, CredentialKind, QuotaScope, UpstreamAuthScheme,
-    UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID, default_credential_kind, default_offering_id,
-    default_provider_id, default_quota_scope, validate_account_binding,
+    UpstreamProtocolKind, default_credential_kind, default_offering_id, default_provider_id,
+    default_quota_scope, validate_account_binding,
 };
 
-/// Default model for dashboard account ping and CLI `ping`.
-pub const DEFAULT_ACCOUNT_TEST_MODEL: &str = "mimo-v2.5";
+pub use crate::kernel::ids::DEFAULT_ACCOUNT_TEST_MODEL;
 
 /// Maximum persisted freeform account note length, counted in Unicode scalars.
 pub const MAX_ACCOUNT_NOTES_CHARS: usize = 4000;
@@ -625,13 +625,12 @@ impl ClaudeDesktopModels {
             if model.is_empty() {
                 continue;
             }
-            if crate::gateway::free_models::is_free_model(model) {
+            if crate::kernel::ids::is_free_model(model) {
                 return Err(format!(
                     "Claude Desktop {role} model `{model}` cannot be a Zen free model"
                 ));
             }
-            if !crate::gateway::protocol::supported_model_ids().any(|supported| supported == model)
-            {
+            if !crate::kernel::protocol::supported_model_ids().any(|supported| supported == model) {
                 return Err(format!("unsupported Claude Desktop {role} model `{model}`"));
             }
         }
@@ -959,8 +958,8 @@ impl ForwardMetrics {
         let Some(provider_id) = provider_id else {
             return;
         };
-        if provider_id == crate::provider::OPENCODE_PROVIDER_ID
-            && offering_id == Some(crate::provider::GO_OFFERING_ID)
+        if provider_id == crate::kernel::ids::OPENCODE_PROVIDER_ID
+            && offering_id == Some(crate::kernel::ids::GO_OFFERING_ID)
         {
             return;
         }
@@ -971,7 +970,7 @@ impl ForwardMetrics {
         self.quota_multiplier = None;
         self.local_adjustment_multiplier = None;
 
-        if provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+        if provider_id == crate::kernel::ids::OPENCODE_ZEN_FREE_PROVIDER_ID
             && offering_id == Some(crate::provider::ANONYMOUS_FREE_OFFERING_ID)
             && (successful || has_cost_outcome)
         {

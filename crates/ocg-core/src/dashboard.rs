@@ -9,12 +9,15 @@ use crate::gateway::{
         api_format_name, redact_known_secret, sanitize_upstream_error_value_with_known_secret,
     },
     limit::{parse_reset, parse_usage_limit_window},
-    protocol::{ApiFormat, supported_model_protocol_profiles, supported_model_protocols},
 };
 use crate::go_usage::GoUsageError;
+use crate::kernel::pricing::PricingSnapshot;
+use crate::kernel::protocol::{
+    ApiFormat, supported_model_protocol_profiles, supported_model_protocols,
+};
 use crate::models::*;
 use crate::pricing::{
-    PricingSnapshot, ensure_seed_model_coverage, fetch_official_snapshot, stamp_pricing_activation,
+    ensure_seed_model_coverage, fetch_official_snapshot, stamp_pricing_activation,
 };
 use crate::state::{CoreState, DesktopUpdateStartError, DesktopUpdateStatus};
 use axum::{
@@ -1043,17 +1046,17 @@ async fn provider_catalog(State(state): State<CoreState>) -> Json<Vec<ProviderCa
 #[derive(Debug, Serialize)]
 struct ZenFreeModelsResponse {
     account_id: &'static str,
-    models: Vec<crate::zen_models::ZenFreeModelView>,
+    models: Vec<crate::kernel::zen::ZenFreeModelView>,
     refreshed_at: Option<DateTime<Utc>>,
     source_url: String,
 }
 
 fn zen_free_models_response(
-    catalog: &crate::zen_models::ZenFreeModelCatalog,
+    catalog: &crate::kernel::zen::ZenFreeModelCatalog,
 ) -> ZenFreeModelsResponse {
     ZenFreeModelsResponse {
         account_id: crate::provider::ZEN_FREE_ACCOUNT_ID,
-        models: crate::zen_models::model_views(catalog),
+        models: crate::kernel::zen::model_views(catalog),
         refreshed_at: catalog.refreshed_at,
         source_url: catalog.source_url.clone(),
     }
@@ -1079,7 +1082,7 @@ async fn get_zen_free_models(
 
 async fn refresh_zen_free_catalog(
     state: &CoreState,
-) -> Result<crate::zen_models::ZenFreeModelCatalog, ApiError> {
+) -> Result<crate::kernel::zen::ZenFreeModelCatalog, ApiError> {
     let _guard = state.zen_free_models_refresh.try_lock().map_err(|_| {
         ApiError::status(
             StatusCode::CONFLICT,
@@ -3995,7 +3998,7 @@ fn apply_official_go_usage_snapshot(
     account_id: &str,
     expected_key_cipher: &str,
     snapshot: &crate::go_usage::GoUsageSnapshot,
-    limits: &crate::pricing::PricingLimits,
+    limits: &crate::kernel::pricing::PricingLimits,
 ) -> Result<UsageWindow, ApiError> {
     let account = db
         .get_account(account_id)
@@ -4082,7 +4085,7 @@ fn account_usage_limits(
     state: &CoreState,
     id: &str,
     _require_manual_calibration: bool,
-) -> Result<crate::pricing::PricingLimits, ApiError> {
+) -> Result<crate::kernel::pricing::PricingLimits, ApiError> {
     let account = state
         .db
         .lock()
@@ -4103,7 +4106,7 @@ fn account_usage_limits(
             "manual usage calibration is unavailable for this account",
         ));
     }
-    Ok(crate::pricing::PricingLimits {
+    Ok(crate::kernel::pricing::PricingLimits {
         window_5h: crate::provider::COMMAND_CODE_GOAT_QUOTA_5H,
         window_week: crate::provider::COMMAND_CODE_GOAT_QUOTA_WEEK,
         window_month: crate::provider::COMMAND_CODE_GOAT_QUOTA_MONTH,
@@ -5010,12 +5013,12 @@ async fn gateway_status(State(state): State<CoreState>) -> Json<GatewayStatus> {
 /// the base row. Empty intersection is `[]`, not an error. Never selects an
 /// account, calls upstream, writes logs, or advances routing state.
 #[cfg(test)]
-fn local_application_models(snapshot: &crate::pricing::PricingSnapshot) -> Vec<String> {
+fn local_application_models(snapshot: &crate::kernel::pricing::PricingSnapshot) -> Vec<String> {
     local_application_models_with_contracts(snapshot, None)
 }
 
 fn local_application_models_with_contracts(
-    snapshot: &crate::pricing::PricingSnapshot,
+    snapshot: &crate::kernel::pricing::PricingSnapshot,
     contracts: Option<&crate::provider_contracts::EffectiveContractSet>,
 ) -> Vec<String> {
     let priced = snapshot
@@ -5448,8 +5451,8 @@ mod tests {
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::{AccountUsageCalibrationSnapshot, Database};
     use crate::gateway::diagnostics::api_format_name;
-    use crate::gateway::protocol::supported_model_protocols;
     use crate::go_usage::{GoUsageError, GoUsageSnapshot, GoUsageWindowStatus};
+    use crate::kernel::protocol::supported_model_protocols;
     use crate::models::{
         Account, AccountAcknowledgementInput, AccountCustomConfigInput, AccountInput,
         AccountModelCapabilityInput, AccountSetupStep, AccountType, AccountUpdate, AppConfig,
@@ -7650,13 +7653,13 @@ mod tests {
         let db = Database::open(dir.clone()).unwrap();
         let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
         state
-            .activate_zen_free_model_catalog(crate::zen_models::ZenFreeModelCatalog {
+            .activate_zen_free_model_catalog(crate::kernel::zen::ZenFreeModelCatalog {
                 models: vec![
                     "mimo-v2.5-free".to_string(),
                     "brand-new-promo-free".to_string(),
                 ],
                 refreshed_at: Some(Utc::now()),
-                source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.to_string(),
+                source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.to_string(),
             })
             .unwrap();
 

@@ -1,12 +1,10 @@
 use crate::crypto::KeyCipher;
 use crate::db::Database;
+use crate::kernel::pricing::{PricingEstimate, PricingSnapshot};
 use crate::models::{
     AppConfig, normalize_client_root_url, normalize_opencode_invite_url, normalize_proxy_url,
 };
-use crate::pricing::{
-    PricingEstimate, PricingSnapshot, embedded_seed, ensure_current_adjustment_policy,
-    ensure_seed_model_coverage,
-};
+use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use std::fmt;
@@ -130,7 +128,7 @@ pub struct CoreStateInner {
     http_client: Mutex<Arc<crate::http_client::ForwardRouteSet>>,
     pricing: RwLock<Arc<PricingSnapshot>>,
     pub pricing_refresh: tokio::sync::Mutex<()>,
-    zen_free_models: RwLock<Arc<crate::zen_models::ZenFreeModelCatalog>>,
+    zen_free_models: RwLock<Arc<crate::kernel::zen::ZenFreeModelCatalog>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
     provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
     pub routing: crate::gateway::routing::RoutingRuntime,
@@ -286,13 +284,13 @@ impl CoreStateInner {
         self.pricing.read().clone()
     }
 
-    pub fn zen_free_model_catalog(&self) -> Arc<crate::zen_models::ZenFreeModelCatalog> {
+    pub fn zen_free_model_catalog(&self) -> Arc<crate::kernel::zen::ZenFreeModelCatalog> {
         self.zen_free_models.read().clone()
     }
 
     pub fn activate_zen_free_model_catalog(
         &self,
-        catalog: crate::zen_models::ZenFreeModelCatalog,
+        catalog: crate::kernel::zen::ZenFreeModelCatalog,
     ) -> crate::Result<()> {
         let route_set = crate::http_client::build_route_set(&self.config(), &catalog)?;
         {
@@ -1465,10 +1463,10 @@ mod tests {
                 barrier.wait();
                 for i in 0..8 {
                     state
-                        .activate_zen_free_model_catalog(crate::zen_models::ZenFreeModelCatalog {
+                        .activate_zen_free_model_catalog(crate::kernel::zen::ZenFreeModelCatalog {
                             models: vec![format!("lock-order-free-{i}")],
                             refreshed_at: Some(chrono::Utc::now()),
-                            source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.into(),
+                            source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
                         })
                         .expect("zen catalog activation should not deadlock");
                 }

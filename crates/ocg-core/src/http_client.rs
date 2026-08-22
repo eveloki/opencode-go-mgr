@@ -1,5 +1,7 @@
+use crate::kernel::ids::{is_free_model, normalize_model_name};
+use crate::kernel::protocol::supported_model_ids;
+use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::{AppConfig, ProxyListDirection, ProxyMode};
-use crate::pricing::normalize_model_name;
 use reqwest::redirect::Policy;
 use std::time::Duration;
 
@@ -64,13 +66,10 @@ impl ForwardRouteSet {
 /// Stale entries — ids a newer registry removed — are dropped here so they
 /// stay inert even if a client explicitly requests that exact id, matching the
 /// load-path tolerance contract ("removed entries match nothing").
-fn normalized_known_list(
-    models: &[String],
-    zen_catalog: &crate::zen_models::ZenFreeModelCatalog,
-) -> Vec<String> {
-    let known: std::collections::HashSet<String> = crate::gateway::protocol::supported_model_ids()
+fn normalized_known_list(models: &[String], zen_catalog: &ZenFreeModelCatalog) -> Vec<String> {
+    let known: std::collections::HashSet<String> = supported_model_ids()
         .filter(|id| {
-            (*id != "big-pickle" && !crate::gateway::free_models::is_free_model(id))
+            (*id != "big-pickle" && !is_free_model(id))
                 || zen_catalog.models.iter().any(|model| model == id)
         })
         .map(normalize_model_name)
@@ -158,7 +157,7 @@ pub(crate) fn build(config: &AppConfig) -> crate::Result<reqwest::Client> {
 /// legs; every other mode builds exactly the process-wide client.
 pub(crate) fn build_route_set(
     config: &AppConfig,
-    zen_catalog: &crate::zen_models::ZenFreeModelCatalog,
+    zen_catalog: &ZenFreeModelCatalog,
 ) -> crate::Result<ForwardRouteSet> {
     match config.proxy_mode {
         ProxyMode::List => {
@@ -203,13 +202,14 @@ pub(crate) fn build_route_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::zen::ZEN_MODELS_SOURCE_URL;
     use axum::Router;
     use axum::http::StatusCode;
     use axum::response::Redirect;
     use axum::routing::get;
 
-    fn zen_catalog() -> crate::zen_models::ZenFreeModelCatalog {
-        crate::zen_models::ZenFreeModelCatalog::default()
+    fn zen_catalog() -> ZenFreeModelCatalog {
+        ZenFreeModelCatalog::default()
     }
 
     #[test]
@@ -339,10 +339,10 @@ mod tests {
             ProxyListDirection::Whitelist,
             &["brand-new-promo-free", "mimo-v2.5-free"],
         );
-        let refreshed = crate::zen_models::ZenFreeModelCatalog {
+        let refreshed = ZenFreeModelCatalog {
             models: vec!["brand-new-promo-free".to_string()],
             refreshed_at: None,
-            source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.to_string(),
+            source_url: ZEN_MODELS_SOURCE_URL.to_string(),
         };
         let routes = build_route_set(&config, &refreshed).unwrap();
         assert_eq!(

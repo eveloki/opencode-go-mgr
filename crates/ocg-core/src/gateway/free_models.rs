@@ -1,9 +1,10 @@
 //! OpenCode Zen free-model allowlist, mapping, and route resolution.
 
 use crate::models::UpstreamChannel;
-use crate::pricing::normalize_model_name;
 use bytes::Bytes;
 use serde_json::{Value, json};
+
+pub use crate::kernel::ids::is_free_model;
 
 /// Default free-usage cooldown when upstream omits a reset hint.
 pub const DEFAULT_FREE_COOLDOWN_MINUTES: i64 = 30;
@@ -37,16 +38,6 @@ const FREE_MODELS: &[FreeModelProfile] = &[
         id: "x-preview-f-free",
     },
 ];
-
-/// True for the Zen catalog naming contract. The discovered catalog remains
-/// the routing allowlist; this helper classifies materialized `-free` routes.
-///
-/// Go catalog ids can contain `free` (currently `ox-alpha-free` / Ox Alpha Free)
-/// and still uses `/zen/go`, so it remains the one explicit exception.
-pub fn is_free_model(model: &str) -> bool {
-    let normalized = normalize_model_name(model);
-    normalized.ends_with("-free") && normalized != "ox-alpha-free"
-}
 
 pub fn free_model_ids() -> impl Iterator<Item = &'static str> {
     FREE_MODELS.iter().map(|profile| profile.id)

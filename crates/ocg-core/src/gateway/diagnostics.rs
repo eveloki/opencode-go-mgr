@@ -1,4 +1,5 @@
-use crate::gateway::protocol::{ApiFormat, decode_anthropic_thinking_block, decode_chat_reasoning};
+use crate::gateway::protocol::{decode_anthropic_thinking_block, decode_chat_reasoning};
+use crate::kernel::protocol::ApiFormat;
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};

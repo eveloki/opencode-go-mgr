@@ -21,14 +21,14 @@
 //! OpenCode `MODEL_PROTOCOLS` table stays Go-specific.
 
 use crate::custom::custom_model_id_matches;
-use crate::gateway::free_models::is_free_model;
-use crate::gateway::protocol::supported_model_ids;
-use crate::provider::{
+use crate::kernel::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
     CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, is_custom_api,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, is_free_model,
 };
+use crate::kernel::protocol::supported_model_ids;
+use crate::provider::is_custom_api;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -169,7 +169,7 @@ fn registry() -> &'static Registry {
 }
 
 fn build_builtin_registry() -> Registry {
-    build_registry(&crate::zen_models::ZenFreeModelCatalog::default().models)
+    build_registry(&crate::kernel::zen::ZenFreeModelCatalog::default().models)
 }
 
 fn build_registry(zen_free_models: &[String]) -> Registry {
@@ -189,7 +189,7 @@ fn build_registry(zen_free_models: &[String]) -> Registry {
         if !is_free_model(model) {
             continue;
         }
-        if let Some(alias) = crate::zen_models::stripped_free_alias(model) {
+        if let Some(alias) = crate::kernel::zen::stripped_free_alias(model) {
             insert_mapping(&mut registry, model, zen_mapping(model));
             insert_mapping(&mut registry, alias, zen_mapping(model));
         }
@@ -563,7 +563,7 @@ pub fn is_published_alias(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::gateway::free_models::free_model_ids;
-    use crate::provider::{
+    use crate::kernel::ids::{
         CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, SCNET_PROVIDER_ID,
         SCNET_TOKEN_PLAN_OFFERING_IDS,
     };
@@ -1014,7 +1014,7 @@ mod tests {
                 );
             }
             let has_free_twin = free_model_ids().any(|free| {
-                crate::zen_models::stripped_free_alias(free).is_some_and(|alias| alias == id)
+                crate::kernel::zen::stripped_free_alias(free).is_some_and(|alias| alias == id)
             });
             assert_eq!(
                 zen.iter().any(|alias| alias == id),

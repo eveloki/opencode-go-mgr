@@ -11,6 +11,7 @@ pub mod gateway;
 pub mod gateway_keys;
 pub mod go_usage;
 pub(crate) mod http_client;
+pub mod kernel;
 pub mod models;
 pub mod pricing;
 pub mod provider;

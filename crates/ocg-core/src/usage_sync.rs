@@ -11,8 +11,8 @@ use crate::db::{
     Database,
 };
 use crate::go_usage::{GoUsageError, GoUsageSnapshot};
+use crate::kernel::pricing::PricingLimits;
 use crate::models::UsageWindow;
-use crate::pricing::PricingLimits;
 use crate::state::CoreState;
 use crate::usage_sync::provider_adapter::supports_authoritative_auto_sync;
 use chrono::{DateTime, Duration, Utc};

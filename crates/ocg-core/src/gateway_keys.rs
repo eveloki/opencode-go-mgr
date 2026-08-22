@@ -23,16 +23,7 @@ use crate::state::CoreStateInner;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
-/// Fixed attribution id for the primary key. The recognizable fixed pattern
-/// keeps it visually distinct from generated v4 UUIDs and the nil UUID.
-/// Stable from release onwards; it may change only through an explicit
-/// migration that re-attributes historical forward log rows (a chunked
-/// UPDATE, the same mechanism as the startup backfill).
-pub const PRIMARY_KEY_ID: &str = "00000000-0000-0000-0000-000000000001";
-
-/// Fixed display name for the primary key in snapshots and backfills; the UI
-/// labels the entry with the localized "主 Key".
-pub const PRIMARY_KEY_NAME: &str = "Primary";
+pub use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
 
 const MAX_NAME_CHARS: usize = 64;
 /// Ceiling on active (non-deleted) sub keys. Auth scans, the credential

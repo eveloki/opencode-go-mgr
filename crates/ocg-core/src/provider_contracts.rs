@@ -6,18 +6,19 @@
 
 use crate::alias::ProviderMapping;
 use crate::custom::CustomAccountRuntime;
-use crate::gateway::protocol::{
+use crate::kernel::ids::{
+    COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, normalize_model_name,
+};
+use crate::kernel::protocol::{
     ApiFormat, command_code_protocol_profiles, supported_model_protocol_profiles,
 };
+use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::Account;
-use crate::pricing::normalize_model_name;
 use crate::provider::{
-    BUILTIN_PLANS, COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID, OPENCODE_CONSTRUCTABLE_PROTOCOLS,
-    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, ProviderRegistry,
-    SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_USABLE_MODELS, StructuralProbeCeiling,
-    UpstreamProtocolKind,
+    BUILTIN_PLANS, OPENCODE_CONSTRUCTABLE_PROTOCOLS, ProviderAdapterKind, ProviderRegistry,
+    SCNET_TOKEN_PLAN_USABLE_MODELS, StructuralProbeCeiling, UpstreamProtocolKind,
 };
-use crate::zen_models::ZenFreeModelCatalog;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -536,7 +537,7 @@ pub fn safety_ceiling_protocols(
         StructuralProbeCeiling::ZenFreeConstructable => {
             if crate::gateway::protocol::is_known_model(model_id) {
                 OPENCODE_CONSTRUCTABLE_PROTOCOLS.to_vec()
-            } else if crate::gateway::free_models::is_free_model(model_id) {
+            } else if crate::kernel::ids::is_free_model(model_id) {
                 vec![UpstreamProtocolKind::ChatCompletions]
             } else {
                 Vec::new()
@@ -560,7 +561,7 @@ pub fn static_verified_protocols(
         ProviderAdapterKind::ZenFree => {
             if let Some(supported) = opencode_supported(model_id) {
                 supported.to_vec()
-            } else if crate::gateway::free_models::is_free_model(model_id) {
+            } else if crate::kernel::ids::is_free_model(model_id) {
                 vec![UpstreamProtocolKind::ChatCompletions]
             } else {
                 Vec::new()
@@ -925,9 +926,8 @@ fn merge_custom_scope(
     persisted: Option<&PersistedScopeRow>,
     evidence: &[PersistedModelProtocol],
 ) -> EffectiveScopeContract {
-    let descriptor =
-        ProviderRegistry::get(CUSTOM_PROVIDER_ID, crate::provider::CUSTOM_API_OFFERING_ID)
-            .expect("custom offering is registered");
+    let descriptor = ProviderRegistry::get(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
+        .expect("custom offering is registered");
     let switches = persisted.map(|row| row.switches).unwrap_or_default();
     let revision = persisted.map(|row| row.revision).unwrap_or(1);
     let declared: Vec<(String, UpstreamProtocolKind)> = runtime
@@ -1148,6 +1148,7 @@ fn custom_or_case_match(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
     use crate::custom::CustomAccountRuntime;
+    use crate::kernel::ids::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM;
     use crate::models::{AccountCustomConfig, AccountModelCapability};
     use crate::provider::{
         CUSTOM_API_OFFERING_ID, ConnectionVerificationStatus, UpstreamAuthScheme,
@@ -1272,7 +1273,7 @@ mod tests {
         assert_eq!(unknown_zen, vec![UpstreamProtocolKind::ChatCompletions]);
         assert!(!probe_may_add(
             ProviderAdapterKind::CommandCodeGoat,
-            crate::provider::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
             UpstreamProtocolKind::ChatCompletions,
             &[],
         ));
@@ -1418,7 +1419,7 @@ mod tests {
             ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
             vec![PersistedModelProtocol {
                 scope: ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
-                model_id: crate::provider::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                model_id: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: ContractEvidenceSource::ProbeConfirmed,
                 verified_at: Some(now),
@@ -1448,7 +1449,7 @@ mod tests {
         assert!(!goat.production_inference);
         assert!(
             !goat
-                .model(crate::provider::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
+                .model(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
                 .unwrap()
                 .routable
         );

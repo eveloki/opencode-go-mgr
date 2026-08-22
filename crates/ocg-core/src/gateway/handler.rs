@@ -10,11 +10,12 @@ use crate::gateway::materialize::{
     resolved_alias_from_model,
 };
 use crate::gateway::protocol::{
-    ApiFormat, MaterializeSpec, ProtocolError, RequestPlan, format_error, format_protocol_error,
+    MaterializeSpec, ProtocolError, RequestPlan, format_error, format_protocol_error,
     materialize_parsed_request, parse_client_request, parse_gemini_request,
 };
 use crate::gateway::routing::resolve_conversation_key;
 use crate::gateway::selector::AccountSelector;
+use crate::kernel::protocol::ApiFormat;
 use crate::models::UpstreamChannel;
 use crate::models::{
     AppConfig, CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,

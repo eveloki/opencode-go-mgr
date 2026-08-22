@@ -12,15 +12,15 @@ use crate::custom_http::{
     self, CustomHttpClient, CustomHttpError, HttpInferenceTransport, InferenceHttpError,
     join_custom_endpoint, json_content_headers,
 };
-use crate::gateway::protocol::ApiFormat;
+use crate::kernel::ids::{CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID};
+use crate::kernel::protocol::ApiFormat;
 use crate::models::{
     AccountCustomConfig, AccountCustomConfigInput, AccountModelCapability, AppConfig,
     CustomModelDiscoveryResult,
 };
 use crate::provider::ConnectionVerificationStatus;
 use crate::provider::{
-    CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, UpstreamAuthScheme, UpstreamProtocolKind,
-    custom_endpoint_relative_path, is_custom_api,
+    UpstreamAuthScheme, UpstreamProtocolKind, custom_endpoint_relative_path, is_custom_api,
 };
 use reqwest::StatusCode;
 use serde_json::{Value, json};

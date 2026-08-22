@@ -1,5 +1,5 @@
+use crate::kernel::pricing::{PricingLimits, PricingSnapshot};
 use crate::models::*;
-use crate::pricing::{PricingLimits, PricingSnapshot};
 use crate::provider::*;
 use crate::provider_contracts::{
     CATALOG_SOURCE_OFFICIAL_ZEN, ContractEvidenceSource, ContractScope, PersistedContracts,
@@ -2199,7 +2199,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn zen_free_model_catalog(&self) -> Result<Option<crate::zen_models::ZenFreeModelCatalog>> {
+    pub fn zen_free_model_catalog(
+        &self,
+    ) -> Result<Option<crate::kernel::zen::ZenFreeModelCatalog>> {
         self.conn
             .query_row(
                 "SELECT models_json, refreshed_at, source_url
@@ -2225,7 +2227,7 @@ impl Database {
                                 })
                         })
                         .transpose()?;
-                    Ok(crate::zen_models::ZenFreeModelCatalog {
+                    Ok(crate::kernel::zen::ZenFreeModelCatalog {
                         models,
                         refreshed_at,
                         source_url: row.get(2)?,
@@ -2238,7 +2240,7 @@ impl Database {
 
     pub fn set_zen_free_model_catalog(
         &self,
-        catalog: &crate::zen_models::ZenFreeModelCatalog,
+        catalog: &crate::kernel::zen::ZenFreeModelCatalog,
     ) -> Result<()> {
         let models_json = serde_json::to_string(&catalog.models)?;
         let refreshed_at = catalog.refreshed_at.map(|value| value.to_rfc3339());
@@ -9723,10 +9725,10 @@ mod tests {
         let refreshed_at = Utc::now();
         {
             let db = Database::open(dir.clone()).unwrap();
-            db.set_zen_free_model_catalog(&crate::zen_models::ZenFreeModelCatalog {
+            db.set_zen_free_model_catalog(&crate::kernel::zen::ZenFreeModelCatalog {
                 models: vec!["persisted-coder-free".into()],
                 refreshed_at: Some(refreshed_at),
-                source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.into(),
+                source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
             })
             .unwrap();
         }
@@ -9771,10 +9773,10 @@ mod tests {
         let refreshed_at = Utc::now();
         {
             let db = Database::open(dir.clone()).unwrap();
-            db.set_zen_free_model_catalog(&crate::zen_models::ZenFreeModelCatalog {
+            db.set_zen_free_model_catalog(&crate::kernel::zen::ZenFreeModelCatalog {
                 models: vec!["backfill-coder-free".into()],
                 refreshed_at: Some(refreshed_at),
-                source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.into(),
+                source_url: crate::kernel::zen::ZEN_MODELS_SOURCE_URL.into(),
             })
             .unwrap();
             db.conn
