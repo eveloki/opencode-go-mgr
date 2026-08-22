@@ -1,5 +1,9 @@
 use crate::custom_http::{build_custom_http_client, json_content_headers};
 use crate::db::{Database, ForwardLogDiagnosticUpdate};
+use crate::gateway::attempt::{
+    AttemptSpec, CredentialHandle, CredentialResolveError, CredentialResolver, ProxyRoutingModel,
+    UpstreamAuth,
+};
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
     TransportClassifyInput, classify_http, classify_preflight, classify_stream, classify_transport,
@@ -10,28 +14,24 @@ use crate::gateway::diagnostics::{
     redact_known_secret_values, safe_upstream_headers,
     sanitize_upstream_error_value_with_known_secret, serialize_diagnostic,
 };
-use crate::gateway::limit::{parse_reset, parse_usage_limit_window};
 use crate::gateway::materialize::native_log_identity;
 use crate::gateway::protocol::{
     RequestPlan, UsageCounts, error_body, extract_usage, format_error, has_complete_usage,
     has_usage, merge_stream_usage, transform_response,
 };
 use crate::gateway::protocol_stream::StreamConverter;
-use crate::gateway::provider_adapter::{self, UpstreamAuth};
-use crate::gateway::selector::AccountSelector;
+use crate::gateway::provider_adapter;
 use crate::http_client::RouteLabel;
 use crate::kernel::pricing::PricingSnapshot;
 use crate::kernel::protocol::ApiFormat;
-use crate::models::{
-    Account, AppConfig, ForwardLog, ForwardMetrics, UpstreamChannel, UsageWindowKind,
-};
+use crate::models::{Account, AppConfig, ForwardLog, ForwardMetrics, UsageWindowKind};
 use crate::state::CoreState;
 use anyhow::Result;
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::BytesMut;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use futures_util::StreamExt;
 use parking_lot::Mutex;
 use reqwest::Client;
@@ -40,6 +40,43 @@ use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
 const MAX_UPSTREAM_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Temporary Host binding: decrypt via the process host for the account the
+/// outer loop already selected. `state.rs` is outside this lease; a later
+/// host slice should move this next to `KeyHost`.
+pub(crate) struct HostCredentialResolver<'a> {
+    state: &'a CoreState,
+    account: &'a Account,
+}
+
+impl<'a> HostCredentialResolver<'a> {
+    pub(crate) fn new(state: &'a CoreState, account: &'a Account) -> Self {
+        Self { state, account }
+    }
+}
+
+impl CredentialResolver for HostCredentialResolver<'_> {
+    fn resolve_credential(
+        &self,
+        handle: &CredentialHandle,
+    ) -> Result<Option<String>, CredentialResolveError> {
+        match handle {
+            CredentialHandle::None => Ok(None),
+            CredentialHandle::Account { id } => {
+                if id != &self.account.id {
+                    return Err(CredentialResolveError::HandleMismatch {
+                        expected: self.account.id.clone(),
+                        actual: id.clone(),
+                    });
+                }
+                self.state
+                    .decrypt_key(&self.account.key_cipher)
+                    .map(Some)
+                    .map_err(CredentialResolveError::Decrypt)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ForwardAction {
@@ -129,15 +166,11 @@ impl ForwardAttemptContext {
         self.known_secret = Some(known_secret.to_string());
     }
 
-    fn set_provider_route(
-        &mut self,
-        account: &Account,
-        route: &provider_adapter::ResolvedProviderRoute,
-    ) {
+    fn set_provider_route(&mut self, account: &Account, spec: &AttemptSpec) {
         self.route_account_id = Some(account.id.clone());
         self.provider_id = Some(account.provider_id.clone());
         self.offering_id = Some(account.offering_id.clone());
-        self.credential_account_id = route.credential_account_id.clone();
+        self.credential_account_id = spec.credential_account_id().map(str::to_string);
     }
 
     fn redact_known_secret(&self, text: &str) -> String {
@@ -279,8 +312,8 @@ async fn forward_request_impl(
     let mut attempt_context =
         ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
     attempt_context.set_client_key(client_key_id, state);
-    let provider_route = match provider_adapter::resolve_route(account, config, plan) {
-        Ok(route) => route,
+    let attempt_spec = match provider_adapter::resolve_route(account, config, plan) {
+        Ok(spec) => spec,
         Err(error) => {
             let class = classify_preflight(PreflightKind::Route);
             let message = format!("provider route is unavailable: {error}");
@@ -317,50 +350,47 @@ async fn forward_request_impl(
             return Ok(account_preflight_failure(plan, message));
         }
     };
-    attempt_context.set_provider_route(account, &provider_route);
-    if plan.custom_route.is_none() {
-        ensure_safe_upstream_base_url(&provider_route.base_url)?;
+    attempt_context.set_provider_route(account, &attempt_spec);
+    if attempt_spec.restricted_upstream_url() {
+        ensure_safe_upstream_base_url(&attempt_spec.base_url)?;
     }
-    let key = if provider_route.auth == UpstreamAuth::None {
-        None
-    } else {
-        match state.decrypt_key(&account.key_cipher) {
-            Ok(key) => Some(key),
-            Err(error) => {
-                let class = classify_preflight(PreflightKind::Decrypt);
-                let message = format!("failed to decrypt account credentials: {error}");
-                let failure = attempt_context.failure(FailureSpec {
-                    error_source: "gateway",
-                    error_stage: "credential",
-                    downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    upstream_status: None,
-                    upstream_wait_ms: None,
-                    retry_action: Some(retry_action_name(forward_action_for_class(
-                        class,
-                        allow_same_account_retry,
-                        None,
-                    ))),
-                    upstream_headers: None,
-                    upstream_error: None,
-                    request_body: Some(client_body),
-                });
-                log_forward(
-                    &state.db.lock(),
-                    account,
-                    &plan.model,
-                    "error",
+    let resolver = HostCredentialResolver::new(state, account);
+    let key = match resolver.resolve_credential(&attempt_spec.credential) {
+        Ok(key) => key,
+        Err(error) => {
+            let class = classify_preflight(PreflightKind::Decrypt);
+            let message = format!("failed to decrypt account credentials: {error}");
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "gateway",
+                error_stage: "credential",
+                downstream_status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: None,
+                retry_action: Some(retry_action_name(forward_action_for_class(
+                    class,
+                    allow_same_account_retry,
                     None,
-                    metadata_metrics(
-                        &pricing_snapshot,
-                        plan.service_tier.as_deref(),
-                        "not_applicable",
-                    ),
-                    Some(&message),
-                    &attempt_context,
-                    Some(failure),
-                )?;
-                return Ok(account_preflight_failure(plan, message));
-            }
+                ))),
+                upstream_headers: None,
+                upstream_error: None,
+                request_body: Some(client_body),
+            });
+            log_forward(
+                &state.db.lock(),
+                account,
+                &plan.model,
+                "error",
+                None,
+                metadata_metrics(
+                    &pricing_snapshot,
+                    plan.service_tier.as_deref(),
+                    "not_applicable",
+                ),
+                Some(&message),
+                &attempt_context,
+                Some(failure),
+            )?;
+            return Ok(account_preflight_failure(plan, message));
         }
     };
     if let Some(key) = key.as_deref() {
@@ -392,19 +422,14 @@ async fn forward_request_impl(
             upstream_headers.insert(name.clone(), value.clone());
         }
     }
-    // Match the provider offering's authentication contract. The client wire
-    // protocol alone is not an authentication decision.
+    // Match the attempt's authentication contract. The client wire protocol
+    // alone is not an authentication decision. The executor constructs the
+    // header from the Host-resolved secret; adapters never supplied plaintext.
     upstream_headers.insert(
         reqwest::header::CONTENT_TYPE,
         reqwest::header::HeaderValue::from_static("application/json"),
     );
-    let resolved_auth = match provider_route.auth {
-        UpstreamAuth::OpenCodeProtocolDefault if plan.upstream == ApiFormat::Messages => {
-            UpstreamAuth::XApiKey
-        }
-        UpstreamAuth::OpenCodeProtocolDefault => UpstreamAuth::Bearer,
-        auth => auth,
-    };
+    let resolved_auth = attempt_spec.wire_auth();
     if matches!(resolved_auth, UpstreamAuth::Bearer | UpstreamAuth::XApiKey) {
         let key = key
             .as_deref()
@@ -471,44 +496,36 @@ async fn forward_request_impl(
         reqwest::header::HeaderValue::from_static("identity"),
     );
 
-    let upstream_path = if provider_route.path.is_empty() {
-        provider_route
-            .upstream
-            .upstream_path()
-            .ok_or_else(|| anyhow::anyhow!("Gemini is a client-only protocol"))?
-            .to_string()
-    } else {
-        provider_route.path.clone()
-    };
-    let url = format!(
-        "{}{}",
-        provider_route.base_url.trim_end_matches('/'),
-        upstream_path
-    );
+    let url = attempt_spec
+        .request_url()
+        .map_err(|error| anyhow::anyhow!(error))?;
 
     let model = plan.model.clone();
-    let custom_client = if plan.custom_route.is_some() {
+    let custom_client = if attempt_spec.proxy_routing == ProxyRoutingModel::IsolatedTrustedAdmin {
         Some(build_custom_http_client(config).map_err(|error| anyhow::anyhow!(error))?)
     } else {
         None
     };
-    let goat_client = if plan.custom_route.is_none() && !provider_route.follow_redirects {
+    let goat_client = if attempt_spec.proxy_routing == ProxyRoutingModel::ProcessWideNoRedirect {
         Some(crate::http_client::build_no_redirect(config)?)
     } else {
         None
     };
-    let custom_url = if plan.custom_route.is_some() {
+    let custom_url = if attempt_spec.isolates_client_headers() {
         Some(reqwest::Url::parse(&url).map_err(|error| anyhow::anyhow!(error))?)
     } else {
         None
     };
-    let custom_headers = if let Some(custom_route) = plan.custom_route.as_ref() {
+    let custom_headers = if attempt_spec.isolates_client_headers() {
         let api_key = key
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Custom route requires a decrypted key"))?;
-        let mut headers =
-            crate::custom_http::isolated_custom_headers(custom_route.auth_scheme, api_key)
-                .map_err(|error| anyhow::anyhow!(error))?;
+        let scheme = match attempt_spec.auth {
+            UpstreamAuth::XApiKey => crate::provider::UpstreamAuthScheme::XApiKey,
+            _ => crate::provider::UpstreamAuthScheme::Bearer,
+        };
+        let mut headers = crate::custom_http::isolated_custom_headers(scheme, api_key)
+            .map_err(|error| anyhow::anyhow!(error))?;
         let extra = json_content_headers(plan.upstream == ApiFormat::Messages)
             .map_err(|error| anyhow::anyhow!(error))?;
         for (name, value) in &extra {
@@ -722,7 +739,7 @@ async fn forward_request_impl(
             &account.provider_id,
             &account.offering_id,
             plan.channel,
-            provider_route.auth == UpstreamAuth::None,
+            attempt_spec.auth == UpstreamAuth::None,
         );
         let action = forward_action_for_class(class, allow_same_account_retry, None);
         let error_message = format!(
@@ -783,7 +800,7 @@ async fn forward_request_impl(
             &account.provider_id,
             &account.offering_id,
             plan.channel,
-            provider_route.auth == UpstreamAuth::None,
+            attempt_spec.auth == UpstreamAuth::None,
         );
 
         match class {
@@ -2121,142 +2138,6 @@ fn join_chunks(chunks: Vec<bytes::Bytes>) -> bytes::Bytes {
     joined.freeze()
 }
 
-/// Simple GET forward for endpoints like /v1/models — uses configured selection strategy.
-pub async fn forward_get(
-    client: &Client,
-    state: &CoreState,
-    config: &AppConfig,
-    upstream_path: &str,
-) -> Result<Response> {
-    ensure_safe_upstream_base_url(&config.upstream_base_url)?;
-    let mut failed_ids = Vec::new();
-    let mut last_http_error = None;
-    let mut last_transport_error = None;
-
-    loop {
-        let account = {
-            let db = state.db.lock();
-            let excluded = failed_ids.iter().map(String::as_str).collect::<Vec<_>>();
-            db.list_accounts()?.into_iter().find(|account| {
-                provider_adapter::supports_model_discovery(account)
-                    && AccountSelector::is_available_for(account, UpstreamChannel::Go, &excluded)
-            })
-        };
-        let Some(account) = account else {
-            if let Some(until) = state.db.lock().soonest_cooldown_reset()? {
-                return Ok(rate_limited_response(ApiFormat::ChatCompletions, until));
-            }
-            if let Some((status, body)) = last_http_error {
-                let mut headers = HeaderMap::new();
-                headers.insert("content-type", HeaderValue::from_static("application/json"));
-                return Ok((status, headers, body).into_response());
-            }
-            if let Some(error) = last_transport_error {
-                return Err(error);
-            }
-            anyhow::bail!("no enabled accounts available");
-        };
-
-        let key = match state.decrypt_key(&account.key_cipher) {
-            Ok(key) => key,
-            Err(error) => {
-                last_transport_error = Some(error);
-                failed_ids.push(account.id);
-                continue;
-            }
-        };
-        let authorization = match HeaderValue::from_str(&format!("Bearer {key}")) {
-            Ok(value) => value,
-            Err(error) => {
-                last_transport_error = Some(anyhow::anyhow!(
-                    "account key is not a valid upstream header value: {error}"
-                ));
-                failed_ids.push(account.id);
-                continue;
-            }
-        };
-        let url = format!(
-            "{}{}",
-            config.upstream_base_url.trim_end_matches('/'),
-            upstream_path
-        );
-        let mut retried_same_account = false;
-
-        loop {
-            let resp = match client
-                .get(&url)
-                .header(reqwest::header::AUTHORIZATION, authorization.clone())
-                .timeout(StdDuration::from_secs(config.non_stream_timeout_secs))
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    // A connect error occurs before an HTTP response exists and
-                    // is the only transport failure safe to repeat. Retry this
-                    // account once, then return the failure without trying a
-                    // different account. Any post-connect failure is ambiguous.
-                    if error.is_connect() && !retried_same_account {
-                        retried_same_account = true;
-                        continue;
-                    }
-                    return Err(error.into());
-                }
-            };
-
-            let status = resp.status();
-            let body = match resp.text().await {
-                Ok(body) => body,
-                Err(error) => {
-                    // Headers may already represent a completed upstream call;
-                    // never replay when reading the response body fails.
-                    return Err(anyhow::anyhow!(response_body_error(&error)));
-                }
-            };
-            let downstream_body = if status.is_success() {
-                redact_success_body(&body, &key)
-            } else {
-                redact_known_secret(&body, &key)
-            };
-
-            if status.as_u16() == 429 {
-                let db = state.db.lock();
-                let cooldown = parse_reset(&body).unwrap_or_else(|| Duration::minutes(5));
-                let sanitized = sanitize_upstream_error(&body, &key);
-                db.set_account_rate_limit_if_key_matches(
-                    &account.id,
-                    &account.key_cipher,
-                    Utc::now() + cooldown,
-                    &sanitized,
-                    parse_usage_limit_window(&body),
-                )?;
-                drop(db);
-                crate::usage_sync::schedule_after_inference_429(state, &account.id);
-            }
-            if status == StatusCode::UNAUTHORIZED {
-                let mut headers = HeaderMap::new();
-                headers.insert("content-type", HeaderValue::from_static("application/json"));
-                return Ok((status, headers, downstream_body).into_response());
-            }
-            if matches!(status.as_u16(), 403 | 429) {
-                last_http_error = Some((status, downstream_body));
-                failed_ids.push(account.id.clone());
-                break;
-            }
-
-            let mut headers = HeaderMap::new();
-            headers.insert("content-type", HeaderValue::from_static("application/json"));
-            let mut response = (status, headers, downstream_body).into_response();
-            if status == StatusCode::PAYLOAD_TOO_LARGE {
-                response
-                    .extensions_mut()
-                    .insert(UpstreamPayloadTooLargeResponse);
-            }
-            return Ok(response);
-        }
-    }
-}
-
 fn ensure_safe_upstream_base_url(base: &str) -> Result<()> {
     let url = reqwest::Url::parse(base)?;
     match url.scheme() {
@@ -2282,14 +2163,6 @@ fn sanitize_upstream_error(text: &str, known_secret: &str) -> String {
         .chars()
         .take(500)
         .collect()
-}
-
-fn redact_success_body(text: &str, known_secret: &str) -> String {
-    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
-        return redact_known_secret(text, known_secret);
-    };
-    redact_known_secret_values(&mut value, known_secret);
-    serde_json::to_string(&value).unwrap_or_else(|_| redact_known_secret(text, known_secret))
 }
 
 fn response_body_error(error: &reqwest::Error) -> String {
@@ -3282,6 +3155,98 @@ mod stream_outcome_guard_tests {
         }
         let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
         assert_eq!(log.status, "streaming");
+        drop(state);
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod host_credential_resolver_tests {
+    use super::*;
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::db::Database;
+    use crate::models::{Account, AccountSetupStep, AccountType};
+    use crate::state::CoreStateInner;
+    use chrono::Utc;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ocg-host-resolver-{}-{}",
+            label,
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_state(label: &str) -> (PathBuf, CoreState) {
+        let dir = temp_dir(label);
+        let cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("host-resolver"));
+        let db = Database::open(dir.clone()).unwrap();
+        let state = Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap());
+        (dir, state)
+    }
+
+    fn account(state: &CoreState, id: &str, plaintext: &str) -> Account {
+        let now = Utc::now();
+        Account {
+            id: id.into(),
+            provider_id: crate::provider::default_provider_id(),
+            offering_id: crate::provider::default_offering_id(),
+            credential_kind: crate::provider::default_credential_kind(),
+            quota_scope: crate::provider::default_quota_scope(),
+            name: id.into(),
+            username: None,
+            password_cipher: None,
+            key_cipher: state.encrypt_key(plaintext).unwrap(),
+            enabled: true,
+            account_type: AccountType::Key,
+            setup_step: AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn host_credential_resolver_decrypts_matching_account_and_rejects_mismatch() {
+        let (dir, state) = test_state("host-resolver");
+        let account = account(&state, "acct-1", "sk-host-secret");
+        let resolver = HostCredentialResolver::new(&state, &account);
+        assert_eq!(
+            resolver
+                .resolve_credential(&CredentialHandle::Account {
+                    id: "acct-1".into()
+                })
+                .unwrap()
+                .as_deref(),
+            Some("sk-host-secret")
+        );
+        assert_eq!(
+            resolver
+                .resolve_credential(&CredentialHandle::None)
+                .unwrap(),
+            None
+        );
+        let mismatch = resolver
+            .resolve_credential(&CredentialHandle::Account { id: "other".into() })
+            .unwrap_err();
+        assert!(mismatch.to_string().contains("does not match"));
         drop(state);
         let _ = fs::remove_dir_all(dir);
     }

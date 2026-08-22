@@ -8,6 +8,12 @@
 //! [`RequestPlan`] then call here. Adapters must not probe a billable inference
 //! path to discover protocol support.
 //!
+//! Route resolution returns a data-only [`crate::gateway::attempt::AttemptSpec`]:
+//! endpoint, path, upstream protocol, auth scheme, redirect policy, an opaque
+//! credential handle, and the proxy-routing model. Adapters take an account,
+//! config, and request plan. They do not decrypt keys, open databases, or
+//! build HTTP clients; the Host resolver and single-attempt executor do that.
+//!
 //! Production Command Code GOAT stays fail-closed here (catalog unroutable,
 //! verification runtime unavailable). The official transport constants and
 //! [`command_code_goat_transport_spec`] prove host/path/auth construction
@@ -17,6 +23,7 @@
 
 use crate::custom::join_custom_protocol_url;
 use crate::custom_http::join_inference_endpoint;
+use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
     ApiFormat, RequestPlan, command_code_model_protocol, command_code_supports_upstream,
@@ -34,26 +41,7 @@ use crate::provider_contracts::EffectiveContractSet;
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
-/// Authentication belongs to the provider/offering adapter, not to the wire
-/// protocol. In particular, a Messages endpoint does not imply `x-api-key`
-/// for every future provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UpstreamAuth {
-    OpenCodeProtocolDefault,
-    Bearer,
-    XApiKey,
-    None,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ResolvedProviderRoute {
-    pub base_url: String,
-    pub path: String,
-    pub upstream: ApiFormat,
-    pub auth: UpstreamAuth,
-    pub credential_account_id: Option<String>,
-    pub follow_redirects: bool,
-}
+pub(crate) use crate::gateway::attempt::UpstreamAuth;
 
 /// Deterministic official Command Code GOAT transport. Used by tests and the
 /// loopback origin substitute; production `resolve_route` still fail-closes
@@ -189,7 +177,7 @@ pub(crate) fn resolve_route(
     account: &Account,
     config: &AppConfig,
     plan: &RequestPlan,
-) -> Result<ResolvedProviderRoute, String> {
+) -> Result<AttemptSpec, String> {
     resolve_route_with_policy(
         account,
         config,
@@ -202,7 +190,7 @@ pub(crate) fn resolve_probe_route(
     account: &Account,
     config: &AppConfig,
     plan: &RequestPlan,
-) -> Result<ResolvedProviderRoute, String> {
+) -> Result<AttemptSpec, String> {
     resolve_route_with_policy(account, config, plan, RoutePolicy::Probe)
 }
 
@@ -211,7 +199,7 @@ fn resolve_route_with_policy(
     config: &AppConfig,
     plan: &RequestPlan,
     policy: RoutePolicy<'_>,
-) -> Result<ResolvedProviderRoute, String> {
+) -> Result<AttemptSpec, String> {
     match ProviderAdapterKind::from_offering(&account.provider_id, &account.offering_id) {
         Some(ProviderAdapterKind::OpenCodeGo) => {
             OpenCodeGoAdapter.resolve(account, config, plan, policy)
@@ -238,7 +226,7 @@ impl OpenCodeGoAdapter {
         config: &AppConfig,
         plan: &RequestPlan,
         policy: RoutePolicy<'_>,
-    ) -> Result<ResolvedProviderRoute, String> {
+    ) -> Result<AttemptSpec, String> {
         let descriptor = registered_descriptor(ProviderAdapterKind::OpenCodeGo, account)?;
         require_binding(
             account,
@@ -255,13 +243,14 @@ impl OpenCodeGoAdapter {
             policy,
             "OpenCode Go",
         )?;
-        Ok(ResolvedProviderRoute {
+        Ok(AttemptSpec {
             base_url: config.upstream_base_url.trim_end_matches('/').to_string(),
             path: opencode_upstream_path(plan.upstream)?,
             upstream: plan.upstream,
             auth: descriptor_auth(descriptor.inference.auth)?,
-            credential_account_id: credential_account_id(account, descriptor),
             follow_redirects: descriptor.inference.follow_redirects,
+            credential: credential_handle(account, descriptor),
+            proxy_routing: ProxyRoutingModel::RequestEntrySnapshot,
         })
     }
 }
@@ -273,7 +262,7 @@ impl ZenFreeAdapter {
         config: &AppConfig,
         plan: &RequestPlan,
         policy: RoutePolicy<'_>,
-    ) -> Result<ResolvedProviderRoute, String> {
+    ) -> Result<AttemptSpec, String> {
         let descriptor = registered_descriptor(ProviderAdapterKind::ZenFree, account)?;
         require_binding(
             account,
@@ -300,13 +289,14 @@ impl ZenFreeAdapter {
             || resolve_upstream_base(UpstreamChannel::Free, &config.upstream_base_url),
             Ok,
         )?;
-        Ok(ResolvedProviderRoute {
+        Ok(AttemptSpec {
             base_url,
             path: opencode_upstream_path(plan.upstream)?,
             upstream: plan.upstream,
             auth: descriptor_auth(descriptor.inference.auth)?,
-            credential_account_id: credential_account_id(account, descriptor),
             follow_redirects: descriptor.inference.follow_redirects,
+            credential: credential_handle(account, descriptor),
+            proxy_routing: ProxyRoutingModel::RequestEntrySnapshot,
         })
     }
 }
@@ -318,7 +308,7 @@ impl CommandCodeGoatAdapter {
         _config: &AppConfig,
         plan: &RequestPlan,
         policy: RoutePolicy<'_>,
-    ) -> Result<ResolvedProviderRoute, String> {
+    ) -> Result<AttemptSpec, String> {
         if matches!(policy, RoutePolicy::Probe) {
             return Err(
                 "protocol probes are not available for Command Code GOAT in this slice".to_string(),
@@ -354,13 +344,14 @@ impl CommandCodeGoatAdapter {
             "Command Code GOAT production inference endpoint, auth, protocol, and model catalog are not verified; route is disabled"
                 .to_string()
         })?;
-        Ok(ResolvedProviderRoute {
+        Ok(AttemptSpec {
             base_url: command_code_goat_loopback_base(&route.origin),
             path: path.to_string(),
             upstream: plan.upstream,
             auth: descriptor_auth(descriptor.inference.auth)?,
-            credential_account_id: credential_account_id(account, descriptor),
             follow_redirects: descriptor.inference.follow_redirects,
+            credential: credential_handle(account, descriptor),
+            proxy_routing: ProxyRoutingModel::ProcessWideNoRedirect,
         })
     }
 }
@@ -372,7 +363,7 @@ impl ScnetAdapter {
         _config: &AppConfig,
         _plan: &RequestPlan,
         policy: RoutePolicy<'_>,
-    ) -> Result<ResolvedProviderRoute, String> {
+    ) -> Result<AttemptSpec, String> {
         let _ = registered_descriptor(ProviderAdapterKind::Scnet, account)?;
         let _ = policy;
         Err(format!(
@@ -389,7 +380,7 @@ impl ConfigurableHttpAdapter {
         _config: &AppConfig,
         plan: &RequestPlan,
         policy: RoutePolicy<'_>,
-    ) -> Result<ResolvedProviderRoute, String> {
+    ) -> Result<AttemptSpec, String> {
         let descriptor = registered_descriptor(ProviderAdapterKind::ConfigurableHttp, account)?;
         require_binding(
             account,
@@ -416,7 +407,7 @@ impl ConfigurableHttpAdapter {
         }
         let _ = join_custom_protocol_url(&custom.base_url, protocol)
             .map_err(|error| error.to_string())?;
-        Ok(ResolvedProviderRoute {
+        Ok(AttemptSpec {
             base_url: custom.base_url.trim_end_matches('/').to_string(),
             path: format!(
                 "/{}",
@@ -427,8 +418,9 @@ impl ConfigurableHttpAdapter {
                 UpstreamAuthScheme::Bearer => UpstreamAuth::Bearer,
                 UpstreamAuthScheme::XApiKey => UpstreamAuth::XApiKey,
             },
-            credential_account_id: credential_account_id(account, descriptor),
             follow_redirects: descriptor.inference.follow_redirects,
+            credential: credential_handle(account, descriptor),
+            proxy_routing: ProxyRoutingModel::IsolatedTrustedAdmin,
         })
     }
 }
@@ -466,13 +458,15 @@ fn descriptor_auth(auth: InferenceAuthDescriptor) -> Result<UpstreamAuth, String
     }
 }
 
-fn credential_account_id(
+fn credential_handle(
     account: &Account,
     descriptor: crate::provider::ProviderDescriptor,
-) -> Option<String> {
+) -> CredentialHandle {
     match descriptor.inference.credential_kind {
-        CredentialKind::ApiKey => Some(account.id.clone()),
-        CredentialKind::None => None,
+        CredentialKind::ApiKey => CredentialHandle::Account {
+            id: account.id.clone(),
+        },
+        CredentialKind::None => CredentialHandle::None,
     }
 }
 
@@ -538,14 +532,6 @@ fn protocol_kind_for(upstream: ApiFormat) -> Result<crate::provider::UpstreamPro
         ApiFormat::Messages => Ok(crate::provider::UpstreamProtocolKind::Messages),
         ApiFormat::Gemini => Err("Gemini is a client-only protocol".to_string()),
     }
-}
-
-pub(crate) fn supports_model_discovery(account: &Account) -> bool {
-    matches!(
-        ProviderAdapterKind::from_offering(&account.provider_id, &account.offering_id),
-        Some(ProviderAdapterKind::OpenCodeGo)
-    ) && account.credential_kind == CredentialKind::ApiKey
-        && account.quota_scope == QuotaScope::Key
 }
 
 fn opencode_upstream_path(upstream: ApiFormat) -> Result<String, String> {
@@ -736,8 +722,17 @@ mod tests {
         assert_eq!(go_route.auth, UpstreamAuth::OpenCodeProtocolDefault);
         assert!(go_route.follow_redirects);
         assert_eq!(go_route.path, "/v1/chat/completions");
-        assert_eq!(go_route.credential_account_id.as_deref(), Some("go-1"));
-        assert!(supports_model_discovery(&go));
+        assert_eq!(
+            go_route.credential,
+            CredentialHandle::Account { id: "go-1".into() }
+        );
+        assert_eq!(
+            go_route.proxy_routing,
+            ProxyRoutingModel::RequestEntrySnapshot
+        );
+        assert!(go_route.restricted_upstream_url());
+        assert!(!go_route.isolates_client_headers());
+        assert_eq!(go_route.wire_auth(), UpstreamAuth::Bearer);
         assert!(
             resolve_route(
                 &go,
@@ -774,8 +769,12 @@ mod tests {
         .unwrap();
         assert_eq!(zen_route.auth, UpstreamAuth::None);
         assert!(zen_route.follow_redirects);
-        assert!(zen_route.credential_account_id.is_none());
-        assert!(!supports_model_discovery(&zen));
+        assert_eq!(zen_route.credential, CredentialHandle::None);
+        assert_eq!(
+            zen_route.proxy_routing,
+            ProxyRoutingModel::RequestEntrySnapshot
+        );
+        assert!(zen_route.credential_account_id().is_none());
 
         let goat = account(
             "goat-1",
@@ -813,6 +812,11 @@ mod tests {
         assert!(!goat_route.follow_redirects);
         assert_eq!(goat_route.base_url, "http://127.0.0.1:9/provider/v1");
         assert_eq!(goat_route.path, "/chat/completions");
+        assert_eq!(
+            goat_route.proxy_routing,
+            ProxyRoutingModel::ProcessWideNoRedirect
+        );
+        assert!(goat_route.restricted_upstream_url());
 
         let scnet = account(
             "scnet-1",
@@ -874,6 +878,18 @@ mod tests {
         assert!(!custom_route.follow_redirects);
         assert_eq!(custom_route.base_url, "http://127.0.0.1:9/v1");
         assert_eq!(custom_route.path, "/chat/completions");
+        assert_eq!(
+            custom_route.proxy_routing,
+            ProxyRoutingModel::IsolatedTrustedAdmin
+        );
+        assert!(custom_route.isolates_client_headers());
+        assert!(!custom_route.restricted_upstream_url());
+        assert_eq!(
+            custom_route.credential,
+            CredentialHandle::Account {
+                id: "custom-1".into()
+            }
+        );
 
         let unknown = account(
             "unknown-1",
@@ -1054,6 +1070,27 @@ mod tests {
             )
             .unwrap_err()
             .contains("not available")
+        );
+    }
+
+    #[test]
+    fn adapter_production_source_has_no_host_transport_or_plaintext_clients() {
+        let source = include_str!("provider_adapter.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        assert!(
+            !production.contains("CoreState"),
+            "adapters must not name CoreState"
+        );
+        assert!(
+            !production.contains("Database"),
+            "adapters must not name Database"
+        );
+        assert!(
+            !production.contains("reqwest::Client"),
+            "adapters must not name reqwest::Client"
         );
     }
 }

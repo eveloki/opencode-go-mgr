@@ -1,3 +1,4 @@
+pub mod attempt;
 pub mod classify;
 pub mod diagnostics;
 pub mod forwarder;
