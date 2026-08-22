@@ -510,42 +510,58 @@ pub fn schedule_after_inference_429(state: &impl UsageSyncHost, account_id: &str
     }
 }
 
-/// Start the background reconciler once per process host. Safe to call
-/// repeatedly; the loop is not cancelled by Gateway stop and exits only when
-/// the owning host is dropped (weak upgrade fails).
-pub fn spawn_usage_sync_loop<H: UsageSyncHost>(state: H) {
-    if state
-        .usage_runtime()
-        .loop_started
-        .swap(true, Ordering::AcqRel)
-    {
-        return;
-    }
-    let weak = state.downgrade();
-    tokio::spawn(async move {
-        loop {
-            let Some(state) = H::upgrade(&weak) else {
-                return;
-            };
-            if let Err(error) = run_scheduler_once(&state).await {
-                state.with_sync_store(|store| {
-                    let _ = store.log_gateway(
-                        "warn",
-                        "usage_sync",
-                        &format!("official usage scheduler tick failed: {error}"),
-                    );
-                });
-            }
-            // Clone the wake handle, then drop state before awaiting so tests
-            // and shutdown can release the SQLite file promptly.
-            let wake = state.usage_runtime().wake_handle();
-            drop(state);
-            tokio::select! {
-                _ = tokio::time::sleep(SCHEDULER_IDLE_TICK) => {}
-                _ = wake.notified() => {}
-            }
+/// Process-level workers owned by a [`UsageSyncHost`].
+///
+/// [`ControlPlaneWorkers::ensure_started`] is idempotent once per host and has
+/// no public cancel API. The usage loop is independent of Gateway listener
+/// bind/stop and exits only when the owning host is dropped (weak upgrade
+/// fails).
+pub struct ControlPlaneWorkers;
+
+impl ControlPlaneWorkers {
+    /// Start the background usage reconciler once per process host.
+    pub fn ensure_started<H: UsageSyncHost>(host: H) {
+        if host
+            .usage_runtime()
+            .loop_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
         }
-    });
+        let weak = host.downgrade();
+        tokio::spawn(async move {
+            loop {
+                let Some(state) = H::upgrade(&weak) else {
+                    return;
+                };
+                if let Err(error) = run_scheduler_once(&state).await {
+                    state.with_sync_store(|store| {
+                        let _ = store.log_gateway(
+                            "warn",
+                            "usage_sync",
+                            &format!("official usage scheduler tick failed: {error}"),
+                        );
+                    });
+                }
+                // Clone the wake handle, then drop state before awaiting so tests
+                // and shutdown can release the SQLite file promptly.
+                let wake = state.usage_runtime().wake_handle();
+                drop(state);
+                tokio::select! {
+                    _ = tokio::time::sleep(SCHEDULER_IDLE_TICK) => {}
+                    _ = wake.notified() => {}
+                }
+            }
+        });
+    }
+}
+
+/// Compatibility wrapper around [`ControlPlaneWorkers::ensure_started`].
+///
+/// Safe to call repeatedly; the loop is not cancelled by Gateway stop and
+/// exits only when the owning host is dropped (weak upgrade fails).
+pub fn spawn_usage_sync_loop<H: UsageSyncHost>(state: H) {
+    ControlPlaneWorkers::ensure_started(state);
 }
 
 async fn run_scheduler_once(state: &impl UsageSyncHost) -> anyhow::Result<()> {
@@ -942,37 +958,129 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    fn usage_loop_started(state: &CoreState) -> bool {
+        state.usage_sync.loop_started.load(AtomicOrdering::Acquire)
+    }
+
+    fn loopback_ephemeral() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 1], 0))
+    }
+
+    #[tokio::test]
+    async fn bind_does_not_start_usage_loop() {
+        let (dir, state) = test_state("bind-no-loop");
+        assert!(!usage_loop_started(&state));
+
+        let first =
+            crate::gateway::listener::GatewayLifecycle::bind(state.clone(), loopback_ephemeral())
+                .await
+                .unwrap();
+        assert!(first.port != 0, "listener bind must occupy a TCP port");
+        assert!(
+            state.dashboard_local_mode(),
+            "loopback bind must keep dashboard local mode"
+        );
+        assert!(
+            !usage_loop_started(&state),
+            "GatewayLifecycle::bind must not start the process-level usage worker"
+        );
+
+        crate::gateway::stop_gateway(first);
+        assert!(
+            !usage_loop_started(&state),
+            "listener stop must not start the usage worker"
+        );
+        let _ = state.config();
+
+        let second =
+            crate::gateway::listener::GatewayLifecycle::bind(state.clone(), loopback_ephemeral())
+                .await
+                .unwrap();
+        assert!(
+            !usage_loop_started(&state),
+            "a later bind still must not start the usage worker"
+        );
+        crate::gateway::stop_gateway(second);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn spawn_usage_sync_loop_starts_once_per_core_state() {
         let (dir, state) = test_state("once-loop");
-        assert!(!state.usage_sync.loop_started.load(AtomicOrdering::Acquire));
+        assert!(!usage_loop_started(&state));
         spawn_usage_sync_loop(state.clone());
-        assert!(state.usage_sync.loop_started.load(AtomicOrdering::Acquire));
+        assert!(usage_loop_started(&state));
         spawn_usage_sync_loop(state.clone());
         spawn_usage_sync_loop(state.clone());
+        ControlPlaneWorkers::ensure_started(state.clone());
+        ControlPlaneWorkers::ensure_started(state.clone());
         assert!(
-            state.usage_sync.loop_started.load(AtomicOrdering::Acquire),
-            "repeat spawn_usage_sync_loop calls must keep the once-per-CoreState flag"
+            usage_loop_started(&state),
+            "repeat spawn_usage_sync_loop / ensure_started calls must keep the once-per-CoreState flag"
         );
 
-        let first = crate::gateway::start_gateway_on(
-            state.clone(),
-            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
-        )
-        .await
-        .unwrap();
-        let second = crate::gateway::start_gateway_on(
-            state.clone(),
-            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
-        )
-        .await
-        .unwrap();
+        let first =
+            crate::gateway::listener::GatewayLifecycle::bind(state.clone(), loopback_ephemeral())
+                .await
+                .unwrap();
+        let second =
+            crate::gateway::listener::GatewayLifecycle::bind(state.clone(), loopback_ephemeral())
+                .await
+                .unwrap();
         assert!(
-            state.usage_sync.loop_started.load(AtomicOrdering::Acquire),
-            "starting additional gateways on the same CoreState must not reset the usage loop"
+            usage_loop_started(&state),
+            "extra listener bind on the same CoreState must not reset the usage loop"
         );
         crate::gateway::stop_gateway(first);
         crate::gateway::stop_gateway(second);
+        assert!(
+            usage_loop_started(&state),
+            "listener stop must not clear the process-level usage worker"
+        );
+        let _ = state.config();
+
+        let rebound =
+            crate::gateway::listener::GatewayLifecycle::bind(state.clone(), loopback_ephemeral())
+                .await
+                .unwrap();
+        assert!(
+            usage_loop_started(&state),
+            "CoreState must remain usable for another bind after stop"
+        );
+        crate::gateway::stop_gateway(rebound);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn start_gateway_on_starts_usage_loop_and_stop_does_not_clear_it() {
+        let (dir, state) = test_state("compat-start-loop");
+        assert!(!usage_loop_started(&state));
+        let handle = crate::gateway::start_gateway_on(state.clone(), loopback_ephemeral())
+            .await
+            .unwrap();
+        assert!(
+            usage_loop_started(&state),
+            "public start_gateway_on must still start the process-level usage worker"
+        );
+        crate::gateway::stop_gateway(handle);
+        assert!(
+            usage_loop_started(&state),
+            "stop_gateway is listener-only and must not clear the usage worker"
+        );
+        let _ = state.config();
+
+        let restarted = crate::gateway::start_gateway_on(state.clone(), loopback_ephemeral())
+            .await
+            .unwrap();
+        assert!(
+            usage_loop_started(&state),
+            "CoreState must remain usable for another public start after stop"
+        );
+        crate::gateway::stop_gateway(restarted);
 
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
