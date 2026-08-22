@@ -137,9 +137,10 @@ fn catalog_type_names_keep_the_accounts_prefix() {
             "CATALOG_TYPE_NAMES missing {name}"
         );
     }
+    let provider_end = ACCOUNTS_CATALOG_PREFIX.len() + PROVIDER_CATALOG_TYPES.len();
     assert_eq!(
-        CATALOG_TYPE_NAMES.len(),
-        ACCOUNTS_CATALOG_PREFIX.len() + PROVIDER_CATALOG_TYPES.len()
+        &CATALOG_TYPE_NAMES[ACCOUNTS_CATALOG_PREFIX.len()..provider_end],
+        PROVIDER_CATALOG_TYPES
     );
 }
 

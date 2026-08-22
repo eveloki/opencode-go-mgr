@@ -2,9 +2,11 @@
 //!
 //! Response objects always serialize nullable fields as `T | null` (never omitted).
 //! Request optional fields may be omitted; `expectedRevision` is required on every
-//! control-plane mutation. Plaintext keys must not appear on `Settings` or
-//! provider/Zen/contract DTOs — `ConnectionInfo` is the only secret-bearing V3 DTO.
-//! Protocol path/switch tokens stay `chat_completions`, `responses`, and `messages`.
+//! control-plane mutation. Pricing mutations also require `expectedPricingRevision`.
+//! Plaintext keys must not appear on `Settings` or provider/Zen/contract DTOs —
+//! `ConnectionInfo` is the only secret-bearing V3 DTO. Protocol path/switch tokens
+//! stay `chat_completions`, `responses`, and `messages`. Pricing wire DTOs are
+//! distinct from `kernel::pricing` and from stored provider pricing blobs.
 
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -81,6 +83,20 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ProtocolProbeRequest",
     "ProtocolProbeResult",
     "ProtocolProbeResponse",
+    "PricingSnapshot",
+    "PricingLimits",
+    "PricingModel",
+    "PricingAdjustment",
+    "PricingTimeWindow",
+    "PricingRefresh",
+    "PricingRefreshStatus",
+    "PricingMultiplierChange",
+    "PricingRefreshUpdate",
+    "PricingRefreshPolicy",
+    "PricingMultipliersUpdate",
+    "PricingMultiplierWrite",
+    "ProviderPricing",
+    "PricingAvailability",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -1272,6 +1288,180 @@ impl From<DomainProbeResultKind> for ProbeResultKind {
     }
 }
 
+/// Dashboard V3 pricing snapshot. Distinct from `kernel::pricing::PricingSnapshot`
+/// and from the stored provider pricing blob.
+///
+/// `revision` is the settings CAS token. The official snapshot id is
+/// `pricingRevision` and must never be named `revision` on this wire type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingSnapshot {
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+    pub activated_at: String,
+    pub document_updated_at: String,
+    pub source_url: String,
+    pub content_hash: String,
+    pub adjustment_policy_version: String,
+    pub limits: PricingLimits,
+    pub models: Vec<PricingModel>,
+}
+
+/// OpenCode Go 5h / week / month usage windows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingLimits {
+    pub window_5h: f64,
+    pub window_week: f64,
+    pub window_month: f64,
+}
+
+/// One official model row, including optional cache-write and token-tier bounds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingModel {
+    pub model_id: String,
+    pub display_name: String,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: Option<f64>,
+    pub usage: f64,
+    pub quota_multiplier: f64,
+    pub min_input_tokens: Option<i64>,
+    pub max_input_tokens: Option<i64>,
+    pub time_window: PricingTimeWindow,
+    pub adjustments: Vec<PricingAdjustment>,
+}
+
+/// One documented local adjustment on a model row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingAdjustment {
+    pub label: String,
+    pub multiplier: f64,
+    pub applies_to: String,
+}
+
+/// Official Peak / Off-Peak row. Wire values stay snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum PricingTimeWindow {
+    Always,
+    OffPeak,
+    Peak,
+}
+
+/// Pricing refresh result. Nested `snapshot` is required; nullable fields emit `T | null`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingRefresh {
+    pub snapshot: PricingSnapshot,
+    pub refresh_status: PricingRefreshStatus,
+    pub multiplier_changes: Vec<PricingMultiplierChange>,
+    pub official_content_hash: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Refresh outcome. Wire values stay snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum PricingRefreshStatus {
+    Success,
+    Unchanged,
+    NeedsConfirmation,
+    FailedNoChange,
+}
+
+/// One model whose official multiplier differs from the active snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingMultiplierChange {
+    pub model_id: String,
+    pub current_multiplier: f64,
+    pub official_multiplier: f64,
+}
+
+/// POST pricing-refresh body. CAS tokens and `expectedPricingRevision` are
+/// required; `policy` and `expectedOfficialContentHash` may be omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingRefreshUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub expected_pricing_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PricingRefreshPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_official_content_hash: Option<String>,
+}
+
+/// Refresh confirmation policy. Wire values stay snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum PricingRefreshPolicy {
+    KeepCurrent,
+    UseOfficial,
+}
+
+/// PUT pricing-multipliers body. CAS tokens, `expectedPricingRevision`, and
+/// `multipliers` are required.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingMultipliersUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub expected_pricing_revision: String,
+    pub multipliers: Vec<PricingMultiplierWrite>,
+}
+
+/// One multiplier write. Handlers validate model id, range, and uniqueness.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingMultiplierWrite {
+    pub model_id: String,
+    pub multiplier: f64,
+}
+
+/// Provider-scoped pricing. `snapshot` is required `T | null` and never
+/// carries a raw stored pricing blob.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderPricing {
+    pub provider_id: String,
+    pub offering_id: String,
+    pub availability: PricingAvailability,
+    pub snapshot: Option<PricingSnapshot>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
+/// Registry pricing availability. Wire values stay snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum PricingAvailability {
+    Available,
+    Unavailable,
+    NotApplicable,
+    Unpriced,
+}
+
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.
 ///
 /// Response types are generated with the serialize contract so `Option` fields
@@ -1318,6 +1508,16 @@ pub fn contract_schema() -> Value {
     include_type::<CardCapabilitySummary>(&mut serialize);
     include_type::<ProtocolProbeResult>(&mut serialize);
     include_type::<ProtocolProbeResponse>(&mut serialize);
+    include_type::<PricingSnapshot>(&mut serialize);
+    include_type::<PricingLimits>(&mut serialize);
+    include_type::<PricingModel>(&mut serialize);
+    include_type::<PricingAdjustment>(&mut serialize);
+    include_type::<PricingTimeWindow>(&mut serialize);
+    include_type::<PricingRefresh>(&mut serialize);
+    include_type::<PricingRefreshStatus>(&mut serialize);
+    include_type::<PricingMultiplierChange>(&mut serialize);
+    include_type::<ProviderPricing>(&mut serialize);
+    include_type::<PricingAvailability>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -1339,6 +1539,10 @@ pub fn contract_schema() -> Value {
     include_type::<ZenFreeSettingsUpdate>(&mut deserialize);
     include_type::<ProtocolSwitchUpdate>(&mut deserialize);
     include_type::<ProtocolProbeRequest>(&mut deserialize);
+    include_type::<PricingRefreshUpdate>(&mut deserialize);
+    include_type::<PricingRefreshPolicy>(&mut deserialize);
+    include_type::<PricingMultipliersUpdate>(&mut deserialize);
+    include_type::<PricingMultiplierWrite>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2525,6 +2729,348 @@ mod tests {
             response_required
                 .iter()
                 .any(|value| value == "pricingRevision")
+        );
+    }
+
+    const PROVIDER_CATALOG_TYPES: &[&str] = &[
+        "ProviderCatalog",
+        "ProviderCatalogEntry",
+        "ProviderCatalogFormField",
+        "ProviderCatalogRiskNotice",
+        "ProviderModelCapability",
+        "ZenFreeSettings",
+        "ZenFreeSettingsUpdate",
+        "ZenFreeModels",
+        "ZenFreeModel",
+        "ProviderContracts",
+        "ProviderContractGroup",
+        "CustomEndpointContract",
+        "ProviderOfferingChoice",
+        "ProviderAccountChoice",
+        "ProtocolSwitches",
+        "EffectiveCatalog",
+        "EffectiveModelContract",
+        "EffectiveModelProtocols",
+        "EffectiveProtocolEvidence",
+        "CapabilitySummary",
+        "CardCapabilitySummary",
+        "ProtocolSwitchUpdate",
+        "ProtocolProbeRequest",
+        "ProtocolProbeResult",
+        "ProtocolProbeResponse",
+    ];
+
+    const PRICING_CATALOG_TYPES: &[&str] = &[
+        "PricingSnapshot",
+        "PricingLimits",
+        "PricingModel",
+        "PricingAdjustment",
+        "PricingTimeWindow",
+        "PricingRefresh",
+        "PricingRefreshStatus",
+        "PricingMultiplierChange",
+        "PricingRefreshUpdate",
+        "PricingRefreshPolicy",
+        "PricingMultipliersUpdate",
+        "PricingMultiplierWrite",
+        "ProviderPricing",
+        "PricingAvailability",
+    ];
+
+    fn sample_pricing_snapshot() -> PricingSnapshot {
+        PricingSnapshot {
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed-2026-08-16-local-v4".into(),
+            activated_at: "2026-08-16T12:00:00.000Z".into(),
+            document_updated_at: "2026-08-16T00:00:00.000Z".into(),
+            source_url: "https://opencode.ai/docs/go/".into(),
+            content_hash: "embedded-opencode-go-2026-08-16".into(),
+            adjustment_policy_version: "local-v4".into(),
+            limits: PricingLimits {
+                window_5h: 12.0,
+                window_week: 30.0,
+                window_month: 60.0,
+            },
+            models: vec![PricingModel {
+                model_id: "grok-4.5".into(),
+                display_name: "Grok 4.5".into(),
+                input: 2.0,
+                output: 6.0,
+                cache_read: 0.3,
+                cache_write: None,
+                usage: 15.0,
+                quota_multiplier: 4.0,
+                min_input_tokens: None,
+                max_input_tokens: None,
+                time_window: PricingTimeWindow::Always,
+                adjustments: vec![PricingAdjustment {
+                    label: "highspeed alias".into(),
+                    multiplier: 2.0,
+                    applies_to: "input,output".into(),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
+        let prefix_len = ACCOUNTS_CATALOG_PREFIX.len() + PROVIDER_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[..ACCOUNTS_CATALOG_PREFIX.len()],
+            ACCOUNTS_CATALOG_PREFIX
+        );
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[ACCOUNTS_CATALOG_PREFIX.len()..prefix_len],
+            PROVIDER_CATALOG_TYPES
+        );
+        assert_eq!(&CATALOG_TYPE_NAMES[prefix_len..], PRICING_CATALOG_TYPES);
+        assert_eq!(
+            CATALOG_TYPE_NAMES.len(),
+            prefix_len + PRICING_CATALOG_TYPES.len()
+        );
+    }
+
+    #[test]
+    fn pricing_snapshot_uses_cas_revision_and_emits_required_nulls() {
+        let snapshot = sample_pricing_snapshot();
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["revision"], 11);
+        assert_eq!(value["processGeneration"], 9);
+        assert_eq!(value["pricingRevision"], "seed-2026-08-16-local-v4");
+        assert_eq!(value["limits"]["window5h"], 12.0);
+        assert_eq!(value["limits"]["windowWeek"], 30.0);
+        assert_eq!(value["limits"]["windowMonth"], 60.0);
+        assert_eq!(value["models"][0]["modelId"], "grok-4.5");
+        assert_eq!(value["models"][0]["cacheWrite"], Value::Null);
+        assert_eq!(value["models"][0]["minInputTokens"], Value::Null);
+        assert_eq!(value["models"][0]["maxInputTokens"], Value::Null);
+        assert_eq!(value["models"][0]["timeWindow"], "always");
+        assert_eq!(
+            value["models"][0]["adjustments"][0]["appliesTo"],
+            "input,output"
+        );
+        assert!(value.get("snapshotJson").is_none());
+        assert!(
+            value
+                .as_object()
+                .unwrap()
+                .get("revision")
+                .unwrap()
+                .is_number()
+        );
+        assert!(
+            serde_json::from_value::<PricingSnapshot>(json!({
+                "revision": "seed-2026-08-16-local-v4",
+                "processGeneration": 9,
+                "pricingRevision": "seed-2026-08-16-local-v4",
+                "activatedAt": "2026-08-16T12:00:00.000Z",
+                "documentUpdatedAt": "2026-08-16T00:00:00.000Z",
+                "sourceUrl": "https://opencode.ai/docs/go/",
+                "contentHash": "embedded-opencode-go-2026-08-16",
+                "adjustmentPolicyVersion": "local-v4",
+                "limits": { "window5h": 12.0, "windowWeek": 30.0, "windowMonth": 60.0 },
+                "models": []
+            }))
+            .is_err(),
+            "kernel snapshot id must not occupy revision"
+        );
+        assert_secret_free(&value);
+
+        let mut peak = snapshot.models[0].clone();
+        peak.cache_write = Some(0.375);
+        peak.min_input_tokens = Some(256_001);
+        peak.max_input_tokens = None;
+        peak.time_window = PricingTimeWindow::Peak;
+        let peak_value = serde_json::to_value(&peak).unwrap();
+        assert_eq!(peak_value["cacheWrite"], 0.375);
+        assert_eq!(peak_value["minInputTokens"], 256_001);
+        assert_eq!(peak_value["maxInputTokens"], Value::Null);
+        assert_eq!(peak_value["timeWindow"], "peak");
+        assert_eq!(
+            serde_json::to_value(PricingTimeWindow::OffPeak).unwrap(),
+            json!("off_peak")
+        );
+    }
+
+    #[test]
+    fn pricing_refresh_and_provider_pricing_emit_nullable_fields() {
+        let refresh = PricingRefresh {
+            snapshot: sample_pricing_snapshot(),
+            refresh_status: PricingRefreshStatus::NeedsConfirmation,
+            multiplier_changes: vec![PricingMultiplierChange {
+                model_id: "grok-4.5".into(),
+                current_multiplier: 4.0,
+                official_multiplier: 5.0,
+            }],
+            official_content_hash: Some("official-hash".into()),
+            error: None,
+        };
+        let refresh_value = serde_json::to_value(&refresh).unwrap();
+        assert_eq!(refresh_value["refreshStatus"], "needs_confirmation");
+        assert_eq!(refresh_value["officialContentHash"], "official-hash");
+        assert_eq!(refresh_value["error"], Value::Null);
+        assert_eq!(
+            refresh_value["snapshot"]["pricingRevision"],
+            "seed-2026-08-16-local-v4"
+        );
+        assert!(refresh_value.get("models").is_none());
+        assert!(refresh_value.get("snapshotJson").is_none());
+        assert_eq!(
+            serde_json::to_value(PricingRefreshStatus::Success).unwrap(),
+            json!("success")
+        );
+        assert_eq!(
+            serde_json::to_value(PricingRefreshStatus::Unchanged).unwrap(),
+            json!("unchanged")
+        );
+        assert_eq!(
+            serde_json::to_value(PricingRefreshStatus::FailedNoChange).unwrap(),
+            json!("failed_no_change")
+        );
+        assert_secret_free(&refresh_value);
+
+        let provider = ProviderPricing {
+            provider_id: "opencode".into(),
+            offering_id: "go".into(),
+            availability: PricingAvailability::Available,
+            snapshot: None,
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed-2026-08-16-local-v4".into(),
+        };
+        let provider_value = serde_json::to_value(&provider).unwrap();
+        assert_eq!(provider_value["snapshot"], Value::Null);
+        assert_eq!(provider_value["availability"], "available");
+        assert_eq!(provider_value["providerId"], "opencode");
+        assert_eq!(provider_value["revision"], 11);
+        assert!(provider_value.get("snapshotJson").is_none());
+        assert_eq!(
+            serde_json::to_value(PricingAvailability::Unavailable).unwrap(),
+            json!("unavailable")
+        );
+        assert_eq!(
+            serde_json::to_value(PricingAvailability::NotApplicable).unwrap(),
+            json!("not_applicable")
+        );
+        assert_eq!(
+            serde_json::to_value(PricingAvailability::Unpriced).unwrap(),
+            json!("unpriced")
+        );
+        assert_secret_free(&provider_value);
+    }
+
+    #[test]
+    fn pricing_mutations_flatten_cas_require_pricing_revision_and_reject_unknown_fields() {
+        let omitted: PricingRefreshUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "expectedPricingRevision": "seed-2026-08-16-local-v4"
+        }))
+        .unwrap();
+        assert_eq!(omitted.expectation.expected_revision, 11);
+        assert_eq!(omitted.expectation.process_generation, 9);
+        assert_eq!(
+            omitted.expected_pricing_revision,
+            "seed-2026-08-16-local-v4"
+        );
+        assert!(omitted.policy.is_none());
+        assert!(omitted.expected_official_content_hash.is_none());
+
+        let confirmed: PricingRefreshUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "expectedPricingRevision": "seed-2026-08-16-local-v4",
+            "policy": "keep_current",
+            "expectedOfficialContentHash": "official-hash"
+        }))
+        .unwrap();
+        assert_eq!(confirmed.policy, Some(PricingRefreshPolicy::KeepCurrent));
+        assert_eq!(
+            confirmed.expected_official_content_hash.as_deref(),
+            Some("official-hash")
+        );
+        assert_eq!(
+            serde_json::to_value(PricingRefreshPolicy::UseOfficial).unwrap(),
+            json!("use_official")
+        );
+
+        assert!(
+            serde_json::from_value::<PricingRefreshUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9
+            }))
+            .is_err(),
+            "expectedPricingRevision is required"
+        );
+        assert!(
+            serde_json::from_value::<PricingRefreshUpdate>(json!({
+                "expected_revision": 11,
+                "processGeneration": 9,
+                "expectedPricingRevision": "seed"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PricingRefreshUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "expected_pricing_revision": "seed"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PricingRefreshUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "expectedPricingRevision": "seed",
+                "snapshotJson": "{}"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PricingRefreshUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "expectedPricingRevision": "seed",
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+
+        let multipliers: PricingMultipliersUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "expectedPricingRevision": "seed-2026-08-16-local-v4",
+            "multipliers": [{ "modelId": "grok-4.5", "multiplier": 4.0 }]
+        }))
+        .unwrap();
+        assert_eq!(multipliers.multipliers[0].model_id, "grok-4.5");
+        assert_eq!(multipliers.multipliers[0].multiplier, 4.0);
+        assert!(
+            serde_json::from_value::<PricingMultipliersUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "multipliers": []
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PricingMultipliersUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "expectedPricingRevision": "seed",
+                "multipliers": [{ "model_id": "grok-4.5", "multiplier": 4.0 }]
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PricingMultiplierWrite>(json!({
+                "modelId": "grok-4.5",
+                "multiplier": 4.0,
+                "token": "nope"
+            }))
+            .is_err()
         );
     }
 }
