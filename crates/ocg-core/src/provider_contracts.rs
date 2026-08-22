@@ -11,7 +11,7 @@ use crate::kernel::ids::{
     OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, normalize_model_name,
 };
 use crate::kernel::protocol::{
-    ApiFormat, command_code_protocol_profiles, supported_model_protocol_profiles,
+    ApiFormat, command_code_protocol_profiles, is_known_model, supported_model_protocol_profiles,
 };
 use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::Account;
@@ -19,6 +19,7 @@ use crate::provider::{
     BUILTIN_PLANS, OPENCODE_CONSTRUCTABLE_PROTOCOLS, ProviderAdapterKind, ProviderRegistry,
     SCNET_TOKEN_PLAN_USABLE_MODELS, StructuralProbeCeiling, UpstreamProtocolKind,
 };
+use crate::redaction::sanitize_upstream_error_value_with_known_secret;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -528,14 +529,14 @@ pub fn safety_ceiling_protocols(
     match descriptor.protocol_probe.structural_ceiling {
         StructuralProbeCeiling::Unavailable => Vec::new(),
         StructuralProbeCeiling::OpenCodeConstructable => {
-            if crate::gateway::protocol::is_known_model(model_id) {
+            if is_known_model(model_id) {
                 OPENCODE_CONSTRUCTABLE_PROTOCOLS.to_vec()
             } else {
                 Vec::new()
             }
         }
         StructuralProbeCeiling::ZenFreeConstructable => {
-            if crate::gateway::protocol::is_known_model(model_id) {
+            if is_known_model(model_id) {
                 OPENCODE_CONSTRUCTABLE_PROTOCOLS.to_vec()
             } else if crate::kernel::ids::is_free_model(model_id) {
                 vec![UpstreamProtocolKind::ChatCompletions]
@@ -693,16 +694,8 @@ pub fn apply_probe_observation(
 
 pub fn sanitize_probe_error(raw: &str, secret: Option<&str>) -> String {
     let value = secret.map_or_else(
-        || {
-            crate::gateway::diagnostics::sanitize_upstream_error_value_with_known_secret(raw, "")
-                .to_string()
-        },
-        |secret| {
-            crate::gateway::diagnostics::sanitize_upstream_error_value_with_known_secret(
-                raw, secret,
-            )
-            .to_string()
-        },
+        || sanitize_upstream_error_value_with_known_secret(raw, "").to_string(),
+        |secret| sanitize_upstream_error_value_with_known_secret(raw, secret).to_string(),
     );
     truncate_chars(&strip_credential_urls(&value), MAX_PROBE_ERROR_CHARS)
 }

@@ -18,6 +18,7 @@ pub mod models;
 pub mod pricing;
 pub mod provider;
 pub mod provider_contracts;
+pub(crate) mod redaction;
 pub mod state;
 pub mod usage_sync;
 pub mod zen_models;

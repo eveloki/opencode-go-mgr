@@ -13,7 +13,6 @@ use chrono::Utc;
 
 use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
 use crate::db::ReorderAccountsError;
-use crate::gateway::diagnostics::redact_known_secret;
 use crate::models::{
     Account as ModelAccount, AccountCustomConfigInput, AccountModelCapabilityInput,
     AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType,
@@ -22,6 +21,7 @@ use crate::models::{
 use crate::provider::{
     CreationAvailability, VerificationPolicy, default_offering_id, default_provider_id,
 };
+use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
 
 use super::types::{

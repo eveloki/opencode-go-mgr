@@ -64,15 +64,8 @@ mod dependency_guard {
         "pricing",
     ];
 
-    const EXPECTED_REMAINING_SCC: &[&str] = &[
-        "auth",
-        "dashboard",
-        "dashboard_v3",
-        "db",
-        "gateway",
-        "provider_contracts",
-        "state",
-    ];
+    const EXPECTED_HOST_SCC: &[&str] = &["dashboard", "dashboard_v3", "gateway", "state"];
+    const EXPECTED_CATALOG_SCC: &[&str] = &["go_usage", "http_client", "models", "provider"];
 
     #[test]
     fn kernel_modules_do_not_import_io_or_control_plane() {
@@ -112,12 +105,73 @@ mod dependency_guard {
     }
 
     #[test]
+    fn contract_and_v3_account_sources_do_not_import_gateway_utilities() {
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        for relative in ["provider_contracts.rs", "dashboard_v3/accounts.rs"] {
+            let path = src_root.join(relative);
+            let production = production_source(&read_to_string(&path));
+            assert!(
+                !crate_path_roots(&production).contains("gateway"),
+                "{relative} production source must not contain crate::gateway"
+            );
+            for line in production.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("use ") {
+                    assert!(
+                        !trimmed.starts_with("use crate::gateway"),
+                        "{relative} imports gateway: {trimmed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn redaction_module_is_a_pure_dag_leaf() {
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let path = src_root.join("redaction.rs");
+        let production = production_source(&read_to_string(&path));
+        for line in production.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("use ") {
+                for prefix in FORBIDDEN_USE_PREFIXES {
+                    assert!(
+                        !trimmed.starts_with(prefix),
+                        "redaction.rs imports I/O or control-plane code: {trimmed}"
+                    );
+                }
+            }
+        }
+        for module in crate_path_roots(&production) {
+            assert!(
+                !FORBIDDEN_KERNEL_CRATE_MODULES.contains(&module.as_str()),
+                "redaction.rs has a qualified production path into `{module}`"
+            );
+            assert_ne!(module, "gateway", "redaction.rs must not depend on gateway");
+        }
+        for needle in ["Utc::now", "Instant::now", "SystemTime::now"] {
+            assert!(
+                !production.contains(needle),
+                "redaction.rs must not read a clock (`{needle}`)"
+            );
+        }
+        assert!(
+            crate_path_roots(&production).is_empty(),
+            "redaction.rs must remain a crate-level DAG leaf, got {:?}",
+            crate_path_roots(&production)
+        );
+    }
+
+    #[test]
     fn production_graph_has_the_expected_remaining_scc() {
         let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let lib_source = production_source(&read_to_string(&src_root.join("lib.rs")));
         let modules = declared_modules(&lib_source);
         assert!(
-            modules.contains("db") && modules.contains("pricing") && modules.contains("kernel"),
+            modules.contains("db")
+                && modules.contains("pricing")
+                && modules.contains("kernel")
+                && modules.contains("redaction"),
             "lib.rs should declare the production modules under test, got {modules:?}"
         );
 
@@ -136,28 +190,16 @@ mod dependency_guard {
         );
 
         let graph = production_graph(&src_root, &modules);
-        let expected: BTreeSet<String> = EXPECTED_REMAINING_SCC
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
-        let db_scc = tarjan(&graph)
+        let expected_host = named_set(EXPECTED_HOST_SCC);
+        let expected_catalog = named_set(EXPECTED_CATALOG_SCC);
+        let db_component = tarjan(&graph)
             .into_iter()
-            .find(|component| component.len() > 1 && component.contains("db"))
-            .expect("db should remain in a production SCC");
-        assert!(
-            expected.is_subset(&db_scc),
-            "host SCC modules missing from the db component: {:?}, db_scc={db_scc:?}",
-            expected
-                .difference(&db_scc)
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        );
-        let extra: BTreeSet<String> = db_scc.difference(&expected).cloned().collect();
-        let mut pricing_only = BTreeSet::new();
-        pricing_only.insert("pricing".to_string());
-        assert!(
-            extra.is_empty() || extra == pricing_only,
-            "db SCC extra members should be at most clocked pricing pending host inversion, got {extra:?} in {db_scc:?}"
+            .find(|component| component.contains("db"))
+            .expect("db module should exist in the production graph");
+        assert_eq!(
+            db_component.len(),
+            1,
+            "db must not remain in a production SCC after the contract/redaction inversion, db_component={db_component:?}"
         );
         assert!(
             !graph
@@ -183,6 +225,23 @@ mod dependency_guard {
                 .is_some_and(|edges| edges.contains("state") || edges.contains("db")),
             "usage_sync must not depend on state or db"
         );
+        assert!(
+            !graph
+                .get("provider_contracts")
+                .is_some_and(|edges| edges.contains("gateway")),
+            "provider_contracts must not depend on gateway"
+        );
+        assert!(
+            !graph
+                .get("dashboard_v3")
+                .is_some_and(|edges| edges.contains("gateway")),
+            "dashboard_v3 must not depend on gateway"
+        );
+        assert_eq!(
+            graph.get("redaction").cloned().unwrap_or_default(),
+            BTreeSet::new(),
+            "redaction must be a production DAG leaf, graph={graph:?}"
+        );
 
         let gateway_keys_source =
             production_source(&read_to_string(&src_root.join("gateway_keys.rs")));
@@ -205,7 +264,14 @@ mod dependency_guard {
         // inversion). This lease cut gateway_keys and usage_sync out of the
         // measured host SCC by depending on KeyHost/UsageSyncHost instead.
         // dashboard_v3 joined the remaining cycle when the contract kernel
-        // mounted at the gateway router.
+        // mounted at the gateway router. Inverting the remaining pure
+        // catalog/sanitizer edges from provider_contracts into gateway also
+        // dropped auth, db, and provider_contracts out of that cycle. A
+        // separate catalog cycle (models/provider/go_usage/http_client) can
+        // match this SCC's size, so identify the host cycle by `gateway` and
+        // whitelist every remaining nontrivial SCC exactly. Largest-only
+        // selection is ambiguous; gateway-only selection would ignore a new
+        // or enlarged non-gateway cycle.
         let mut measured = graph.clone();
         measured.remove("pricing");
         for edges in measured.values_mut() {
@@ -216,15 +282,41 @@ mod dependency_guard {
             .filter(|component| component.len() > 1)
             .collect();
         nontrivial.sort();
-        let largest = nontrivial
-            .iter()
-            .max_by_key(|component| component.len())
-            .cloned()
-            .expect("host SCC");
+        let mut expected_sccs = vec![expected_host.clone(), expected_catalog.clone()];
+        expected_sccs.sort();
         assert_eq!(
-            largest, expected,
-            "remaining production SCC should be {expected:?}, sccs={nontrivial:?}, graph={graph:?}"
+            nontrivial, expected_sccs,
+            "approved production SCCs after pricing exclusion should be {expected_sccs:?}, sccs={nontrivial:?}, graph={graph:?}"
         );
+        let host_scc = nontrivial
+            .iter()
+            .find(|component| component.contains("gateway"))
+            .cloned()
+            .expect("gateway should remain in a production SCC");
+        assert_eq!(
+            host_scc, expected_host,
+            "remaining production host SCC should be {expected_host:?}, sccs={nontrivial:?}, graph={graph:?}"
+        );
+        let catalog_scc = nontrivial
+            .iter()
+            .find(|component| component.contains("models"))
+            .cloned()
+            .expect("catalog modules should remain in a production SCC");
+        assert_eq!(
+            catalog_scc, expected_catalog,
+            "remaining production catalog SCC should be {expected_catalog:?}, sccs={nontrivial:?}, graph={graph:?}"
+        );
+        assert!(
+            !host_scc.contains("provider_contracts")
+                && !host_scc.contains("redaction")
+                && !host_scc.contains("db")
+                && !host_scc.contains("auth"),
+            "inverted contract/redaction leaves must stay outside the host SCC, host_scc={host_scc:?}"
+        );
+    }
+
+    fn named_set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
     }
 
     fn production_graph(
