@@ -27,6 +27,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "Settings",
     "SettingsUpdate",
     "ProxySupportedModel",
+    "KeyCreate",
+    "KeyUpdate",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -62,7 +64,7 @@ impl ControlRevision {
 /// process generation prevents a revision captured before restart from being
 /// accepted by a fresh process whose in-memory counter reused the same value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MutationExpectation {
     pub expected_revision: u64,
@@ -262,6 +264,31 @@ pub struct SettingsUpdate {
     pub conversation_sticky: Option<bool>,
 }
 
+/// POST `/keys` body. CAS tokens are required; `name` is required. Unknown
+/// fields, including any Key material, are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KeyCreate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub name: String,
+}
+
+/// PATCH `/keys/{id}` body. CAS tokens are required; `name` and `enabled`
+/// may be omitted. Unknown fields, including any Key material, are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KeyUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
 /// One known model backing the list-mode checkbox grid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -325,6 +352,8 @@ pub fn contract_schema() -> Value {
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
     include_type::<MutationExpectation>(&mut deserialize);
     include_type::<SettingsUpdate>(&mut deserialize);
+    include_type::<KeyCreate>(&mut deserialize);
+    include_type::<KeyUpdate>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -397,6 +426,14 @@ mod tests {
         assert!(
             serde_json::from_value::<MutationExpectation>(json!({ "expected_revision": 3 }))
                 .is_err()
+        );
+        assert!(
+            serde_json::from_value::<MutationExpectation>(json!({
+                "expectedRevision": 3,
+                "processGeneration": 7,
+                "value": "must-not-be-accepted"
+            }))
+            .is_err()
         );
     }
 
@@ -542,5 +579,106 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn key_mutation_dtos_require_cas_and_reject_secret_fields() {
+        let created: KeyCreate = serde_json::from_value(json!({
+            "expectedRevision": 4,
+            "processGeneration": 9,
+            "name": "Laptop"
+        }))
+        .unwrap();
+        assert_eq!(created.expectation.expected_revision, 4);
+        assert_eq!(created.expectation.process_generation, 9);
+        assert_eq!(created.name, "Laptop");
+        assert!(
+            serde_json::from_value::<KeyCreate>(json!({
+                "expectedRevision": 4,
+                "processGeneration": 9,
+                "name": "Laptop",
+                "value": "ocg-secret"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<KeyCreate>(json!({
+                "expectedRevision": 4,
+                "processGeneration": 9,
+                "name": "Laptop",
+                "key": "ocg-secret"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<KeyCreate>(json!({
+                "expectedRevision": 4,
+                "processGeneration": 9,
+                "name": "Laptop",
+                "gatewayKey": "ocg-secret"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<KeyCreate>(json!({
+                "expectedRevision": 4,
+                "processGeneration": 9,
+                "name": "Laptop",
+                "primaryKey": "ocg-secret"
+            }))
+            .is_err()
+        );
+
+        let patched: KeyUpdate = serde_json::from_value(json!({
+            "expectedRevision": 5,
+            "processGeneration": 9,
+            "enabled": false
+        }))
+        .unwrap();
+        assert_eq!(patched.expectation.expected_revision, 5);
+        assert_eq!(patched.enabled, Some(false));
+        assert!(patched.name.is_none());
+        assert!(
+            serde_json::from_value::<KeyUpdate>(json!({
+                "expectedRevision": 5,
+                "processGeneration": 9,
+                "value": "ocg-secret"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<KeyUpdate>(json!({
+                "expected_revision": 5,
+                "processGeneration": 9
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn mutation_ack_serializes_without_credential_fields() {
+        let ack = MutationAck {
+            revision: 8,
+            process_generation: 9,
+        };
+        let value = serde_json::to_value(&ack).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.get("revision"), Some(&json!(8)));
+        assert_eq!(object.get("processGeneration"), Some(&json!(9)));
+        for forbidden in [
+            "key",
+            "gatewayKey",
+            "gateway_key",
+            "primaryKey",
+            "primary_key",
+            "value",
+            "name",
+            "id",
+        ] {
+            assert!(
+                !object.contains_key(forbidden),
+                "MutationAck must not expose {forbidden}"
+            );
+        }
     }
 }

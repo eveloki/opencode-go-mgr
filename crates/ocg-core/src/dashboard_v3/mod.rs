@@ -2,9 +2,11 @@
 //!
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
-//! generation, connection/settings reads, and the settings write path.
+//! generation, connection/settings reads, the settings write path, and the
+//! access-key lifecycle.
 
 mod connection;
+mod keys;
 mod settings;
 mod types;
 
@@ -12,17 +14,19 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 use crate::state::CoreState;
 
 pub use types::{
     CATALOG_TYPE_NAMES, ConnectionInfo, ConnectionSubKey, ControlRevision, ERROR_INTERNAL,
     ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
-    ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, MutationAck, MutationExpectation, PricingRevision,
-    ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
-    V3Error, contract_schema, contract_schema_pretty,
+    ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, KeyCreate, KeyUpdate, MutationAck,
+    MutationExpectation, PricingRevision, ProxyListDirection, ProxyMode, ProxySupportedModel,
+    RoutingMode, Settings, SettingsUpdate, V3Error, contract_schema, contract_schema_pretty,
 };
 
 /// Must match `dashboard.rs` `SESSION_COOKIE`. V2 owns login; V3 only checks it.
@@ -36,6 +40,16 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/settings",
             get(settings::get_settings).put(settings::put_settings),
         )
+        .route(
+            "/keys/primary/regenerate",
+            post(keys::regenerate_primary_key),
+        )
+        .route("/keys", post(keys::create_key))
+        .route(
+            "/keys/{id}",
+            patch(keys::update_key).delete(keys::delete_key),
+        )
+        .route("/keys/{id}/regenerate", post(keys::regenerate_key))
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }
 
@@ -141,4 +155,30 @@ fn dashboard_session_value(headers: &HeaderMap) -> Option<&str> {
 
 async fn get_contract(State(state): State<CoreState>) -> Json<ControlRevision> {
     Json(ControlRevision::from_state(&state))
+}
+
+/// Shared mutation-body parser: missing `expectedRevision` is a dedicated
+/// 400; anything else that is not valid JSON for `T` is `invalidJson`.
+fn parse_mutation_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| V3ApiError::invalid_json())?;
+    let Some(object) = value.as_object() else {
+        return Err(V3ApiError::invalid_json());
+    };
+    if !object.contains_key("expectedRevision") {
+        return Err(V3ApiError::missing_expected_revision());
+    }
+    serde_json::from_value(value).map_err(|_| V3ApiError::invalid_json())
+}
+
+fn check_expectation(
+    state: &CoreState,
+    expectation: &MutationExpectation,
+) -> Result<(), V3ApiError> {
+    if expectation.expected_revision != state.settings_revision()
+        || expectation.process_generation != state.process_generation()
+    {
+        Err(V3ApiError::revision_conflict(state))
+    } else {
+        Ok(())
+    }
 }
