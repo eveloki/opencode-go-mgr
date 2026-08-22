@@ -893,6 +893,118 @@
       ],
       "type": "object"
     },
+    "AuthLogin": {
+      "additionalProperties": false,
+      "description": "POST `/auth/login` body. Same required fields as [`AuthRegister`]; kept\nas a distinct catalog type so the two endpoints stay separately versionable.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "password": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "username",
+        "password"
+      ],
+      "type": "object"
+    },
+    "AuthLogout": {
+      "additionalProperties": false,
+      "description": "POST `/auth/logout` body. CAS tokens are required; unknown fields,\nincluding credentials, are rejected.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AuthRegister": {
+      "additionalProperties": false,
+      "description": "POST `/auth/register` body. CAS tokens, `username`, and `password` are\nrequired. `password` is write-only and never echoed.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "password": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "username",
+        "password"
+      ],
+      "type": "object"
+    },
+    "AuthStatus": {
+      "additionalProperties": false,
+      "description": "Public dashboard authentication snapshot. Never carries a password,\nsession token, Key, cipher, or secret.",
+      "properties": {
+        "authenticated": {
+          "type": "boolean"
+        },
+        "initialized": {
+          "type": "boolean"
+        },
+        "local": {
+          "type": "boolean"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "local",
+        "initialized",
+        "authenticated",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "CapabilitySummary": {
       "additionalProperties": false,
       "description": "Registry pricing or usage availability copied as display data.",
@@ -4292,6 +4404,18 @@
     },
     {
       "$ref": "#/$defs/UsageAvailability"
+    },
+    {
+      "$ref": "#/$defs/AuthStatus"
+    },
+    {
+      "$ref": "#/$defs/AuthRegister"
+    },
+    {
+      "$ref": "#/$defs/AuthLogin"
+    },
+    {
+      "$ref": "#/$defs/AuthLogout"
     }
   ],
   "title": "DashboardApiV3"

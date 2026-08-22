@@ -96,7 +96,11 @@ export type DashboardApiV3 =
   | QuotaWindow
   | CreditBalance
   | UsageSyncState
-  | UsageAvailability;
+  | UsageAvailability
+  | AuthStatus
+  | AuthRegister
+  | AuthLogin
+  | AuthLogout;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -1222,4 +1226,43 @@ export interface UsageSyncState {
   lastExpeditedAt: string | null;
   lastSuccessAt: string | null;
   nextEligibleAt: string | null;
+}
+/**
+ * Public dashboard authentication snapshot. Never carries a password,
+ * session token, Key, cipher, or secret.
+ */
+export interface AuthStatus {
+  authenticated: boolean;
+  initialized: boolean;
+  local: boolean;
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * POST `/auth/register` body. CAS tokens, `username`, and `password` are
+ * required. `password` is write-only and never echoed.
+ */
+export interface AuthRegister {
+  expectedRevision: number;
+  password: string;
+  processGeneration: number;
+  username: string;
+}
+/**
+ * POST `/auth/login` body. Same required fields as [`AuthRegister`]; kept
+ * as a distinct catalog type so the two endpoints stay separately versionable.
+ */
+export interface AuthLogin {
+  expectedRevision: number;
+  password: string;
+  processGeneration: number;
+  username: string;
+}
+/**
+ * POST `/auth/logout` body. CAS tokens are required; unknown fields,
+ * including credentials, are rejected.
+ */
+export interface AuthLogout {
+  expectedRevision: number;
+  processGeneration: number;
 }
