@@ -179,8 +179,12 @@ fn dashboard_v3_schema_version_stays_at_v26() {
 #[test]
 fn auth_catalog_types_append_after_pricing_without_rewriting_the_prefix() {
     assert_eq!(CATALOG_TYPE_NAMES[0], "ControlRevision");
+    let auth_start = CATALOG_TYPE_NAMES
+        .iter()
+        .position(|name| *name == AUTH_CATALOG_TYPES[0])
+        .expect("AuthStatus catalog entry");
     assert_eq!(
-        &CATALOG_TYPE_NAMES[CATALOG_TYPE_NAMES.len() - AUTH_CATALOG_TYPES.len()..],
+        &CATALOG_TYPE_NAMES[auth_start..auth_start + AUTH_CATALOG_TYPES.len()],
         AUTH_CATALOG_TYPES
     );
 
