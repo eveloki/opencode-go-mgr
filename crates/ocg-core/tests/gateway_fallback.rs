@@ -2479,6 +2479,10 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
     assert!(body.to_string().contains("unknown model"), "{body}");
     assert!(calls.lock().unwrap().is_empty());
     assert!(
+        state.db.lock().list_forward_logs(10).unwrap().is_empty(),
+        "unknown model must not insert a forward row"
+    );
+    assert!(
         state
             .db
             .lock()
@@ -2488,6 +2492,73 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
             .auth_error
             .is_none(),
         "a rejected unknown model must not touch account state"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn corrupt_selectable_credential_writes_a_preflight_row_without_upstream_call() {
+    let replies = HashMap::from([(
+        "key-2".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
+    state
+        .db
+        .lock()
+        .update_account(
+            "acct-1",
+            &AccountUpdate {
+                name: None,
+                username: None,
+                password: None,
+                key: None,
+                enabled: None,
+                referral_code: None,
+                purchase_date: None,
+                notes: None,
+            },
+            Some("not-a-valid-cipher"),
+            None,
+        )
+        .unwrap();
+    let corrupted = state.db.lock().get_account("acct-1").unwrap().unwrap();
+    assert!(corrupted.enabled, "{corrupted:?}");
+    assert_eq!(corrupted.key_cipher, "not-a-valid-cipher");
+
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let (status, body) = chat(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0].key, "key-2");
+
+    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
+    logs.sort_by_key(|log| log.attempt);
+    assert_eq!(logs.len(), 2, "{logs:?}");
+    assert_eq!(logs[0].account_id, "acct-1");
+    assert_eq!(logs[0].status, "error");
+    assert_eq!(logs[0].http_status, None);
+    assert_eq!(logs[0].error_source.as_deref(), Some("gateway"));
+    assert_eq!(logs[0].error_stage.as_deref(), Some("credential"));
+    assert!(
+        logs[0]
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("failed to decrypt account credentials")),
+        "{:?}",
+        logs[0].error_message
+    );
+    assert!(
+        logs[1].account_id == "acct-2" && logs[1].status.starts_with("success"),
+        "{logs:?}"
     );
 
     gateway::stop_gateway(gateway_handle);

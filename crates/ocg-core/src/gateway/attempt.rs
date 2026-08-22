@@ -11,11 +11,16 @@
 //! outbound client from [`ProxyRoutingModel`]. This slice does not rewrite
 //! the outer fallback loop.
 //!
-//! The temporary process-host resolver lives in `forwarder` because `state.rs`
-//! is outside this lease. A later host slice should move that concrete
-//! resolver next to `KeyHost`.
+//! [`AttemptTimeouts`] and [`AttemptTransportError`] describe the single POST
+//! boundary. `forward_once` in `forwarder` performs exactly one `.send()` and
+//! owns only transport selection and those timeouts.
+//!
+//! The temporary process-host resolver and `DbAttemptSink` live in `forwarder`
+//! because `state.rs` / `db.rs` are outside this lease. A later host slice
+//! should move the concrete resolver next to `KeyHost`.
 
 use crate::kernel::protocol::ApiFormat;
+use std::time::Duration;
 
 /// Authentication belongs to the provider/offering adapter, not to the wire
 /// protocol. In particular, a Messages endpoint does not imply `x-api-key`
@@ -116,6 +121,57 @@ impl AttemptSpec {
             self.path.clone()
         };
         Ok(format!("{}{}", self.base_url.trim_end_matches('/'), path))
+    }
+}
+
+/// Timeouts applied at the single-POST boundary. Non-stream uses reqwest's
+/// per-request timeout; stream wraps `.send()` with a header-wait timeout.
+/// Body idle timeouts, SSE conversion, and retry stay outside `forward_once`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AttemptTimeouts {
+    pub non_stream: Duration,
+    pub stream_header: Duration,
+}
+
+impl AttemptTimeouts {
+    pub(crate) fn from_secs(non_stream: u64, stream_header: u64) -> Self {
+        Self {
+            non_stream: Duration::from_secs(non_stream),
+            stream_header: Duration::from_secs(stream_header),
+        }
+    }
+}
+
+/// Errors from the single upstream POST. Classification, logging, cooldown,
+/// CAS, usage scheduling, and retry stay in the caller.
+#[derive(Debug)]
+pub(crate) enum AttemptTransportError {
+    HeaderTimeout { timeout: Duration },
+    Send(reqwest::Error),
+}
+
+impl std::fmt::Display for AttemptTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HeaderTimeout { timeout } => write!(
+                f,
+                "upstream did not return response headers within {}s",
+                timeout.as_secs()
+            ),
+            Self::Send(error) if error.is_timeout() => {
+                write!(f, "upstream request timed out: {error}")
+            }
+            Self::Send(error) => write!(f, "upstream request failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for AttemptTransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::HeaderTimeout { .. } => None,
+            Self::Send(error) => Some(error),
+        }
     }
 }
 
@@ -335,5 +391,28 @@ mod tests {
         );
         let handle = CredentialHandle::Account { id: "go-1".into() };
         assert!(!format!("{handle:?}").contains("sk-live-secret"));
+    }
+
+    #[test]
+    fn attempt_timeouts_are_transport_durations_only() {
+        let timeouts = AttemptTimeouts::from_secs(900, 300);
+        assert_eq!(timeouts.non_stream, Duration::from_secs(900));
+        assert_eq!(timeouts.stream_header, Duration::from_secs(300));
+        assert_ne!(timeouts.non_stream, timeouts.stream_header);
+    }
+
+    #[test]
+    fn attempt_transport_error_messages_match_stage0_send_text() {
+        let header = AttemptTransportError::HeaderTimeout {
+            timeout: Duration::from_secs(300),
+        };
+        assert_eq!(
+            header.to_string(),
+            "upstream did not return response headers within 300s"
+        );
+        assert!(matches!(
+            header,
+            AttemptTransportError::HeaderTimeout { .. }
+        ));
     }
 }

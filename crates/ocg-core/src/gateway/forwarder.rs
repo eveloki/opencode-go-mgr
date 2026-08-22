@@ -1,8 +1,8 @@
 use crate::custom_http::{build_custom_http_client, json_content_headers};
 use crate::db::{Database, ForwardLogDiagnosticUpdate};
 use crate::gateway::attempt::{
-    AttemptSpec, CredentialHandle, CredentialResolveError, CredentialResolver, ProxyRoutingModel,
-    UpstreamAuth,
+    AttemptSpec, AttemptTimeouts, AttemptTransportError, CredentialHandle, CredentialResolveError,
+    CredentialResolver, ProxyRoutingModel, UpstreamAuth,
 };
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
@@ -76,6 +76,143 @@ impl CredentialResolver for HostCredentialResolver<'_> {
             }
         }
     }
+}
+
+/// One insert per attempt and same-row finalize for streaming. The outer
+/// fallback loop still decides retry; this sink only persists the row.
+#[allow(clippy::too_many_arguments)]
+trait AttemptSink {
+    #[allow(clippy::too_many_arguments)]
+    fn insert(
+        &self,
+        account: &Account,
+        model: &str,
+        status: &str,
+        http_status: Option<i32>,
+        metrics: ForwardMetrics,
+        error_message: Option<&str>,
+        context: &ForwardAttemptContext,
+        failure: Option<FailureRecord>,
+    ) -> Result<i64>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize(
+        &self,
+        id: i64,
+        status: &str,
+        http_status: Option<i32>,
+        metrics: ForwardMetrics,
+        error_message: Option<&str>,
+        diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
+        context: &ForwardAttemptContext,
+    ) -> Result<()>;
+}
+
+struct DbAttemptSink<'a> {
+    db: &'a Database,
+}
+
+impl<'a> DbAttemptSink<'a> {
+    fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+impl AttemptSink for DbAttemptSink<'_> {
+    fn insert(
+        &self,
+        account: &Account,
+        model: &str,
+        status: &str,
+        http_status: Option<i32>,
+        metrics: ForwardMetrics,
+        error_message: Option<&str>,
+        context: &ForwardAttemptContext,
+        failure: Option<FailureRecord>,
+    ) -> Result<i64> {
+        log_forward(
+            self.db,
+            account,
+            model,
+            status,
+            http_status,
+            metrics,
+            error_message,
+            context,
+            failure,
+        )
+    }
+
+    fn finalize(
+        &self,
+        id: i64,
+        status: &str,
+        http_status: Option<i32>,
+        metrics: ForwardMetrics,
+        error_message: Option<&str>,
+        diagnostic: Option<&ForwardLogDiagnosticUpdate<'_>>,
+        context: &ForwardAttemptContext,
+    ) -> Result<()> {
+        finalize_logged_forward(
+            self.db,
+            id,
+            status,
+            http_status,
+            metrics,
+            error_message,
+            diagnostic,
+            context,
+        )
+    }
+}
+
+struct ForwardOnceOutput {
+    started: Instant,
+    result: std::result::Result<reqwest::Response, AttemptTransportError>,
+}
+
+/// Exactly one upstream POST. Owns transport selection and timeouts only.
+#[allow(clippy::too_many_arguments)]
+async fn forward_once(
+    spec: &AttemptSpec,
+    snapshot_client: &Client,
+    config: &AppConfig,
+    timeouts: AttemptTimeouts,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+    body: bytes::Bytes,
+    stream: bool,
+) -> Result<ForwardOnceOutput> {
+    let mut request = match spec.proxy_routing {
+        ProxyRoutingModel::IsolatedTrustedAdmin => {
+            let client = build_custom_http_client(config)?;
+            let url = reqwest::Url::parse(url)?;
+            client.request(reqwest::Method::POST, url)
+        }
+        ProxyRoutingModel::ProcessWideNoRedirect => {
+            let client = crate::http_client::build_no_redirect(config)?;
+            client.post(url)
+        }
+        ProxyRoutingModel::RequestEntrySnapshot => snapshot_client.post(url),
+    };
+    request = request.headers(headers).body(body);
+    if !stream {
+        request = request.timeout(timeouts.non_stream);
+    }
+    let started = Instant::now();
+    let send_future = request.send();
+    let result = if stream {
+        match tokio::time::timeout(timeouts.stream_header, send_future).await {
+            Ok(result) => result.map_err(AttemptTransportError::Send),
+            Err(_) => Err(AttemptTransportError::HeaderTimeout {
+                timeout: timeouts.stream_header,
+            }),
+        }
+    } else {
+        send_future.await.map_err(AttemptTransportError::Send)
+    };
+    Ok(ForwardOnceOutput { started, result })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,8 +469,7 @@ async fn forward_request_impl(
                 upstream_error: None,
                 request_body: Some(client_body),
             });
-            log_forward(
-                &state.db.lock(),
+            DbAttemptSink::new(&state.db.lock()).insert(
                 account,
                 &plan.model,
                 "error",
@@ -375,8 +511,7 @@ async fn forward_request_impl(
                 upstream_error: None,
                 request_body: Some(client_body),
             });
-            log_forward(
-                &state.db.lock(),
+            DbAttemptSink::new(&state.db.lock()).insert(
                 account,
                 &plan.model,
                 "error",
@@ -454,8 +589,7 @@ async fn forward_request_impl(
                     upstream_error: None,
                     request_body: Some(client_body),
                 });
-                log_forward(
-                    &state.db.lock(),
+                DbAttemptSink::new(&state.db.lock()).insert(
                     account,
                     &plan.model,
                     "error",
@@ -501,22 +635,7 @@ async fn forward_request_impl(
         .map_err(|error| anyhow::anyhow!(error))?;
 
     let model = plan.model.clone();
-    let custom_client = if attempt_spec.proxy_routing == ProxyRoutingModel::IsolatedTrustedAdmin {
-        Some(build_custom_http_client(config).map_err(|error| anyhow::anyhow!(error))?)
-    } else {
-        None
-    };
-    let goat_client = if attempt_spec.proxy_routing == ProxyRoutingModel::ProcessWideNoRedirect {
-        Some(crate::http_client::build_no_redirect(config)?)
-    } else {
-        None
-    };
-    let custom_url = if attempt_spec.isolates_client_headers() {
-        Some(reqwest::Url::parse(&url).map_err(|error| anyhow::anyhow!(error))?)
-    } else {
-        None
-    };
-    let custom_headers = if attempt_spec.isolates_client_headers() {
+    let send_headers = if attempt_spec.isolates_client_headers() {
         let api_key = key
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Custom route requires a decrypted key"))?;
@@ -531,104 +650,76 @@ async fn forward_request_impl(
         for (name, value) in &extra {
             headers.insert(name.clone(), value.clone());
         }
-        Some(headers)
+        headers
     } else {
-        None
+        upstream_headers
     };
 
-    let upstream_started = Instant::now();
-    let send_future = async {
-        if let (Some(custom_client), Some(custom_url), Some(headers)) =
-            (custom_client.as_ref(), custom_url, custom_headers)
-        {
-            let mut request = custom_client
-                .request(reqwest::Method::POST, custom_url)
-                .headers(headers)
-                .body(plan.body.clone());
-            if !plan.stream {
-                request = request.timeout(StdDuration::from_secs(config.non_stream_timeout_secs));
-            }
-            request.send().await
-        } else {
-            let send_client = goat_client.as_ref().unwrap_or(client);
-            let request = send_client
-                .post(&url)
-                .headers(upstream_headers)
-                .body(plan.body.clone());
-            if plan.stream {
-                request.send().await
-            } else {
-                request
-                    .timeout(StdDuration::from_secs(config.non_stream_timeout_secs))
-                    .send()
-                    .await
-            }
-        }
-    };
-    let upstream_resp = if plan.stream {
-        match tokio::time::timeout(
-            StdDuration::from_secs(config.stream_idle_timeout_secs),
-            send_future,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                let class = classify_transport(TransportClassifyInput::HeaderTimeout);
-                let detail = format!(
-                    "upstream did not return response headers within {}s",
-                    config.stream_idle_timeout_secs
-                );
-                let error_message = outcome_unknown_message(&detail);
-                let upstream_wait_ms = upstream_started.elapsed().as_millis() as u64;
-                let action = forward_action_for_class(class, allow_same_account_retry, None);
-                let failure = attempt_context.failure(FailureSpec {
-                    error_source: "transport",
-                    error_stage: "response_headers",
-                    downstream_status: Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
-                    upstream_status: None,
-                    upstream_wait_ms: Some(upstream_wait_ms),
-                    retry_action: Some(retry_action_name(action)),
-                    upstream_headers: None,
-                    upstream_error: Some(&detail),
-                    request_body: Some(client_body),
-                });
-                {
-                    let db = state.db.lock();
-                    log_forward(
-                        &db,
-                        account,
-                        &model,
-                        "outcome_unknown",
-                        None,
-                        metadata_metrics(
-                            &pricing_snapshot,
-                            plan.service_tier.as_deref(),
-                            "outcome_unknown",
-                        ),
-                        Some(&error_message),
-                        &attempt_context,
-                        Some(failure),
-                    )?;
-                }
-                return Ok(ForwardResult {
-                    response: outcome_unknown_response(
-                        plan.client,
-                        StatusCode::GATEWAY_TIMEOUT,
-                        &detail,
-                    ),
-                    action,
-                    error_message: Some(error_message),
-                });
-            }
-        }
-    } else {
-        send_future.await
-    };
-
-    let upstream_resp = match upstream_resp {
+    let sent = forward_once(
+        &attempt_spec,
+        client,
+        config,
+        AttemptTimeouts::from_secs(
+            config.non_stream_timeout_secs,
+            config.stream_idle_timeout_secs,
+        ),
+        &url,
+        send_headers,
+        plan.body.clone(),
+        plan.stream,
+    )
+    .await?;
+    let upstream_started = sent.started;
+    let upstream_resp = match sent.result {
         Ok(resp) => resp,
-        Err(e) => {
+        Err(AttemptTransportError::HeaderTimeout { timeout }) => {
+            let class = classify_transport(TransportClassifyInput::HeaderTimeout);
+            let detail = format!(
+                "upstream did not return response headers within {}s",
+                timeout.as_secs()
+            );
+            let error_message = outcome_unknown_message(&detail);
+            let upstream_wait_ms = upstream_started.elapsed().as_millis() as u64;
+            let action = forward_action_for_class(class, allow_same_account_retry, None);
+            let failure = attempt_context.failure(FailureSpec {
+                error_source: "transport",
+                error_stage: "response_headers",
+                downstream_status: Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
+                upstream_status: None,
+                upstream_wait_ms: Some(upstream_wait_ms),
+                retry_action: Some(retry_action_name(action)),
+                upstream_headers: None,
+                upstream_error: Some(&detail),
+                request_body: Some(client_body),
+            });
+            {
+                let db = state.db.lock();
+                DbAttemptSink::new(&db).insert(
+                    account,
+                    &model,
+                    "outcome_unknown",
+                    None,
+                    metadata_metrics(
+                        &pricing_snapshot,
+                        plan.service_tier.as_deref(),
+                        "outcome_unknown",
+                    ),
+                    Some(&error_message),
+                    &attempt_context,
+                    Some(failure),
+                )?;
+            }
+            return Ok(ForwardResult {
+                response: outcome_unknown_response(
+                    plan.client,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    &detail,
+                ),
+                action,
+                error_message: Some(error_message),
+            });
+        }
+        Err(AttemptTransportError::Send(e)) => {
             let upstream_wait_ms = upstream_started.elapsed().as_millis() as u64;
             let class = classify_transport(if e.is_connect() {
                 TransportClassifyInput::Connect
@@ -672,8 +763,7 @@ async fn forward_request_impl(
             });
             {
                 let db = state.db.lock();
-                log_forward(
-                    &db,
+                DbAttemptSink::new(&db).insert(
                     account,
                     &model,
                     if outcome_unknown {
@@ -760,8 +850,7 @@ async fn forward_request_impl(
         });
         {
             let db = state.db.lock();
-            log_forward(
-                &db,
+            DbAttemptSink::new(&db).insert(
                 account,
                 &model,
                 "error",
@@ -827,8 +916,7 @@ async fn forward_request_impl(
                 });
                 {
                     let db = state.db.lock();
-                    log_forward(
-                        &db,
+                    DbAttemptSink::new(&db).insert(
                         account,
                         &model,
                         "client_error",
@@ -881,8 +969,7 @@ async fn forward_request_impl(
                 });
                 {
                     let db = state.db.lock();
-                    log_forward(
-                        &db,
+                    DbAttemptSink::new(&db).insert(
                         account,
                         &model,
                         "outcome_unknown",
@@ -927,8 +1014,7 @@ async fn forward_request_impl(
                 });
                 {
                     let db = state.db.lock();
-                    log_forward(
-                        &db,
+                    DbAttemptSink::new(&db).insert(
                         account,
                         &model,
                         "client_error",
@@ -974,8 +1060,7 @@ async fn forward_request_impl(
                 });
                 {
                     let db = state.db.lock();
-                    log_forward(
-                        &db,
+                    DbAttemptSink::new(&db).insert(
                         account,
                         &model,
                         "client_error",
@@ -1029,8 +1114,7 @@ async fn forward_request_impl(
                 });
                 {
                     let db = state.db.lock();
-                    log_forward(
-                        &db,
+                    DbAttemptSink::new(&db).insert(
                         account,
                         &model,
                         "client_error",
@@ -1069,8 +1153,7 @@ async fn forward_request_impl(
                 });
                 {
                     let db = state.db.lock();
-                    log_forward(
-                        &db,
+                    DbAttemptSink::new(&db).insert(
                         account,
                         &model,
                         "client_error",
@@ -1123,8 +1206,7 @@ async fn forward_request_impl(
         // request maps to exactly one row in forward_logs.
         let initial_id: i64 = {
             let db = state.db.lock();
-            log_forward(
-                &db,
+            DbAttemptSink::new(&db).insert(
                 account,
                 &model,
                 "streaming",
@@ -1353,8 +1435,7 @@ async fn forward_request_impl(
                                     });
                                     let diagnostic = failure.update();
                                     let db = state_h.db.lock();
-                                    let _ = finalize_logged_forward(
-                                        &db,
+                                    let _ = DbAttemptSink::new(&db).finalize(
                                         initial_id,
                                         "outcome_unknown",
                                         None,
@@ -1399,8 +1480,7 @@ async fn forward_request_impl(
                             });
                             let diagnostic = failure.update();
                             let db = state_h.db.lock();
-                            let _ = finalize_logged_forward(
-                                &db,
+                            let _ = DbAttemptSink::new(&db).finalize(
                                 initial_id,
                                 "outcome_unknown",
                                 None,
@@ -1446,8 +1526,7 @@ async fn forward_request_impl(
                             });
                             let diagnostic = failure.update();
                             let db = state_h.db.lock();
-                            let _ = finalize_logged_forward(
-                                &db,
+                            let _ = DbAttemptSink::new(&db).finalize(
                                 initial_id,
                                 "outcome_unknown",
                                 None,
@@ -1640,8 +1719,7 @@ async fn forward_request_impl(
                             .or(stream_error.as_deref())
                             .map(|error| attempt.redact_known_secret(error));
                         let db = db_h.db.lock();
-                        if let Err(e) = finalize_logged_forward(
-                            &db,
+                        if let Err(e) = DbAttemptSink::new(&db).finalize(
                             initial_id,
                             &status_str,
                             None,
@@ -1708,8 +1786,7 @@ async fn forward_request_impl(
                 });
                 {
                     let db = state.db.lock();
-                    log_forward(
-                        &db,
+                    DbAttemptSink::new(&db).insert(
                         account,
                         &model,
                         "outcome_unknown",
@@ -1747,8 +1824,7 @@ async fn forward_request_impl(
                     request_body: Some(client_body),
                 });
                 let db = state.db.lock();
-                log_forward(
-                    &db,
+                DbAttemptSink::new(&db).insert(
                     account,
                     &model,
                     "error",
@@ -1815,8 +1891,7 @@ async fn forward_request_impl(
                     request_body: Some(client_body),
                 });
                 let db = state.db.lock();
-                log_forward(
-                    &db,
+                DbAttemptSink::new(&db).insert(
                     account,
                     &model,
                     "error",
@@ -1839,8 +1914,7 @@ async fn forward_request_impl(
 
         {
             let db = state.db.lock();
-            log_forward(
-                &db,
+            DbAttemptSink::new(&db).insert(
                 account,
                 &model,
                 success_status_for_cost(metrics.cost_state),
@@ -2007,8 +2081,7 @@ impl Drop for StreamOutcomeGuard {
             .as_deref()
             .map(|message| self.attempt_context.redact_known_secret(message));
         let db = self.state.db.lock();
-        if let Err(error) = finalize_logged_forward(
-            &db,
+        if let Err(error) = DbAttemptSink::new(&db).finalize(
             self.log_id,
             status,
             None,
@@ -2102,8 +2175,7 @@ fn handle_pre_output_stream_failure(
     });
     let diagnostic = failure.update();
     let db = state.db.lock();
-    if let Err(error) = finalize_logged_forward(
-        &db,
+    if let Err(error) = DbAttemptSink::new(&db).finalize(
         log_id,
         "outcome_unknown",
         None,
@@ -3039,18 +3111,18 @@ mod stream_outcome_guard_tests {
         context: &ForwardAttemptContext,
     ) -> i64 {
         let pricing = state.pricing_snapshot();
-        log_forward(
-            &state.db.lock(),
-            account,
-            "deepseek-v4-flash",
-            "streaming",
-            Some(200),
-            metadata_metrics(&pricing, None, "not_applicable"),
-            None,
-            context,
-            None,
-        )
-        .unwrap()
+        DbAttemptSink::new(&state.db.lock())
+            .insert(
+                account,
+                "deepseek-v4-flash",
+                "streaming",
+                Some(200),
+                metadata_metrics(&pricing, None, "not_applicable"),
+                None,
+                context,
+                None,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -3158,6 +3230,53 @@ mod stream_outcome_guard_tests {
         drop(state);
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn db_attempt_sink_inserts_once_and_finalizes_the_same_row() {
+        let (dir, state) = test_state("sink-once");
+        let account = account(&state);
+        state.db.lock().create_account(&account).unwrap();
+        let context = attempt_context();
+        let pricing = state.pricing_snapshot();
+        let id = {
+            let db = state.db.lock();
+            let sink = DbAttemptSink::new(&db);
+            let id = sink
+                .insert(
+                    &account,
+                    "deepseek-v4-flash",
+                    "streaming",
+                    Some(200),
+                    metadata_metrics(&pricing, None, "not_applicable"),
+                    None,
+                    &context,
+                    None,
+                )
+                .unwrap();
+            sink.finalize(
+                id,
+                "success",
+                Some(200),
+                metadata_metrics(&pricing, None, "not_applicable"),
+                None,
+                None,
+                &context,
+            )
+            .unwrap();
+            id
+        };
+        let logs = state.db.lock().list_forward_logs(10).unwrap();
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        assert_eq!(logs[0].id, id);
+        assert_ne!(logs[0].status, "streaming");
+        assert!(
+            logs[0].status.starts_with("success"),
+            "same-row finalize must leave one completed attempt: {}",
+            logs[0].status
+        );
+        drop(state);
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]
@@ -3249,5 +3368,112 @@ mod host_credential_resolver_tests {
         assert!(mismatch.to_string().contains("does not match"));
         drop(state);
         let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod forward_once_tests {
+    fn production_source() -> &'static str {
+        include_str!("forwarder.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests")
+    }
+
+    fn function_source(name: &str) -> &'static str {
+        let production = production_source();
+        let sig = format!("async fn {name}");
+        let start = production
+            .find(&sig)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        let after = &production[start..];
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape = false;
+        for (i, ch) in after.char_indices() {
+            if in_string {
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escape = true;
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unclosed {name}");
+    }
+
+    #[test]
+    fn forward_once_has_exactly_one_production_send_site() {
+        let production = production_source();
+        assert_eq!(
+            production.matches(".send()").count(),
+            1,
+            "production forwarder must POST through a single .send()"
+        );
+        let source = function_source("forward_once");
+        assert_eq!(source.matches(".send()").count(), 1);
+        assert!(source.contains("request.send()"));
+        assert!(source.contains("timeouts.non_stream"));
+        assert!(source.contains("timeouts.stream_header"));
+        assert!(source.contains("ProxyRoutingModel::IsolatedTrustedAdmin"));
+        assert!(source.contains("ProxyRoutingModel::ProcessWideNoRedirect"));
+        assert!(source.contains("ProxyRoutingModel::RequestEntrySnapshot"));
+        assert!(source.contains("build_custom_http_client"));
+        assert!(source.contains("build_no_redirect"));
+    }
+
+    #[test]
+    fn forward_once_contains_no_policy_or_retry() {
+        let source = function_source("forward_once");
+        for forbidden in [
+            "classify_",
+            "log_forward",
+            "finalize_logged",
+            "DbAttemptSink",
+            "schedule_after_inference_429",
+            "usage_sync",
+            "StreamOutcomeGuard",
+            "StreamConverter",
+            "RetrySameAccount",
+            "TryNextAccount",
+            "ExhaustFreeChannel",
+            "ForwardAction",
+            "cooldown",
+            "redact",
+            "materialize",
+            "select_candidate",
+            "set_account_",
+            "CoreState",
+            "Database",
+            "FailureSpec",
+            "emit_failure",
+            "alias::",
+            "native_log_identity",
+            "allow_same_account_retry",
+            "pricing_snapshot",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "forward_once must not contain policy token `{forbidden}`"
+            );
+        }
     }
 }
