@@ -873,6 +873,42 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    #[tokio::test]
+    async fn spawn_usage_sync_loop_starts_once_per_core_state() {
+        let (dir, state) = test_state("once-loop");
+        assert!(!state.usage_sync.loop_started.load(AtomicOrdering::Acquire));
+        spawn_usage_sync_loop(state.clone());
+        assert!(state.usage_sync.loop_started.load(AtomicOrdering::Acquire));
+        spawn_usage_sync_loop(state.clone());
+        spawn_usage_sync_loop(state.clone());
+        assert!(
+            state.usage_sync.loop_started.load(AtomicOrdering::Acquire),
+            "repeat spawn_usage_sync_loop calls must keep the once-per-CoreState flag"
+        );
+
+        let first = crate::gateway::start_gateway_on(
+            state.clone(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .await
+        .unwrap();
+        let second = crate::gateway::start_gateway_on(
+            state.clone(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            state.usage_sync.loop_started.load(AtomicOrdering::Acquire),
+            "starting additional gateways on the same CoreState must not reset the usage loop"
+        );
+        crate::gateway::stop_gateway(first);
+        crate::gateway::stop_gateway(second);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn failure_backoff_ladder_caps_at_six_hours() {
         assert_eq!(failure_backoff(1), Duration::minutes(5));
