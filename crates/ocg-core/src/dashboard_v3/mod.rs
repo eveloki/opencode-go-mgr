@@ -3,11 +3,14 @@
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, connection/settings reads, the settings write path, the
-//! access-key lifecycle, and the local accounts control plane.
+//! access-key lifecycle, the local accounts control plane, and the local/Zen
+//! provider catalog, contracts, and Zen Free control plane. Billable protocol
+//! probes stay off this router.
 
 mod accounts;
 mod connection;
 mod keys;
+mod providers;
 mod settings;
 mod types;
 
@@ -22,6 +25,8 @@ use serde_json::Value;
 
 use crate::state::CoreState;
 
+#[cfg(debug_assertions)]
+pub use providers::set_zen_models_source_url_override_for_tests;
 pub use types::{
     Account, AccountAcknowledgement, AccountAcknowledgementCreate, AccountAcknowledgementWrite,
     AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
@@ -29,12 +34,18 @@ pub use types::{
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
     AccountType, AccountUpdate, AccountUpstreamProtocol, AccountVerificationStatus,
-    CATALOG_TYPE_NAMES, ConnectionInfo, ConnectionSubKey, ControlRevision, ERROR_CONFLICT,
-    ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
-    ERROR_NOT_FOUND, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
-    ERROR_UNAUTHORIZED, KeyCreate, KeyUpdate, MutationAck, MutationExpectation, PricingRevision,
+    CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
+    ContractScopeKind, ControlRevision, CustomEndpointContract, ERROR_CONFLICT, ERROR_INTERNAL,
+    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
+    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
+    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
+    EffectiveProtocolEvidence, KeyCreate, KeyUpdate, MutationAck, MutationExpectation,
+    PricingRevision, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
+    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
     ProxyListDirection, ProxyMode, ProxySupportedModel, RoutingMode, Settings, SettingsUpdate,
-    V3Error, contract_schema, contract_schema_pretty,
+    V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
+    contract_schema_pretty,
 };
 
 /// Must match `dashboard.rs` `SESSION_COOKIE`. V2 owns login; V3 only checks it.
@@ -91,6 +102,31 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/accounts/{id}/acknowledgements",
             post(accounts::create_account_acknowledgement),
         )
+        .route("/providers", get(providers::get_providers))
+        .route(
+            "/providers/model-capabilities",
+            get(providers::get_model_capabilities),
+        )
+        .route(
+            "/providers/zen-free",
+            get(providers::get_zen_free_settings).patch(providers::patch_zen_free_settings),
+        )
+        .route(
+            "/providers/zen-free/models",
+            get(providers::get_zen_free_models),
+        )
+        .route(
+            "/providers/zen-free/models/refresh",
+            post(providers::refresh_zen_free_models),
+        )
+        .route(
+            "/provider-contracts",
+            get(providers::get_provider_contracts),
+        )
+        .route(
+            "/provider-contracts/provider/{scope_id}/protocols/{protocol}",
+            put(providers::put_provider_protocol_switch),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_v3_session))
 }
 
@@ -140,13 +176,29 @@ impl V3ApiError {
     }
 
     fn not_found(state: &CoreState) -> Self {
+        Self::not_found_at(state, "account not found")
+    }
+
+    fn not_found_at(state: &CoreState, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             body: V3Error::not_found(
-                "account not found",
+                message,
                 state.settings_revision(),
                 state.process_generation(),
             ),
+        }
+    }
+
+    fn outbound_failed(state: &CoreState, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            body: V3Error {
+                code: "outboundFailed".to_string(),
+                message: message.into(),
+                current_revision: Some(state.settings_revision()),
+                process_generation: Some(state.process_generation()),
+            },
         }
     }
 
