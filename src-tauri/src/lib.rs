@@ -1,5 +1,6 @@
 pub mod autostart;
 pub mod commands;
+pub mod native_browser;
 pub mod state;
 pub mod tray;
 pub mod updater;
@@ -58,13 +59,13 @@ pub fn run() {
     }
 
     let browser_processes = Arc::new(Mutex::new(BrowserProcessState::default()));
-    match commands::browser::native_browser_name() {
+    match native_browser::native_browser_name() {
         Ok(browser_name) => {
             let launcher_data_dir = core_state.data_dir();
             let launcher_processes = browser_processes.clone();
             let launcher: ocg_core::browser::NativeBrowserLauncher =
                 Arc::new(move |account_id, url| {
-                    commands::browser::open_external_browser(
+                    native_browser::open_external_browser(
                         launcher_data_dir.clone(),
                         launcher_processes.clone(),
                         account_id,
@@ -76,7 +77,7 @@ pub fn run() {
             let stopper_processes = browser_processes.clone();
             let stopper_data_dir = core_state.data_dir();
             let stopper: ocg_core::browser::NativeBrowserStopper = Arc::new(move |account_id| {
-                commands::browser::stop_external_browser(
+                native_browser::stop_external_browser(
                     &stopper_processes,
                     account_id,
                     Some(&stopper_data_dir),
@@ -217,7 +218,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(move |_app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                let _ = commands::browser::close_all_browser_processes(
+                let _ = native_browser::close_all_browser_processes(
                     &app_state.browser_processes,
                     Some(&core_state.data_dir()),
                 );
@@ -276,5 +277,25 @@ mod host_lifecycle_surface {
         let capabilities = include_str!("../capabilities/default.json");
         assert!(capabilities.contains("core:window:allow-hide"));
         assert!(!capabilities.contains("updater"));
+    }
+
+    #[test]
+    fn native_browser_hooks_are_owned_by_the_host_module() {
+        let production = include_str!("lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production lib.rs precedes this test module");
+        assert!(production.contains("native_browser::native_browser_name()"));
+        assert!(production.contains("native_browser::open_external_browser"));
+        assert!(production.contains("native_browser::stop_external_browser"));
+        assert!(production.contains("native_browser::close_all_browser_processes"));
+        assert!(!production.contains("commands::browser::native_browser_name"));
+        assert!(!production.contains("commands::browser::open_external_browser"));
+        assert!(!production.contains("commands::browser::stop_external_browser"));
+        assert!(!production.contains("commands::browser::close_all_browser_processes"));
+        assert!(production.contains("commands::browser::open_browser"));
+        assert!(production.contains("commands::browser::close_browser"));
+        assert!(production.contains("commands::browser::close_account_browser"));
+        assert!(production.contains("commands::browser::reset_browser_profile"));
     }
 }
