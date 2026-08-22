@@ -98,29 +98,26 @@
           :key="account.id"
           :account="account"
           :catalog="providerCatalog"
-          :provider-models="zenFreeModels"
+          :contract-summary="contractSummaryFor(account)"
           :usage="getUsage(account.id)"
-          :limits="usageLimits"
+          :limits="usageLimitsFor(account)"
           :edits="usageEdits[account.id]"
           :now="now"
           :order-handle-disabled="orderSaving || busy || accounts.length < 2"
           :dragging="draggingAccountId === account.id"
-          :pinging="!!pinging[account.id]"
           :usage-loading="!!usageLoading[account.id]"
           :usage-load-error="usageLoadErrors[account.id] ?? null"
           :usage-refresh-loading="!!usageRefreshLoading[account.id]"
-          :model-refreshing="!!modelRefreshing[account.id]"
           :verifying="!!verifying[account.id]"
           :quota-limits-failed="!!quotaLimitsError"
           :menu-options="accountMenuOptions(account, now)"
           @order-keydown="handleOrderKeydown($event, account.id)"
           @order-drag-start="startAccountDrag($event, account.id)"
-          @ping="pingAccount(account.id)"
           @toggle="toggleAccount(account.id)"
           @verify="verifyCustomAccount(account.id)"
           @refresh-usage="refreshAccountUsage(account.id)"
-          @refresh-models="refreshProviderModels(account.id)"
           @reload-usage="loadAccountUsage(account.id)"
+          @open-provider="openProvider(account)"
           @open-wizard="openManagedWizard(account.id)"
           @menu-select="handleMenuSelect($event, account.id)"
           @usage-editor-open="focusUsageEditor(account.id)"
@@ -256,7 +253,10 @@ import {
 import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, tauriApi } from "../api/tauri";
 import { providerApi } from "../api/providers.ts";
-import type { ProviderCatalogEntry, ZenFreeModelsResponse } from "../api/providers.ts";
+import type {
+  ProviderCatalogEntry,
+  ProviderContractsResponse,
+} from "../api/providers.ts";
 import type {
   Account,
   AccountInput,
@@ -267,7 +267,10 @@ import type {
 } from "../api/tauri";
 import { isCooling } from "./accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "./account-display.ts";
-import { isZenFreeAccount } from "./account-providers.ts";
+import {
+  isCommandCodeGoatAccount,
+  isZenFreeAccount,
+} from "./account-providers.ts";
 import {
   executeCustomAccountEdit,
   isCustomApiAccount,
@@ -303,16 +306,19 @@ import AccountAddModal from "../components/AccountAddModal.vue";
 import AccountCard from "../components/AccountCard.vue";
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
+import { accountContractSummary, accountProviderScope } from "./provider-contracts.ts";
+
+const emit = defineEmits<{
+  navigate: [view: string, extras?: { scope_kind: string; scope_id: string }];
+}>();
 
 const dialog = useDialog();
 const message = useMessage();
 const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
-const pinging = ref<Record<string, boolean>>({});
 const verifying = ref<Record<string, boolean>>({});
 const providerSettingsSaving = ref<Record<string, boolean>>({});
-const modelRefreshing = ref<Record<string, boolean>>({});
 /** Settings revision from `GET /settings`, used for conditional Zen writes. */
 const settingsRevision = ref<number | null>(null);
 const showModal = ref(false);
@@ -338,7 +344,7 @@ const now = ref(Date.now());
 const planFilter = ref<AccountPlanFilter>("all");
 const statusFilter = ref<AccountStatusFilter>("all");
 const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
-const zenFreeModels = ref<ZenFreeModelsResponse | null>(null);
+const providerContracts = ref<ProviderContractsResponse | null>(null);
 const catalogLoading = ref(false);
 const catalogError = ref("");
 const selectedPlanForCreate = ref<PlanDefinition | null>(null);
@@ -347,7 +353,7 @@ const {
   quotaLimits,
   quotaLimitsLoading,
   quotaLimitsError,
-  usageLimits,
+  usageLimitsFor,
   usageMap,
   usageEdits,
   usageLoading,
@@ -705,10 +711,13 @@ function removeAccountState(id: string): void {
   delete usageEdits.value[id];
   delete usageLoading.value[id];
   delete usageLoadErrors.value[id];
-  delete pinging.value[id];
   delete verifying.value[id];
   delete providerSettingsSaving.value[id];
-  delete modelRefreshing.value[id];
+}
+
+function accountHasUsageDisplay(account: Account): boolean {
+  return isCommandCodeGoatAccount(account)
+    || (account.provider_id === "opencode" && account.offering_id === "go");
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -721,7 +730,7 @@ async function refreshAccountState(id: string): Promise<Account | null> {
     message.warning(t("未找到该账号，已为你刷新列表"));
     return null;
   }
-  if (accountIsReady(account) && account.provider_id === "opencode" && account.offering_id === "go") {
+  if (accountIsReady(account) && accountHasUsageDisplay(account)) {
     await loadAccountUsage(id);
   } else {
     delete usageMap.value[id];
@@ -751,12 +760,18 @@ async function loadAccounts() {
     accounts.value = loaded;
     settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
     // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
-    if (quotaLimits.value) {
+    if (quotaLimits.value || loaded.some(isCommandCodeGoatAccount)) {
       await mapWithConcurrency(
         loaded.filter((account) => (
           accountIsReady(account)
-          && account.provider_id === "opencode"
-          && account.offering_id === "go"
+          && (
+            isCommandCodeGoatAccount(account)
+            || (
+              !!quotaLimits.value
+              && account.provider_id === "opencode"
+              && account.offering_id === "go"
+            )
+          )
         )),
         4,
         (account) => loadAccountUsage(account.id),
@@ -807,16 +822,11 @@ async function loadProviderCatalog(): Promise<void> {
   }
 }
 
-async function loadZenFreeModels(): Promise<void> {
-  const zen = accounts.value.find(isZenFreeAccount);
-  if (!zen) {
-    zenFreeModels.value = null;
-    return;
-  }
+async function loadProviderContracts(): Promise<void> {
   try {
-    zenFreeModels.value = await providerApi.getProviderModels(zen.id);
+    providerContracts.value = await providerApi.getProviderContracts();
   } catch {
-    zenFreeModels.value = null;
+    // Keep the last good snapshot; account cards still render without a summary.
   }
 }
 
@@ -825,7 +835,17 @@ async function initializeAccounts() {
   const catalogPromise = loadProviderCatalog();
   await loadQuotaLimits();
   await loadAccounts();
-  await Promise.allSettled([registrationOptions, catalogPromise, loadZenFreeModels()]);
+  await Promise.allSettled([registrationOptions, catalogPromise, loadProviderContracts()]);
+}
+
+function contractSummaryFor(account: Account) {
+  if (!providerContracts.value) return null;
+  return accountContractSummary(account, providerContracts.value, providerCatalog.value);
+}
+
+function openProvider(account: Account) {
+  const scope = accountProviderScope(account);
+  emit("navigate", "providers", scope);
 }
 
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
@@ -853,7 +873,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       // purchase_date defines the monthly usage window and changing it clears
       // the persisted calibration offset, so the local usage snapshot must be
       // refreshed before the edited account is shown again.
-      await loadAccountUsage(saved.id);
+      if (accountHasUsageDisplay(saved)) await loadAccountUsage(saved.id);
       message.success(t("账号已更新"));
       showModal.value = false;
     } catch (e) {
@@ -875,13 +895,9 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       message.success(t("账号已添加"));
       addAccount(created);
       settingsRevision.value = created.revision ?? settingsRevision.value;
-      // Only OpenCode Go exposes per-account quota windows; Custom API usage
-      // is unavailable and Zen Free shares an egress-IP lane.
-      if (
-        created.provider_id === "opencode"
-        && created.offering_id === "go"
-        && accountIsReady(created)
-      ) {
+      // OpenCode Go reads authoritative usage; GOAT keeps a manual display
+      // because the provider exposes no machine-readable usage endpoint.
+      if (accountHasUsageDisplay(created) && accountIsReady(created)) {
         await loadAccountUsage(created.id);
       }
       showModal.value = false;
@@ -890,25 +906,6 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       message.error(t("保存失败: {error}", { error: dashboardErrorDetail(e) }));
     } finally {
       busy.value = false;
-    }
-  }
-}
-
-async function pingAccount(id: string) {
-  pinging.value[id] = true;
-  try {
-    await tauriApi.testAccount(id);
-    message.success(t("账号连接成功"));
-  } catch (e) {
-    message.error(e instanceof DashboardRequestError && e.status === 429
-      ? t("账号达到额度或限流，已进入冷却")
-      : t("Ping 失败: {error}", { error: dashboardErrorDetail(e) }));
-  } finally {
-    pinging.value[id] = false;
-    try {
-      await refreshAccountState(id);
-    } catch (e) {
-      message.error(t("加载账号失败: {error}", { error: dashboardErrorDetail(e) }));
     }
   }
 }
@@ -1085,22 +1082,6 @@ async function saveZenProviderSettings(
     }
   } finally {
     providerSettingsSaving.value[account.id] = false;
-  }
-}
-
-async function refreshProviderModels(id: string) {
-  const account = accounts.value.find((item) => item.id === id);
-  if (!account || !isZenFreeAccount(account) || modelRefreshing.value[id]) return;
-  modelRefreshing.value[id] = true;
-  try {
-    const result = await providerApi.refreshProviderModels(id);
-    zenFreeModels.value = result;
-    await loadProviderCatalog();
-    message.success(t("已获取 {count} 个模型", { count: result.models.length }));
-  } catch (error) {
-    message.error(`${t("获取模型失败，请检查配置后重试")}: ${dashboardErrorDetail(error)}`);
-  } finally {
-    modelRefreshing.value[id] = false;
   }
 }
 

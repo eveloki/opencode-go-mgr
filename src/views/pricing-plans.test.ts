@@ -4,6 +4,7 @@ import type { PricingSnapshot } from "../api/tauri.ts";
 import type { StoredProviderPricingSnapshot } from "../api/providers.ts";
 import {
   buildPlanPricingGroups,
+  buildScopedPlanPricingGroups,
   resolvePlanPricingDisplay,
   type PlanPricingContent,
   type PlanPricingGroup,
@@ -112,6 +113,17 @@ test("pricing copy is kind-aware and never turns missing data into a price table
     })).messageKey,
     "只在你主动刷新时访问官方文档；刷新失败会继续使用当前快照。",
   );
+});
+
+test("scoped pricing groups stay on one provider and include Zen Free or Custom when asked", () => {
+  const zen = buildScopedPlanPricingGroups("opencode-zen-free", null, goSnapshot(), {});
+  assert.deepEqual(zen.map(({ plan }) => plan.id), ["zen-free"]);
+  assert.equal(zen[0]?.pricingAvailability, "not_applicable");
+  const custom = buildScopedPlanPricingGroups("custom", null, goSnapshot(), {});
+  assert.deepEqual(custom.map(({ plan }) => plan.id), ["custom-endpoint"]);
+  assert.equal(custom[0]?.pricingAvailability, "unpriced");
+  const go = buildScopedPlanPricingGroups("opencode", null, goSnapshot(), {});
+  assert.deepEqual(go.map(({ plan }) => plan.id), ["opencode-go"]);
 });
 
 test("Pricing includes only Go, GOAT, and SCNet in stable order", () => {

@@ -177,7 +177,7 @@ test("pricing catalog keeps refresh explicit and exposes accessible grouped mult
   const settings = readFileSync(new URL("./Settings.vue", import.meta.url), "utf8");
   assert.match(pricing, /<PricingCatalog \/>/);
   assert.doesNotMatch(settings, /PricingCatalog/);
-  assert.match(catalog, /onMounted\(\(\) => void loadPricing\(\)\)/);
+  assert.match(catalog, /if \(!props\.providerId \|\| props\.providerId === "opencode"\) void loadPricing\(\)/);
   assert.doesNotMatch(catalog, /onMounted\(\(\) => void performPricingRefresh\(\)\)/);
   assert.match(catalog, /@click="requestPricingRefresh"/);
   assert.match(catalog, /result\.error \|\| t\("价格表刷新失败，详见页面提示"\)/);

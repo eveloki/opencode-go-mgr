@@ -12,7 +12,7 @@ OCG Manager 文档按读者拆分。先从产品 README 入手，再打开对应
 | Audience / 读者 | English | 简体中文 | Scope / 范围 |
 | --- | --- | --- | --- |
 | Product overview / 产品概览 | [../README.md](../README.md) | [../README.zh-CN.md](../README.zh-CN.md) | What it is, download matrix, 3-step start, pointers into USER |
-| End users / 终端用户 | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | Install, dashboard, Plans, aliases, model tables, gateway behavior, CLI, Docker, limits, troubleshooting |
+| End users / 终端用户 | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | Install, dashboard, Plans, Providers, aliases, model tables, gateway behavior, CLI, Docker, limits, troubleshooting |
 | Maintainers / 维护者 | [MAINTAINER.md](MAINTAINER.md) | [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) | Layout, dev loop, architecture, release matrix, CI, validation |
 | Anti-abuse / 防滥用 | [OPENCODE_GO_ANTI_ABUSE.md](OPENCODE_GO_ANTI_ABUSE.md) | [OPENCODE_GO_ANTI_ABUSE.zh-CN.md](OPENCODE_GO_ANTI_ABUSE.zh-CN.md) | Allowed use boundary for OpenCode-Go |
 | Contributors / 贡献者 | [CONTRIBUTORS.md](CONTRIBUTORS.md) | bilingual / 中英同页 | Community credits |
@@ -36,9 +36,10 @@ When docs disagree, prefer the source below and fix the other side.
 | Topic / 主题 | Source of truth / 权威来源 |
 | --- | --- |
 | User-visible product behavior / 用户可见行为 | Code + [USER.md](USER.md) / [USER.zh-CN.md](USER.zh-CN.md) |
-| Plan catalog / Plan 目录 | `crates/ocg-core/src/provider.rs` (`BUILTIN_PLANS`); USER Accounts mirrors live vs pending families |
+| Plan catalog / Plan 目录 | `crates/ocg-core/src/provider.rs` (`BUILTIN_PLANS`, `ProviderRegistry`); USER Accounts mirrors live vs pending families; Custom is `ConfigurableHttpAdapter`, not a base class |
+| Provider contracts / 供应商合约 | `crates/ocg-core/src/provider_contracts.rs`; USER Providers mirrors scopes, local catalogs, switches, probes, and request-time selection |
 | Client aliases / 客户端别名 | `crates/ocg-core/src/alias.rs`; USER Aliases / 别名 mirrors the contract |
-| Local `GET /v1/models` / 本地客户端模型列表 | `crates/ocg-core/src/gateway/handler.rs`; authenticated Go aliases ∪ saved Zen Free aliases ∪ eligible Custom IDs; the GET itself makes no upstream request |
+| Local `GET /v1/models` / 本地客户端模型列表 | `crates/ocg-core/src/gateway/handler.rs`; authenticated Go aliases ∪ saved Zen Free aliases ∪ eligible Custom IDs that have an effective enabled protocol; the GET itself makes no upstream request |
 | Applications picker list / 应用选择器列表 | `crates/ocg-core/src/dashboard.rs` (`GET /dashboard/api/application-models`); Go routeable aliases ∩ active pricing; no Custom |
 | Custom API HTTP / Custom API HTTP | `crates/ocg-core/src/custom.rs` + `custom_http.rs`; trusted-admin destinations, Direct/Manual/Auto, no redirects, isolated auth |
 | SCNet official snapshot / SCNet 官方快照 | `crates/ocg-core/src/provider.rs` (`SCNET_TOKEN_PLAN_*`); adapter input only, never client aliases |
@@ -63,7 +64,8 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
 ## Reading order / 阅读顺序
 
 1. **New user** — README quick start → User guide install / first client /
-   accounts (Key import vs managed Beta) / true vs false circuit breakers.
+   accounts (Key import vs managed Beta) / Providers (catalogs, switches,
+   probes, scoped pricing) / true vs false circuit breakers.
 2. **Docker / CLI operator** — User guide Docker and CLI chapters; enable the
    browser profile when managed onboarding needs noVNC.
 3. **Contributor** — Maintainer guide layout, development, checks; keep
@@ -75,7 +77,7 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
    surface you are changing.
 
 1. **新用户** — README 快速开始 → 用户指南的安装、首个客户端、账号（导入 Key /
-   托管 Beta）、真/假熔断。
+   托管 Beta）、供应商（目录、协议开关、探测、范围内价格）、真/假熔断。
 2. **Docker / CLI 运维** — 用户指南的 Docker 与 CLI 章节；托管注册需要时启用
    browser profile。
 3. **贡献者** — 维护者指南的仓库结构、开发与检查；编码时以 `AGENTS.md` 为准
@@ -95,7 +97,9 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
   trusted-administrator boundary in USER; do not revive Phase-1 / SSRF-denylist
   wording. Do not invent a
   `requested_alias` log field. Do not equate `GET /v1/models` with
-  `application-models` (the latter is Go ∩ pricing only). Do not claim browser, live-provider-key, or
+  `application-models` (the latter is Go ∩ pricing only). Do not claim there is
+  no supplier page, or that Zen catalog refresh lives on the account card.
+  Do not claim browser, live-provider-key, or
   installed-desktop proof unless those checks were actually run.
 - After release version bumps, update Docker clone tags and image pins in
   USER, `.env.example`, and `compose.example.yaml` together
@@ -113,6 +117,7 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
   Custom API 已在受信管理员边界下上线路由，以 USER 为准，不要再写回 Phase-1
   休眠或 SSRF denylist。不要发明 `requested_alias` 日志字段。不要把
   `GET /v1/models` 与 `application-models` 写成同一份列表（后者只是 Go ∩ 价格）。
+  不要写“没有供应商页”，也不要把 Zen 目录刷新写回账号卡。
   除非实际做过检查，不要宣称浏览器、真实供应商 Key 或已安装桌面版实测。
 - 发版升版后，同步更新 USER、`.env.example`、`compose.example.yaml` 中的
   clone tag 与镜像钉（`pnpm run release:check` 会核对 compose/package

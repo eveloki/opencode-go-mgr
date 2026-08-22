@@ -81,24 +81,6 @@
 
     <template #header-extra>
       <div class="account-actions">
-        <div v-if="isGo && accountIsReady(account)" class="account-action account-action--ping">
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-button
-                circle
-                quaternary
-                size="small"
-                :aria-label="t('测试账号 {name}', { name: account.name })"
-                :loading="pinging"
-                @click="emit('ping')"
-              >
-                <template #icon><n-icon :component="ThunderboltOutlined" /></template>
-              </n-button>
-            </template>
-            {{ t("测试连接") }}
-          </n-tooltip>
-        </div>
-
         <div v-if="accountIsReady(account)" class="account-action account-action--enabled">
           <n-tooltip trigger="hover">
             <template #trigger>
@@ -134,25 +116,10 @@
           </n-tooltip>
         </div>
 
-        <div v-if="isZen && accountIsReady(account)" class="account-action account-action--secondary">
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-button
-                circle
-                quaternary
-                size="small"
-                :aria-label="t('获取模型')"
-                :loading="modelRefreshing"
-                @click="emit('refresh-models')"
-              >
-                <template #icon><n-icon :component="ReloadOutlined" /></template>
-              </n-button>
-            </template>
-            {{ t("获取模型") }}
-          </n-tooltip>
-        </div>
-
-        <div v-if="isGo && accountIsReady(account) && edits" class="account-action account-action--edit">
+        <div
+          v-if="manualUsageCalibration && accountIsReady(account) && edits"
+          class="account-action account-action--edit"
+        >
           <n-popover
             trigger="click"
             placement="bottom-end"
@@ -249,7 +216,30 @@
     </div>
     <div v-else-if="isDraft" class="provider-unconfigured" role="status">
       <p>{{ draftDescription }}</p>
-      <GoatQuotaReference v-if="isGoat" />
+      <div v-if="manualUsageCalibration" class="manual-usage-block">
+        <div v-if="usageLoadError" class="usage-load-error" role="alert">
+          <span>{{ t("用量加载失败") }}</span>
+          <n-button
+            text
+            size="tiny"
+            type="primary"
+            :loading="usageLoading"
+            @click="emit('reload-usage')"
+          >
+            {{ t("重试") }}
+          </n-button>
+        </div>
+        <UsageStrip
+          v-else
+          :account="account"
+          :usage="usage"
+          :limits="limits"
+          :editing="!!edits"
+        />
+        <p v-if="!usageLoadError" class="usage-sync-meta">
+          {{ t("服务商未开放用量查询，显示值由你手工校准。") }}
+        </p>
+      </div>
     </div>
     <div v-else-if="isCustom" class="custom-endpoint">
       <div class="custom-endpoint__meta">
@@ -272,24 +262,6 @@
       >
         {{ t("验证连接") }}
       </n-button>
-    </div>
-    <div v-else-if="isZen" class="custom-endpoint">
-      <div class="custom-endpoint__meta">
-        <n-popover trigger="click" placement="bottom-start" :width="360">
-          <template #trigger>
-            <n-button text type="primary" size="small">
-              {{ t("{count} 个模型", { count: providerModels?.models.length ?? 0 }) }}
-            </n-button>
-          </template>
-          <div class="zen-model-list">
-            <div v-for="model in providerModels?.models ?? []" :key="model.model_id" class="zen-model-list__item">
-              <code>{{ model.alias }}</code>
-              <span aria-hidden="true">→</span>
-              <code>{{ model.model_id }}</code>
-            </div>
-          </div>
-        </n-popover>
-      </div>
     </div>
     <div v-else-if="isGo && !quotaLimitsFailed">
       <div v-if="usageLoadError" class="usage-load-error" role="alert">
@@ -318,6 +290,30 @@
         {{ usageSyncCaption(account, now) }}
       </p>
     </div>
+
+    <div v-if="contractSummary" class="account-contract">
+      <p class="account-contract__label">{{ contractSummary.label }}</p>
+      <p>
+        {{ contractSummary.enabledProtocols.length
+          ? t("有效协议：{protocols}", {
+            protocols: contractSummary.enabledProtocols.map(protocolDisplayName).join(" / "),
+          })
+          : t("无有效协议") }}
+      </p>
+      <p v-if="contractSummary.allProtocolsDisabled">{{ t("全部供应商协议已关闭") }}</p>
+      <p v-else-if="contractSummary.unroutable">
+        {{ contractSummary.disabledReasons[0] || t("该供应商范围当前不可路由") }}
+      </p>
+      <n-button
+        text
+        type="primary"
+        size="small"
+        :aria-label="t('前往供应商')"
+        @click="emit('open-provider')"
+      >
+        {{ t("前往供应商") }}
+      </n-button>
+    </div>
   </n-card>
 </template>
 
@@ -339,10 +335,13 @@ import {
   HolderOutlined,
   MoreOutlined,
   ReloadOutlined,
-  ThunderboltOutlined,
 } from "@vicons/antd";
 import type { Account, UsageWindow } from "../api/tauri";
-import type { ProviderCatalogEntry, ZenFreeModelsResponse } from "../api/providers.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
+import {
+  protocolDisplayName,
+  type AccountContractSummary,
+} from "../views/provider-contracts.ts";
 import { isCooling, isUsageLimitReached } from "../views/accounts-usage.ts";
 import type { UsageKey } from "../views/accounts-usage.ts";
 import {
@@ -372,24 +371,21 @@ import { accountPlanWarning, planLabel } from "../views/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../views/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
-import GoatQuotaReference from "./GoatQuotaReference.vue";
 import UsageStrip from "./UsageStrip.vue";
 
 const props = defineProps<{
   account: Account;
   catalog: readonly ProviderCatalogEntry[] | null;
-  providerModels: ZenFreeModelsResponse | null;
+  contractSummary: AccountContractSummary | null;
   usage: UsageWindow;
   limits: UsageLimitView[];
   edits: AccountUsageEdits | undefined;
   now: number;
   orderHandleDisabled: boolean;
   dragging: boolean;
-  pinging: boolean;
   usageLoading: boolean;
   usageLoadError: string | null;
   usageRefreshLoading: boolean;
-  modelRefreshing: boolean;
   /** Connection verification in flight for a pending/failed Custom account. */
   verifying: boolean;
   quotaLimitsFailed: boolean;
@@ -399,11 +395,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   "order-keydown": [event: KeyboardEvent];
   "order-drag-start": [event: PointerEvent];
-  ping: [];
   toggle: [];
   verify: [];
   "refresh-usage": [];
-  "refresh-models": [];
+  "open-provider": [];
   "reload-usage": [];
   "open-wizard": [];
   "menu-select": [key: string | number];
@@ -420,6 +415,13 @@ const isGo = computed(() => (
   props.account.provider_id === "opencode" && props.account.offering_id === "go"
 ));
 const isCustom = computed(() => isCustomApiAccount(props.account));
+const plan = computed(() => props.catalog?.find((entry) => (
+  entry.provider_id === props.account.provider_id
+  && entry.offering_id === props.account.offering_id
+)));
+const manualUsageCalibration = computed(() => (
+  plan.value?.manual_usage_calibration ?? isGoat.value
+));
 const customNeedsVerification = computed(() => customAccountNeedsVerification(props.account));
 const toggleBlockedReason = computed(() => {
   if (!props.account.plan_routable) return t("该方案暂不可路由");
@@ -510,9 +512,15 @@ const usageEditorAvailable = computed(() => {
   margin: 0;
 }
 
+.manual-usage-block {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .account-actions {
   display: grid;
-  grid-template-columns: repeat(5, 40px);
+  grid-template-columns: repeat(4, 40px);
   align-items: center;
   justify-content: end;
   column-gap: 8px;
@@ -525,24 +533,37 @@ const usageEditorAvailable = computed(() => {
   min-width: 0;
 }
 
-.account-action--ping {
+.account-action--enabled {
   grid-column: 1;
 }
 
-.account-action--enabled {
+.account-action--secondary {
   grid-column: 2;
 }
 
-.account-action--secondary {
+.account-action--edit {
   grid-column: 3;
 }
 
-.account-action--edit {
+.account-action--menu {
   grid-column: 4;
 }
 
-.account-action--menu {
-  grid-column: 5;
+.account-contract {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  margin-top: 10px;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
+}
+.account-contract__label {
+  margin: 0;
+  color: var(--ocg-ink);
+  font-weight: 600;
+}
+.account-contract p {
+  margin: 0;
 }
 
 .custom-endpoint {
@@ -574,24 +595,6 @@ const usageEditorAvailable = computed(() => {
   margin: 0;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
-}
-
-.zen-model-list {
-  display: grid;
-  gap: 8px;
-  max-height: 280px;
-  overflow: auto;
-}
-
-.zen-model-list__item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-}
-
-.zen-model-list__item code {
-  overflow-wrap: anywhere;
 }
 
 .account-plan-warning {

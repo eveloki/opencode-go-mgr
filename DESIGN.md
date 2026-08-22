@@ -52,11 +52,11 @@ The type scale has six steps, exposed as `--ocg-font-xs` … `--ocg-font-2xl`: 1
 
 ## Layout
 
-Use the spacing scale from `{spacing.xs}` through `{spacing.xxl}`. The side rail (horizontal app menu below 1024px) exposes seven views in this order: Dashboard, Access Keys, Accounts, Pricing, Applications, Logs, Settings.
+Use the spacing scale from `{spacing.xs}` through `{spacing.xxl}`. The side rail (horizontal app menu below 1024px) exposes seven views in this order: Dashboard, Access Keys, Accounts, Providers, Applications, Logs, Settings.
 
 The Dashboard order is connection center, KPIs, full-width chart, then account overview. Core connection information must stay above the fold and must never be moved into a secondary rail. The connection center is the consume surface: the current Key, copy, and rotate-current stay there, plus a manage action that opens Access Keys. Create, rename, enable, delete, and reset live only on Access Keys. The primary key has no custom-value field; rotation uses the same reset control as sub keys.
 
-Pricing is a data-dense catalog: revision/ledger metadata first, then a dense table of model rates and multipliers. Prefer monospace for revision IDs, USD rates, and multipliers; keep refresh as an explicit primary action, never automatic on page load.
+Providers is the supplier control plane. A left rail lists contract scopes (built-in `Provider` families, with SCNet offerings grouped; each Custom API destination isolated). The main pane is overview and offering state, a local model catalog with source and timestamps, Chat Completions / Responses / Messages switches, per-model protocol evidence, an explicit protocol-probe panel, then scoped pricing. Prefer monospace for revision IDs, model IDs, USD rates, and multipliers. Catalog refresh, protocol probes, and OpenCode Go pricing refresh are explicit primary actions, never automatic on page load. The probe panel must warn that the selected account sends a real minimal request that may consume quota. Accounts keep identity, Key, verification, enablement, and usage; they show only a read-only contract summary and a deep link into Providers.
 
 ## Shapes
 
@@ -78,7 +78,7 @@ Utility actions are circular quaternary icon buttons with a Tooltip and an expli
 - Don't repeat a card title when structure and icons already provide context.
 - Don't hide primary connection actions behind menus or secondary navigation.
 - Don't use icon-only controls for ambiguous commit or irreversible actions.
-- Don't fetch OpenCode Go pricing or GitHub releases without an explicit user action.
+- Don't fetch OpenCode Go pricing, provider catalogs, protocol probes, or GitHub releases without an explicit user action.
 
 ## Responsive
 

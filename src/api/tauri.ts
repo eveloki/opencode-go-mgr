@@ -101,6 +101,15 @@ export interface AccountModelCapabilityInput {
   source?: string;
 }
 
+export interface AccountTestInput {
+  model_id: string;
+  protocol: "chat_completions" | "responses" | "messages";
+}
+
+export interface AccountTestResult extends AccountTestInput {
+  message: string;
+}
+
 export interface CustomModelDiscoveryInput {
   base_url: string;
   upstream_protocol: "chat_completions" | "responses" | "messages";
@@ -572,10 +581,11 @@ export const tauriApi = {
       ? {}
       : { body: jsonBody({ expected_revision: expectedRevision }) }),
   }),
-  testAccount: async (id: string) => {
-    const result = await request<{ message: string }>(`/accounts/${id}/test`, { method: "POST" });
-    return result.message;
-  },
+  testAccount: (id: string, input: AccountTestInput) =>
+    request<AccountTestResult>(`/accounts/${id}/test`, {
+      method: "POST",
+      body: jsonBody(input),
+    }),
   getAccountUsage: (id: string) => request<UsageWindow>(`/accounts/${id}/usage`),
   updateAccountUsage: (
     id: string,

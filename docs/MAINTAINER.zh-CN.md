@@ -36,7 +36,7 @@ ocg-manager/
 │   ├── components/    LocaleSwitcher、PricingCatalog、StackedBarChart、…
 │   ├── i18n/          i18n 注册表 + 各语言文案 + 单元测试
 │   ├── styles/        主题 token、设计系统覆盖
-│   └── views/         Dashboard、Keys、Accounts、Pricing、Applications、Logs、Settings（含单测）
+│   └── views/         Dashboard、Keys、Accounts、Providers、Applications、Logs、Settings（含单测）
 ├── src-tauri/         跨平台托盘应用、单实例、升级桥接、原生打包
 ├── docs/              USER / MAINTAINER / 防滥用（中英）、CONTRIBUTORS、索引
 ├── scripts/           free-dev-port、release、updater manifest、release notes、冒烟脚本、…
@@ -192,7 +192,7 @@ Desktop 三个角色模型的持久化行为。
   `resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`。没有
   `requested_alias` 字段。`native_cost_value` / `native_cost_unit` /
   `native_cost_currency` 可选。
-- `zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的账号卡显式刷新通过全局代理
+- `zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的供应商页显式刷新通过全局代理
   请求固定无 Key endpoint `https://opencode.ai/zen/v1/models`，不跟随重定向，只保留
   合法且以 `-free` 结尾的 ID；完整成功快照先持久化，再切换运行时。每个模型同时公布
   原 ID 与去掉 `-free` 的 Alias。失败或过滤结果为空时保留旧快照，`/v1/models` 只读
@@ -291,20 +291,20 @@ Desktop 三个角色模型的持久化行为。
   不属于遥测。
 - Docker 可用 `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；
   不提供时由首位注册者创建。
-- 侧栏包含仪表盘、接入 Key、账号、价格表、应用、日志、设置。**应用** 视图维护 16 个教程：
+- 侧栏包含仪表盘、接入 Key、账号、供应商、应用、日志、设置。**应用** 视图维护 16 个教程：
   Claude Code、Claude Desktop、Codex、Gemini CLI、Pi、Kimi Code CLI、OpenCode、
   WorkBuddy、OpenClaw、Hermes、Cherry Studio、VS Code Copilot Chat、Cline、Roo
   Code、Continue、Chatbox。Claude Desktop 的复制动作还会保存三个角色模型；其他
-  教程只生成客户端配置，不修改 Gateway 设置。**价格表** 视图通过受保护的定价
-  API 读取并刷新当前 OpenCode Go 快照。账号卡是 Plan / 凭据 / 额度单位。Zen Free
+  教程只生成客户端配置，不修改 Gateway 设置。**供应商** 视图托管按范围的价格表、
+  Zen 目录刷新与协议探测。账号卡是 Plan / 凭据 / 额度单位。Zen Free
   由数据库持有：可启用、停用、排序，但不能通过通用账号 API 创建或删除。GOAT /
   SCNet 草稿保持禁用且不可路由。Custom API 在验证后显式启用即可路由；创建/更新后
-  仍为禁用 `pending`。日志持久化
+  仍为禁用 `pending`。Zen 目录刷新与协议探测在供应商页，不在账号卡上。日志持久化
   provider、offering、route-account、credential-account、`requested_model`、
   `resolved_alias`、`upstream_model`、可选的 `native_cost_*`、原始成本、额度扣减
   与实际付费成本。没有 `requested_alias` 字段。现有模型筛选会对任一存储身份
   （`model`、`requested_model`、`resolved_alias` 或 `upstream_model`）做精确匹配。
-  侧栏保持现有七个视图；不要新增供应商页或模型路由页。
+  侧栏保持现有七个视图；不要新增模型路由页。
 
 ### 账号生命周期与浏览器运行时
 
@@ -367,6 +367,7 @@ Desktop 三个角色模型的持久化行为。
 ### 持久化
 
 - `crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询；
+  `crates/ocg-core/src/provider_contracts.rs` 负责供应商合约范围与模型协议证据；
   `crates/ocg-core/src/models.rs` 定义共享 serde 类型和 `AppConfig`；
   `crates/ocg-core/src/crypto.rs` 提供 Key 混淆与 `.encryption-key` 管理。
 - schema v22 为每张账号卡建立不可变的 provider/offering 绑定、按供应商区分的价格
@@ -379,7 +380,9 @@ Desktop 三个角色模型的持久化行为。
   `data.sqlite.pre-v22.<timestamp>.bak`。请与常规备份一起保存；它们只是回滚点，
   不是完整备份，也不是允许旧二进制打开已迁移数据库的许可。schema v24 为转发日志新增
   实际代理路由段；schema v25 新增 `provider_model_catalogs`，保存 Zen Free 最后一次成功
-  过滤的模型快照；这个加法迁移不会单独创建 pre-v24 或 pre-v25 备份。每次
+  过滤的模型快照；schema v26 新增 `provider_contract_scopes` 与
+  `provider_contract_model_protocols`，保存供应商合约范围与模型协议证据；这些加法
+  迁移不会单独创建 pre-v24、pre-v25 或 pre-v26 备份。每次
   `Database::open` 都会禁用遗留的已启用 Command Code GOAT 与全部三个 SCNet Token
   Plan tier，且不改 `updated_at`。Custom API 的 enabled 状态予以保留。验证与配置
   保持不变，只有既有未验证的 GOAT 行会重置为 `pending`；Go、Zen Free 和未知
@@ -788,8 +791,8 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
       会话时映射 API 返回 `401`。
 - [ ] 打开 **应用** 视图，确认 16 个教程完整可选；逐项抽查复制结果不含掩码
       Key，并实际启动 Claude Desktop 与 Gemini CLI 各完成一次文本和工具调用。
-- [ ] 覆盖 schema v16 迁移、schema v25（`data.sqlite.pre-v23.*.bak` 回滚、别名 /
-      上游日志身份、可选原生成本、未 `verified` 的 GOAT 行保持禁用 `pending`、Zen Free 模型快照持久化）、旧账号 `key + ready`、托管状态机
+- [ ] 覆盖 schema v16 迁移、schema v26（`data.sqlite.pre-v23.*.bak` 回滚、别名 /
+      上游日志身份、可选原生成本、未 `verified` 的 GOAT 行保持禁用 `pending`、Zen Free 模型快照持久化、供应商合约范围 / 模型协议表）、旧账号 `key + ready`、托管状态机
       （前进一格 / 回退更早步骤、禁止跳步）、Pending 路由隔离、邀请 URL 白名单与
       演示默认写回，以及 Key 验证的 `2xx`/`429`/`401`/`403`/网络/`5xx` 分支；确认
       任何 DTO 和日志都没有明文 Key。
@@ -878,7 +881,7 @@ Rust 测试覆盖 Gemini/Claude Desktop 路由、鉴权、别名改写、非流�
 - **`auto_start` 受能力门控**。只有 Windows release / 已安装的 Tauri 进程注入
   注册表同步钩子；开发构建、CLI、Docker、macOS、Linux 面板必须保持隐藏。
 - **本地 Alias 列表保持本地**。带鉴权的 `GET /v1/models` 与面板
-  `application-models` 不得增加请求时上游发现。显式 Zen Free 刷新是唯一目录抓取
+  `application-models` 不得增加请求时上游发现。供应商页上的显式 Zen Free 刷新是唯一目录抓取
   例外，且只能访问固定官方 endpoint。不要把两份列表写成同一份；不要
   发明 `requested_alias` 日志字段。
 - **不要重新发明 `cargo test` 体验**。CLI 用 `parking_lot::Mutex`，不可重入。

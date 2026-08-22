@@ -57,7 +57,7 @@ test("the dashboard consume surface does not host key lifecycle controls", async
 test("app registers the keys view between dashboard and accounts", async () => {
   const app = await readFile(new URL("../App.vue", import.meta.url), "utf8");
 
-  assert.match(app, /type ViewKey = "dashboard" \| "keys" \| "accounts"/);
+  assert.match(app, /type ViewKey = AppViewKey/);
   assert.match(app, /keys: "接入 Key"/);
   assert.match(app, /<Keys v-else-if="activeKey === 'keys'" \/>/);
   assert.match(app, /<Dashboard v-if="activeKey === 'dashboard'" @navigate="selectView" \/>/);

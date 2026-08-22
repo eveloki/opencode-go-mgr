@@ -1,0 +1,41 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  applyAppViewSearchParams,
+  isLegacyPricingView,
+  readProviderScopeQuery,
+  resolveAppViewKey,
+} from "./app-navigation.ts";
+
+test("legacy pricing view keys resolve to providers without inventing a second entry", () => {
+  assert.equal(isLegacyPricingView("pricing"), true);
+  assert.equal(resolveAppViewKey("pricing"), "providers");
+  assert.equal(resolveAppViewKey("providers"), "providers");
+  assert.equal(resolveAppViewKey("accounts"), "accounts");
+  assert.equal(resolveAppViewKey("not-a-view"), "dashboard");
+});
+
+test("provider deep-link query fields round-trip on the providers view", () => {
+  assert.deepEqual(readProviderScopeQuery("?view=providers&scope_kind=provider&scope_id=scnet"), {
+    scope_kind: "provider",
+    scope_id: "scnet",
+  });
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=accounts"),
+    "providers",
+    { scope_kind: "custom_endpoint", scope_id: "acc-9" },
+  );
+  assert.equal(url.searchParams.get("view"), "providers");
+  assert.equal(url.searchParams.get("scope_kind"), "custom_endpoint");
+  assert.equal(url.searchParams.get("scope_id"), "acc-9");
+});
+
+test("leaving providers strips scope query fields", () => {
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=providers&scope_kind=provider&scope_id=opencode"),
+    "logs",
+  );
+  assert.equal(url.searchParams.get("view"), "logs");
+  assert.equal(url.searchParams.get("scope_kind"), null);
+  assert.equal(url.searchParams.get("scope_id"), null);
+});

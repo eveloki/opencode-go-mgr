@@ -44,6 +44,7 @@ export interface ProviderCatalogEntry {
   managed_registration: boolean;
   pricing_availability: "available" | "unavailable" | "not_applicable" | "unpriced";
   usage_availability: "available" | "unavailable" | "local_state";
+  manual_usage_calibration: boolean;
   quota_unit: string;
   model_source: string;
   key_prefix?: string | null;
@@ -52,6 +53,16 @@ export interface ProviderCatalogEntry {
   form_fields: ProviderCatalogFormField[];
   risk_notice?: ProviderCatalogRiskNotice | null;
   model_aliases: string[];
+}
+
+export type ProviderProtocol = "chat_completions" | "responses" | "messages";
+
+export interface ProviderModelCapability {
+  model_id: string;
+  provider_id: string;
+  offering_id: string;
+  preferred_protocol: ProviderProtocol;
+  supported_protocols: ProviderProtocol[];
 }
 
 export interface StoredProviderPricingSnapshot {
@@ -137,8 +148,157 @@ export interface ZenFreeModelsResponse {
   source_url: string;
 }
 
+export type ContractScopeKind = "provider" | "custom_endpoint";
+export type ContractEvidenceSource = "static" | "preset" | "probe_confirmed" | "probe_observed";
+export type ProbeResultKind = "success" | "failure";
+export type ConnectionVerificationStatus = "not_required" | "pending" | "verified" | "failed";
+
+export interface ProtocolSwitches {
+  chat_completions: boolean;
+  responses: boolean;
+  messages: boolean;
+}
+
+export interface EffectiveCatalog {
+  source: string;
+  source_url: string;
+  refreshed_at: string | null;
+  models: string[];
+  refresh_supported: boolean;
+}
+
+export interface EffectiveProtocolEvidence {
+  protocol: ProviderProtocol;
+  available: boolean;
+  enabled: boolean;
+  source: ContractEvidenceSource;
+  verified_at: string | null;
+  observed_at: string | null;
+  last_probe_result: ProbeResultKind | null;
+  last_probe_at: string | null;
+  last_probe_error: string | null;
+}
+
+export interface EffectiveModelContract {
+  model_id: string;
+  preferred_protocol: ProviderProtocol;
+  protocols: Record<string, EffectiveProtocolEvidence>;
+  routable: boolean;
+  disabled_reasons: string[];
+}
+
+export interface ProviderAccountChoice {
+  id: string;
+  name: string;
+  enabled: boolean;
+  verification_status: ConnectionVerificationStatus;
+}
+
+export interface ProviderOfferingChoice {
+  offering_id: string;
+  display_name: string;
+  routable: boolean;
+  accounts: ProviderAccountChoice[];
+}
+
+export interface CapabilitySummary {
+  availability: string;
+}
+
+export interface CardCapabilitySummary {
+  fetch_zen_models: boolean;
+  discover_models: boolean;
+  protocol_probe: boolean;
+  catalog_refresh: boolean;
+}
+
+export interface ProviderContractGroup {
+  scope_kind: ContractScopeKind;
+  scope_id: string;
+  provider_id: string;
+  offerings: ProviderOfferingChoice[];
+  catalog: EffectiveCatalog;
+  models: EffectiveModelContract[];
+  protocols: ProtocolSwitches;
+  pricing: CapabilitySummary;
+  usage: CapabilitySummary;
+  card: CardCapabilitySummary;
+  catalog_routable: boolean;
+  production_inference: boolean;
+  disabled_reasons: string[];
+  revision: number;
+}
+
+export interface CustomEndpointContract {
+  scope_kind: ContractScopeKind;
+  scope_id: string;
+  provider_id: string;
+  account: ProviderAccountChoice;
+  catalog: EffectiveCatalog;
+  models: EffectiveModelContract[];
+  protocols: ProtocolSwitches;
+  pricing: CapabilitySummary;
+  usage: CapabilitySummary;
+  card: CardCapabilitySummary;
+  catalog_routable: boolean;
+  production_inference: boolean;
+  disabled_reasons: string[];
+  revision: number;
+}
+
+export interface ProviderContractsResponse {
+  /** Shared settings revision for PUT `expected_revision`. Distinct from each scope `revision`. */
+  revision: number;
+  providers: ProviderContractGroup[];
+  custom_endpoints: CustomEndpointContract[];
+}
+
+export interface ProtocolSwitchUpdate {
+  enabled: boolean;
+  expected_revision?: number;
+}
+
+export interface ProtocolProbeRequest {
+  model_id: string;
+  protocols: ProviderProtocol[];
+}
+
+export interface ProtocolProbeResult {
+  protocol: ProviderProtocol;
+  success: boolean;
+  skipped: boolean;
+  error: string | null;
+}
+
+export interface ProtocolProbeResponse {
+  account_id: string;
+  model_id: string;
+  results: ProtocolProbeResult[];
+  contract: EffectiveModelContract | null;
+}
+
+export interface CustomCatalogRefreshResponse {
+  scope_kind: ContractScopeKind;
+  scope_id: string;
+  models: string[];
+  truncated: boolean;
+  refreshed_at: string;
+  source: string;
+  declared_capabilities_unchanged: boolean;
+}
+
+export type ProviderModelsRefreshResponse = ZenFreeModelsResponse | CustomCatalogRefreshResponse;
+
+export function isCustomCatalogRefreshResponse(
+  value: ProviderModelsRefreshResponse,
+): value is CustomCatalogRefreshResponse {
+  return "scope_kind" in value && "truncated" in value;
+}
+
 export const providerApi = {
   getProviderCatalog: () => request<ProviderCatalogEntry[]>("/providers/catalog"),
+  getProviderModelCapabilities: () =>
+    request<ProviderModelCapability[]>("/providers/model-capabilities"),
   getProviderPricing: (providerId: string, offeringId: string) =>
     request<ProviderPricingResponse>(
       `/providers/${encodeURIComponent(providerId)}/${encodeURIComponent(offeringId)}/pricing`,
@@ -155,8 +315,23 @@ export const providerApi = {
       `/accounts/${encodeURIComponent(accountId)}/provider-models`,
     ),
   refreshProviderModels: (accountId: string) =>
-    request<ZenFreeModelsResponse>(
+    request<ProviderModelsRefreshResponse>(
       `/accounts/${encodeURIComponent(accountId)}/provider-models/refresh`,
       { method: "POST" },
+    ),
+  getProviderContracts: () => request<ProviderContractsResponse>("/provider-contracts"),
+  updateProviderContractProtocol: (
+    scopeKind: ContractScopeKind,
+    scopeId: string,
+    protocol: ProviderProtocol,
+    update: ProtocolSwitchUpdate,
+  ) => request<ProviderContractsResponse>(
+    `/provider-contracts/${encodeURIComponent(scopeKind)}/${encodeURIComponent(scopeId)}/protocols/${encodeURIComponent(protocol)}`,
+    { method: "PUT", body: jsonBody(update) },
+  ),
+  runProtocolProbes: (accountId: string, input: ProtocolProbeRequest) =>
+    request<ProtocolProbeResponse>(
+      `/accounts/${encodeURIComponent(accountId)}/protocol-probes`,
+      { method: "POST", body: jsonBody(input) },
     ),
 };

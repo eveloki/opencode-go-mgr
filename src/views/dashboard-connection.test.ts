@@ -1091,7 +1091,7 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.doesNotMatch(applications, /<code>\{\{ serviceConfig\.(?:gateway_key|primary_key) \}\}<\/code>/);
   assert.match(app, /<main class="app-content">/);
   assert.doesNotMatch(app, /<n-layout-content/);
-  assert.match(app, /dashboard.*keys.*accounts.*apps.*pricing.*logs.*settings/s);
+  assert.match(app, /dashboard.*keys.*accounts.*providers.*apps.*logs.*settings/s);
 });
 
 test("settings expose the downstream display root and bounded request timeouts", async () => {

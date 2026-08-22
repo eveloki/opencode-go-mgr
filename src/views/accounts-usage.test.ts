@@ -366,7 +366,7 @@ test("calibration shortcut is disabled when every usage window is cooling", asyn
 
   assert.match(card, /:disabled="!usageEditorAvailable"/);
   assert.match(usage, /usageLoading\.value\[account\.id\] \|\| usageLoadErrors\.value\[account\.id\]/);
-  assert.match(usage, /usageLimits\.value\.some\(\(\{ key \}\) => !accountUsageLimitReached\(account, key\)\)/);
+  assert.match(usage, /usageLimitsFor\(account\)\.some\(\(\{ key \}\) => !accountUsageLimitReached\(account, key\)\)/);
 });
 
 test("usage refresh initializes windows missing after an earlier quota load failure", async () => {
@@ -398,17 +398,16 @@ test("accounts render before per-account usage and expose failed loads for retry
   assert.match(usage, /usageLoadErrors\.value\[accountId\] = dashboardErrorDetail\(error\)/);
   assert.match(accounts, /v-if="accountListLoading"[\s\S]*?v-else-if="accountListError"[\s\S]*?@click="loadAccounts"/);
 
-  const ping = accounts.slice(accounts.indexOf("async function pingAccount"), accounts.indexOf("async function toggleAccount"));
-  assert.match(ping, /try \{\s+await refreshAccountState\(id\);\s+\} catch \(e\) \{/);
+  assert.match(accounts, /async function refreshAccountState/);
 });
 
 test("editing an account refreshes usage after purchase-date window changes", async () => {
   const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
-  const save = source.slice(source.indexOf("async function onFormSave"), source.indexOf("async function pingAccount"));
+  const save = source.slice(source.indexOf("async function onFormSave"), source.indexOf("async function verifyCustomAccount"));
 
   const update = save.indexOf("const saved = await runWithFreshSettingsRevision");
   const replace = save.indexOf("replaceAccount(saved);");
-  const refresh = save.indexOf("await loadAccountUsage(saved.id);");
+  const refresh = save.indexOf("if (accountHasUsageDisplay(saved)) await loadAccountUsage(saved.id);");
   assert.ok(update >= 0 && replace > update && refresh > replace);
 });
 

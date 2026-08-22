@@ -95,8 +95,13 @@ impl std::error::Error for DesktopUpdateStartError {
 }
 
 // Note: Mutex lock ordering is (1) settings_update, (2) db, (3) config,
-// (4) http_client, (5) gateway, (6) pricing, (7) routing, (8)
-// credential_snapshot. desktop_update_status and the async pricing_refresh
+// (4) http_client, (5) gateway, (6) pricing, (7) zen_free_models,
+// (8) provider_contracts, (9) routing, (10) credential_snapshot.
+// `activate_zen_free_model_catalog` acquires db → http_client →
+// zen_free_models → provider_contracts, then drops those before
+// `routing.reset()`. `reload_provider_contracts_locked` may already hold db
+// and then takes zen_free_models (read, dropped) before provider_contracts
+// (write). desktop_update_status and the async pricing_refresh
 // guard are never held while acquiring another sync lock. The credential
 // snapshot write lock is always taken last (after db/config reads) and never
 // held while acquiring another lock; auth-path readers take only the
@@ -127,6 +132,7 @@ pub struct CoreStateInner {
     pub pricing_refresh: tokio::sync::Mutex<()>,
     zen_free_models: RwLock<Arc<crate::zen_models::ZenFreeModelCatalog>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
+    provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
     pub routing: crate::gateway::routing::RoutingRuntime,
     pub browser: crate::browser::BrowserRuntime,
     /// Official Go usage sync gates (concurrency, dedupe, clock/jitter seams).
@@ -194,6 +200,12 @@ impl CoreStateInner {
             }
         };
         let zen_free_models = db.zen_free_model_catalog()?.unwrap_or_default();
+        let custom_runtimes = db.list_custom_account_runtimes()?;
+        let provider_contracts = crate::provider_contracts::build_effective_contracts(
+            &zen_free_models,
+            &custom_runtimes,
+            db.load_persisted_contracts()?,
+        );
         let http_client = crate::http_client::build_route_set(&config, &zen_free_models)?;
         Ok(Self {
             db: Mutex::new(db),
@@ -220,6 +232,7 @@ impl CoreStateInner {
             pricing_refresh: tokio::sync::Mutex::new(()),
             zen_free_models: RwLock::new(Arc::new(zen_free_models)),
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
+            provider_contracts: RwLock::new(Arc::new(provider_contracts)),
             routing: crate::gateway::routing::RoutingRuntime::new(),
             browser: crate::browser::BrowserRuntime::new(),
             usage_sync: crate::usage_sync::UsageSyncRuntime::new(),
@@ -282,13 +295,41 @@ impl CoreStateInner {
         catalog: crate::zen_models::ZenFreeModelCatalog,
     ) -> crate::Result<()> {
         let route_set = crate::http_client::build_route_set(&self.config(), &catalog)?;
-        let db = self.db.lock();
-        let mut active = self.zen_free_models.write();
-        let mut http_client = self.http_client.lock();
-        db.set_zen_free_model_catalog(&catalog)?;
-        *active = Arc::new(catalog);
-        *http_client = Arc::new(route_set);
+        {
+            let db = self.db.lock();
+            let mut http_client = self.http_client.lock();
+            let mut active = self.zen_free_models.write();
+            let mut contracts = self.provider_contracts.write();
+            db.set_zen_free_model_catalog(&catalog)?;
+            *active = Arc::new(catalog);
+            *contracts = Arc::new(crate::provider_contracts::build_effective_contracts(
+                &active,
+                &db.list_custom_account_runtimes()?,
+                db.load_persisted_contracts()?,
+            ));
+            *http_client = Arc::new(route_set);
+        }
         self.routing.reset();
+        Ok(())
+    }
+
+    pub fn provider_contracts(&self) -> Arc<crate::provider_contracts::EffectiveContractSet> {
+        self.provider_contracts.read().clone()
+    }
+
+    pub fn reload_provider_contracts(&self) -> crate::Result<()> {
+        let db = self.db.lock();
+        self.reload_provider_contracts_locked(&db)
+    }
+
+    pub fn reload_provider_contracts_locked(&self, db: &Database) -> crate::Result<()> {
+        let zen = self.zen_free_model_catalog();
+        let set = crate::provider_contracts::build_effective_contracts(
+            &zen,
+            &db.list_custom_account_runtimes()?,
+            db.load_persisted_contracts()?,
+        );
+        *self.provider_contracts.write() = Arc::new(set);
         Ok(())
     }
 
@@ -1404,6 +1445,51 @@ mod tests {
         assert!(stored.contains("proxy_mode"));
         assert!(stored.contains("proxy_url"));
 
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn zen_activation_and_contract_reload_share_documented_lock_order() {
+        let dir = temp_data_dir("zen-contract-lock-order");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = Arc::new(
+            CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize"),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let activator = {
+            let state = state.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..8 {
+                    state
+                        .activate_zen_free_model_catalog(crate::zen_models::ZenFreeModelCatalog {
+                            models: vec![format!("lock-order-free-{i}")],
+                            refreshed_at: Some(chrono::Utc::now()),
+                            source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.into(),
+                        })
+                        .expect("zen catalog activation should not deadlock");
+                }
+            })
+        };
+        let reloader = {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..8 {
+                    state
+                        .reload_provider_contracts()
+                        .expect("contract reload should not deadlock");
+                    let _ = state.provider_contracts();
+                    let _ = state.zen_free_model_catalog();
+                    let _ = state.forward_route_set();
+                }
+            })
+        };
+        activator.join().expect("activator thread");
+        reloader.join().expect("reloader thread");
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");
     }

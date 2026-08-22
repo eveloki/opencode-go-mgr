@@ -158,6 +158,42 @@ async fn public_dashboard_uses_first_registration_and_session_cookie() {
     );
     assert_eq!(
         client
+            .get(format!("{base}/provider-contracts"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .put(format!(
+                "{base}/provider-contracts/provider/opencode/protocols/chat_completions"
+            ))
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .post(format!(
+                "{base}/accounts/{ZEN_FREE_ACCOUNT_ID}/protocol-probes"
+            ))
+            .json(&json!({
+                "model_id": "hy3-free",
+                "protocols": ["chat_completions"]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
             .get(format!("{base}/settings"))
             .header(reqwest::header::COOKIE, &cookie)
             .send()
@@ -1482,6 +1518,7 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
         .unwrap();
     assert_eq!(goat["pricing_availability"], "unavailable");
     assert_eq!(goat["usage_availability"], "unavailable");
+    assert_eq!(goat["manual_usage_calibration"], true);
     let zen_catalog = catalog
         .as_array()
         .unwrap()
@@ -1506,6 +1543,14 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
             .iter()
             .all(|item| item["provider_id"] == OPENCODE_PROVIDER_ID)
     );
+    let grok = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["model_id"] == "grok-4.5")
+        .unwrap();
+    assert_eq!(grok["preferred_protocol"], "responses");
+    assert_eq!(grok["supported_protocols"], json!(["responses"]));
 
     let created = client
         .post(format!("{base}/accounts"))
@@ -1560,14 +1605,26 @@ async fn multi_provider_dashboard_api_is_guarded_and_keeps_legacy_free_mode_cons
             .status(),
         StatusCode::CONFLICT
     );
+    let goat_usage = client
+        .get(format!("{base}/accounts/{goat_id}/usage"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(goat_usage.status(), StatusCode::OK);
+    let goat_usage: serde_json::Value = goat_usage.json().await.unwrap();
+    assert_eq!(goat_usage["window_5h"], 0.0);
+    let calibrated = client
+        .patch(format!("{base}/accounts/{goat_id}/usage"))
+        .json(&json!({
+            "window": "window_5h", "percent": 50.0, "resets_in_minutes": 180
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(calibrated.status(), StatusCode::OK);
     assert_eq!(
-        client
-            .get(format!("{base}/accounts/{goat_id}/usage"))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::BAD_REQUEST
+        calibrated.json::<serde_json::Value>().await.unwrap()["window_5h"],
+        7.0
     );
 
     let invalid = client
@@ -1969,6 +2026,177 @@ async fn gateway_key_lifecycle_api_manages_sub_keys() {
             .any(|log| log.category == "keys" && log.message.contains("gateway key")),
         "audit wording must say \"key\" only"
     );
+
+    gateway::stop_gateway(handle);
+}
+
+#[tokio::test]
+async fn provider_contract_apis_require_auth_cas_and_reject_invalid_scopes() {
+    let state = state("provider-contracts");
+    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([0, 0, 0, 0], 0)))
+        .await
+        .unwrap();
+    let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
+    let client = loopback_client();
+    let register = client
+        .post(format!("{base}/auth/register"))
+        .json(&json!({ "username": "admin", "password": "password123" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(register.status(), StatusCode::CREATED);
+    let cookie = register
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let listed = client
+        .get(format!("{base}/provider-contracts"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let body = listed.json::<serde_json::Value>().await.unwrap();
+    let providers = body["providers"].as_array().expect("providers array");
+    assert!(
+        providers
+            .iter()
+            .any(|item| item["provider_id"] == OPENCODE_PROVIDER_ID)
+    );
+    assert!(
+        providers
+            .iter()
+            .any(|item| item["provider_id"] == "scnet" && item["scope_id"] == "scnet")
+    );
+    assert!(body["custom_endpoints"].as_array().unwrap().is_empty());
+    let cas_revision = body["revision"]
+        .as_u64()
+        .expect("provider contracts GET must return the settings CAS token");
+    assert_eq!(cas_revision, state.settings_revision());
+    let go_scope_revision = providers
+        .iter()
+        .find(|item| item["provider_id"] == OPENCODE_PROVIDER_ID)
+        .and_then(|item| item["revision"].as_u64())
+        .expect("each provider scope keeps its own revision");
+    assert_ne!(
+        go_scope_revision, 0,
+        "per-scope revision is distinct from the settings CAS token"
+    );
+
+    let switched = client
+        .put(format!(
+            "{base}/provider-contracts/provider/opencode/protocols/messages"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({ "enabled": false, "expected_revision": cas_revision }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(switched.status(), StatusCode::OK);
+    let switched_body = switched.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(
+        switched_body["revision"].as_u64(),
+        Some(state.settings_revision())
+    );
+    assert_ne!(switched_body["revision"].as_u64(), Some(cas_revision));
+
+    let stale = client
+        .put(format!(
+            "{base}/provider-contracts/provider/opencode/protocols/chat_completions"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({ "enabled": false, "expected_revision": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let unknown_protocol = client
+        .put(format!(
+            "{base}/provider-contracts/provider/opencode/protocols/gemini"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown_protocol.status(), StatusCode::BAD_REQUEST);
+
+    let unknown_scope = client
+        .put(format!(
+            "{base}/provider-contracts/provider/not-a-provider/protocols/chat_completions"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown_scope.status(), StatusCode::NOT_FOUND);
+
+    let goat = ocg_core::models::Account {
+        id: "goat-probe".into(),
+        provider_id: COMMAND_CODE_PROVIDER_ID.to_string(),
+        offering_id: GOAT_OFFERING_ID.to_string(),
+        credential_kind: ocg_core::provider::CredentialKind::ApiKey,
+        quota_scope: ocg_core::provider::QuotaScope::Key,
+        name: "goat-probe".into(),
+        username: None,
+        password_cipher: None,
+        key_cipher: state.encrypt_key("sk-goat").unwrap(),
+        enabled: false,
+        account_type: ocg_core::models::AccountType::Key,
+        setup_step: ocg_core::models::AccountSetupStep::Ready,
+        referral_code: None,
+        purchase_date: String::new(),
+        expires_on: String::new(),
+        cooldown_until: None,
+        cooldown_generic_until: None,
+        cooldown_5h_until: None,
+        cooldown_week_until: None,
+        cooldown_month_until: None,
+        cooldown_free_until: None,
+        last_error: None,
+        auth_error: None,
+        notes: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    state.db.lock().create_account(&goat).unwrap();
+    let goat_probe = client
+        .post(format!("{base}/accounts/goat-probe/protocol-probes"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({
+            "model_id": "deepseek/deepseek-v4-flash",
+            "protocols": ["chat_completions"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(goat_probe.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let mut go = goat.clone();
+    go.id = "go-refresh".into();
+    go.name = "go-refresh".into();
+    go.provider_id = OPENCODE_PROVIDER_ID.to_string();
+    go.offering_id = ocg_core::provider::GO_OFFERING_ID.to_string();
+    go.enabled = true;
+    state.db.lock().create_account(&go).unwrap();
+    let go_refresh = client
+        .post(format!(
+            "{base}/accounts/go-refresh/provider-models/refresh"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(go_refresh.status(), StatusCode::CONFLICT);
 
     gateway::stop_gateway(handle);
 }

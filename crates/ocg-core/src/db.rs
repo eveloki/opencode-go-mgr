@@ -1,6 +1,11 @@
 use crate::models::*;
 use crate::pricing::{PricingLimits, PricingSnapshot};
 use crate::provider::*;
+use crate::provider_contracts::{
+    CATALOG_SOURCE_OFFICIAL_ZEN, ContractEvidenceSource, ContractScope, PersistedContracts,
+    PersistedModelProtocol, PersistedScopeRow, ProbeResultKind, ProtocolSwitches,
+    SCOPE_KIND_CUSTOM_ENDPOINT,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
 use rusqlite::{
@@ -39,7 +44,39 @@ pub const PRE_V22_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v22.";
 /// database receives any migration writes on its way to v23.
 pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 25;
+pub const CURRENT_SCHEMA_VERSION: i32 = 26;
+
+const PROVIDER_CONTRACT_V26_DDL: &str = "
+    CREATE TABLE IF NOT EXISTS provider_contract_scopes (
+        scope_kind TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        catalog_models_json TEXT NOT NULL DEFAULT '[]',
+        catalog_refreshed_at TEXT,
+        catalog_source TEXT NOT NULL DEFAULT '',
+        catalog_source_url TEXT NOT NULL DEFAULT '',
+        chat_completions_enabled INTEGER NOT NULL DEFAULT 1,
+        responses_enabled INTEGER NOT NULL DEFAULT 1,
+        messages_enabled INTEGER NOT NULL DEFAULT 1,
+        revision INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (scope_kind, scope_id)
+    );
+    CREATE TABLE IF NOT EXISTS provider_contract_model_protocols (
+        scope_kind TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        protocol TEXT NOT NULL,
+        source TEXT NOT NULL,
+        verified_at TEXT,
+        observed_at TEXT,
+        last_probe_result TEXT,
+        last_probe_at TEXT,
+        last_probe_error TEXT,
+        PRIMARY KEY (scope_kind, scope_id, model_id, protocol)
+    );
+    CREATE INDEX IF NOT EXISTS idx_provider_contract_model_protocols_scope
+        ON provider_contract_model_protocols(scope_kind, scope_id);
+";
 
 pub struct ForwardLogQueryOptions<'a> {
     pub limit: i64,
@@ -169,6 +206,219 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
         .collect::<rusqlite::Result<Vec<_>>>()?
         .iter()
         .any(|existing| existing == column))
+}
+
+fn backfill_v26_zen_provider_scope(tx: &Transaction<'_>) -> Result<()> {
+    if !table_exists(tx, "provider_model_catalogs")? {
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO provider_contract_scopes (
+            scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
+            catalog_source, catalog_source_url,
+            chat_completions_enabled, responses_enabled, messages_enabled,
+            revision, updated_at
+         )
+         SELECT
+            'provider',
+            provider_id,
+            models_json,
+            refreshed_at,
+            ?1,
+            source_url,
+            1, 1, 1, 1,
+            COALESCE(refreshed_at, datetime('now'))
+         FROM provider_model_catalogs
+         WHERE provider_id = ?2
+         ON CONFLICT(scope_kind, scope_id) DO NOTHING",
+        params![CATALOG_SOURCE_OFFICIAL_ZEN, OPENCODE_ZEN_FREE_PROVIDER_ID],
+    )?;
+    Ok(())
+}
+
+fn parse_rfc3339_opt(
+    value: Option<String>,
+    column: usize,
+) -> rusqlite::Result<Option<DateTime<Utc>>> {
+    value
+        .map(|text| parse_rfc3339_column(text, column))
+        .transpose()
+}
+
+fn parse_rfc3339_column(value: String, column: usize) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
+        })
+}
+
+fn scope_from_row(kind: &str, id: &str) -> rusqlite::Result<ContractScope> {
+    ContractScope::parse(kind, id).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            Type::Text,
+            Box::new(std::io::Error::other(error)),
+        )
+    })
+}
+
+fn persist_scope_from_row(row: &Row<'_>) -> rusqlite::Result<PersistedScopeRow> {
+    let kind: String = row.get(0)?;
+    let id: String = row.get(1)?;
+    let models_json: String = row.get(2)?;
+    let models: Vec<String> = serde_json::from_str(&models_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+    })?;
+    Ok(PersistedScopeRow {
+        scope: scope_from_row(&kind, &id)?,
+        catalog_models: models,
+        catalog_refreshed_at: parse_rfc3339_opt(row.get(3)?, 3)?,
+        catalog_source: row.get(4)?,
+        catalog_source_url: row.get(5)?,
+        switches: ProtocolSwitches {
+            chat_completions: row.get::<_, i64>(6)? != 0,
+            responses: row.get::<_, i64>(7)? != 0,
+            messages: row.get::<_, i64>(8)? != 0,
+        },
+        revision: row.get::<_, i64>(9)? as u64,
+        updated_at: parse_rfc3339_column(row.get(10)?, 10)?,
+    })
+}
+
+fn persist_evidence_from_row(row: &Row<'_>) -> rusqlite::Result<PersistedModelProtocol> {
+    let kind: String = row.get(0)?;
+    let id: String = row.get(1)?;
+    let protocol_value: String = row.get(3)?;
+    let protocol = UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            Type::Text,
+            Box::new(std::io::Error::other(error.to_string())),
+        )
+    })?;
+    let source_value: String = row.get(4)?;
+    let source = ContractEvidenceSource::try_from(source_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            Type::Text,
+            Box::new(std::io::Error::other(error)),
+        )
+    })?;
+    let last_probe: Option<String> = row.get(7)?;
+    let last_probe_result = last_probe
+        .map(|value| {
+            ProbeResultKind::try_from(value.as_str()).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    Type::Text,
+                    Box::new(std::io::Error::other(error)),
+                )
+            })
+        })
+        .transpose()?;
+    Ok(PersistedModelProtocol {
+        scope: scope_from_row(&kind, &id)?,
+        model_id: row.get(2)?,
+        protocol,
+        source,
+        verified_at: parse_rfc3339_opt(row.get(5)?, 5)?,
+        observed_at: parse_rfc3339_opt(row.get(6)?, 6)?,
+        last_probe_result,
+        last_probe_at: parse_rfc3339_opt(row.get(8)?, 8)?,
+        last_probe_error: row.get(9)?,
+    })
+}
+
+fn load_scope_on(conn: &Connection, scope: &ContractScope) -> Result<Option<PersistedScopeRow>> {
+    conn.query_row(
+        "SELECT scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
+                catalog_source, catalog_source_url,
+                chat_completions_enabled, responses_enabled, messages_enabled,
+                revision, updated_at
+         FROM provider_contract_scopes
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![scope.kind_str(), scope.id()],
+        persist_scope_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn ensure_contract_scope_row(
+    conn: &Connection,
+    scope: &ContractScope,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO provider_contract_scopes (
+            scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
+            catalog_source, catalog_source_url,
+            chat_completions_enabled, responses_enabled, messages_enabled,
+            revision, updated_at
+         ) VALUES (?1, ?2, '[]', NULL, '', '', 1, 1, 1, 1, ?3)
+         ON CONFLICT(scope_kind, scope_id) DO NOTHING",
+        params![scope.kind_str(), scope.id(), now.to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn upsert_contract_catalog_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    models: &[String],
+    refreshed_at: Option<DateTime<Utc>>,
+    source: &str,
+    source_url: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let models_json = serde_json::to_string(models)?;
+    conn.execute(
+        "INSERT INTO provider_contract_scopes (
+            scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
+            catalog_source, catalog_source_url,
+            chat_completions_enabled, responses_enabled, messages_enabled,
+            revision, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 1, 1, 1, ?7)
+         ON CONFLICT(scope_kind, scope_id) DO UPDATE SET
+            catalog_models_json = excluded.catalog_models_json,
+            catalog_refreshed_at = excluded.catalog_refreshed_at,
+            catalog_source = excluded.catalog_source,
+            catalog_source_url = excluded.catalog_source_url,
+            revision = provider_contract_scopes.revision + 1,
+            updated_at = excluded.updated_at",
+        params![
+            scope.kind_str(),
+            scope.id(),
+            models_json,
+            refreshed_at.map(|value| value.to_rfc3339()),
+            source,
+            source_url,
+            now.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn bump_scope_revision_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    now: DateTime<Utc>,
+) -> Result<u64> {
+    ensure_contract_scope_row(conn, scope, now)?;
+    conn.execute(
+        "UPDATE provider_contract_scopes
+         SET revision = revision + 1, updated_at = ?3
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![scope.kind_str(), scope.id(), now.to_rfc3339()],
+    )?;
+    let revision = conn.query_row(
+        "SELECT revision FROM provider_contract_scopes
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![scope.kind_str(), scope.id()],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(revision as u64)
 }
 
 fn schema_version_on(conn: &Connection) -> Result<i32> {
@@ -1772,6 +2022,15 @@ impl Database {
             )?;
         }
 
+        // v26: scope-level effective contracts (catalog snapshots, protocol
+        // evidence, Chat/Responses/Messages switches). Additive only; v25 Zen
+        // catalog rows are projected into the Zen provider scope.
+        if version < 26 {
+            tx.execute_batch(PROVIDER_CONTRACT_V26_DDL)?;
+            backfill_v26_zen_provider_scope(&tx)?;
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (26);")?;
+        }
+
         // Unreleased #43 drafts numbered client-key columns as v18 and the
         // sub-key table as v19, so those databases already report version
         // >= 18 and skip the notes gate above. ensure_column is idempotent
@@ -1836,6 +2095,7 @@ impl Database {
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
             );",
         )?;
+        tx.execute_batch(PROVIDER_CONTRACT_V26_DDL)?;
         // Fail-closed leftovers for every catalogued-but-unroutable offering,
         // including already-v23 verified rows. Sparse pre-v22 fixtures may still
         // lack `enabled` even after additive column backstops, so skip rather
@@ -1981,7 +2241,9 @@ impl Database {
         catalog: &crate::zen_models::ZenFreeModelCatalog,
     ) -> Result<()> {
         let models_json = serde_json::to_string(&catalog.models)?;
-        self.conn.execute(
+        let refreshed_at = catalog.refreshed_at.map(|value| value.to_rfc3339());
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO provider_model_catalogs
              (provider_id, offering_id, models_json, refreshed_at, source_url)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1993,11 +2255,179 @@ impl Database {
                 OPENCODE_ZEN_FREE_PROVIDER_ID,
                 ANONYMOUS_FREE_OFFERING_ID,
                 models_json,
-                catalog.refreshed_at.map(|value| value.to_rfc3339()),
+                refreshed_at,
                 catalog.source_url,
             ],
         )?;
+        upsert_contract_catalog_on(
+            &tx,
+            &ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID),
+            &catalog.models,
+            catalog.refreshed_at,
+            CATALOG_SOURCE_OFFICIAL_ZEN,
+            &catalog.source_url,
+            Utc::now(),
+        )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn load_persisted_contracts(&self) -> Result<PersistedContracts> {
+        let mut persisted = PersistedContracts::default();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
+                        catalog_source, catalog_source_url,
+                        chat_completions_enabled, responses_enabled, messages_enabled,
+                        revision, updated_at
+                 FROM provider_contract_scopes",
+            )?;
+            let rows = stmt.query_map([], persist_scope_from_row)?;
+            for row in rows {
+                let row = row?;
+                persisted.scopes.insert(row.scope.clone(), row);
+            }
+        }
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT scope_kind, scope_id, model_id, protocol, source, verified_at,
+                        observed_at, last_probe_result, last_probe_at, last_probe_error
+                 FROM provider_contract_model_protocols",
+            )?;
+            let rows = stmt.query_map([], persist_evidence_from_row)?;
+            for row in rows {
+                let row = row?;
+                persisted
+                    .evidence
+                    .entry(row.scope.clone())
+                    .or_default()
+                    .push(row);
+            }
+        }
+        Ok(persisted)
+    }
+
+    pub fn load_persisted_scope(&self, scope: &ContractScope) -> Result<Option<PersistedScopeRow>> {
+        self.conn
+            .query_row(
+                "SELECT scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
+                        catalog_source, catalog_source_url,
+                        chat_completions_enabled, responses_enabled, messages_enabled,
+                        revision, updated_at
+                 FROM provider_contract_scopes
+                 WHERE scope_kind = ?1 AND scope_id = ?2",
+                params![scope.kind_str(), scope.id()],
+                persist_scope_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn set_contract_catalog(
+        &self,
+        scope: &ContractScope,
+        models: &[String],
+        refreshed_at: Option<DateTime<Utc>>,
+        source: &str,
+        source_url: &str,
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
+        let tx = self.conn.unchecked_transaction()?;
+        upsert_contract_catalog_on(&tx, scope, models, refreshed_at, source, source_url, now)?;
+        let row = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    pub fn set_protocol_switch(
+        &self,
+        scope: &ContractScope,
+        protocol: UpstreamProtocolKind,
+        enabled: bool,
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_contract_scope_row(&tx, scope, now)?;
+        let mut current = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        current.switches.set(protocol, enabled);
+        current.revision = current.revision.saturating_add(1);
+        current.updated_at = now;
+        tx.execute(
+            "UPDATE provider_contract_scopes SET
+                chat_completions_enabled = ?3,
+                responses_enabled = ?4,
+                messages_enabled = ?5,
+                revision = ?6,
+                updated_at = ?7
+             WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![
+                scope.kind_str(),
+                scope.id(),
+                current.switches.chat_completions as i64,
+                current.switches.responses as i64,
+                current.switches.messages as i64,
+                current.revision as i64,
+                current.updated_at.to_rfc3339(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(current)
+    }
+
+    pub fn load_model_protocol(
+        &self,
+        scope: &ContractScope,
+        model_id: &str,
+        protocol: UpstreamProtocolKind,
+    ) -> Result<Option<PersistedModelProtocol>> {
+        self.conn
+            .query_row(
+                "SELECT scope_kind, scope_id, model_id, protocol, source, verified_at,
+                        observed_at, last_probe_result, last_probe_at, last_probe_error
+                 FROM provider_contract_model_protocols
+                 WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3 AND protocol = ?4",
+                params![scope.kind_str(), scope.id(), model_id, protocol.as_str()],
+                persist_evidence_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn upsert_model_protocol(&self, row: &PersistedModelProtocol) -> Result<PersistedScopeRow> {
+        let tx = self.conn.unchecked_transaction()?;
+        let now = row.observed_at.unwrap_or_else(Utc::now);
+        tx.execute(
+            "INSERT INTO provider_contract_model_protocols (
+                scope_kind, scope_id, model_id, protocol, source, verified_at,
+                observed_at, last_probe_result, last_probe_at, last_probe_error
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(scope_kind, scope_id, model_id, protocol) DO UPDATE SET
+                source = excluded.source,
+                verified_at = excluded.verified_at,
+                observed_at = excluded.observed_at,
+                last_probe_result = excluded.last_probe_result,
+                last_probe_at = excluded.last_probe_at,
+                last_probe_error = excluded.last_probe_error",
+            params![
+                row.scope.kind_str(),
+                row.scope.id(),
+                row.model_id,
+                row.protocol.as_str(),
+                row.source.as_str(),
+                row.verified_at.map(|value| value.to_rfc3339()),
+                row.observed_at.map(|value| value.to_rfc3339()),
+                row.last_probe_result.map(|value| value.as_str()),
+                row.last_probe_at.map(|value| value.to_rfc3339()),
+                row.last_probe_error,
+            ],
+        )?;
+        bump_scope_revision_on(&tx, &row.scope, now)?;
+        let scope = load_scope_on(&tx, &row.scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        tx.commit()?;
+        Ok(scope)
     }
 
     pub fn latest_pricing_snapshot(&self) -> Result<Option<PricingSnapshot>> {
@@ -2313,6 +2743,16 @@ impl Database {
         tx.execute(
             "DELETE FROM account_acknowledgements WHERE account_id = ?1",
             [id],
+        )?;
+        tx.execute(
+            "DELETE FROM provider_contract_model_protocols
+             WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![SCOPE_KIND_CUSTOM_ENDPOINT, id],
+        )?;
+        tx.execute(
+            "DELETE FROM provider_contract_scopes
+             WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![SCOPE_KIND_CUSTOM_ENDPOINT, id],
         )?;
         tx.execute("DELETE FROM accounts WHERE id = ?1", [id])?;
         tx.commit()?;
@@ -9258,7 +9698,7 @@ mod tests {
         db.conn
             .execute_batch(
                 "DELETE FROM schema_version;
-                 INSERT INTO schema_version (version) VALUES (26);",
+                 INSERT INTO schema_version (version) VALUES (27);",
             )
             .unwrap();
         drop(db);
@@ -9272,7 +9712,7 @@ mod tests {
             "{error}"
         );
         let conn = Connection::open(dir.join("data.sqlite")).unwrap();
-        assert_eq!(schema_version_on(&conn).unwrap(), 26);
+        assert_eq!(schema_version_on(&conn).unwrap(), 27);
         drop(conn);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -9296,6 +9736,238 @@ mod tests {
             assert_eq!(catalog.models, ["persisted-coder-free"]);
             assert_eq!(catalog.refreshed_at, Some(refreshed_at));
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v26_fresh_database_has_contract_tables_and_reopens() {
+        let dir = temp_data_dir("v26-fresh");
+        let db = Database::open(dir.clone()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        let tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN (
+                    'provider_contract_scopes', 'provider_contract_model_protocols'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
+        db.migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(db);
+        let reopened = Database::open(dir.clone()).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(reopened);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v25_to_v26_backfills_zen_catalog_into_provider_scope() {
+        let dir = temp_data_dir("v25-v26-zen-backfill");
+        let refreshed_at = Utc::now();
+        {
+            let db = Database::open(dir.clone()).unwrap();
+            db.set_zen_free_model_catalog(&crate::zen_models::ZenFreeModelCatalog {
+                models: vec!["backfill-coder-free".into()],
+                refreshed_at: Some(refreshed_at),
+                source_url: crate::zen_models::ZEN_MODELS_SOURCE_URL.into(),
+            })
+            .unwrap();
+            db.conn
+                .execute_batch(
+                    "DROP TABLE IF EXISTS provider_contract_model_protocols;
+                     DROP TABLE IF EXISTS provider_contract_scopes;
+                     DELETE FROM schema_version;
+                     INSERT INTO schema_version (version) VALUES (25);",
+                )
+                .unwrap();
+            assert_eq!(db.schema_version().unwrap(), 25);
+        }
+        let db = Database::open(dir.clone()).expect("v25 database should migrate to v26");
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        let scope = db
+            .load_persisted_scope(&ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID))
+            .unwrap()
+            .expect("zen provider scope should be backfilled");
+        assert_eq!(scope.catalog_models, ["backfill-coder-free"]);
+        assert_eq!(scope.catalog_source, CATALOG_SOURCE_OFFICIAL_ZEN);
+        assert!(scope.switches.chat_completions);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn provider_and_custom_contract_scopes_are_isolated() {
+        let dir = temp_data_dir("v26-scope-isolation");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let go = ContractScope::provider(OPENCODE_PROVIDER_ID);
+        let custom = ContractScope::custom_endpoint("custom-a");
+        db.upsert_model_protocol(&PersistedModelProtocol {
+            scope: go.clone(),
+            model_id: "glm-5.2".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: ContractEvidenceSource::ProbeConfirmed,
+            verified_at: Some(now),
+            observed_at: Some(now),
+            last_probe_result: Some(ProbeResultKind::Success),
+            last_probe_at: Some(now),
+            last_probe_error: None,
+        })
+        .unwrap();
+        db.upsert_model_protocol(&PersistedModelProtocol {
+            scope: custom.clone(),
+            model_id: "local-model".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            source: ContractEvidenceSource::Preset,
+            verified_at: Some(now),
+            observed_at: Some(now),
+            last_probe_result: None,
+            last_probe_at: None,
+            last_probe_error: None,
+        })
+        .unwrap();
+        db.set_protocol_switch(&go, UpstreamProtocolKind::Messages, false, now)
+            .unwrap();
+        let persisted = db.load_persisted_contracts().unwrap();
+        assert!(
+            persisted
+                .evidence
+                .get(&go)
+                .unwrap()
+                .iter()
+                .any(|row| row.model_id == "glm-5.2")
+        );
+        assert!(
+            persisted
+                .evidence
+                .get(&custom)
+                .unwrap()
+                .iter()
+                .all(|row| row.model_id != "glm-5.2")
+        );
+        assert!(!persisted.scopes.get(&go).unwrap().switches.messages);
+        assert!(
+            persisted
+                .scopes
+                .get(&custom)
+                .map(|row| row.switches.messages)
+                .unwrap_or(true)
+        );
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn probe_evidence_and_catalog_mutations_advance_scope_revision_atomically() {
+        let dir = temp_data_dir("v26-revision-bump");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+        assert!(db.load_persisted_scope(&scope).unwrap().is_none());
+
+        let success = db
+            .upsert_model_protocol(&PersistedModelProtocol {
+                scope: scope.clone(),
+                model_id: "grok-4.5".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: ContractEvidenceSource::ProbeConfirmed,
+                verified_at: Some(now),
+                observed_at: Some(now),
+                last_probe_result: Some(ProbeResultKind::Success),
+                last_probe_at: Some(now),
+                last_probe_error: None,
+            })
+            .unwrap();
+        assert_eq!(success.revision, 2);
+        let after_success = db.load_persisted_scope(&scope).unwrap().unwrap();
+        assert_eq!(after_success.revision, 2);
+
+        let failure = db
+            .upsert_model_protocol(&PersistedModelProtocol {
+                scope: scope.clone(),
+                model_id: "grok-4.5".into(),
+                protocol: UpstreamProtocolKind::Messages,
+                source: ContractEvidenceSource::ProbeObserved,
+                verified_at: None,
+                observed_at: Some(now),
+                last_probe_result: Some(ProbeResultKind::Failure),
+                last_probe_at: Some(now),
+                last_probe_error: Some("upstream 500".into()),
+            })
+            .unwrap();
+        assert_eq!(failure.revision, 3);
+
+        let catalog = db
+            .set_contract_catalog(
+                &scope,
+                &["grok-4.5".into()],
+                Some(now),
+                crate::provider_contracts::CATALOG_SOURCE_STATIC,
+                "",
+                now,
+            )
+            .unwrap();
+        assert_eq!(catalog.revision, 4);
+
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_probe_write BEFORE INSERT ON provider_contract_model_protocols
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+            )
+            .unwrap();
+        let before_failed = db.load_persisted_scope(&scope).unwrap().unwrap().revision;
+        let failed = db.upsert_model_protocol(&PersistedModelProtocol {
+            scope: scope.clone(),
+            model_id: "glm-5.3".into(),
+            protocol: UpstreamProtocolKind::Responses,
+            source: ContractEvidenceSource::ProbeObserved,
+            verified_at: None,
+            observed_at: Some(now),
+            last_probe_result: Some(ProbeResultKind::Failure),
+            last_probe_at: Some(now),
+            last_probe_error: Some("should roll back".into()),
+        });
+        assert!(failed.is_err());
+        let after_failed = db.load_persisted_scope(&scope).unwrap().unwrap();
+        assert_eq!(after_failed.revision, before_failed);
+        assert!(
+            db.load_model_protocol(&scope, "glm-5.3", UpstreamProtocolKind::Responses)
+                .unwrap()
+                .is_none()
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scnet_offerings_share_one_persisted_provider_scope() {
+        let dir = temp_data_dir("v26-shared-scnet");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let scope = ContractScope::from_offering(
+            SCNET_PROVIDER_ID,
+            SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+            None,
+        )
+        .unwrap();
+        db.set_protocol_switch(&scope, UpstreamProtocolKind::ChatCompletions, false, now)
+            .unwrap();
+        let premium = ContractScope::from_offering(
+            SCNET_PROVIDER_ID,
+            SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
+            None,
+        )
+        .unwrap();
+        assert_eq!(scope, premium);
+        let loaded = db.load_persisted_scope(&premium).unwrap().unwrap();
+        assert!(!loaded.switches.chat_completions);
+        drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
 

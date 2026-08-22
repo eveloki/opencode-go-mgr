@@ -97,7 +97,7 @@
             :collapsed-icon-size="22"
             :options="menuOptions"
             :value="activeKey"
-            @update:value="selectView"
+            @update:value="(key: string) => selectView(key)"
           />
         </n-layout-sider>
 
@@ -111,7 +111,7 @@
                 responsive
                 :options="menuOptions"
                 :value="activeKey"
-                @update:value="selectView"
+                @update:value="(key: string) => selectView(key)"
               />
             </div>
             <div class="header-actions">
@@ -176,9 +176,9 @@
             <KeepAlive>
               <Dashboard v-if="activeKey === 'dashboard'" @navigate="selectView" />
               <Keys v-else-if="activeKey === 'keys'" />
-              <Accounts v-else-if="activeKey === 'accounts'" />
+              <Accounts v-else-if="activeKey === 'accounts'" @navigate="selectView" />
+              <Providers v-else-if="activeKey === 'providers'" />
               <Applications v-else-if="activeKey === 'apps'" />
-              <Pricing v-else-if="activeKey === 'pricing'" />
               <Logs v-else-if="activeKey === 'logs'" />
               <Settings
                 v-else-if="activeKey === 'settings'"
@@ -224,7 +224,7 @@ import {
   BgColorsOutlined,
   CheckOutlined,
   DashboardOutlined,
-  DollarCircleOutlined,
+  CloudServerOutlined,
   FileTextOutlined,
   KeyOutlined,
   LogoutOutlined,
@@ -247,26 +247,32 @@ import {
 } from "./theme";
 import type { ThemeName } from "./theme";
 import { userFacingError } from "./utils/errors.ts";
+import {
+  applyAppViewSearchParams,
+  isLegacyPricingView,
+  resolveAppViewKey,
+  type AppViewKey,
+  type ProviderScopeQuery,
+} from "./views/app-navigation.ts";
 
-type ViewKey = "dashboard" | "keys" | "accounts" | "apps" | "pricing" | "logs" | "settings" | "browser";
+type ViewKey = AppViewKey;
 
 const viewConfig: Record<ViewKey, MessageKey> = {
   dashboard: "仪表盘",
   keys: "接入 Key",
   accounts: "账号",
   apps: "应用",
-  pricing: "价格表",
+  providers: "供应商",
   logs: "日志",
   settings: "设置",
   browser: "远程浏览器",
 };
-const views = new Set<ViewKey>(Object.keys(viewConfig) as ViewKey[]);
 
 const Dashboard = defineAsyncComponent(() => import("./views/Dashboard.vue"));
 const Keys = defineAsyncComponent(() => import("./views/Keys.vue"));
 const Accounts = defineAsyncComponent(() => import("./views/Accounts.vue"));
 const Applications = defineAsyncComponent(() => import("./views/Applications.vue"));
-const Pricing = defineAsyncComponent(() => import("./views/Pricing.vue"));
+const Providers = defineAsyncComponent(() => import("./views/Providers.vue"));
 const Logs = defineAsyncComponent(() => import("./views/Logs.vue"));
 const Settings = defineAsyncComponent(() => import("./views/Settings.vue"));
 const BrowserSession = defineAsyncComponent(() => import("./views/BrowserSession.vue"));
@@ -313,7 +319,7 @@ const menuOptions = computed(() => [
   { label: t("仪表盘"), key: "dashboard", icon: renderIcon(DashboardOutlined) },
   { label: t("接入 Key"), key: "keys", icon: renderIcon(KeyOutlined) },
   { label: t("账号"), key: "accounts", icon: renderIcon(TeamOutlined) },
-  { label: t("价格表"), key: "pricing", icon: renderIcon(DollarCircleOutlined) },
+  { label: t("供应商"), key: "providers", icon: renderIcon(CloudServerOutlined) },
   { label: t("应用"), key: "apps", icon: renderIcon(AppstoreOutlined) },
   { label: t("日志"), key: "logs", icon: renderIcon(FileTextOutlined) },
   { label: t("设置"), key: "settings", icon: renderIcon(SettingOutlined) },
@@ -357,18 +363,40 @@ const themeMenuProps: DropdownMenuProps = () => ({
   "aria-label": t("选择主题"),
 });
 
+const pendingProviderScope = ref<ProviderScopeQuery | null | undefined>(undefined);
+
 function readView(): ViewKey {
-  const value = new URLSearchParams(window.location.search).get("view");
-  return value && views.has(value as ViewKey) ? value as ViewKey : "dashboard";
+  const params = new URLSearchParams(window.location.search);
+  const raw = params.get("view");
+  if (isLegacyPricingView(raw)) {
+    const url = applyAppViewSearchParams(new URL(window.location.href), "providers");
+    window.history.replaceState(null, "", url);
+    return "providers";
+  }
+  return resolveAppViewKey(raw);
 }
 
-function selectView(key: string) {
-  if (views.has(key as ViewKey)) activeKey.value = key as ViewKey;
+function selectView(key: string, extras?: ProviderScopeQuery) {
+  const view = resolveAppViewKey(key);
+  pendingProviderScope.value = extras;
+  if (extras && view === "providers") {
+    window.history.replaceState(
+      null,
+      "",
+      applyAppViewSearchParams(new URL(window.location.href), view, extras),
+    );
+  }
+  activeKey.value = view;
 }
 
 function syncView(view: ViewKey) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("view", view);
+  const extras = pendingProviderScope.value;
+  pendingProviderScope.value = undefined;
+  const url = applyAppViewSearchParams(
+    new URL(window.location.href),
+    view,
+    view === "providers" ? extras : null,
+  );
   window.history.replaceState(null, "", url);
 }
 

@@ -19,7 +19,7 @@ the true / false circuit breakers, and protocol conversion actually work.
   - [Application Guides](#application-guides)
   - [Model capabilities](#model-capabilities)
   - [Accounts](#accounts)
-  - [Pricing](#pricing)
+  - [Providers](#providers)
   - [Logs](#logs)
   - [Settings](#settings)
 - [Gateway Behavior](#gateway-behavior)
@@ -55,9 +55,11 @@ The gateway does four jobs:
 1. Authenticate the client with the **Key** issued by the dashboard.
 2. Resolve the requested model against the local Alias registry (and eligible
    Custom declared IDs), then pick a usable account card after capability
-   filtering.
-3. Convert the request to the selected Plan's supported upstream protocol,
-   and the response back to the client protocol.
+   filtering, the adapter ceiling, the saved provider contract, and the
+   Chat Completions / Responses / Messages switches.
+3. Convert the request to the selected Plan's effective upstream protocol,
+   and the response back to the client protocol. Client requests never
+   discover or probe.
 4. Log the request (`requested_model`, `resolved_alias`, `upstream_model`),
    write usage and any cooldown to SQLite, and surface everything in the
    dashboard.
@@ -194,7 +196,7 @@ enabled/disabled/deleted state is intact when you upgrade again, and no
 revoked credential can ever come back to life by downgrading. Sub keys
 simply do not authenticate while the older build runs.
 
-### Plan Migration (Schema v25)
+### Plan Migration (Schema v26)
 
 Schema v23 stores Plan verification state, Alias / upstream log identity
 (`requested_model`, `resolved_alias`, `upstream_model`), optional native cost
@@ -207,11 +209,15 @@ verified. It is a pre-v23 rollback point, not a replacement for a complete
 backup; never open the migrated database with an older build.
 
 Schema v24 adds the recorded proxy route leg (`auto`, `proxy`, or `direct`) to
-forward logs. Schema v25 adds the persisted provider-model catalog used by Zen Free. A
-successful manual refresh replaces that snapshot atomically; a failed or
-empty refresh leaves the previous snapshot untouched. This additive migration
-does not create separate pre-v24 or pre-v25 backups; the pre-v23 rollback copy described
-above remains the migration safety boundary.
+forward logs. Schema v25 adds the persisted provider-model catalog used by Zen
+Free. Schema v26 adds scope-level provider contracts: local catalogs, Chat /
+Responses / Messages switches, and per-model protocol evidence. A successful
+manual catalog refresh replaces that snapshot atomically; a failed or empty
+refresh leaves the previous snapshot untouched. Disabling an account does not
+delete the saved contract; re-enabling restores it. This additive migration
+does not create separate pre-v24, pre-v25, or pre-v26 backups; the pre-v23
+rollback copy described above remains the migration safety boundary. v25 Zen
+catalog rows are projected into the Zen provider scope.
 
 If the source database was older than schema v22, the same startup also keeps
 `data.sqlite.pre-v22.<timestamp>.bak` as the earlier rollback point. On every
@@ -318,7 +324,7 @@ The direct GUI steps are also the fallback when in-app update is unavailable.
 
 The dashboard is a single-page Vue 3 application served by the gateway. The
 left rail (or the horizontal app menu below 1024px) exposes seven views:
-**Dashboard**, **Access Keys**, **Accounts**, **Pricing**, **Applications**,
+**Dashboard**, **Access Keys**, **Accounts**, **Providers**, **Applications**,
 **Logs**, and **Settings**. The top right of the header holds the theme
 switcher, the language switcher, and the sign-out button.
 
@@ -444,8 +450,9 @@ which publishes currently routeable Go aliases, the saved Zen Free catalog,
 and eligible Custom declared IDs. `application-models` stays Go-only. Both
 endpoints are local reads: no SCNet official table spellings, no unpublished
 Command Code GOAT names, and no request-time upstream discovery or account
-selection. The explicit Zen Free **Fetch models** action is the only catalog
-refresh path. An accepted pricing refresh can
+selection. They publish only currently routable models that have an effective
+enabled protocol. Zen Free catalog refresh is an explicit **Providers**
+action. An accepted pricing refresh on **Providers** can
 change which Go aliases `application-models` returns. The view reloads this
 local list whenever you return to it. Model selections and edited snippets are
 cached separately per application while the current dashboard page remains
@@ -510,10 +517,18 @@ Each account card binds one **Plan** (provider + offering), and when that Plan
 requires one, one credential, plus one independent quota pool. Cards share one
 manually persisted global order;
 after the request's capability filter, strict priority, global sticky, and
-round-robin routing all reuse that order. There is no separate provider page,
-model-routing page, or per-model quota pool. The seven dashboard views stay
-**Dashboard**, **Access Keys**, **Accounts**, **Pricing**, **Applications**,
+round-robin routing all reuse that order. There is no per-model quota pool.
+The seven dashboard views stay
+**Dashboard**, **Access Keys**, **Accounts**, **Providers**, **Applications**,
 **Logs**, and **Settings**.
+
+**Accounts** owns identity, the account Key, verification, enabled state, card
+order, managed registration, and account usage / calibration / cooldown. Each
+card shows a read-only contract summary (effective protocols, or that all
+supplier protocols are disabled / the scope is not routable) and an **Open
+provider** deep link into **Providers** for that scope. Local catalogs,
+protocol probes, Chat Completions / Responses / Messages switches, and scoped
+pricing live on **Providers**, not on the account card.
 
 The built-in Plan families are:
 
@@ -704,25 +719,96 @@ has its own anonymous, egress-IP-shared free cooldown rather than a key quota.
 - **Cooldown reset.** You can reset a cooldown manually from this view. The
   bar snaps back to its local estimate as soon as the cooldown is cleared.
 
-### Pricing
+### Providers
 
-The **Pricing** view shows immutable provider pricing snapshots. Refresh is
-manual only: OpenCode Go can fetch `https://opencode.ai/docs/go/` after you
-press refresh, while offerings without a verified first-party pricing contract
-remain unavailable and cannot be refreshed. A failed fetch or validation keeps
-the last successful snapshot.
+**Providers** is the supplier control plane. Older bookmarks that use
+`?view=pricing` open this view.
 
-Pricing keeps only the OpenCode Go, Command Code GOAT, and SCNet tabs. Zen Free
-has no price, while Custom API pricing belongs to the administrator's upstream,
-so neither appears in Pricing. For OpenCode Go, the view shows the revision, documentation timestamp, window
-limits, token rates, `Usage`, and the quota-debit multiplier. The allowance is
-not a quota pool and does not route requests: it only derives that debit
-multiplier (`monthly limit / Usage`). Saving a temporary override creates a
-new persistent revision for later estimates. There is no model-level quota
-pool. Command Code GOAT and SCNet Token Plans show dated official package
-references checked on `2026-08-22`, but still have no live pricing or usage
-path and do not become routable. Custom API is catalogued as unpriced: successful forwards log
-`cost_state=unknown` with no quota debit and no official usage refresh.
+The public base is a static Provider Registry plus capability-specific
+adapters. Custom API is one Configurable HTTP adapter, not a base class.
+Contract scopes are:
+
+- `Provider(provider_id)` for built-ins. SCNet's three token-plan offerings
+  share one SCNet scope.
+- `CustomEndpoint(account_id)` for each Custom destination. Custom endpoints
+  stay isolated from each other and from the built-in families.
+
+The left rail lists those scopes. The main pane is **Overview**, **Model
+catalog**, **Upstream protocol policy**, **Model contracts**, **Protocol
+probe**, and scoped **Pricing**.
+
+**Overview** shows the selected provider, scope revision, production-inference
+state, catalog-routable state, disabled reasons, and each offering with its
+bound accounts (enabled/disabled and verification). Command Code GOAT and
+SCNet remain non-routable drafts: probes cannot promote them to production
+routing.
+
+**Model catalog** is local. Source labels are Static catalog, Official Zen
+catalog, Custom discovery, or Account-declared. When a source URL is present
+it is shown, as is the last successful refresh time (or Not yet refreshed).
+Refresh is never automatic:
+
+- OpenCode Go uses the static protocol catalog and does not refresh.
+- Zen Free **Refresh model catalog** (choose the Zen Free account) calls the
+  official keyless directory `https://opencode.ai/zen/v1/models`. A failed or
+  empty refresh keeps the previous snapshot.
+- Custom **Refresh model catalog** (choose that Custom account) discovers
+  models from the configured base URL without changing declared capabilities.
+  Truncated discovery is reported; a failed refresh keeps the previous
+  snapshot. The account form **Fetch models** action remains a separate
+  explicit edit that only merges IDs into the unsaved capability list.
+- Command Code GOAT and SCNet do not refresh; their catalogs are adapter
+  input only and are never published as client aliases.
+
+Refreshing a catalog does not automatically publish a new stable alias. Zen
+Free still derives one extra alias by stripping `-free` from each saved ID,
+as described under [Zen Free models](#zen-free-models). Probe-confirmed extras
+stay on the contract until they also match a published alias or an eligible
+Custom declared ID.
+
+**Upstream protocol policy** has three switches: Chat Completions, Responses,
+and Messages. Turning a protocol on or off immediately applies to every
+account in this scope and affects production routing. Switches take
+precedence over probe evidence and static support. Disabling an account does
+not delete the saved contract; re-enabling restores the saved catalog,
+evidence, and switches.
+
+**Model contracts** list each local model with its preferred protocol and
+per-protocol status: Globally closed (the switch is off), Unavailable,
+Unsupported, Static, Preset, Probe confirmed, or Latest probe failed (with a
+sanitized error and last-probe time). Probe success may confirm or add
+support only inside the adapter's structural ceiling. Probe failure is
+recorded and does not delete static capability.
+
+**Protocol probe** is an explicit action. It uses the selected test account
+and sends a real minimal request that may consume quota — confirm that
+warning before sending. Client requests never probe. GOAT and SCNet show that
+probes are not available for this plan.
+
+**Pricing** is scoped to the selected provider. Refresh remains manual only:
+
+- OpenCode Go shows revision, documentation timestamp, window limits, token
+  rates, `Usage`, and the quota-debit multiplier, and can fetch
+  `https://opencode.ai/docs/go/` after you press refresh. A failed fetch or
+  validation keeps the last successful snapshot. The allowance is not a quota
+  pool and does not route requests: it only derives that debit multiplier
+  (`monthly limit / Usage`). Saving a temporary override creates a new
+  persistent revision for later estimates.
+- Command Code GOAT and SCNet show dated official package references checked
+  on `2026-08-22`; they still have no live pricing or usage path and do not
+  become routable.
+- Zen Free has no price (egress-IP-shared free quota).
+- Custom API is unpriced: successful forwards log `cost_state=unknown` with
+  no quota debit and no official usage refresh.
+
+There is no model-level quota pool.
+
+At request time the gateway never discovers or probes. Flow: Alias → account
+eligibility → adapter ceiling → saved contract → protocol switch →
+passthrough or conversion. Authenticated `GET /v1/models` and protected
+`GET /dashboard/api/application-models` publish only currently routable
+models that have an effective enabled protocol. The Applications picker stays
+Go aliases ∩ active pricing and does not include Custom.
 
 ### Logs
 
@@ -844,8 +930,9 @@ The **Settings** view exposes the persistent gateway configuration:
   direct overwrite install described above. Development builds, the CLI, and
   Docker keep the release-link/manual-upgrade path. The host must be able to
   reach GitHub; a failed check or install does not affect gateway forwarding.
-- **Zen Free** — enable or disable it from its account card. Use the card's
-  **Fetch models** action to refresh the Free catalog.
+- **Zen Free** — enable or disable it from its account card. Use
+  **Providers** to refresh the Free catalog, inspect protocol evidence, and
+  toggle Chat Completions / Responses / Messages.
 
 Configuration settings are written to SQLite and reloaded on the next start.
 The update check is an on-demand action and is not persisted.
@@ -861,7 +948,7 @@ The gateway is served at `http://<bind>:<port>` and exposes:
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET`  | `/v1/models` | Authenticated local list: published Go aliases, the last saved Zen Free catalog, and eligible Custom IDs |
+| `GET`  | `/v1/models` | Authenticated local list: published Go aliases, the last saved Zen Free catalog, and eligible Custom IDs that currently have an effective enabled protocol |
 | `POST` | `/v1beta/models/{model}:generateContent` | Gemini non-stream generation (`/v1/models/...` is also accepted) |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini SSE generation (`/v1/models/...` is also accepted) |
 | `POST` | `/v1beta/models/{model}:countTokens` | Returns `501`; Gemini CLI can fall back to local estimation |
@@ -909,13 +996,16 @@ local registry. Existing OpenCode Go model IDs are the preferred aliases;
 case-folded spellings such as `GLM-5.2` are accepted.
 
 Authenticated `GET /v1/models` lists currently routeable published aliases
-(OpenCode Go and Zen Free) in deterministic registry order, then appends
-eligible Custom capability IDs that do not match those aliases (`owned_by` is
-`custom`). It does not make an upstream request: Zen discovery happens only
-when an administrator clicks **Fetch models**, and this endpoint reads that
-saved snapshot. It does not write a forward log. Published Go and Zen Free
-aliases do not depend on whether any Go account exists. Eligible Custom IDs
-come from enabled + verified + ready Custom accounts that have a key.
+(OpenCode Go and Zen Free) that have an effective enabled protocol, in
+deterministic registry order, then appends eligible Custom capability IDs
+that do not match those aliases (`owned_by` is `custom`) and likewise have an
+effective enabled protocol. It does not make an upstream request: Zen
+discovery happens only when an administrator refreshes the catalog on
+**Providers**, and this endpoint reads that saved snapshot. It does not write
+a forward log. Published Go and Zen Free aliases do not depend on whether any
+Go account exists. Eligible Custom IDs come from enabled + verified + ready
+Custom accounts that have a key. Dynamic or probe-confirmed models do not
+gain a new stable alias automatically.
 
 Protected `GET /dashboard/api/application-models` is a different local list:
 currently routeable OpenCode Go aliases intersected with the active OpenCode
@@ -960,18 +1050,29 @@ aliases, not the Plan model union.
 
 ### Protocol Conversion
 
-Each known OpenCode Go model has a hardcoded **preferred** protocol and a
-**supported** set (maintained after test-account probes; not discovered at
-request time). When the client protocol is supported, the gateway passthroughs
-the request and response. Otherwise it converts the **request body** to the
-preferred upstream protocol and the **response body** (or SSE stream) back to
-the client protocol. `MODEL_PROTOCOLS` remains Go-specific. Custom API
-converts the client protocol to that account's declared upstream protocol. Conversion covers text, system instructions, images, tool
-calls and tool results, reasoning content, completion status, errors, and
-usage fields. Example: `glm-5.2` passthroughs Chat Completions, Responses, and
-Messages; `grok-4.5` is Responses-only and converts Chat / Messages / Gemini
-entries to Responses; `gpt-5.6-luna` prefers Responses and also passthroughs
-Chat; `glm-5.3` is Chat-only.
+At request time the gateway never discovers or probes a protocol. It resolves
+the Alias, checks account eligibility, applies the adapter structural ceiling,
+then the saved provider contract, then the Chat Completions / Responses /
+Messages switches, and only then passthroughs or converts. Switches take
+precedence: a globally closed protocol is not used even if the model lists it
+as supported.
+
+Each known OpenCode Go model starts from a hardcoded **preferred** protocol
+and a **supported** set (maintained after test-account probes; not discovered
+at request time). Explicit probe success on **Providers** may confirm or add
+support only inside that adapter ceiling; probe failure is recorded and does
+not delete static capability. When the client protocol is supported and
+enabled, the gateway passthroughs the request and response. Otherwise it
+converts the **request body** to the preferred upstream protocol and the
+**response body** (or SSE stream) back to the client protocol.
+`MODEL_PROTOCOLS` remains the Go starting point. Custom API converts the
+client protocol to that account's declared upstream protocol, then still
+honors the Custom endpoint contract and switches. Conversion covers text,
+system instructions, images, tool calls and tool results, reasoning content,
+completion status, errors, and usage fields. Example: `glm-5.2` passthroughs
+Chat Completions, Responses, and Messages; `grok-4.5` is Responses-only and
+converts Chat / Messages / Gemini entries to Responses; `gpt-5.6-luna`
+prefers Responses and also passthroughs Chat; `glm-5.3` is Chat-only.
 
 | Preferred upstream | Models |
 | --- | --- |
@@ -1104,6 +1205,8 @@ from the Accounts view. The selector skips:
 - Accounts that are cooling down.
 - Accounts that have already failed during the current request (e.g. with a
   `429`).
+- Accounts whose saved provider contract has no enabled upstream protocol
+  for the resolved model.
 
 A `429` with a recognized `Resets in …` phrase writes `cooldown_until` and
 the gateway tries the next account. `403` fails over without writing a
@@ -1196,15 +1299,15 @@ no separate Deny / Explicit / Prefer policy. Disable the card if you do not
 want Free traffic; otherwise its position in the account list is its routing
 priority.
 
-**Fetch models** calls the official keyless Zen model directory only on user
-request. The backend keeps only IDs ending in `-free`, saves the successful
-snapshot, and derives one additional Alias by removing that suffix. For
-example, `mimo-v2.5-free` is accepted both as itself and as `mimo-v2.5`;
-requests for the shared Alias follow account-card order across Go and Zen.
-The card shows every `Alias → upstream model ID` pair. A failed or empty
-refresh leaves the last saved snapshot active. The reserved Go model
-`ox-alpha-free` is excluded from Zen discovery so it remains Go-only and
-unpriced.
+**Refresh model catalog** on **Providers** calls the official keyless Zen
+model directory only on user request. The backend keeps only IDs ending in
+`-free`, saves the successful snapshot, and derives one additional Alias by
+removing that suffix. For example, `mimo-v2.5-free` is accepted both as
+itself and as `mimo-v2.5`; requests for the shared Alias follow account-card
+order across Go and Zen. **Providers** shows the saved catalog and each
+model contract. A failed or empty refresh leaves the last saved snapshot
+active. The reserved Go model `ox-alpha-free` is excluded from Zen discovery
+so it remains Go-only and unpriced.
 
 Free and Go cooldowns are **independent**. Zen Free sends no authentication
 headers. Its promo quota is shared per egress IP, so a Free `429` cools the
@@ -1560,13 +1663,17 @@ and browser profiles.
   builds, the CLI, and Docker use the direct/manual upgrade path.
 - Command Code GOAT and SCNet Token Plans can be saved as disabled `pending`
   drafts (`routable=false`). Connection verification returns `501`. They have
-  no live inference, usage, pricing, verification runtime, or provider
-  guides. Custom API is live under the trusted-administrator boundary in
-  [Accounts](#accounts); it is unpriced and has no official usage path.
+  no live inference, usage, pricing, verification runtime, or production
+  routing; they appear on **Providers** as non-routable scopes and cannot be
+  promoted by probes. Custom API is live under the trusted-administrator
+  boundary in [Accounts](#accounts); it is unpriced and has no official usage
+  path. Catalog, protocol, and pricing controls for Custom live on
+  **Providers** as isolated `CustomEndpoint` scopes.
 - Unknown model names return `400` on every supported client format. Clients
   should send published aliases or eligible Custom IDs from authenticated
-  `GET /v1/models`. Protected `GET /dashboard/api/application-models` is Go
-  aliases ∩ active pricing, not that full client list.
+  `GET /v1/models` that currently have an effective enabled protocol.
+  Protected `GET /dashboard/api/application-models` is Go aliases ∩ active
+  pricing, not that full client list.
 
 ## Troubleshooting
 

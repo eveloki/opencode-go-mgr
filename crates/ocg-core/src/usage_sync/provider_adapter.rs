@@ -7,10 +7,7 @@
 //! without becoming account/inference eligibility state.
 
 use crate::models::AppConfig;
-use crate::provider::{
-    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID,
-    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-};
+use crate::provider::{ProviderRegistry, UsageContractKind};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -55,41 +52,25 @@ pub fn provider_usage_capability(
     provider_id: &str,
     offering_id: &str,
 ) -> Option<ProviderUsageCapability> {
-    match (provider_id, offering_id) {
-        (OPENCODE_PROVIDER_ID, GO_OFFERING_ID) => Some(ProviderUsageCapability {
-            provider_id: OPENCODE_PROVIDER_ID,
-            offering_id: GO_OFFERING_ID,
-            evidence: ProviderUsageEvidence::Authoritative,
-            experimental: false,
-            endpoint: Some(crate::go_usage::GO_USAGE_URL),
-            automatic_sync: true,
-            authoritative_for_quota: true,
-            affects_inference_eligibility: false,
-        }),
-        (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => Some(ProviderUsageCapability {
-            provider_id: COMMAND_CODE_PROVIDER_ID,
-            offering_id: GOAT_OFFERING_ID,
-            evidence: ProviderUsageEvidence::Unavailable,
-            experimental: true,
-            endpoint: None,
-            automatic_sync: false,
-            authoritative_for_quota: false,
-            affects_inference_eligibility: false,
-        }),
-        (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
-            Some(ProviderUsageCapability {
-                provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
-                offering_id: ANONYMOUS_FREE_OFFERING_ID,
-                evidence: ProviderUsageEvidence::Unavailable,
-                experimental: false,
-                endpoint: None,
-                automatic_sync: false,
-                authoritative_for_quota: false,
-                affects_inference_eligibility: false,
-            })
-        }
-        _ => None,
+    let descriptor = ProviderRegistry::get(provider_id, offering_id)?;
+    if !descriptor.usage.publishes_capability {
+        return None;
     }
+    Some(ProviderUsageCapability {
+        provider_id: descriptor.provider_id,
+        offering_id: descriptor.offering_id,
+        evidence: match descriptor.usage.contract {
+            UsageContractKind::Authoritative => ProviderUsageEvidence::Authoritative,
+            UsageContractKind::LocalState
+            | UsageContractKind::ExperimentalUnavailable
+            | UsageContractKind::Unavailable => ProviderUsageEvidence::Unavailable,
+        },
+        experimental: descriptor.usage.experimental,
+        endpoint: descriptor.usage.endpoint,
+        automatic_sync: descriptor.usage.automatic_sync,
+        authoritative_for_quota: descriptor.usage.authoritative_for_quota,
+        affects_inference_eligibility: descriptor.usage.affects_inference_eligibility,
+    })
 }
 
 pub fn supports_authoritative_auto_sync(provider_id: &str, offering_id: &str) -> bool {
@@ -241,6 +222,13 @@ mod tests {
 
     #[test]
     fn capabilities_keep_goat_and_zen_out_of_authoritative_go_sync() {
+        use crate::provider::{
+            ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
+            CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
+            OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, SCNET_PROVIDER_ID,
+            SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+        };
+
         let go = provider_usage_capability(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
         assert_eq!(go.evidence, ProviderUsageEvidence::Authoritative);
         assert!(go.automatic_sync);
@@ -260,6 +248,77 @@ mod tests {
         assert_eq!(zen.endpoint, None);
         assert!(!zen.experimental);
         assert!(!zen.authoritative_for_quota);
+
+        assert!(
+            provider_usage_capability(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
+                .is_none()
+        );
+        assert!(provider_usage_capability(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).is_none());
+        for descriptor in crate::provider::ProviderRegistry::iter() {
+            let capability =
+                provider_usage_capability(descriptor.provider_id, descriptor.offering_id);
+            match descriptor.kind {
+                ProviderAdapterKind::OpenCodeGo => {
+                    let capability = capability.expect("Go publishes authoritative usage");
+                    assert_eq!(capability.evidence, ProviderUsageEvidence::Authoritative);
+                    assert!(capability.automatic_sync);
+                    assert!(capability.authoritative_for_quota);
+                }
+                ProviderAdapterKind::CommandCodeGoat => {
+                    let capability = capability.expect("GOAT publishes an unavailable capability");
+                    assert_eq!(capability.evidence, ProviderUsageEvidence::Unavailable);
+                    assert!(capability.experimental);
+                    assert!(!capability.automatic_sync);
+                }
+                ProviderAdapterKind::ZenFree => {
+                    let capability = capability.expect("Zen publishes local-state usage");
+                    assert!(!capability.experimental);
+                    assert!(!capability.automatic_sync);
+                }
+                ProviderAdapterKind::Scnet | ProviderAdapterKind::ConfigurableHttp => {
+                    assert!(capability.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn usage_capability_delegates_through_composed_usage_adapter() {
+        use crate::provider::{
+            ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
+            CUSTOM_PROVIDER_ID, CommandCodeGoatAdapter, ConfigurableHttpAdapter, GO_OFFERING_ID,
+            GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+            OpenCodeGoAdapter, SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ScnetAdapter,
+            UsageAdapter, ZenFreeAdapter, builtin_plan,
+        };
+
+        let go_plan = builtin_plan(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
+        let go_usage = OpenCodeGoAdapter::usage(go_plan);
+        let go = provider_usage_capability(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
+        assert_eq!(go.endpoint, go_usage.endpoint);
+        assert_eq!(go.automatic_sync, go_usage.automatic_sync);
+        assert_eq!(go.authoritative_for_quota, go_usage.authoritative_for_quota);
+        assert!(go_usage.publishes_capability);
+
+        let goat_plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+        let goat_usage = CommandCodeGoatAdapter::usage(goat_plan);
+        let goat = provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+        assert!(goat_usage.experimental);
+        assert_eq!(goat.experimental, goat_usage.experimental);
+        assert_eq!(goat.endpoint, goat_usage.endpoint);
+        assert!(!goat_usage.automatic_sync);
+
+        let zen_plan =
+            builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();
+        let zen_usage = ZenFreeAdapter::usage(zen_plan);
+        assert!(zen_usage.publishes_capability);
+        assert!(!zen_usage.authoritative_for_quota);
+
+        let scnet_plan =
+            builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
+        assert!(!ScnetAdapter::usage(scnet_plan).publishes_capability);
+        let custom_plan = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
+        assert!(!ConfigurableHttpAdapter::usage(custom_plan).publishes_capability);
     }
 
     #[tokio::test]

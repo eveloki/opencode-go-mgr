@@ -4388,3 +4388,330 @@ async fn list_mode_midflight_config_switch_keeps_the_entry_snapshot() {
     let _ = proxy_shutdown_tx.send(());
     let _ = fs::remove_dir_all(dir);
 }
+
+fn disable_go_protocols(state: &Arc<CoreStateInner>, chat: bool, responses: bool, messages: bool) {
+    let now = Utc::now();
+    let scope = ocg_core::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
+    let db = state.db.lock();
+    if !chat {
+        db.set_protocol_switch(
+            &scope,
+            ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+            false,
+            now,
+        )
+        .unwrap();
+    }
+    if !responses {
+        db.set_protocol_switch(
+            &scope,
+            ocg_core::provider::UpstreamProtocolKind::Responses,
+            false,
+            now,
+        )
+        .unwrap();
+    }
+    if !messages {
+        db.set_protocol_switch(
+            &scope,
+            ocg_core::provider::UpstreamProtocolKind::Messages,
+            false,
+            now,
+        )
+        .unwrap();
+    }
+    drop(db);
+    state.reload_provider_contracts().unwrap();
+}
+
+#[tokio::test]
+async fn disabled_protocols_fail_locally_without_upstream() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    disable_go_protocols(&state, false, false, false);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "glm-5.3").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string()
+            .contains(ocg_core::provider_contracts::NO_ENABLED_UPSTREAM_PROTOCOL)
+            || body.to_string().contains("no enabled upstream"),
+        "{body}"
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "disabled protocols must fail before upstream: {:?}",
+        calls.lock().unwrap()
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn protocol_switch_filters_v1_models_and_application_models() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    disable_go_protocols(&state, false, true, true);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains("\"glm-5.3\""),
+        "chat-only glm-5.3 must leave /v1/models when Chat is disabled: {body}"
+    );
+    assert!(
+        body.contains("\"grok-4.5\""),
+        "responses-only grok-4.5 must remain: {body}"
+    );
+
+    let (status, app_body) = get_application_models(port).await;
+    assert_eq!(status, StatusCode::OK, "{app_body}");
+    let ids = app_body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&"glm-5.3"));
+    assert!(ids.contains(&"grok-4.5"));
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "listing endpoints must stay local: {:?}",
+        calls.lock().unwrap()
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn reenabling_a_protocol_restores_routing_without_a_new_probe() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    disable_go_protocols(&state, false, true, true);
+    let glm = state
+        .provider_contracts()
+        .scope(&ocg_core::provider_contracts::ContractScope::provider(
+            OPENCODE_PROVIDER_ID,
+        ))
+        .unwrap()
+        .model("glm-5.3")
+        .unwrap()
+        .clone();
+    assert!(glm.protocols.get("chat_completions").unwrap().available);
+    assert!(!glm.protocols.get("chat_completions").unwrap().enabled);
+
+    let now = Utc::now();
+    state
+        .db
+        .lock()
+        .set_protocol_switch(
+            &ocg_core::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID),
+            ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+            true,
+            now,
+        )
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "glm-5.3").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+async fn dashboard_protocol_probe(
+    port: u16,
+    account_id: &str,
+    model_id: &str,
+    protocols: &[&str],
+) -> (StatusCode, serde_json::Value) {
+    let response = loopback_client()
+        .post(format!(
+            "http://127.0.0.1:{port}/dashboard/api/accounts/{account_id}/protocol-probes"
+        ))
+        .json(&serde_json::json!({
+            "model_id": model_id,
+            "protocols": protocols,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.json().await.unwrap();
+    (status, body)
+}
+
+#[tokio::test]
+async fn duplicate_protocol_probes_fail_locally_without_upstream() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = dashboard_protocol_probe(
+        port,
+        "acct-1",
+        "glm-5.2",
+        &["chat_completions", "responses", "chat_completions"],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("duplicate"),
+        "duplicate protocols must 400: {body}"
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a duplicated protocol must not run a billable probe: {:?}",
+        calls.lock().unwrap()
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn explicit_probe_can_add_ceiling_protocol_and_failure_does_not() {
+    let replies = HashMap::from([(
+        "key-1".to_string(),
+        VecDeque::from([
+            MockReply {
+                status: 500,
+                body: r#"{"error":"nope"}"#,
+            },
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+        ]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let before = state
+        .provider_contracts()
+        .scope(&ocg_core::provider_contracts::ContractScope::provider(
+            OPENCODE_PROVIDER_ID,
+        ))
+        .unwrap()
+        .model("grok-4.5")
+        .unwrap()
+        .clone();
+    assert!(!before.protocols.get("chat_completions").unwrap().available);
+    assert!(before.protocols.get("responses").unwrap().available);
+
+    let (status, body) =
+        dashboard_protocol_probe(port, "acct-1", "grok-4.5", &["chat_completions"]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"][0]["success"], false);
+    assert_eq!(body["results"][0]["skipped"], false);
+    let after_failure = state
+        .provider_contracts()
+        .scope(&ocg_core::provider_contracts::ContractScope::provider(
+            OPENCODE_PROVIDER_ID,
+        ))
+        .unwrap()
+        .model("grok-4.5")
+        .unwrap()
+        .clone();
+    assert!(
+        !after_failure
+            .protocols
+            .get("chat_completions")
+            .unwrap()
+            .available
+    );
+    assert!(after_failure.protocols.get("responses").unwrap().available);
+    assert_eq!(
+        after_failure
+            .protocols
+            .get("chat_completions")
+            .unwrap()
+            .last_probe_result,
+        Some(ocg_core::provider_contracts::ProbeResultKind::Failure)
+    );
+
+    let (status, body) =
+        dashboard_protocol_probe(port, "acct-1", "grok-4.5", &["chat_completions"]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"][0]["success"], true);
+    let after_success = state
+        .provider_contracts()
+        .scope(&ocg_core::provider_contracts::ContractScope::provider(
+            OPENCODE_PROVIDER_ID,
+        ))
+        .unwrap()
+        .model("grok-4.5")
+        .unwrap()
+        .clone();
+    assert!(
+        after_success
+            .protocols
+            .get("chat_completions")
+            .unwrap()
+            .available
+    );
+    assert!(
+        after_success
+            .protocols
+            .get("chat_completions")
+            .unwrap()
+            .enabled
+    );
+
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "grok-4.5").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let recorded = calls.lock().unwrap();
+    assert!(
+        recorded
+            .iter()
+            .any(|call| call.path == "/v1/chat/completions" && call.body.contains("grok-4.5")),
+        "probed Chat must become the selected production path: {recorded:?}"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}

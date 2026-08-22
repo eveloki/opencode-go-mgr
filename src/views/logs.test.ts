@@ -207,6 +207,41 @@ test("account API sends purchase dates and the complete reorder payload", async 
   ]);
 });
 
+test("account model test sends the selected model and protocol", async () => {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { location: { pathname: "/dashboard" }, dispatchEvent() {} },
+  });
+  let request: { url: string; method: string; body: unknown } | null = null;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string, init: RequestInit = {}) => {
+      request = {
+        url: input,
+        method: init.method ?? "GET",
+        body: init.body ? JSON.parse(String(init.body)) : null,
+      };
+      return new Response(JSON.stringify({
+        message: "ok",
+        model_id: "gpt-5.6-luna",
+        protocol: "responses",
+      }), { headers: { "Content-Type": "application/json" } });
+    },
+  });
+
+  const result = await tauriApi.testAccount("account-1", {
+    model_id: "gpt-5.6-luna",
+    protocol: "responses",
+  });
+
+  assert.deepEqual(request, {
+    url: "/dashboard/api/accounts/account-1/test",
+    method: "POST",
+    body: { model_id: "gpt-5.6-luna", protocol: "responses" },
+  });
+  assert.equal(result.protocol, "responses");
+});
+
 test("managed account API uses ordered setup, browser targets, and profile reset routes", async () => {
   Object.defineProperty(globalThis, "window", {
     configurable: true,

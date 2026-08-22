@@ -23,6 +23,7 @@ function goCatalog(form_fields: ProviderCatalogEntry["form_fields"]): ProviderCa
     managed_registration: true,
     pricing_availability: "available",
     usage_availability: "available",
+    manual_usage_calibration: false,
     quota_unit: "usd",
     model_source: "builtin",
     auth_schemes: ["bearer"],

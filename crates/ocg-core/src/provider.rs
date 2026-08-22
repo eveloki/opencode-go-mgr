@@ -31,6 +31,9 @@ pub const COMMAND_CODE_GOAT_MODELS_PATH: &str = "/models";
 pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS: &str = "deepseek-v4-flash";
 /// Unique exact upstream raw ID for Command Code GOAT.
 pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM: &str = "deepseek/deepseek-v4-flash";
+pub const COMMAND_CODE_GOAT_QUOTA_5H: f64 = 14.0;
+pub const COMMAND_CODE_GOAT_QUOTA_WEEK: f64 = 35.0;
+pub const COMMAND_CODE_GOAT_QUOTA_MONTH: f64 = 70.0;
 pub const SCNET_TOKEN_PLAN_BASIC_OFFERING_ID: &str = "token-plan-basic";
 pub const SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID: &str = "token-plan-standard";
 pub const SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID: &str = "token-plan-premium";
@@ -248,15 +251,18 @@ impl TryFrom<&str> for ConnectionVerificationStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamProtocolKind {
+    #[default]
     ChatCompletions,
     Responses,
     Messages,
 }
 
 impl UpstreamProtocolKind {
+    pub const ALL: [Self; 3] = [Self::ChatCompletions, Self::Responses, Self::Messages];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ChatCompletions => "chat_completions",
@@ -265,6 +271,25 @@ impl UpstreamProtocolKind {
         }
     }
 }
+
+/// Deterministic fallback when the preferred upstream protocol is disabled.
+pub const PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES: &[UpstreamProtocolKind] = &[
+    UpstreamProtocolKind::ChatCompletions,
+    UpstreamProtocolKind::Responses,
+    UpstreamProtocolKind::Messages,
+];
+
+/// Protocols whose OpenCode Go / known Zen endpoint, materialization, and
+/// auth path the adapter can construct. This is the probe safety ceiling,
+/// not static verified support (`MODEL_PROTOCOLS`).
+pub const OPENCODE_CONSTRUCTABLE_PROTOCOLS: &[UpstreamProtocolKind] =
+    PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES;
+
+/// Command Code / SCNet documented surfaces have no Responses path.
+pub const PROTOCOL_FALLBACK_CHAT_MESSAGES: &[UpstreamProtocolKind] = &[
+    UpstreamProtocolKind::ChatCompletions,
+    UpstreamProtocolKind::Messages,
+];
 
 impl TryFrom<&str> for UpstreamProtocolKind {
     type Error = ProviderBindingError;
@@ -411,6 +436,9 @@ pub struct BuiltinPlan {
     pub managed_registration: bool,
     pub pricing_availability: &'static str,
     pub usage_availability: &'static str,
+    /// Whether the dashboard may persist a user-entered quota percentage for
+    /// display when the provider exposes no machine-readable usage endpoint.
+    pub manual_usage_calibration: bool,
     pub quota_unit: &'static str,
     pub model_source: &'static str,
     pub key_prefix: Option<&'static str>,
@@ -548,6 +576,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         managed_registration: true,
         pricing_availability: "available",
         usage_availability: "available",
+        manual_usage_calibration: false,
         quota_unit: "usd",
         model_source: "builtin_go_protocol_table",
         key_prefix: None,
@@ -576,6 +605,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         managed_registration: false,
         pricing_availability: "not_applicable",
         usage_availability: "local_state",
+        manual_usage_calibration: false,
         quota_unit: "request",
         model_source: "builtin_zen_free_alias",
         key_prefix: None,
@@ -596,6 +626,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         managed_registration: false,
         pricing_availability: "unavailable",
         usage_availability: "unavailable",
+        manual_usage_calibration: true,
         quota_unit: "credits",
         model_source: "builtin_command_code_protocol_table",
         key_prefix: None,
@@ -616,6 +647,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         managed_registration: false,
         pricing_availability: "unavailable",
         usage_availability: "unavailable",
+        manual_usage_calibration: false,
         quota_unit: "credits",
         model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
         key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
@@ -636,6 +668,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         managed_registration: false,
         pricing_availability: "unavailable",
         usage_availability: "unavailable",
+        manual_usage_calibration: false,
         quota_unit: "credits",
         model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
         key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
@@ -656,6 +689,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         managed_registration: false,
         pricing_availability: "unavailable",
         usage_availability: "unavailable",
+        manual_usage_calibration: false,
         quota_unit: "credits",
         model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
         key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
@@ -676,6 +710,7 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         managed_registration: false,
         pricing_availability: "unpriced",
         usage_availability: "unavailable",
+        manual_usage_calibration: false,
         quota_unit: "token",
         model_source: "account_capabilities",
         key_prefix: None,
@@ -722,9 +757,104 @@ pub fn builtin_plan(provider_id: &str, offering_id: &str) -> Option<BuiltinPlan>
     })
 }
 
+/// Exhaustive, code-owned adapter identity. Not a plugin slot, JSON DSL, or
+/// user-defined implementation. Custom API is [`Self::ConfigurableHttp`], not
+/// a base class other adapters inherit from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderAdapterKind {
+    OpenCodeGo,
+    ZenFree,
+    CommandCodeGoat,
+    Scnet,
+    ConfigurableHttp,
+}
+
+impl ProviderAdapterKind {
+    pub const ALL: [Self; 5] = [
+        Self::OpenCodeGo,
+        Self::ZenFree,
+        Self::CommandCodeGoat,
+        Self::Scnet,
+        Self::ConfigurableHttp,
+    ];
+
+    pub fn from_offering(provider_id: &str, offering_id: &str) -> Option<Self> {
+        match (provider_id, offering_id) {
+            (OPENCODE_PROVIDER_ID, GO_OFFERING_ID) => Some(Self::OpenCodeGo),
+            (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => Some(Self::ZenFree),
+            (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => Some(Self::CommandCodeGoat),
+            (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
+            | (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID)
+            | (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID) => Some(Self::Scnet),
+            (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID) => Some(Self::ConfigurableHttp),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenCodeGo => "opencode_go",
+            Self::ZenFree => "zen_free",
+            Self::CommandCodeGoat => "command_code_goat",
+            Self::Scnet => "scnet",
+            Self::ConfigurableHttp => "configurable_http",
+        }
+    }
+
+    /// Built-in provider id that owns this adapter's shared contract scope.
+    /// Configurable HTTP is per-endpoint and has no provider scope.
+    pub const fn provider_scope_id(self) -> Option<&'static str> {
+        match self {
+            Self::OpenCodeGo => Some(OPENCODE_PROVIDER_ID),
+            Self::ZenFree => Some(OPENCODE_ZEN_FREE_PROVIDER_ID),
+            Self::CommandCodeGoat => Some(COMMAND_CODE_PROVIDER_ID),
+            Self::Scnet => Some(SCNET_PROVIDER_ID),
+            Self::ConfigurableHttp => None,
+        }
+    }
+
+    pub const fn catalog_refresh_supported(self) -> bool {
+        match self {
+            Self::ZenFree | Self::ConfigurableHttp => true,
+            Self::OpenCodeGo | Self::CommandCodeGoat | Self::Scnet => false,
+        }
+    }
+
+    pub const fn protocol_probe_supported(self) -> bool {
+        match self {
+            Self::OpenCodeGo | Self::ZenFree | Self::ConfigurableHttp => true,
+            Self::CommandCodeGoat | Self::Scnet => false,
+        }
+    }
+}
+
+/// Zero-sized OpenCode Go adapter identity. Capability records are composed
+/// from the sealed contracts below; this type is not a plugin slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OpenCodeGoAdapter;
+
+/// Zero-sized Zen Free adapter identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ZenFreeAdapter;
+
+/// Zero-sized Command Code GOAT adapter identity. Production stays fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CommandCodeGoatAdapter;
+
+/// Zero-sized SCNet Token Plan adapter identity. Production stays fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScnetAdapter;
+
+/// Zero-sized Configurable HTTP adapter identity (Custom API). Not a base class
+/// other adapters inherit from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConfigurableHttpAdapter;
+
 pub fn is_scnet_token_plan(provider_id: &str, offering_id: &str) -> bool {
-    provider_id == SCNET_PROVIDER_ID
-        && scnet_token_plan_official_offering_name(offering_id).is_some()
+    matches!(
+        ProviderAdapterKind::from_offering(provider_id, offering_id),
+        Some(ProviderAdapterKind::Scnet)
+    )
 }
 
 pub fn scnet_token_plan_official_offering_name(offering_id: &str) -> Option<&'static str> {
@@ -745,11 +875,17 @@ pub fn scnet_token_plan_model_snapshot(
 }
 
 pub fn is_command_code_goat(provider_id: &str, offering_id: &str) -> bool {
-    provider_id == COMMAND_CODE_PROVIDER_ID && offering_id == GOAT_OFFERING_ID
+    matches!(
+        ProviderAdapterKind::from_offering(provider_id, offering_id),
+        Some(ProviderAdapterKind::CommandCodeGoat)
+    )
 }
 
 pub fn is_custom_api(provider_id: &str, offering_id: &str) -> bool {
-    provider_id == CUSTOM_PROVIDER_ID && offering_id == CUSTOM_API_OFFERING_ID
+    matches!(
+        ProviderAdapterKind::from_offering(provider_id, offering_id),
+        Some(ProviderAdapterKind::ConfigurableHttp)
+    )
 }
 
 /// Relative path appended onto a Custom base URL prefix. Callers must join
@@ -759,6 +895,896 @@ pub fn custom_endpoint_relative_path(protocol: UpstreamProtocolKind) -> &'static
         UpstreamProtocolKind::ChatCompletions => "chat/completions",
         UpstreamProtocolKind::Responses => "responses",
         UpstreamProtocolKind::Messages => "messages",
+    }
+}
+
+/// Static code-owned registry of built-in provider offerings. Lookup is by
+/// `(provider_id, offering_id)`; unknown pairs fail closed.
+pub struct ProviderRegistry;
+
+impl ProviderRegistry {
+    pub fn get(provider_id: &str, offering_id: &str) -> Option<ProviderDescriptor> {
+        let plan = builtin_plan(provider_id, offering_id)?;
+        let kind = ProviderAdapterKind::from_offering(provider_id, offering_id)?;
+        Some(ProviderDescriptor::from_plan(kind, plan))
+    }
+
+    pub fn iter() -> impl Iterator<Item = ProviderDescriptor> {
+        BUILTIN_PLANS
+            .iter()
+            .filter_map(|plan| Self::get(plan.offering.provider_id, plan.offering.offering_id))
+    }
+}
+
+/// Composed capability records selected from one concrete adapter.
+/// Built only through [`ProviderCapabilities::compose`] /
+/// [`ProviderAdapterKind::compose_capabilities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub model_catalog: ModelCatalogDescriptor,
+    pub inference: InferenceRoutingDescriptor,
+    pub protocol_probe: ProtocolProbeDescriptor,
+    pub verification: VerificationDescriptor,
+    pub usage: UsageDescriptor,
+    pub pricing: PricingDescriptor,
+    pub error_cooldown: ErrorCooldownDescriptor,
+    pub card_actions: CardActionsDescriptor,
+}
+
+/// Composed capability surfaces for one catalog offering. These are facts for
+/// later persistence/UI; this slice does not change dashboard DTOs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderDescriptor {
+    pub kind: ProviderAdapterKind,
+    pub provider_id: &'static str,
+    pub offering_id: &'static str,
+    pub model_catalog: ModelCatalogDescriptor,
+    pub inference: InferenceRoutingDescriptor,
+    pub protocol_probe: ProtocolProbeDescriptor,
+    pub verification: VerificationDescriptor,
+    pub usage: UsageDescriptor,
+    pub pricing: PricingDescriptor,
+    pub error_cooldown: ErrorCooldownDescriptor,
+    pub card_actions: CardActionsDescriptor,
+}
+
+impl ProviderDescriptor {
+    fn from_plan(kind: ProviderAdapterKind, plan: BuiltinPlan) -> Self {
+        Self::from_capabilities(kind, plan, kind.compose_capabilities(plan))
+    }
+
+    fn from_capabilities(
+        kind: ProviderAdapterKind,
+        plan: BuiltinPlan,
+        capabilities: ProviderCapabilities,
+    ) -> Self {
+        Self {
+            kind,
+            provider_id: plan.offering.provider_id,
+            offering_id: plan.offering.offering_id,
+            model_catalog: capabilities.model_catalog,
+            inference: capabilities.inference,
+            protocol_probe: capabilities.protocol_probe,
+            verification: capabilities.verification,
+            usage: capabilities.usage,
+            pricing: capabilities.pricing,
+            error_cooldown: capabilities.error_cooldown,
+            card_actions: capabilities.card_actions,
+        }
+    }
+
+    pub fn capabilities(self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            model_catalog: self.model_catalog,
+            inference: self.inference,
+            protocol_probe: self.protocol_probe,
+            verification: self.verification,
+            usage: self.usage,
+            pricing: self.pricing,
+            error_cooldown: self.error_cooldown,
+            card_actions: self.card_actions,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCatalogKind {
+    BuiltinGoProtocolTable,
+    ZenFreePersistedSnapshot,
+    BuiltinCommandCodeProtocolTable,
+    OfficialTokenPlanUsableModels,
+    AccountDeclaredCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelCatalogDescriptor {
+    pub kind: ModelCatalogKind,
+    pub catalog_source: &'static str,
+    pub publishes_client_aliases: bool,
+    pub admin_explicit_refresh: bool,
+    pub overlays_declared_ids: bool,
+    pub snapshot_is_adapter_input_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceChannelKind {
+    Go,
+    Free,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceOriginKind {
+    ConfigUpstreamBase,
+    DerivedZenBase,
+    OfficialFixed,
+    AccountConfigured,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceAuthDescriptor {
+    OpenCodeProtocolDefault,
+    Bearer,
+    None,
+    ConfigurableBearerOrXApiKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InferenceRoutingDescriptor {
+    pub catalog_routable: bool,
+    pub production_inference: bool,
+    pub channel: Option<InferenceChannelKind>,
+    pub credential_kind: CredentialKind,
+    pub quota_scope: QuotaScope,
+    pub auth: InferenceAuthDescriptor,
+    pub follow_redirects: bool,
+    pub origin: InferenceOriginKind,
+    pub loopback_test_seam_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolMatrixKind {
+    OpenCodeModelProtocols,
+    CommandCodeNative,
+    DocumentedChatAndMessages,
+    AccountDeclaredProtocol,
+}
+
+/// Immutable adapter ceiling for explicit protocol probes. Distinct from
+/// static/preset verified support, which still begins from `MODEL_PROTOCOLS`
+/// (OpenCode/Zen), Command Code native rows, SCNet documented surfaces, or
+/// the Custom account's declared protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuralProbeCeiling {
+    /// GOAT/SCNet: probes are unavailable; production stays hard-unroutable.
+    Unavailable,
+    /// Known OpenCode Go models: Chat Completions, Responses, and Messages
+    /// all have constructable `/v1/...` paths and OpenCode auth.
+    OpenCodeConstructable,
+    /// Known Zen models share OpenCode constructable paths. Unknown `-free`
+    /// IDs stay Chat-only. Anything else is empty.
+    ZenFreeConstructable,
+    /// Configurable HTTP: only the account's immutable declared protocol.
+    AccountDeclared,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolProbeDescriptor {
+    pub request_path_may_trial: bool,
+    pub matrix: ProtocolMatrixKind,
+    pub unknown_zen_free_defaults_to_chat: bool,
+    pub fallback_priority: &'static [UpstreamProtocolKind],
+    /// Dedicated admin probe surface. Request paths must stay false.
+    pub explicit_probe: bool,
+    pub structural_ceiling: StructuralProbeCeiling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerificationDescriptor {
+    pub policy: VerificationPolicy,
+    pub runtime_availability: &'static str,
+    pub never_auto_enable: bool,
+    pub probe_first_declared_model: bool,
+    pub uses_get_models: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageContractKind {
+    Authoritative,
+    LocalState,
+    ExperimentalUnavailable,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageDescriptor {
+    pub catalog_availability: &'static str,
+    pub contract: UsageContractKind,
+    pub endpoint: Option<&'static str>,
+    pub experimental: bool,
+    pub automatic_sync: bool,
+    pub authoritative_for_quota: bool,
+    pub affects_inference_eligibility: bool,
+    pub publishes_capability: bool,
+    pub manual_calibration: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PricingDescriptor {
+    pub availability: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorCooldownDescriptor {
+    pub parse_opencode_go_windows_on_429: bool,
+    pub schedule_official_go_usage_after_429: bool,
+    pub generic_provider_key_cooldown: bool,
+    pub egress_ip_shared_free_cooldown: bool,
+    pub inference_401_passthrough: bool,
+    pub success_cost_state_free: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardVerifyAction {
+    NotApplicable,
+    Optional,
+    UnavailableNotImplemented,
+    AvailableThenExplicitEnable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CardActionsDescriptor {
+    pub persisted_enable_allowed: bool,
+    pub enable_requires_verification: bool,
+    pub managed_registration: bool,
+    pub fetch_zen_models: bool,
+    pub discover_models: bool,
+    pub usage_refresh: bool,
+    pub manual_usage_calibration: bool,
+    pub connection_verify: CardVerifyAction,
+    pub protocol_and_auth_immutable_after_create: bool,
+    pub risk_acknowledgement: bool,
+    pub protocol_probe: bool,
+    pub catalog_refresh: bool,
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+impl sealed::Sealed for OpenCodeGoAdapter {}
+impl sealed::Sealed for ZenFreeAdapter {}
+impl sealed::Sealed for CommandCodeGoatAdapter {}
+impl sealed::Sealed for ScnetAdapter {}
+impl sealed::Sealed for ConfigurableHttpAdapter {}
+
+/// Static model-catalog capability contract. Sealed to the five concrete
+/// adapter identities; not a plugin slot or runtime registry.
+pub trait ModelCatalogAdapter: sealed::Sealed {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor;
+}
+
+/// Static inference routing capability contract.
+pub trait InferenceAdapter: sealed::Sealed {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor;
+}
+
+/// Static protocol-probe capability contract. Request paths must not trial
+/// billable inference.
+pub trait ProtocolProbeAdapter: sealed::Sealed {
+    fn protocol_probe(plan: BuiltinPlan) -> ProtocolProbeDescriptor;
+}
+
+/// Static connection-verification capability contract.
+pub trait VerificationAdapter: sealed::Sealed {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor;
+}
+
+/// Static usage capability contract.
+pub trait UsageAdapter: sealed::Sealed {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor;
+}
+
+/// Static pricing capability contract.
+pub trait PricingAdapter: sealed::Sealed {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor;
+}
+
+/// Static error/cooldown policy contract.
+pub trait ErrorPolicyAdapter: sealed::Sealed {
+    fn error_policy(plan: BuiltinPlan) -> ErrorCooldownDescriptor;
+}
+
+/// Static account-card capability contract.
+pub trait CardCapabilities: sealed::Sealed {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor;
+}
+
+impl ProviderCapabilities {
+    /// Compose the eight sealed contracts from one concrete adapter. This is
+    /// the only construction helper; callers must not re-match adapter kind
+    /// per capability.
+    pub fn compose<A>(_adapter: A, plan: BuiltinPlan) -> Self
+    where
+        A: ModelCatalogAdapter
+            + InferenceAdapter
+            + ProtocolProbeAdapter
+            + VerificationAdapter
+            + UsageAdapter
+            + PricingAdapter
+            + ErrorPolicyAdapter
+            + CardCapabilities,
+    {
+        Self {
+            model_catalog: A::model_catalog(plan),
+            inference: A::inference(plan),
+            protocol_probe: A::protocol_probe(plan),
+            verification: A::verification(plan),
+            usage: A::usage(plan),
+            pricing: A::pricing(plan),
+            error_cooldown: A::error_policy(plan),
+            card_actions: A::card_capabilities(plan),
+        }
+    }
+}
+
+impl ProviderAdapterKind {
+    /// Single registry-owned construction point. Adding a concrete adapter
+    /// means implementing the eight contracts and one arm here.
+    pub fn compose_capabilities(self, plan: BuiltinPlan) -> ProviderCapabilities {
+        match self {
+            Self::OpenCodeGo => ProviderCapabilities::compose(OpenCodeGoAdapter, plan),
+            Self::ZenFree => ProviderCapabilities::compose(ZenFreeAdapter, plan),
+            Self::CommandCodeGoat => ProviderCapabilities::compose(CommandCodeGoatAdapter, plan),
+            Self::Scnet => ProviderCapabilities::compose(ScnetAdapter, plan),
+            Self::ConfigurableHttp => ProviderCapabilities::compose(ConfigurableHttpAdapter, plan),
+        }
+    }
+}
+
+fn catalog_pricing(plan: BuiltinPlan) -> PricingDescriptor {
+    PricingDescriptor {
+        availability: plan.pricing_availability,
+    }
+}
+
+impl ModelCatalogAdapter for OpenCodeGoAdapter {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
+        ModelCatalogDescriptor {
+            kind: ModelCatalogKind::BuiltinGoProtocolTable,
+            catalog_source: plan.model_source,
+            publishes_client_aliases: true,
+            admin_explicit_refresh: false,
+            overlays_declared_ids: false,
+            snapshot_is_adapter_input_only: false,
+        }
+    }
+}
+
+impl InferenceAdapter for OpenCodeGoAdapter {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
+        InferenceRoutingDescriptor {
+            catalog_routable: plan.routable,
+            production_inference: true,
+            channel: Some(InferenceChannelKind::Go),
+            credential_kind: plan.offering.credential_kind,
+            quota_scope: plan.offering.quota_scope,
+            auth: InferenceAuthDescriptor::OpenCodeProtocolDefault,
+            follow_redirects: true,
+            origin: InferenceOriginKind::ConfigUpstreamBase,
+            loopback_test_seam_only: false,
+        }
+    }
+}
+
+impl ProtocolProbeAdapter for OpenCodeGoAdapter {
+    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
+        ProtocolProbeDescriptor {
+            request_path_may_trial: false,
+            matrix: ProtocolMatrixKind::OpenCodeModelProtocols,
+            unknown_zen_free_defaults_to_chat: false,
+            fallback_priority: PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
+            explicit_probe: true,
+            structural_ceiling: StructuralProbeCeiling::OpenCodeConstructable,
+        }
+    }
+}
+
+impl VerificationAdapter for OpenCodeGoAdapter {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
+        VerificationDescriptor {
+            policy: plan.verification_policy,
+            runtime_availability: plan.verification_runtime_availability,
+            never_auto_enable: false,
+            probe_first_declared_model: false,
+            uses_get_models: false,
+        }
+    }
+}
+
+impl UsageAdapter for OpenCodeGoAdapter {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
+        UsageDescriptor {
+            catalog_availability: plan.usage_availability,
+            contract: UsageContractKind::Authoritative,
+            endpoint: Some(crate::go_usage::GO_USAGE_URL),
+            experimental: false,
+            automatic_sync: true,
+            authoritative_for_quota: true,
+            affects_inference_eligibility: false,
+            publishes_capability: true,
+            manual_calibration: plan.manual_usage_calibration,
+        }
+    }
+}
+
+impl PricingAdapter for OpenCodeGoAdapter {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
+        catalog_pricing(plan)
+    }
+}
+
+impl ErrorPolicyAdapter for OpenCodeGoAdapter {
+    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
+        ErrorCooldownDescriptor {
+            parse_opencode_go_windows_on_429: true,
+            schedule_official_go_usage_after_429: true,
+            generic_provider_key_cooldown: false,
+            egress_ip_shared_free_cooldown: false,
+            inference_401_passthrough: false,
+            success_cost_state_free: false,
+        }
+    }
+}
+
+impl CardCapabilities for OpenCodeGoAdapter {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
+        CardActionsDescriptor {
+            persisted_enable_allowed: plan.routable,
+            enable_requires_verification: false,
+            managed_registration: plan.managed_registration,
+            fetch_zen_models: false,
+            discover_models: false,
+            usage_refresh: true,
+            manual_usage_calibration: plan.manual_usage_calibration,
+            connection_verify: CardVerifyAction::Optional,
+            protocol_and_auth_immutable_after_create: false,
+            risk_acknowledgement: plan.risk_notice.is_some(),
+            protocol_probe: true,
+            catalog_refresh: false,
+        }
+    }
+}
+
+impl ModelCatalogAdapter for ZenFreeAdapter {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
+        ModelCatalogDescriptor {
+            kind: ModelCatalogKind::ZenFreePersistedSnapshot,
+            catalog_source: plan.model_source,
+            publishes_client_aliases: true,
+            admin_explicit_refresh: true,
+            overlays_declared_ids: false,
+            snapshot_is_adapter_input_only: false,
+        }
+    }
+}
+
+impl InferenceAdapter for ZenFreeAdapter {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
+        InferenceRoutingDescriptor {
+            catalog_routable: plan.routable,
+            production_inference: true,
+            channel: Some(InferenceChannelKind::Free),
+            credential_kind: plan.offering.credential_kind,
+            quota_scope: plan.offering.quota_scope,
+            auth: InferenceAuthDescriptor::None,
+            follow_redirects: true,
+            origin: InferenceOriginKind::DerivedZenBase,
+            loopback_test_seam_only: false,
+        }
+    }
+}
+
+impl ProtocolProbeAdapter for ZenFreeAdapter {
+    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
+        ProtocolProbeDescriptor {
+            request_path_may_trial: false,
+            matrix: ProtocolMatrixKind::OpenCodeModelProtocols,
+            unknown_zen_free_defaults_to_chat: true,
+            fallback_priority: PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
+            explicit_probe: true,
+            structural_ceiling: StructuralProbeCeiling::ZenFreeConstructable,
+        }
+    }
+}
+
+impl VerificationAdapter for ZenFreeAdapter {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
+        VerificationDescriptor {
+            policy: plan.verification_policy,
+            runtime_availability: plan.verification_runtime_availability,
+            never_auto_enable: false,
+            probe_first_declared_model: false,
+            uses_get_models: false,
+        }
+    }
+}
+
+impl UsageAdapter for ZenFreeAdapter {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
+        UsageDescriptor {
+            catalog_availability: plan.usage_availability,
+            contract: UsageContractKind::LocalState,
+            endpoint: None,
+            experimental: false,
+            automatic_sync: false,
+            authoritative_for_quota: false,
+            affects_inference_eligibility: false,
+            publishes_capability: true,
+            manual_calibration: plan.manual_usage_calibration,
+        }
+    }
+}
+
+impl PricingAdapter for ZenFreeAdapter {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
+        catalog_pricing(plan)
+    }
+}
+
+impl ErrorPolicyAdapter for ZenFreeAdapter {
+    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
+        ErrorCooldownDescriptor {
+            parse_opencode_go_windows_on_429: false,
+            schedule_official_go_usage_after_429: false,
+            generic_provider_key_cooldown: false,
+            egress_ip_shared_free_cooldown: true,
+            inference_401_passthrough: true,
+            success_cost_state_free: true,
+        }
+    }
+}
+
+impl CardCapabilities for ZenFreeAdapter {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
+        CardActionsDescriptor {
+            persisted_enable_allowed: plan.routable,
+            enable_requires_verification: false,
+            managed_registration: plan.managed_registration,
+            fetch_zen_models: true,
+            discover_models: false,
+            usage_refresh: false,
+            manual_usage_calibration: plan.manual_usage_calibration,
+            connection_verify: CardVerifyAction::NotApplicable,
+            protocol_and_auth_immutable_after_create: false,
+            risk_acknowledgement: plan.risk_notice.is_some(),
+            protocol_probe: true,
+            catalog_refresh: true,
+        }
+    }
+}
+
+impl ModelCatalogAdapter for CommandCodeGoatAdapter {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
+        ModelCatalogDescriptor {
+            kind: ModelCatalogKind::BuiltinCommandCodeProtocolTable,
+            catalog_source: plan.model_source,
+            publishes_client_aliases: false,
+            admin_explicit_refresh: false,
+            overlays_declared_ids: false,
+            snapshot_is_adapter_input_only: false,
+        }
+    }
+}
+
+impl InferenceAdapter for CommandCodeGoatAdapter {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
+        InferenceRoutingDescriptor {
+            catalog_routable: plan.routable,
+            production_inference: false,
+            channel: Some(InferenceChannelKind::Go),
+            credential_kind: plan.offering.credential_kind,
+            quota_scope: plan.offering.quota_scope,
+            auth: InferenceAuthDescriptor::Bearer,
+            follow_redirects: false,
+            origin: InferenceOriginKind::OfficialFixed,
+            loopback_test_seam_only: true,
+        }
+    }
+}
+
+impl ProtocolProbeAdapter for CommandCodeGoatAdapter {
+    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
+        ProtocolProbeDescriptor {
+            request_path_may_trial: false,
+            matrix: ProtocolMatrixKind::CommandCodeNative,
+            unknown_zen_free_defaults_to_chat: false,
+            fallback_priority: PROTOCOL_FALLBACK_CHAT_MESSAGES,
+            explicit_probe: false,
+            structural_ceiling: StructuralProbeCeiling::Unavailable,
+        }
+    }
+}
+
+impl VerificationAdapter for CommandCodeGoatAdapter {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
+        VerificationDescriptor {
+            policy: plan.verification_policy,
+            runtime_availability: plan.verification_runtime_availability,
+            never_auto_enable: true,
+            probe_first_declared_model: false,
+            uses_get_models: false,
+        }
+    }
+}
+
+impl UsageAdapter for CommandCodeGoatAdapter {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
+        UsageDescriptor {
+            catalog_availability: plan.usage_availability,
+            contract: UsageContractKind::ExperimentalUnavailable,
+            endpoint: None,
+            experimental: true,
+            automatic_sync: false,
+            authoritative_for_quota: false,
+            affects_inference_eligibility: false,
+            publishes_capability: true,
+            manual_calibration: plan.manual_usage_calibration,
+        }
+    }
+}
+
+impl PricingAdapter for CommandCodeGoatAdapter {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
+        catalog_pricing(plan)
+    }
+}
+
+impl ErrorPolicyAdapter for CommandCodeGoatAdapter {
+    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
+        ErrorCooldownDescriptor {
+            parse_opencode_go_windows_on_429: false,
+            schedule_official_go_usage_after_429: false,
+            generic_provider_key_cooldown: true,
+            egress_ip_shared_free_cooldown: false,
+            inference_401_passthrough: false,
+            success_cost_state_free: false,
+        }
+    }
+}
+
+impl CardCapabilities for CommandCodeGoatAdapter {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
+        CardActionsDescriptor {
+            persisted_enable_allowed: plan.routable,
+            enable_requires_verification: true,
+            managed_registration: plan.managed_registration,
+            fetch_zen_models: false,
+            discover_models: false,
+            usage_refresh: false,
+            manual_usage_calibration: plan.manual_usage_calibration,
+            connection_verify: CardVerifyAction::UnavailableNotImplemented,
+            protocol_and_auth_immutable_after_create: false,
+            risk_acknowledgement: plan.risk_notice.is_some(),
+            protocol_probe: false,
+            catalog_refresh: false,
+        }
+    }
+}
+
+impl ModelCatalogAdapter for ScnetAdapter {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
+        ModelCatalogDescriptor {
+            kind: ModelCatalogKind::OfficialTokenPlanUsableModels,
+            catalog_source: plan.model_source,
+            publishes_client_aliases: false,
+            admin_explicit_refresh: false,
+            overlays_declared_ids: false,
+            snapshot_is_adapter_input_only: true,
+        }
+    }
+}
+
+impl InferenceAdapter for ScnetAdapter {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
+        InferenceRoutingDescriptor {
+            catalog_routable: plan.routable,
+            production_inference: false,
+            channel: Some(InferenceChannelKind::Go),
+            credential_kind: plan.offering.credential_kind,
+            quota_scope: plan.offering.quota_scope,
+            auth: InferenceAuthDescriptor::Bearer,
+            follow_redirects: false,
+            origin: InferenceOriginKind::None,
+            loopback_test_seam_only: false,
+        }
+    }
+}
+
+impl ProtocolProbeAdapter for ScnetAdapter {
+    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
+        ProtocolProbeDescriptor {
+            request_path_may_trial: false,
+            matrix: ProtocolMatrixKind::DocumentedChatAndMessages,
+            unknown_zen_free_defaults_to_chat: false,
+            fallback_priority: PROTOCOL_FALLBACK_CHAT_MESSAGES,
+            explicit_probe: false,
+            structural_ceiling: StructuralProbeCeiling::Unavailable,
+        }
+    }
+}
+
+impl VerificationAdapter for ScnetAdapter {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
+        VerificationDescriptor {
+            policy: plan.verification_policy,
+            runtime_availability: plan.verification_runtime_availability,
+            never_auto_enable: true,
+            probe_first_declared_model: false,
+            uses_get_models: false,
+        }
+    }
+}
+
+impl UsageAdapter for ScnetAdapter {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
+        UsageDescriptor {
+            catalog_availability: plan.usage_availability,
+            contract: UsageContractKind::Unavailable,
+            endpoint: None,
+            experimental: false,
+            automatic_sync: false,
+            authoritative_for_quota: false,
+            affects_inference_eligibility: false,
+            publishes_capability: false,
+            manual_calibration: plan.manual_usage_calibration,
+        }
+    }
+}
+
+impl PricingAdapter for ScnetAdapter {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
+        catalog_pricing(plan)
+    }
+}
+
+impl ErrorPolicyAdapter for ScnetAdapter {
+    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
+        ErrorCooldownDescriptor {
+            parse_opencode_go_windows_on_429: false,
+            schedule_official_go_usage_after_429: false,
+            generic_provider_key_cooldown: false,
+            egress_ip_shared_free_cooldown: false,
+            inference_401_passthrough: false,
+            success_cost_state_free: false,
+        }
+    }
+}
+
+impl CardCapabilities for ScnetAdapter {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
+        CardActionsDescriptor {
+            persisted_enable_allowed: plan.routable,
+            enable_requires_verification: true,
+            managed_registration: plan.managed_registration,
+            fetch_zen_models: false,
+            discover_models: false,
+            usage_refresh: false,
+            manual_usage_calibration: plan.manual_usage_calibration,
+            connection_verify: CardVerifyAction::UnavailableNotImplemented,
+            protocol_and_auth_immutable_after_create: false,
+            risk_acknowledgement: plan.risk_notice.is_some(),
+            protocol_probe: false,
+            catalog_refresh: false,
+        }
+    }
+}
+
+impl ModelCatalogAdapter for ConfigurableHttpAdapter {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
+        ModelCatalogDescriptor {
+            kind: ModelCatalogKind::AccountDeclaredCapabilities,
+            catalog_source: plan.model_source,
+            publishes_client_aliases: false,
+            admin_explicit_refresh: false,
+            overlays_declared_ids: true,
+            snapshot_is_adapter_input_only: false,
+        }
+    }
+}
+
+impl InferenceAdapter for ConfigurableHttpAdapter {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
+        InferenceRoutingDescriptor {
+            catalog_routable: plan.routable,
+            production_inference: true,
+            channel: Some(InferenceChannelKind::Go),
+            credential_kind: plan.offering.credential_kind,
+            quota_scope: plan.offering.quota_scope,
+            auth: InferenceAuthDescriptor::ConfigurableBearerOrXApiKey,
+            follow_redirects: false,
+            origin: InferenceOriginKind::AccountConfigured,
+            loopback_test_seam_only: false,
+        }
+    }
+}
+
+impl ProtocolProbeAdapter for ConfigurableHttpAdapter {
+    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
+        ProtocolProbeDescriptor {
+            request_path_may_trial: false,
+            matrix: ProtocolMatrixKind::AccountDeclaredProtocol,
+            unknown_zen_free_defaults_to_chat: false,
+            fallback_priority: PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
+            explicit_probe: true,
+            structural_ceiling: StructuralProbeCeiling::AccountDeclared,
+        }
+    }
+}
+
+impl VerificationAdapter for ConfigurableHttpAdapter {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
+        VerificationDescriptor {
+            policy: plan.verification_policy,
+            runtime_availability: plan.verification_runtime_availability,
+            never_auto_enable: true,
+            probe_first_declared_model: true,
+            uses_get_models: false,
+        }
+    }
+}
+
+impl UsageAdapter for ConfigurableHttpAdapter {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
+        UsageDescriptor {
+            catalog_availability: plan.usage_availability,
+            contract: UsageContractKind::Unavailable,
+            endpoint: None,
+            experimental: false,
+            automatic_sync: false,
+            authoritative_for_quota: false,
+            affects_inference_eligibility: false,
+            publishes_capability: false,
+            manual_calibration: plan.manual_usage_calibration,
+        }
+    }
+}
+
+impl PricingAdapter for ConfigurableHttpAdapter {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
+        catalog_pricing(plan)
+    }
+}
+
+impl ErrorPolicyAdapter for ConfigurableHttpAdapter {
+    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
+        ErrorCooldownDescriptor {
+            parse_opencode_go_windows_on_429: false,
+            schedule_official_go_usage_after_429: false,
+            generic_provider_key_cooldown: true,
+            egress_ip_shared_free_cooldown: false,
+            inference_401_passthrough: false,
+            success_cost_state_free: false,
+        }
+    }
+}
+
+impl CardCapabilities for ConfigurableHttpAdapter {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
+        CardActionsDescriptor {
+            persisted_enable_allowed: plan.routable,
+            enable_requires_verification: true,
+            managed_registration: plan.managed_registration,
+            fetch_zen_models: false,
+            discover_models: true,
+            usage_refresh: false,
+            manual_usage_calibration: plan.manual_usage_calibration,
+            connection_verify: CardVerifyAction::AvailableThenExplicitEnable,
+            protocol_and_auth_immutable_after_create: true,
+            risk_acknowledgement: plan.risk_notice.is_some(),
+            protocol_probe: true,
+            catalog_refresh: true,
+        }
     }
 }
 
@@ -815,8 +1841,10 @@ pub fn ensure_offering_can_enable(
 }
 
 pub fn plan_requires_custom_config(plan: BuiltinPlan) -> bool {
-    plan.offering.provider_id == CUSTOM_PROVIDER_ID
-        && plan.offering.offering_id == CUSTOM_API_OFFERING_ID
+    matches!(
+        ProviderAdapterKind::from_offering(plan.offering.provider_id, plan.offering.offering_id),
+        Some(ProviderAdapterKind::ConfigurableHttp)
+    )
 }
 
 pub fn validate_plan_key(plan: BuiltinPlan, key: &str) -> Result<(), ProviderBindingError> {
@@ -1533,5 +2561,304 @@ mod tests {
         assert!(
             scnet_token_plan_model_snapshot(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none()
         );
+    }
+
+    #[test]
+    fn provider_registry_is_exhaustive_for_plans_and_adapter_kinds() {
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(ProviderRegistry::iter().count(), BUILTIN_PLANS.len());
+        for plan in BUILTIN_PLANS {
+            let kind = ProviderAdapterKind::from_offering(
+                plan.offering.provider_id,
+                plan.offering.offering_id,
+            )
+            .expect("every catalog plan has an adapter kind");
+            seen.insert(kind);
+            let descriptor =
+                ProviderRegistry::get(plan.offering.provider_id, plan.offering.offering_id)
+                    .expect("every catalog plan has a composed descriptor");
+            assert_eq!(descriptor.kind, kind);
+            assert_eq!(descriptor.provider_id, plan.offering.provider_id);
+            assert_eq!(descriptor.offering_id, plan.offering.offering_id);
+            assert_eq!(descriptor.inference.catalog_routable, plan.routable);
+            assert_eq!(
+                descriptor.inference.credential_kind,
+                plan.offering.credential_kind
+            );
+            assert_eq!(descriptor.inference.quota_scope, plan.offering.quota_scope);
+            assert_eq!(descriptor.verification.policy, plan.verification_policy);
+            assert_eq!(
+                descriptor.verification.runtime_availability,
+                plan.verification_runtime_availability
+            );
+            assert_eq!(descriptor.pricing.availability, plan.pricing_availability);
+            assert_eq!(
+                descriptor.usage.catalog_availability,
+                plan.usage_availability
+            );
+            assert_eq!(
+                descriptor.usage.manual_calibration,
+                plan.manual_usage_calibration
+            );
+            assert_eq!(descriptor.model_catalog.catalog_source, plan.model_source);
+            assert_eq!(
+                descriptor.card_actions.managed_registration,
+                plan.managed_registration
+            );
+            assert_eq!(
+                descriptor.card_actions.persisted_enable_allowed,
+                plan.routable
+            );
+            assert!(!descriptor.protocol_probe.request_path_may_trial);
+            assert!(!descriptor.protocol_probe.fallback_priority.is_empty());
+            assert_eq!(
+                descriptor.protocol_probe.explicit_probe,
+                descriptor.card_actions.protocol_probe
+            );
+            assert_eq!(
+                descriptor.card_actions.catalog_refresh,
+                kind.catalog_refresh_supported()
+            );
+            assert_eq!(
+                descriptor.card_actions.protocol_probe,
+                kind.protocol_probe_supported()
+            );
+            assert!(!descriptor.verification.uses_get_models);
+            match kind {
+                ProviderAdapterKind::OpenCodeGo
+                | ProviderAdapterKind::ZenFree
+                | ProviderAdapterKind::ConfigurableHttp => {
+                    assert!(descriptor.inference.production_inference);
+                }
+                ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::Scnet => {
+                    assert!(!descriptor.inference.production_inference);
+                    assert!(!descriptor.inference.catalog_routable);
+                    assert_eq!(descriptor.verification.runtime_availability, "unavailable");
+                    assert_eq!(
+                        descriptor.card_actions.connection_verify,
+                        CardVerifyAction::UnavailableNotImplemented
+                    );
+                }
+            }
+        }
+        for kind in ProviderAdapterKind::ALL {
+            assert!(
+                seen.contains(&kind),
+                "{kind:?} must be wired to at least one catalog offering"
+            );
+        }
+        assert_eq!(seen.len(), ProviderAdapterKind::ALL.len());
+        assert!(ProviderAdapterKind::from_offering("unknown", "unknown").is_none());
+        assert!(ProviderRegistry::get("unknown", "unknown").is_none());
+        assert_eq!(ProviderAdapterKind::ALL.len(), 5);
+    }
+
+    #[test]
+    fn adapter_descriptors_preserve_current_capability_decisions() {
+        let go = ProviderRegistry::get(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
+        assert_eq!(go.kind, ProviderAdapterKind::OpenCodeGo);
+        assert_eq!(
+            go.inference.auth,
+            InferenceAuthDescriptor::OpenCodeProtocolDefault
+        );
+        assert!(go.inference.follow_redirects);
+        assert_eq!(go.inference.origin, InferenceOriginKind::ConfigUpstreamBase);
+        assert!(go.usage.automatic_sync);
+        assert!(go.usage.authoritative_for_quota);
+        assert_eq!(go.usage.endpoint, Some(crate::go_usage::GO_USAGE_URL));
+        assert_eq!(go.usage.contract, UsageContractKind::Authoritative);
+        assert!(go.usage.publishes_capability);
+        assert!(go.error_cooldown.parse_opencode_go_windows_on_429);
+        assert!(go.error_cooldown.schedule_official_go_usage_after_429);
+        assert_eq!(
+            go.protocol_probe.matrix,
+            ProtocolMatrixKind::OpenCodeModelProtocols
+        );
+        assert!(go.protocol_probe.explicit_probe);
+        assert_eq!(
+            go.protocol_probe.structural_ceiling,
+            StructuralProbeCeiling::OpenCodeConstructable
+        );
+        assert_eq!(
+            go.card_actions.connection_verify,
+            CardVerifyAction::Optional
+        );
+        assert!(go.card_actions.usage_refresh);
+        assert!(go.card_actions.protocol_probe);
+        assert!(!go.card_actions.catalog_refresh);
+
+        let zen = ProviderRegistry::get(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID)
+            .unwrap();
+        assert_eq!(zen.kind, ProviderAdapterKind::ZenFree);
+        assert_eq!(zen.inference.auth, InferenceAuthDescriptor::None);
+        assert_eq!(zen.inference.credential_kind, CredentialKind::None);
+        assert_eq!(zen.inference.quota_scope, QuotaScope::EgressIp);
+        assert_eq!(zen.inference.channel, Some(InferenceChannelKind::Free));
+        assert!(zen.inference.follow_redirects);
+        assert!(zen.model_catalog.admin_explicit_refresh);
+        assert!(zen.protocol_probe.unknown_zen_free_defaults_to_chat);
+        assert!(zen.protocol_probe.explicit_probe);
+        assert_eq!(
+            zen.protocol_probe.structural_ceiling,
+            StructuralProbeCeiling::ZenFreeConstructable
+        );
+        assert!(!zen.usage.experimental);
+        assert!(zen.error_cooldown.egress_ip_shared_free_cooldown);
+        assert!(zen.error_cooldown.inference_401_passthrough);
+        assert!(zen.error_cooldown.success_cost_state_free);
+        assert!(zen.card_actions.fetch_zen_models);
+        assert!(zen.card_actions.protocol_probe);
+        assert!(zen.card_actions.catalog_refresh);
+        assert_eq!(
+            zen.card_actions.connection_verify,
+            CardVerifyAction::NotApplicable
+        );
+
+        let goat = ProviderRegistry::get(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+        assert_eq!(goat.kind, ProviderAdapterKind::CommandCodeGoat);
+        assert!(goat.inference.loopback_test_seam_only);
+        assert!(!goat.inference.follow_redirects);
+        assert_eq!(goat.inference.auth, InferenceAuthDescriptor::Bearer);
+        assert!(goat.usage.experimental);
+        assert!(!goat.usage.publishes_capability || goat.usage.endpoint.is_none());
+        assert!(goat.usage.publishes_capability);
+        assert_eq!(
+            goat.usage.contract,
+            UsageContractKind::ExperimentalUnavailable
+        );
+        assert!(goat.usage.manual_calibration);
+        assert!(goat.error_cooldown.generic_provider_key_cooldown);
+        assert_eq!(
+            goat.protocol_probe.matrix,
+            ProtocolMatrixKind::CommandCodeNative
+        );
+        assert!(!goat.protocol_probe.explicit_probe);
+        assert_eq!(
+            goat.protocol_probe.structural_ceiling,
+            StructuralProbeCeiling::Unavailable
+        );
+        assert!(!goat.card_actions.protocol_probe);
+        assert!(!goat.card_actions.catalog_refresh);
+
+        let scnet =
+            ProviderRegistry::get(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
+        assert_eq!(scnet.kind, ProviderAdapterKind::Scnet);
+        assert!(scnet.model_catalog.snapshot_is_adapter_input_only);
+        assert!(!scnet.usage.publishes_capability);
+        assert_eq!(scnet.inference.origin, InferenceOriginKind::None);
+        assert!(scnet.card_actions.risk_acknowledgement);
+        assert_eq!(
+            scnet.protocol_probe.matrix,
+            ProtocolMatrixKind::DocumentedChatAndMessages
+        );
+        assert!(!scnet.protocol_probe.explicit_probe);
+        assert_eq!(
+            scnet.protocol_probe.structural_ceiling,
+            StructuralProbeCeiling::Unavailable
+        );
+        assert!(!scnet.card_actions.protocol_probe);
+
+        let custom = ProviderRegistry::get(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
+        assert_eq!(custom.kind, ProviderAdapterKind::ConfigurableHttp);
+        assert_eq!(
+            custom.inference.auth,
+            InferenceAuthDescriptor::ConfigurableBearerOrXApiKey
+        );
+        assert!(!custom.inference.follow_redirects);
+        assert_eq!(
+            custom.inference.origin,
+            InferenceOriginKind::AccountConfigured
+        );
+        assert!(custom.model_catalog.overlays_declared_ids);
+        assert!(custom.verification.never_auto_enable);
+        assert!(custom.verification.probe_first_declared_model);
+        assert!(!custom.usage.publishes_capability);
+        assert_eq!(
+            custom.card_actions.connection_verify,
+            CardVerifyAction::AvailableThenExplicitEnable
+        );
+        assert!(custom.card_actions.protocol_and_auth_immutable_after_create);
+        assert!(custom.card_actions.discover_models);
+        assert!(custom.card_actions.protocol_probe);
+        assert!(custom.card_actions.catalog_refresh);
+        assert_eq!(
+            custom.protocol_probe.structural_ceiling,
+            StructuralProbeCeiling::AccountDeclared
+        );
+        assert!(custom.error_cooldown.generic_provider_key_cooldown);
+
+        assert_ne!(go.kind, ProviderAdapterKind::ConfigurableHttp);
+        assert_ne!(zen.kind, ProviderAdapterKind::ConfigurableHttp);
+        assert_ne!(goat.kind, ProviderAdapterKind::ConfigurableHttp);
+        assert_ne!(scnet.kind, ProviderAdapterKind::ConfigurableHttp);
+        assert_eq!(
+            ProviderAdapterKind::from_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
+            Some(ProviderAdapterKind::ConfigurableHttp)
+        );
+    }
+
+    #[test]
+    fn composed_capability_contracts_delegate_from_concrete_adapters() {
+        fn compose<A>(adapter: A, plan: BuiltinPlan) -> ProviderCapabilities
+        where
+            A: ModelCatalogAdapter
+                + InferenceAdapter
+                + ProtocolProbeAdapter
+                + VerificationAdapter
+                + UsageAdapter
+                + PricingAdapter
+                + ErrorPolicyAdapter
+                + CardCapabilities,
+        {
+            ProviderCapabilities::compose(adapter, plan)
+        }
+
+        for plan in BUILTIN_PLANS {
+            let kind = ProviderAdapterKind::from_offering(
+                plan.offering.provider_id,
+                plan.offering.offering_id,
+            )
+            .expect("every catalog plan has an adapter kind");
+            let from_adapter = match kind {
+                ProviderAdapterKind::OpenCodeGo => compose(OpenCodeGoAdapter, plan),
+                ProviderAdapterKind::ZenFree => compose(ZenFreeAdapter, plan),
+                ProviderAdapterKind::CommandCodeGoat => compose(CommandCodeGoatAdapter, plan),
+                ProviderAdapterKind::Scnet => compose(ScnetAdapter, plan),
+                ProviderAdapterKind::ConfigurableHttp => compose(ConfigurableHttpAdapter, plan),
+            };
+            let descriptor =
+                ProviderRegistry::get(plan.offering.provider_id, plan.offering.offering_id)
+                    .expect("every catalog plan has a composed descriptor");
+            assert_eq!(kind.compose_capabilities(plan), from_adapter);
+            assert_eq!(descriptor.capabilities(), from_adapter);
+            assert_eq!(descriptor.model_catalog, from_adapter.model_catalog);
+            assert_eq!(descriptor.inference, from_adapter.inference);
+            assert_eq!(descriptor.protocol_probe, from_adapter.protocol_probe);
+            assert_eq!(descriptor.verification, from_adapter.verification);
+            assert_eq!(descriptor.usage, from_adapter.usage);
+            assert_eq!(descriptor.pricing, from_adapter.pricing);
+            assert_eq!(descriptor.error_cooldown, from_adapter.error_cooldown);
+            assert_eq!(descriptor.card_actions, from_adapter.card_actions);
+        }
+
+        let go_plan = builtin_plan(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
+        assert_eq!(
+            OpenCodeGoAdapter::usage(go_plan).contract,
+            UsageContractKind::Authoritative
+        );
+        assert!(OpenCodeGoAdapter::error_policy(go_plan).parse_opencode_go_windows_on_429);
+        let custom_plan = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
+        assert!(ConfigurableHttpAdapter::verification(custom_plan).probe_first_declared_model);
+        assert!(ConfigurableHttpAdapter::model_catalog(custom_plan).overlays_declared_ids);
+        assert!(!ConfigurableHttpAdapter::inference(custom_plan).follow_redirects);
+        let goat_plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+        assert!(!CommandCodeGoatAdapter::inference(goat_plan).production_inference);
+        let scnet_plan =
+            builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
+        assert!(!ScnetAdapter::inference(scnet_plan).production_inference);
+        let zen_plan =
+            builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();
+        assert!(ZenFreeAdapter::protocol_probe(zen_plan).unknown_zen_free_defaults_to_chat);
+        assert!(ZenFreeAdapter::card_capabilities(zen_plan).fetch_zen_models);
     }
 }

@@ -60,6 +60,7 @@ function catalog(provider_id: string, offering_id: string, credential_kind: "api
     managed_registration: provider_id === "opencode",
     pricing_availability: provider_id === "command-code" ? "unavailable" : "available",
     usage_availability: provider_id === "command-code" ? "unavailable" : "available",
+    manual_usage_calibration: provider_id === "command-code",
     quota_unit: "usd",
     model_source: "test",
     auth_schemes: credential_kind === "none" ? [] : ["bearer"],

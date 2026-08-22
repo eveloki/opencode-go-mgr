@@ -12,11 +12,13 @@
 //!    upstream ID is pinned to its single mapping; overlapping raw IDs return
 //!    [`crate::alias::AMBIGUOUS_MODEL_ID`].
 //! 3. Build candidate plans from [`ResolvedModel`] mappings. Match accounts in saved
-//!    account order through [`super::provider_adapter::supports_plan`], using
+//!    account order through [`super::provider_adapter::supports_production_plan`], using
 //!    mapping order only as the per-account tie-break. Protocol selection
 //!    uses the OpenCode `MODEL_PROTOCOLS` table for Go/Zen upstream models
 //!    and the Command Code-native table for GOAT raw IDs.
 //!    **Never** trial a billable inference path.
+//!    Adapter identity is [`crate::provider::ProviderAdapterKind`]; Custom is
+//!    Configurable HTTP, not a base class.
 //! 4. Ask [`super::provider_adapter::resolve_route`] for endpoint + auth.
 //!    Production GOAT stays fail-closed (catalog unroutable, drafts disabled,
 //!    no live adapter without the loopback test seam). The official slash raw
@@ -38,6 +40,10 @@ use crate::gateway::provider_adapter;
 use crate::gateway::routing::RoutingCandidate;
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::pricing::normalize_model_name;
+use crate::provider::ProviderAdapterKind;
+use crate::provider_contracts::{
+    ContractScope, EffectiveContractSet, NO_ENABLED_UPSTREAM_PROTOCOL,
+};
 use axum::http::StatusCode;
 use bytes::Bytes;
 
@@ -66,12 +72,24 @@ pub(crate) fn diagnostic_forced_upstream(
     client: ApiFormat,
 ) -> Option<ApiFormat> {
     let has_custom = match resolved {
-        ResolvedModel::PinnedRaw { mapping, .. } => mapping.is_custom_api(),
+        ResolvedModel::PinnedRaw { mapping, .. } => mapping_is_configurable_http(mapping),
         ResolvedModel::Alias { mappings, .. } => mappings
             .iter()
-            .any(|mapping| mapping.routeable && mapping.is_custom_api()),
+            .any(|mapping| mapping.routeable && mapping_is_configurable_http(mapping)),
     };
     has_custom.then_some(client)
+}
+
+fn mapping_adapter_kind(mapping: &ProviderMapping) -> Option<ProviderAdapterKind> {
+    ProviderAdapterKind::from_offering(mapping.provider_id, mapping.offering_id)
+}
+
+fn mapping_is_configurable_http(mapping: &ProviderMapping) -> bool {
+    mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ConfigurableHttp)
+}
+
+fn mapping_is_zen_free(mapping: &ProviderMapping) -> bool {
+    mapping_adapter_kind(mapping) == Some(ProviderAdapterKind::ZenFree)
 }
 
 pub(crate) fn protocol_error_from_resolve(error: ResolveError) -> ProtocolError {
@@ -172,6 +190,7 @@ pub(crate) fn materialize_account_routes(
     _client_body: &Bytes,
     free_available: bool,
     custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
+    contracts: &EffectiveContractSet,
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     match resolved {
         ResolvedModel::PinnedRaw { mapping, .. } => {
@@ -184,6 +203,7 @@ pub(crate) fn materialize_account_routes(
                 resolved_alias_from_model(resolved),
                 None,
                 false,
+                contracts,
             )?;
             collect_mapping_plans(
                 accounts,
@@ -199,6 +219,7 @@ pub(crate) fn materialize_account_routes(
                 false,
                 Vec::new(),
                 custom_runtimes,
+                contracts,
             )
         }
         ResolvedModel::Alias {
@@ -209,14 +230,13 @@ pub(crate) fn materialize_account_routes(
                 .filter(|mapping| mapping.routeable)
                 .cloned()
                 .collect();
-            let zen_only =
-                !routeable.is_empty() && routeable.iter().all(|mapping| mapping.is_zen_free());
+            let zen_only = !routeable.is_empty() && routeable.iter().all(mapping_is_zen_free);
             let mut plans = Vec::new();
             let mut rejected = Vec::new();
             let mut first_materialization_error = None;
             let resolved_alias = Some(alias.to_string());
             for mapping in &routeable {
-                if mapping.is_zen_free() && !free_available && !zen_only {
+                if mapping_is_zen_free(mapping) && !free_available && !zen_only {
                     continue;
                 }
                 match materialize_mapping_plan(
@@ -228,6 +248,7 @@ pub(crate) fn materialize_account_routes(
                     resolved_alias.clone(),
                     None,
                     false,
+                    contracts,
                 ) {
                     Ok(plan) => plans.push(MappingPlan {
                         mapping: mapping.clone(),
@@ -263,6 +284,7 @@ pub(crate) fn materialize_account_routes(
                 zen_only,
                 rejected,
                 custom_runtimes,
+                contracts,
             )
         }
     }
@@ -278,32 +300,32 @@ fn materialize_mapping_plan(
     resolved_alias: Option<String>,
     original_model: Option<String>,
     allow_go_fallback: bool,
+    contracts: &EffectiveContractSet,
 ) -> Result<RequestPlan, ProtocolError> {
-    let channel = if mapping.is_zen_free() {
+    let adapter_kind = mapping_adapter_kind(mapping);
+    let channel = if adapter_kind == Some(ProviderAdapterKind::ZenFree) {
         UpstreamChannel::Free
     } else {
-        // GOAT / SCNet / Custom share the Go channel discriminator. Custom is
-        // rematerialized per account with that account's configured protocol.
+        // GOAT / SCNet / Configurable HTTP share the Go channel discriminator.
+        // Custom is rematerialized per account with that account's configured
+        // protocol. Configurable HTTP is not a base class.
         UpstreamChannel::Go
     };
-    let model = if mapping.is_custom_api() {
+    let model = if adapter_kind == Some(ProviderAdapterKind::ConfigurableHttp) {
         routing_model.to_string()
     } else if original_model.is_some() {
         mapping.upstream_model.to_string()
     } else {
         upstream_model_for(routing_model, &mapping.upstream_model)
     };
-    let forced_upstream = if mapping.is_custom_api() {
+    let forced_upstream = if adapter_kind == Some(ProviderAdapterKind::ConfigurableHttp) {
         Some(parsed.client)
-    } else if mapping.is_zen_free()
-        && !crate::gateway::protocol::is_known_model(&mapping.upstream_model)
-    {
-        // The official Zen catalog does not expose protocol metadata. Current
-        // discovered `-free` entries use Chat Completions; known exceptions
-        // continue to use the verified static protocol table above.
-        Some(ApiFormat::ChatCompletions)
     } else {
-        None
+        Some(
+            contracts
+                .select_for_mapping(mapping, parsed.client, &model)
+                .map_err(|error| ProtocolError::new(error.message))?,
+        )
     };
     materialize_channel_plan(
         config,
@@ -353,6 +375,7 @@ fn materialize_channel_plan(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_custom_account_plan(
     account: &Account,
     runtime: Option<&CustomAccountRuntime>,
@@ -361,6 +384,7 @@ fn materialize_custom_account_plan(
     client_model: &str,
     routing_model: &str,
     resolved_alias: Option<String>,
+    contracts: &EffectiveContractSet,
 ) -> Result<RequestPlan, ProtocolError> {
     let runtime = runtime.ok_or_else(|| {
         ProtocolError::new(format!(
@@ -383,6 +407,20 @@ fn materialize_custom_account_plan(
     let resolved_alias = resolved_alias
         .filter(|alias| !alias.is_empty())
         .or_else(|| Some(capability.model_id.clone()));
+    let protocol = runtime.config.upstream_protocol;
+    let contract = contracts
+        .scope(&ContractScope::custom_endpoint(&account.id))
+        .ok_or_else(|| {
+            ProtocolError::new(format!(
+                "no effective contract for custom_endpoint `{}`",
+                account.id
+            ))
+        })?;
+    if !contract.switches.is_enabled(protocol)
+        || !contract.model_has_enabled_protocol(&capability.model_id)
+    {
+        return Err(ProtocolError::new(NO_ENABLED_UPSTREAM_PROTOCOL));
+    }
     materialize_channel_plan(
         config,
         parsed,
@@ -392,9 +430,7 @@ fn materialize_custom_account_plan(
         UpstreamChannel::Go,
         None,
         false,
-        Some(crate::custom::api_format_for_custom_protocol(
-            runtime.config.upstream_protocol,
-        )),
+        Some(crate::custom::api_format_for_custom_protocol(protocol)),
         Some(CustomRouteSpec {
             base_url: runtime.config.base_url.clone(),
             auth_scheme: runtime.config.auth_scheme,
@@ -414,6 +450,7 @@ fn collect_mapping_plans(
     free_only: bool,
     mut rejected: Vec<String>,
     custom_runtimes: &std::collections::HashMap<String, CustomAccountRuntime>,
+    contracts: &EffectiveContractSet,
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     let mut routes = Vec::new();
     for account in accounts {
@@ -429,7 +466,7 @@ fn collect_mapping_plans(
             }) {
                 continue;
             }
-            let plan = if candidate.mapping.is_custom_api() {
+            let plan = if mapping_is_configurable_http(&candidate.mapping) {
                 match materialize_custom_account_plan(
                     account,
                     custom_runtimes.get(&account.id),
@@ -438,6 +475,7 @@ fn collect_mapping_plans(
                     client_model,
                     routing_model,
                     resolved_alias.clone(),
+                    contracts,
                 ) {
                     Ok(plan) => plan,
                     Err(error) => {
@@ -451,7 +489,7 @@ fn collect_mapping_plans(
             } else {
                 candidate.plan.clone()
             };
-            match provider_adapter::supports_plan(account, config, &plan) {
+            match provider_adapter::supports_production_plan(account, config, &plan, contracts) {
                 Ok(()) => {
                     routes.push(MaterializedCandidate {
                         routing: RoutingCandidate {
@@ -501,8 +539,8 @@ mod tests {
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID,
         CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, CredentialKind,
         GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-        QuotaScope, UpstreamAuthScheme, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
-        ZEN_FREE_ACCOUNT_NAME,
+        ProviderAdapterKind, QuotaScope, UpstreamAuthScheme, UpstreamProtocolKind,
+        ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -588,6 +626,20 @@ mod tests {
         )
     }
 
+    fn static_contracts() -> crate::provider_contracts::EffectiveContractSet {
+        contracts_for(&[])
+    }
+
+    fn contracts_for(
+        runtimes: &[CustomAccountRuntime],
+    ) -> crate::provider_contracts::EffectiveContractSet {
+        crate::provider_contracts::build_effective_contracts(
+            &crate::zen_models::ZenFreeModelCatalog::default(),
+            runtimes,
+            crate::provider_contracts::PersistedContracts::default(),
+        )
+    }
+
     fn routes_for(
         model: &str,
         accounts: &[Account],
@@ -607,6 +659,7 @@ mod tests {
             &body,
             free_available,
             &std::collections::HashMap::new(),
+            &static_contracts(),
         )
         .unwrap()
     }
@@ -710,6 +763,7 @@ mod tests {
             &body,
             true,
             &std::collections::HashMap::new(),
+            &static_contracts(),
         )
         .unwrap();
         assert_eq!(set.routes.len(), 1);
@@ -761,6 +815,7 @@ mod tests {
             &body,
             true,
             &std::collections::HashMap::new(),
+            &static_contracts(),
         )
         .unwrap();
         assert_eq!(set.routes.len(), 2);
@@ -796,6 +851,7 @@ mod tests {
             &body,
             true,
             &std::collections::HashMap::new(),
+            &static_contracts(),
         )
         .unwrap();
         assert!(set.routes.is_empty());
@@ -996,6 +1052,45 @@ mod tests {
     }
 
     #[test]
+    fn materialize_dispatches_builtin_and_custom_through_adapter_kinds() {
+        assert_eq!(
+            mapping_adapter_kind(&crate::alias::ProviderMapping {
+                provider_id: OPENCODE_PROVIDER_ID,
+                offering_id: GO_OFFERING_ID,
+                upstream_model: "glm-5.2".into(),
+                routeable: true,
+            }),
+            Some(ProviderAdapterKind::OpenCodeGo)
+        );
+        assert_eq!(
+            mapping_adapter_kind(&crate::alias::ProviderMapping {
+                provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
+                offering_id: ANONYMOUS_FREE_OFFERING_ID,
+                upstream_model: "mimo-v2.5-free".into(),
+                routeable: true,
+            }),
+            Some(ProviderAdapterKind::ZenFree)
+        );
+        assert_eq!(
+            mapping_adapter_kind(&crate::alias::ProviderMapping {
+                provider_id: CUSTOM_PROVIDER_ID,
+                offering_id: CUSTOM_API_OFFERING_ID,
+                upstream_model: "local".into(),
+                routeable: true,
+            }),
+            Some(ProviderAdapterKind::ConfigurableHttp)
+        );
+        assert!(!mapping_is_configurable_http(
+            &crate::alias::ProviderMapping {
+                provider_id: COMMAND_CODE_PROVIDER_ID,
+                offering_id: GOAT_OFFERING_ID,
+                upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                routeable: false,
+            }
+        ));
+    }
+
+    #[test]
     fn custom_candidate_diagnostic_passthrough_keeps_client_protocol() {
         let resolved =
             alias::resolve_with_custom("local-custom", &["local-custom".into()]).unwrap();
@@ -1042,6 +1137,7 @@ mod tests {
         let account = custom_account("custom-1");
         let runtime = custom_runtime("custom-1", "local-custom", UpstreamProtocolKind::Responses);
         let mut runtimes = std::collections::HashMap::new();
+        let contracts = contracts_for(std::slice::from_ref(&runtime));
         runtimes.insert(account.id.clone(), runtime);
         let set = materialize_account_routes(
             &[account],
@@ -1053,6 +1149,7 @@ mod tests {
             &body,
             false,
             &runtimes,
+            &contracts,
         )
         .expect("native Responses structured output must not be rejected via Chat conversion");
         assert_eq!(set.routes.len(), 1);
@@ -1081,6 +1178,7 @@ mod tests {
         let account = custom_account("custom-1");
         let runtime = custom_runtime("custom-1", "local-custom", UpstreamProtocolKind::Messages);
         let mut runtimes = std::collections::HashMap::new();
+        let contracts = contracts_for(std::slice::from_ref(&runtime));
         runtimes.insert(account.id.clone(), runtime);
         let set = materialize_account_routes(
             &[account],
@@ -1092,11 +1190,110 @@ mod tests {
             &body,
             false,
             &runtimes,
+            &contracts,
         )
         .expect("native Messages structured output must not be rejected via Chat conversion");
         assert_eq!(set.routes.len(), 1);
         assert_eq!(set.routes[0].plan.upstream, ApiFormat::Messages);
         let upstream: serde_json::Value = serde_json::from_slice(&set.routes[0].plan.body).unwrap();
         assert_eq!(upstream["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn custom_without_scope_contract_does_not_produce_a_candidate() {
+        let body = chat_body("local-custom");
+        let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+        let resolved =
+            alias::resolve_with_custom("local-custom", &["local-custom".into()]).unwrap();
+        let account = custom_account("custom-missing-scope");
+        let runtime = custom_runtime(
+            "custom-missing-scope",
+            "local-custom",
+            UpstreamProtocolKind::ChatCompletions,
+        );
+        let mut runtimes = std::collections::HashMap::new();
+        runtimes.insert(account.id.clone(), runtime);
+        let set = materialize_account_routes(
+            &[account],
+            &AppConfig::default(),
+            &parsed,
+            &resolved,
+            &parsed.requested_model,
+            "local-custom",
+            &body,
+            false,
+            &runtimes,
+            &static_contracts(),
+        )
+        .expect("missing custom contract must fail closed without a protocol error for mixed resolution");
+        assert!(
+            set.routes.is_empty(),
+            "no production Custom candidate without ContractScope::CustomEndpoint"
+        );
+        assert!(set.incompatibility.as_deref().is_some_and(|message| {
+            message.contains("no effective contract") || message.contains("custom_endpoint")
+        }));
+    }
+
+    #[test]
+    fn probed_opencode_protocol_is_selected_after_contract_evidence() {
+        let body = chat_body("grok-4.5");
+        let parsed = parse_client_request(ApiFormat::ChatCompletions, body.clone()).unwrap();
+        let resolved = alias::resolve("grok-4.5").unwrap();
+        let account = go_account("go-probe");
+        let before = materialize_account_routes(
+            std::slice::from_ref(&account),
+            &AppConfig::default(),
+            &parsed,
+            &resolved,
+            &parsed.requested_model,
+            "grok-4.5",
+            &body,
+            false,
+            &std::collections::HashMap::new(),
+            &static_contracts(),
+        )
+        .unwrap();
+        assert_eq!(before.routes.len(), 1);
+        assert_eq!(before.routes[0].plan.upstream, ApiFormat::Responses);
+
+        let now = Utc::now();
+        let mut persisted = crate::provider_contracts::PersistedContracts::default();
+        let scope = crate::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
+        persisted.evidence.insert(
+            scope.clone(),
+            vec![crate::provider_contracts::PersistedModelProtocol {
+                scope,
+                model_id: "grok-4.5".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: crate::provider_contracts::ContractEvidenceSource::ProbeConfirmed,
+                verified_at: Some(now),
+                observed_at: Some(now),
+                last_probe_result: Some(crate::provider_contracts::ProbeResultKind::Success),
+                last_probe_at: Some(now),
+                last_probe_error: None,
+            }],
+        );
+        let contracts = crate::provider_contracts::build_effective_contracts(
+            &crate::zen_models::ZenFreeModelCatalog::default(),
+            &[],
+            persisted,
+        );
+        let after = materialize_account_routes(
+            &[account],
+            &AppConfig::default(),
+            &parsed,
+            &resolved,
+            &parsed.requested_model,
+            "grok-4.5",
+            &body,
+            false,
+            &std::collections::HashMap::new(),
+            &contracts,
+        )
+        .unwrap();
+        assert_eq!(after.routes.len(), 1);
+        assert_eq!(after.routes[0].plan.upstream, ApiFormat::ChatCompletions);
+        assert_eq!(after.routes[0].routing.account.id, "go-probe");
     }
 }

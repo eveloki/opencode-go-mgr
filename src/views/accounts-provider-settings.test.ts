@@ -20,13 +20,28 @@ test("zen provider settings send the settings revision guard and reload on 409",
   assert.match(accounts, /async function reloadAfterControlPlaneConflict[\s\S]*?tauriApi\.getSettings\([\s\S]*?tauriApi\.getAccounts\(/);
 });
 
-test("Zen card refreshes and renders the filtered model-to-alias catalog", () => {
+test("Accounts keeps account-owned writes and no longer hosts supplier catalog or protocol tests", () => {
   const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
-  assert.match(accounts, /providerApi\.refreshProviderModels\(id\)/);
-  assert.match(accounts, /zenFreeModels\.value = result/);
-  assert.match(card, /emit\('refresh-models'\)/);
-  assert.match(card, /model\.alias/);
-  assert.match(card, /model\.model_id/);
+  assert.doesNotMatch(accounts, /providerApi\.refreshProviderModels/);
+  assert.doesNotMatch(accounts, /getProviderModels/);
+  assert.doesNotMatch(accounts, /getProviderModelCapabilities/);
+  assert.doesNotMatch(accounts, /runProtocolProbes/);
+  assert.doesNotMatch(accounts, /tauriApi\.testAccount/);
+  assert.doesNotMatch(card, /emit\('refresh-models'\)/);
+  assert.doesNotMatch(card, /<AccountTestPopover/);
+  assert.match(accounts, /providerApi\.updateProviderSettings/);
+  assert.match(accounts, /tauriApi\.toggleAccount/);
+  assert.match(card, /emit\('refresh-usage'\)/);
+  assert.match(card, /emit\('open-provider'\)/);
+  assert.match(accounts, /accountProviderScope\(account\)/);
+});
+
+test("Accounts omits a protocol summary until a contract snapshot exists and keeps last-good on GET failure", () => {
+  const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  assert.match(accounts, /if \(!providerContracts\.value\) return null;/);
+  assert.match(accounts, /Keep the last good snapshot/);
+  assert.match(card, /v-if="contractSummary"/);
+  assert.match(card, /t\("无有效协议"\)/);
 });
 
 test("the generic account patch no longer carries the zen free alias", () => {

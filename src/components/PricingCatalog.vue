@@ -210,10 +210,15 @@ import type { PricingTableRow } from "../views/pricing-view";
 import type { PlanId } from "../views/plans.ts";
 import {
   buildPlanPricingGroups,
+  buildScopedPlanPricingGroups,
   PRICING_PLAN_DEFINITIONS,
   resolvePlanPricingDisplay,
 } from "../views/pricing-plans.ts";
 import type { PlanPricingGroup, ProviderSnapshots } from "../views/pricing-plans.ts";
+
+const props = defineProps<{
+  providerId?: string | null;
+}>();
 
 const message = useMessage();
 const dialog = useDialog();
@@ -241,7 +246,9 @@ const tableRows = computed(() => buildPricingTableRows(snapshot.value?.models ??
 }));
 
 const planGroups = computed<PlanPricingGroup[]>(() => (
-  buildPlanPricingGroups(catalog.value, snapshot.value, providerSnapshots.value)
+  props.providerId
+    ? buildScopedPlanPricingGroups(props.providerId, catalog.value, snapshot.value, providerSnapshots.value)
+    : buildPlanPricingGroups(catalog.value, snapshot.value, providerSnapshots.value)
 ));
 
 function pricingError(group: PlanPricingGroup): string | null {
@@ -710,7 +717,19 @@ async function performPricingRefresh(
   }
 }
 
-onMounted(() => void loadPricing());
+watch(planGroups, (groups) => {
+  if (props.providerId && groups[0] && !groups.some((group) => group.plan.id === activePlanId.value)) {
+    activePlanId.value = groups[0].plan.id;
+  }
+});
+
+watch(() => props.providerId, (id) => {
+  if ((!id || id === "opencode") && !snapshot.value && !loading.value) void loadPricing();
+});
+
+onMounted(() => {
+  if (!props.providerId || props.providerId === "opencode") void loadPricing();
+});
 onMounted(() => void loadProviderCatalog());
 </script>
 

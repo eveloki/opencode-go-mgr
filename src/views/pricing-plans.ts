@@ -189,28 +189,49 @@ export function resolvePlanPricingDisplay(
  * Other families rely on the catalog for their `pricing_availability` and,
  * when applicable, on the per-family provider-pricing response.
  */
+function groupForPlan(
+  plan: PlanDefinition,
+  catalog: readonly ProviderCatalogEntry[] | null | undefined,
+  opencodeSnapshot: PricingSnapshot | null,
+  providerSnapshots: ProviderSnapshots,
+): PlanPricingGroup {
+  // For families with multiple offerings (SCNet), the catalog should list all
+  // of them with the same pricing_availability; read the first present entry.
+  const entry = plan.offering_ids
+    .map((offeringId) => findCatalogEntry(catalog, plan.provider_id, offeringId))
+    .find(Boolean);
+  const response = providerSnapshots[plan.id];
+  const pricingAvailability = response?.availability
+    ?? entry?.pricing_availability
+    ?? defaultPricingAvailability(plan);
+  const label = planFamilyLabel(plan, catalog);
+
+  return {
+    plan,
+    label,
+    pricingAvailability,
+    content: buildContent(plan, pricingAvailability, opencodeSnapshot, providerSnapshots),
+  };
+}
+
 export function buildPlanPricingGroups(
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
   opencodeSnapshot: PricingSnapshot | null,
   providerSnapshots: ProviderSnapshots,
 ): PlanPricingGroup[] {
-  return PRICING_PLAN_DEFINITIONS.map((plan) => {
-    // For families with multiple offerings (SCNet), the catalog should list all
-    // of them with the same pricing_availability; read the first present entry.
-    const entry = plan.offering_ids
-      .map((offeringId) => findCatalogEntry(catalog, plan.provider_id, offeringId))
-      .find(Boolean);
-    const response = providerSnapshots[plan.id];
-    const pricingAvailability = response?.availability
-      ?? entry?.pricing_availability
-      ?? defaultPricingAvailability(plan);
-    const label = planFamilyLabel(plan, catalog);
+  return PRICING_PLAN_DEFINITIONS.map((plan) => (
+    groupForPlan(plan, catalog, opencodeSnapshot, providerSnapshots)
+  ));
+}
 
-    return {
-      plan,
-      label,
-      pricingAvailability,
-      content: buildContent(plan, pricingAvailability, opencodeSnapshot, providerSnapshots),
-    };
-  });
+/** Pricing groups for a single provider family, including Zen Free and Custom. */
+export function buildScopedPlanPricingGroups(
+  providerId: string,
+  catalog: readonly ProviderCatalogEntry[] | null | undefined,
+  opencodeSnapshot: PricingSnapshot | null,
+  providerSnapshots: ProviderSnapshots,
+): PlanPricingGroup[] {
+  return PLAN_DEFINITIONS
+    .filter((plan) => plan.provider_id === providerId)
+    .map((plan) => groupForPlan(plan, catalog, opencodeSnapshot, providerSnapshots));
 }

@@ -1,5 +1,5 @@
 {
-  "comment": "Black-box Plan catalog contract for OCG Manager v2.0. GET /dashboard/api/providers/catalog is the only Plan source. Internal identity stays provider_id + offering_id. Catalog JSON uses display_name/display_family, creation_availability, verification_policy, verification_runtime_availability, routable, form_fields, risk_notice, model_aliases, pricing_availability, and usage_availability. risk_notice is omitted when a Plan has none.",
+  "comment": "Black-box Plan catalog contract for OCG Manager v2.0. GET /dashboard/api/providers/catalog is the only Plan source. Internal identity stays provider_id + offering_id. Catalog JSON uses display_name/display_family, creation_availability, verification_policy, verification_runtime_availability, routable, form_fields, risk_notice, model_aliases, pricing_availability, usage_availability, and manual_usage_calibration. risk_notice is omitted when a Plan has none.",
   "catalog_paths": [
     "/dashboard/api/providers/catalog",
     "/dashboard/api/providers"
@@ -16,7 +16,8 @@
     "form_fields",
     "model_aliases",
     "pricing_availability",
-    "usage_availability"
+    "usage_availability",
+    "manual_usage_calibration"
   ],
   "risk_notice_fields": ["acknowledgement_id", "version", "content_hash"],
   "custom_create": {

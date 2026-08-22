@@ -23,6 +23,7 @@ function catalogEntry(
     managed_registration: false,
     pricing_availability: "unavailable",
     usage_availability: "unavailable",
+    manual_usage_calibration: false,
     quota_unit: "credits",
     model_source: "test",
     auth_schemes: ["bearer"],

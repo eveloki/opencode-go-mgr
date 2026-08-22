@@ -501,6 +501,10 @@ pub fn command_code_model_protocol(model: &str) -> Option<&'static CommandCodeMo
         .find(|profile| profile.upstream_id.eq_ignore_ascii_case(trimmed))
 }
 
+pub fn command_code_protocol_profiles() -> impl Iterator<Item = &'static CommandCodeModelProtocol> {
+    COMMAND_CODE_MODEL_PROTOCOLS.iter()
+}
+
 pub fn command_code_supports_upstream(model: &str, upstream: ApiFormat) -> bool {
     command_code_model_protocol(model)
         .is_some_and(|profile| profile.supported_upstream.contains(&upstream))
@@ -522,6 +526,17 @@ pub fn supported_model_protocols() -> impl Iterator<Item = (&'static str, ApiFor
     MODEL_PROTOCOLS
         .iter()
         .map(|profile| (profile.id, profile.preferred))
+}
+
+/// Returns the canonical model ID, preferred protocol, and every directly
+/// supported OpenCode Go upstream protocol. Dashboard account tests consume
+/// this same probed matrix so the UI never offers a billable trial pair that
+/// request routing itself considers unsupported.
+pub fn supported_model_protocol_profiles()
+-> impl Iterator<Item = (&'static str, ApiFormat, &'static [ApiFormat])> {
+    MODEL_PROTOCOLS
+        .iter()
+        .map(|profile| (profile.id, profile.preferred, profile.supported))
 }
 
 /// True when the OpenCode protocol catalog contains the model ID.

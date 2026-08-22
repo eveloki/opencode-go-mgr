@@ -18,6 +18,10 @@ import {
 } from "./accounts-usage.ts";
 import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
 import { accountIsReady, isUsageRefreshBlocked } from "./account-display.ts";
+import {
+  COMMAND_CODE_GOAT_USAGE_LIMITS,
+  isCommandCodeGoatAccount,
+} from "./account-providers.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -48,6 +52,18 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     ];
   });
 
+  function usageLimitsFor(account: Account): UsageLimitView[] {
+    const limits = isCommandCodeGoatAccount(account)
+      ? COMMAND_CODE_GOAT_USAGE_LIMITS
+      : quotaLimits.value;
+    if (!limits) return [];
+    return [
+      { key: "window_5h", label: t("5小时"), limit: limits.window_5h },
+      { key: "window_week", label: t("本周"), limit: limits.window_week },
+      { key: "window_month", label: t("本月"), limit: limits.window_month },
+    ];
+  }
+
   const usageMap = ref<Record<string, UsageWindow>>({});
   const usageEdits = ref<Record<string, AccountUsageEdits>>({});
   const usageLoading = ref<Record<string, boolean>>({});
@@ -70,8 +86,11 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     return usageMap.value[accountId] || blankUsage(accountId);
   }
 
-  function usageLimit(key: UsageKey): number {
-    return usageLimits.value.find((limit) => limit.key === key)?.limit ?? 0;
+  function usageLimit(accountId: string, key: UsageKey): number {
+    const account = accounts.value.find(({ id }) => id === accountId);
+    return account
+      ? usageLimitsFor(account).find((limit) => limit.key === key)?.limit ?? 0
+      : 0;
   }
 
   function accountUsageLimitReached(account: Account, key: UsageKey): boolean {
@@ -80,7 +99,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
 
   function hasAvailableUsageEditor(account: Account): boolean {
     if (usageLoading.value[account.id] || usageLoadErrors.value[account.id]) return false;
-    return usageLimits.value.some(({ key }) => !accountUsageLimitReached(account, key));
+    return usageLimitsFor(account).some(({ key }) => !accountUsageLimitReached(account, key));
   }
 
   async function focusUsageEditor(accountId: string) {
@@ -94,7 +113,9 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
   }
 
   function usageEditsFromWindow(usage: UsageWindow): AccountUsageEdits {
-    return Object.fromEntries(usageLimits.value.map(({ key, limit }) => {
+    const account = accounts.value.find(({ id }) => id === usage.account_id);
+    const limits = account ? usageLimitsFor(account) : [];
+    return Object.fromEntries(limits.map(({ key, limit }) => {
       const percent = usagePercentFromCost(usage[key], limit);
       const resetsInMin = defaultResetsInMinutes(usage, key, now.value);
       return [key, {
@@ -116,7 +137,8 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
       return;
     }
     const account = accounts.value.find(({ id }) => id === accountId);
-    for (const { key, limit } of usageLimits.value) {
+    const limits = account ? usageLimitsFor(account) : [];
+    for (const { key, limit } of limits) {
       const saved = usagePercentFromCost(usage[key], limit);
       const edit = existing[key];
       const wasActuallyReset = account && isUsageLimitReached(account, key, now.value);
@@ -188,7 +210,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
         ...(key === "window_week" ? { resets_in_week: usage.resets_in_week } : {}),
         ...(key === "window_month" ? { resets_in_month: usage.resets_in_month } : {}),
       };
-      const saved = usagePercentFromCost(usage[key], usageLimit(key));
+      const saved = usagePercentFromCost(usage[key], usageLimit(accountId, key));
       edit.draft = saved;
       edit.saved = saved;
       edit.resets_at_saved = windowResetsAt(usage, key);
@@ -282,13 +304,19 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
 
   async function retryQuotaLimits() {
     if (!await loadQuotaLimits()) return;
-    // Quota windows only exist for OpenCode Go accounts; Custom API usage is
-    // unavailable and Zen Free shares an egress-IP lane.
+    // OpenCode Go uses the official snapshot. GOAT has no machine-readable
+    // usage endpoint, so its locally calibrated display uses the same three
+    // persisted legacy windows with provider-specific limits.
     await mapWithConcurrency(
       accounts.value.filter((account) => (
         accountIsReady(account)
-        && account.provider_id === "opencode"
-        && account.offering_id === "go"
+        && (
+          isCommandCodeGoatAccount(account)
+          || (
+            account.provider_id === "opencode"
+            && account.offering_id === "go"
+          )
+        )
       )),
       4,
       (account) => loadAccountUsage(account.id),
@@ -300,6 +328,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     quotaLimitsLoading,
     quotaLimitsError,
     usageLimits,
+    usageLimitsFor,
     usageMap,
     usageEdits,
     usageLoading,

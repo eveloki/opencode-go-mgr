@@ -9,7 +9,7 @@ use crate::gateway::{
         api_format_name, redact_known_secret, sanitize_upstream_error_value_with_known_secret,
     },
     limit::{parse_reset, parse_usage_limit_window},
-    protocol::{ApiFormat, supported_model_ids, supported_model_protocols},
+    protocol::{ApiFormat, supported_model_protocol_profiles, supported_model_protocols},
 };
 use crate::go_usage::GoUsageError;
 use crate::models::*;
@@ -44,6 +44,11 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/accounts", get(list_accounts).post(create_account_route))
         .route("/providers", get(provider_catalog))
         .route("/providers/catalog", get(provider_catalog))
+        .route("/provider-contracts", get(list_provider_contracts))
+        .route(
+            "/provider-contracts/{scope_kind}/{scope_id}/protocols/{protocol}",
+            put(update_provider_contract_protocol),
+        )
         .route(
             "/providers/model-capabilities",
             get(provider_model_capabilities),
@@ -76,7 +81,11 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/accounts/{id}/provider-models", get(get_zen_free_models))
         .route(
             "/accounts/{id}/provider-models/refresh",
-            post(refresh_zen_free_models),
+            post(refresh_provider_models),
+        )
+        .route(
+            "/accounts/{id}/protocol-probes",
+            post(run_account_protocol_probes),
         )
         .route("/accounts/{id}/toggle", post(toggle_account))
         .route("/accounts/{id}/verify", post(verify_account_connection))
@@ -954,6 +963,7 @@ struct ProviderCatalogEntry {
     managed_registration: bool,
     pricing_availability: &'static str,
     usage_availability: &'static str,
+    manual_usage_calibration: bool,
     quota_unit: &'static str,
     model_source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -989,6 +999,7 @@ async fn provider_catalog(State(state): State<CoreState>) -> Json<Vec<ProviderCa
                 managed_registration: plan.managed_registration,
                 pricing_availability: plan.pricing_availability,
                 usage_availability: plan.usage_availability,
+                manual_usage_calibration: plan.manual_usage_calibration,
                 quota_unit: plan.quota_unit,
                 model_source: plan.model_source,
                 key_prefix: plan.key_prefix,
@@ -1066,11 +1077,9 @@ async fn get_zen_free_models(
     Ok(Json(zen_free_models_response(&catalog)))
 }
 
-async fn refresh_zen_free_models(
-    State(state): State<CoreState>,
-    Path(id): Path<String>,
-) -> Result<Json<ZenFreeModelsResponse>, ApiError> {
-    require_zen_free_account(&id)?;
+async fn refresh_zen_free_catalog(
+    state: &CoreState,
+) -> Result<crate::zen_models::ZenFreeModelCatalog, ApiError> {
     let _guard = state.zen_free_models_refresh.try_lock().map_err(|_| {
         ApiError::status(
             StatusCode::CONFLICT,
@@ -1084,7 +1093,712 @@ async fn refresh_zen_free_models(
     state
         .activate_zen_free_model_catalog(catalog.clone())
         .map_err(ApiError::internal)?;
-    Ok(Json(zen_free_models_response(&catalog)))
+    Ok(catalog)
+}
+
+async fn refresh_provider_models(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    let adapter = crate::provider::ProviderAdapterKind::from_offering(
+        &account.provider_id,
+        &account.offering_id,
+    )
+    .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
+    match adapter {
+        crate::provider::ProviderAdapterKind::ZenFree => {
+            require_zen_free_account(&id)?;
+            let catalog = refresh_zen_free_catalog(&state).await?;
+            Ok(Json(zen_free_models_response(&catalog)).into_response())
+        }
+        crate::provider::ProviderAdapterKind::ConfigurableHttp => {
+            let refreshed = refresh_custom_catalog(&state, &account).await?;
+            Ok(Json(refreshed).into_response())
+        }
+        crate::provider::ProviderAdapterKind::CommandCodeGoat
+        | crate::provider::ProviderAdapterKind::Scnet => Err(ApiError::status(
+            StatusCode::NOT_IMPLEMENTED,
+            "model catalog refresh is not available for this Plan in this slice",
+        )),
+        crate::provider::ProviderAdapterKind::OpenCodeGo => Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "OpenCode Go uses the static protocol catalog and does not refresh models from upstream",
+        )),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CustomCatalogRefreshResponse {
+    scope_kind: &'static str,
+    scope_id: String,
+    models: Vec<String>,
+    truncated: bool,
+    refreshed_at: DateTime<Utc>,
+    source: &'static str,
+    declared_capabilities_unchanged: bool,
+}
+
+async fn refresh_custom_catalog(
+    state: &CoreState,
+    account: &Account,
+) -> Result<CustomCatalogRefreshResponse, ApiError> {
+    require_custom_plan(
+        account,
+        "model catalog refresh is only available for Custom API accounts",
+    )?;
+    let config = state
+        .db
+        .lock()
+        .account_custom_config(&account.id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "Custom API accounts require a persisted base URL, protocol, and auth scheme",
+            )
+        })?;
+    if account.key_cipher.is_empty() {
+        return Err(ApiError::bad_request(
+            "Custom model discovery requires a stored API key",
+        ));
+    }
+    let api_key = state
+        .decrypt_key(&account.key_cipher)
+        .map_err(ApiError::internal)?;
+    let discovery = crate::custom::discover_custom_models(
+        &state.config(),
+        &AccountCustomConfigInput {
+            base_url: config.base_url.clone(),
+            upstream_protocol: config.upstream_protocol,
+            auth_scheme: config.auth_scheme,
+        },
+        &api_key,
+    )
+    .await
+    .map_err(|failure| ApiError::bad_request(failure.message))?;
+    let now = Utc::now();
+    let scope = crate::provider_contracts::ContractScope::custom_endpoint(&account.id);
+    state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &discovery.models,
+            Some(now),
+            crate::provider_contracts::CATALOG_SOURCE_CUSTOM_DISCOVERY,
+            "",
+            now,
+        )
+        .map_err(ApiError::internal)?;
+    state
+        .reload_provider_contracts()
+        .map_err(ApiError::internal)?;
+    Ok(CustomCatalogRefreshResponse {
+        scope_kind: crate::provider_contracts::SCOPE_KIND_CUSTOM_ENDPOINT,
+        scope_id: account.id.clone(),
+        models: discovery.models,
+        truncated: discovery.truncated,
+        refreshed_at: now,
+        source: crate::provider_contracts::CATALOG_SOURCE_CUSTOM_DISCOVERY,
+        declared_capabilities_unchanged: true,
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderContractsResponse {
+    /// Shared settings revision used by PUT `expected_revision`. Distinct
+    /// from each scope's own `revision`.
+    revision: u64,
+    providers: Vec<ProviderContractGroupView>,
+    custom_endpoints: Vec<CustomEndpointContractView>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderContractGroupView {
+    scope_kind: &'static str,
+    scope_id: String,
+    provider_id: String,
+    offerings: Vec<ProviderOfferingChoiceView>,
+    catalog: crate::provider_contracts::EffectiveCatalog,
+    models: Vec<crate::provider_contracts::EffectiveModelContract>,
+    protocols: crate::provider_contracts::ProtocolSwitches,
+    pricing: CapabilitySummary,
+    usage: CapabilitySummary,
+    card: CardCapabilitySummary,
+    catalog_routable: bool,
+    production_inference: bool,
+    disabled_reasons: Vec<String>,
+    revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderOfferingChoiceView {
+    offering_id: String,
+    display_name: &'static str,
+    routable: bool,
+    accounts: Vec<ProviderAccountChoiceView>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderAccountChoiceView {
+    id: String,
+    name: String,
+    enabled: bool,
+    verification_status: crate::provider::ConnectionVerificationStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct CustomEndpointContractView {
+    scope_kind: &'static str,
+    scope_id: String,
+    provider_id: String,
+    account: ProviderAccountChoiceView,
+    catalog: crate::provider_contracts::EffectiveCatalog,
+    models: Vec<crate::provider_contracts::EffectiveModelContract>,
+    protocols: crate::provider_contracts::ProtocolSwitches,
+    pricing: CapabilitySummary,
+    usage: CapabilitySummary,
+    card: CardCapabilitySummary,
+    catalog_routable: bool,
+    production_inference: bool,
+    disabled_reasons: Vec<String>,
+    revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CapabilitySummary {
+    availability: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct CardCapabilitySummary {
+    fetch_zen_models: bool,
+    discover_models: bool,
+    protocol_probe: bool,
+    catalog_refresh: bool,
+}
+
+async fn list_provider_contracts(
+    State(state): State<CoreState>,
+) -> Result<Json<ProviderContractsResponse>, ApiError> {
+    let contracts = state.provider_contracts();
+    let (accounts, statuses) = load_accounts_with_verification(&state)?;
+    Ok(Json(build_provider_contracts_response(
+        &contracts,
+        &accounts,
+        &statuses,
+        state.settings_revision(),
+    )))
+}
+
+fn load_accounts_with_verification(
+    state: &CoreState,
+) -> Result<
+    (
+        Vec<Account>,
+        std::collections::HashMap<String, crate::provider::ConnectionVerificationStatus>,
+    ),
+    ApiError,
+> {
+    let db = state.db.lock();
+    let accounts = db.list_accounts().map_err(ApiError::internal)?;
+    let mut statuses = std::collections::HashMap::new();
+    for account in &accounts {
+        if let Some(state) = db
+            .account_verification_state(&account.id)
+            .map_err(ApiError::internal)?
+        {
+            statuses.insert(account.id.clone(), state.status);
+        }
+    }
+    Ok((accounts, statuses))
+}
+
+fn build_provider_contracts_response(
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+    accounts: &[Account],
+    statuses: &std::collections::HashMap<String, crate::provider::ConnectionVerificationStatus>,
+    settings_revision: u64,
+) -> ProviderContractsResponse {
+    let mut providers = Vec::new();
+    for provider_id in crate::provider_contracts::builtin_provider_scope_ids() {
+        let Some(contract) = contracts.providers.get(provider_id) else {
+            continue;
+        };
+        let descriptor = crate::provider::ProviderRegistry::iter()
+            .find(|item| item.kind == contract.adapter_kind)
+            .expect("adapter has a catalog offering");
+        let offerings = crate::provider::BUILTIN_PLANS
+            .iter()
+            .filter(|plan| plan.offering.provider_id == provider_id)
+            .map(|plan| ProviderOfferingChoiceView {
+                offering_id: plan.offering.offering_id.to_string(),
+                display_name: plan.display_name,
+                routable: plan.routable,
+                accounts: accounts
+                    .iter()
+                    .filter(|account| {
+                        account.provider_id == plan.offering.provider_id
+                            && account.offering_id == plan.offering.offering_id
+                    })
+                    .map(|account| account_choice_view(account, statuses))
+                    .collect(),
+            })
+            .collect();
+        providers.push(ProviderContractGroupView {
+            scope_kind: crate::provider_contracts::SCOPE_KIND_PROVIDER,
+            scope_id: provider_id.to_string(),
+            provider_id: provider_id.to_string(),
+            offerings,
+            catalog: contract.catalog.clone(),
+            models: contract.models.values().cloned().collect(),
+            protocols: contract.switches,
+            pricing: CapabilitySummary {
+                availability: descriptor.pricing.availability,
+            },
+            usage: CapabilitySummary {
+                availability: descriptor.usage.catalog_availability,
+            },
+            card: card_summary(descriptor),
+            catalog_routable: contract.catalog_routable,
+            production_inference: contract.production_inference,
+            disabled_reasons: contract.disabled_reasons.clone(),
+            revision: contract.revision,
+        });
+    }
+    let custom_endpoints = contracts
+        .custom_endpoints
+        .values()
+        .map(|contract| {
+            let descriptor = crate::provider::ProviderRegistry::get(
+                crate::provider::CUSTOM_PROVIDER_ID,
+                crate::provider::CUSTOM_API_OFFERING_ID,
+            )
+            .expect("custom offering is registered");
+            let account = accounts
+                .iter()
+                .find(|account| account.id == contract.scope.id())
+                .map(|account| account_choice_view(account, statuses))
+                .unwrap_or(ProviderAccountChoiceView {
+                    id: contract.scope.id().to_string(),
+                    name: contract.scope.id().to_string(),
+                    enabled: false,
+                    verification_status: crate::provider::ConnectionVerificationStatus::Pending,
+                });
+            CustomEndpointContractView {
+                scope_kind: crate::provider_contracts::SCOPE_KIND_CUSTOM_ENDPOINT,
+                scope_id: contract.scope.id().to_string(),
+                provider_id: crate::provider::CUSTOM_PROVIDER_ID.to_string(),
+                account,
+                catalog: contract.catalog.clone(),
+                models: contract.models.values().cloned().collect(),
+                protocols: contract.switches,
+                pricing: CapabilitySummary {
+                    availability: descriptor.pricing.availability,
+                },
+                usage: CapabilitySummary {
+                    availability: descriptor.usage.catalog_availability,
+                },
+                card: card_summary(descriptor),
+                catalog_routable: contract.catalog_routable,
+                production_inference: contract.production_inference,
+                disabled_reasons: contract.disabled_reasons.clone(),
+                revision: contract.revision,
+            }
+        })
+        .collect();
+    ProviderContractsResponse {
+        revision: settings_revision,
+        providers,
+        custom_endpoints,
+    }
+}
+
+fn account_choice_view(
+    account: &Account,
+    statuses: &std::collections::HashMap<String, crate::provider::ConnectionVerificationStatus>,
+) -> ProviderAccountChoiceView {
+    let verification_status = statuses.get(&account.id).copied().unwrap_or_else(|| {
+        crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
+            .map(crate::provider::default_verification_status)
+            .unwrap_or(crate::provider::ConnectionVerificationStatus::NotRequired)
+    });
+    ProviderAccountChoiceView {
+        id: account.id.clone(),
+        name: account.name.clone(),
+        enabled: account.enabled,
+        verification_status,
+    }
+}
+
+fn card_summary(descriptor: crate::provider::ProviderDescriptor) -> CardCapabilitySummary {
+    CardCapabilitySummary {
+        fetch_zen_models: descriptor.card_actions.fetch_zen_models,
+        discover_models: descriptor.card_actions.discover_models,
+        protocol_probe: descriptor.card_actions.protocol_probe,
+        catalog_refresh: descriptor.card_actions.catalog_refresh,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtocolSwitchUpdate {
+    enabled: bool,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+}
+
+async fn update_provider_contract_protocol(
+    State(state): State<CoreState>,
+    Path((scope_kind, scope_id, protocol)): Path<(String, String, String)>,
+    Json(input): Json<ProtocolSwitchUpdate>,
+) -> Result<Json<ProviderContractsResponse>, ApiError> {
+    let _settings_update = state.settings_update.lock();
+    check_key_revision(&state, input.expected_revision)?;
+    let scope = crate::provider_contracts::ContractScope::parse(&scope_kind, &scope_id)
+        .map_err(ApiError::bad_request)?;
+    let protocol = crate::provider_contracts::parse_upstream_protocol(&protocol)
+        .map_err(ApiError::bad_request)?;
+    validate_contract_scope_ownership(&state, &scope)?;
+    let now = Utc::now();
+    {
+        let db = state.db.lock();
+        db.set_protocol_switch(&scope, protocol, input.enabled, now)
+            .map_err(ApiError::internal)?;
+        state
+            .reload_provider_contracts_locked(&db)
+            .map_err(ApiError::internal)?;
+    }
+    state.routing.reset();
+    let revision = state.bump_settings_revision();
+    let (accounts, statuses) = load_accounts_with_verification(&state)?;
+    Ok(Json(build_provider_contracts_response(
+        &state.provider_contracts(),
+        &accounts,
+        &statuses,
+        revision,
+    )))
+}
+
+fn validate_contract_scope_ownership(
+    state: &CoreState,
+    scope: &crate::provider_contracts::ContractScope,
+) -> Result<(), ApiError> {
+    match scope {
+        crate::provider_contracts::ContractScope::Provider(provider_id) => {
+            if crate::provider_contracts::builtin_provider_scope_ids()
+                .contains(&provider_id.as_str())
+            {
+                Ok(())
+            } else {
+                Err(ApiError::not_found("provider contract scope not found"))
+            }
+        }
+        crate::provider_contracts::ContractScope::CustomEndpoint(account_id) => {
+            let account = state
+                .db
+                .lock()
+                .get_account(account_id)
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| ApiError::not_found("custom endpoint contract scope not found"))?;
+            if crate::provider::ProviderAdapterKind::from_offering(
+                &account.provider_id,
+                &account.offering_id,
+            ) == Some(crate::provider::ProviderAdapterKind::ConfigurableHttp)
+            {
+                Ok(())
+            } else {
+                Err(ApiError::bad_request(
+                    "custom_endpoint scopes are only valid for Custom API accounts",
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtocolProbeRequest {
+    model_id: String,
+    protocols: Vec<crate::provider::UpstreamProtocolKind>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProtocolProbeResponse {
+    account_id: String,
+    model_id: String,
+    results: Vec<ProtocolProbeResultView>,
+    contract: Option<crate::provider_contracts::EffectiveModelContract>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProtocolProbeResultView {
+    protocol: &'static str,
+    success: bool,
+    skipped: bool,
+    error: Option<String>,
+}
+
+async fn run_account_protocol_probes(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    Json(input): Json<ProtocolProbeRequest>,
+) -> Result<Json<ProtocolProbeResponse>, ApiError> {
+    let account = state
+        .db
+        .lock()
+        .get_account(&id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+    let descriptor =
+        crate::provider::ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
+    if !descriptor.protocol_probe.explicit_probe {
+        return Err(ApiError::status(
+            StatusCode::NOT_IMPLEMENTED,
+            "protocol probes are not available for this Plan in this slice",
+        ));
+    }
+    let model_id = input.model_id.trim();
+    if model_id.is_empty() {
+        return Err(ApiError::bad_request("model_id is required"));
+    }
+    if input.protocols.is_empty() {
+        return Err(ApiError::bad_request(
+            "at least one explicit upstream protocol is required",
+        ));
+    }
+    require_unique_probe_protocols(&input.protocols)?;
+    let adapter = descriptor.kind;
+    let scope = crate::provider_contracts::ContractScope::from_account(&account)
+        .ok_or_else(|| ApiError::bad_request("account does not own a provider contract scope"))?;
+    let declared = if adapter == crate::provider::ProviderAdapterKind::ConfigurableHttp {
+        state
+            .db
+            .lock()
+            .list_account_model_capabilities_declared(&account.id)
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .map(|capability| (capability.model_id, capability.protocol))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut results = Vec::new();
+    let now = Utc::now();
+    for protocol in &input.protocols {
+        if !crate::provider_contracts::probe_may_add(adapter, model_id, *protocol, &declared) {
+            results.push(ProtocolProbeResultView {
+                protocol: protocol.as_str(),
+                success: false,
+                skipped: true,
+                error: Some("probe combination is outside the adapter safety ceiling".to_string()),
+            });
+            continue;
+        }
+        let existing = state
+            .db
+            .lock()
+            .load_model_protocol(&scope, model_id, *protocol)
+            .map_err(ApiError::internal)?;
+        let outcome = execute_protocol_probe(&state, &account, adapter, model_id, *protocol).await;
+        let (success, error) = match &outcome {
+            Ok(()) => (true, None),
+            Err(message) => (false, Some(message.clone())),
+        };
+        let persisted = crate::provider_contracts::apply_probe_observation(
+            existing.as_ref(),
+            scope.clone(),
+            model_id,
+            *protocol,
+            success,
+            error.clone(),
+            now,
+            true,
+        )
+        .map_err(ApiError::bad_request)?;
+        state
+            .db
+            .lock()
+            .upsert_model_protocol(&persisted)
+            .map_err(ApiError::internal)?;
+        results.push(ProtocolProbeResultView {
+            protocol: protocol.as_str(),
+            success,
+            skipped: false,
+            error,
+        });
+    }
+    state
+        .reload_provider_contracts()
+        .map_err(ApiError::internal)?;
+    let contract = state
+        .provider_contracts()
+        .scope(&scope)
+        .and_then(|scope| scope.model(model_id).cloned());
+    Ok(Json(ProtocolProbeResponse {
+        account_id: account.id,
+        model_id: model_id.to_string(),
+        results,
+        contract,
+    }))
+}
+
+fn require_unique_probe_protocols(
+    protocols: &[crate::provider::UpstreamProtocolKind],
+) -> Result<(), ApiError> {
+    let mut seen = HashSet::new();
+    for protocol in protocols {
+        if !seen.insert(*protocol) {
+            return Err(ApiError::bad_request("duplicate upstream protocol"));
+        }
+    }
+    Ok(())
+}
+
+async fn execute_protocol_probe(
+    state: &CoreState,
+    account: &Account,
+    adapter: crate::provider::ProviderAdapterKind,
+    model_id: &str,
+    protocol: crate::provider::UpstreamProtocolKind,
+) -> Result<(), String> {
+    use crate::custom_http::{
+        HttpInferenceTransport, HttpInferenceTransportSpec, InferenceHttpRequest,
+        json_content_headers,
+    };
+    use crate::gateway::protocol::RequestPlan;
+    use crate::models::UpstreamChannel;
+    use crate::provider_contracts::protocol_to_api;
+
+    let format = protocol_to_api(protocol);
+    let config = state.config();
+    let body = crate::custom::minimal_verification_body(protocol, model_id)
+        .map_err(|error| error.message)?;
+    let mut plan = RequestPlan {
+        client: format,
+        upstream: format,
+        model: model_id.to_string(),
+        client_model: model_id.to_string(),
+        stream: false,
+        body: bytes::Bytes::from(body.clone()),
+        channel: if adapter == crate::provider::ProviderAdapterKind::ZenFree {
+            UpstreamChannel::Free
+        } else {
+            UpstreamChannel::Go
+        },
+        upstream_base_override: None,
+        original_model: None,
+        allow_go_fallback: false,
+        resolved_alias: None,
+        custom_route: None,
+        service_tier: None,
+        custom_tools: Vec::new(),
+        namespace_tools: Vec::new(),
+        response_parallel_tool_calls: true,
+        response_tool_choice: serde_json::json!("auto"),
+        response_tools: Vec::new(),
+    };
+    if adapter == crate::provider::ProviderAdapterKind::ConfigurableHttp {
+        let custom = state
+            .db
+            .lock()
+            .account_custom_config(&account.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "Custom API accounts require a persisted base URL, protocol, and auth scheme"
+                    .to_string()
+            })?;
+        plan.custom_route = Some(crate::gateway::protocol::CustomRouteSpec {
+            base_url: custom.base_url,
+            auth_scheme: custom.auth_scheme,
+        });
+    }
+    let route = crate::gateway::provider_adapter::resolve_probe_route(account, &config, &plan)?;
+    let secret = if matches!(
+        route.auth,
+        crate::gateway::provider_adapter::UpstreamAuth::None
+    ) {
+        None
+    } else {
+        Some(
+            state
+                .decrypt_key(&account.key_cipher)
+                .map_err(|error| error.to_string())?,
+        )
+    };
+    let spec = if route.follow_redirects {
+        HttpInferenceTransportSpec::follow_redirects()
+    } else {
+        HttpInferenceTransportSpec::no_redirects()
+    };
+    let transport =
+        HttpInferenceTransport::build(&config, spec).map_err(|error| error.to_string())?;
+    let url = HttpInferenceTransport::join_endpoint(&route.base_url, &route.path)
+        .map_err(|error| error.to_string())?;
+    let extra = json_content_headers(protocol == crate::provider::UpstreamProtocolKind::Messages)
+        .map_err(|error| error.to_string())?;
+    let timeout = std::time::Duration::from_secs(config.non_stream_timeout_secs.clamp(5, 30));
+    let auth = match (route.auth, secret.as_deref()) {
+        (crate::gateway::provider_adapter::UpstreamAuth::None, _) => None,
+        (crate::gateway::provider_adapter::UpstreamAuth::XApiKey, Some(key)) => {
+            Some((crate::provider::UpstreamAuthScheme::XApiKey, key))
+        }
+        (crate::gateway::provider_adapter::UpstreamAuth::Bearer, Some(key)) => {
+            Some((crate::provider::UpstreamAuthScheme::Bearer, key))
+        }
+        (crate::gateway::provider_adapter::UpstreamAuth::OpenCodeProtocolDefault, Some(key))
+            if format == ApiFormat::Messages =>
+        {
+            Some((crate::provider::UpstreamAuthScheme::XApiKey, key))
+        }
+        (crate::gateway::provider_adapter::UpstreamAuth::OpenCodeProtocolDefault, Some(key)) => {
+            Some((crate::provider::UpstreamAuthScheme::Bearer, key))
+        }
+        (_, None) => {
+            return Err("account is missing a decrypted credential for this probe".to_string());
+        }
+    };
+    let response = transport
+        .send(InferenceHttpRequest {
+            method: reqwest::Method::POST,
+            url,
+            auth,
+            extra_headers: extra,
+            body: Some(body),
+            request_timeout: Some(timeout),
+        })
+        .await
+        .map_err(|error| {
+            crate::provider_contracts::sanitize_probe_error(&error.to_string(), secret.as_deref())
+        })?;
+    let status = response.status();
+    let bytes = HttpInferenceTransport::read_body_limited(
+        response,
+        crate::custom::MAX_CUSTOM_VERIFICATION_BODY_BYTES,
+    )
+    .await
+    .map_err(|error| {
+        crate::provider_contracts::sanitize_probe_error(&error.to_string(), secret.as_deref())
+    })?;
+    if !status.is_success() {
+        let raw = String::from_utf8_lossy(&bytes);
+        return Err(crate::provider_contracts::sanitize_probe_error(
+            &format!("upstream returned {} {raw}", status.as_u16()),
+            secret.as_deref(),
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "protocol probe did not return a JSON object".to_string())?;
+    if !parsed.is_object() {
+        return Err("protocol probe did not return a JSON object".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -1092,6 +1806,8 @@ struct ProviderModelCapability {
     model_id: String,
     provider_id: String,
     offering_id: String,
+    preferred_protocol: &'static str,
+    supported_protocols: Vec<&'static str>,
 }
 
 /// The gateway model set is currently backed only by OpenCode Go. Do not
@@ -1099,11 +1815,13 @@ struct ProviderModelCapability {
 /// selectable account binding.
 async fn provider_model_capabilities() -> Json<Vec<ProviderModelCapability>> {
     Json(
-        supported_model_ids()
-            .map(|model_id| ProviderModelCapability {
+        supported_model_protocol_profiles()
+            .map(|(model_id, preferred, supported)| ProviderModelCapability {
                 model_id: model_id.to_string(),
                 provider_id: crate::provider::OPENCODE_PROVIDER_ID.to_string(),
                 offering_id: crate::provider::GO_OFFERING_ID.to_string(),
+                preferred_protocol: api_format_name(preferred),
+                supported_protocols: supported.iter().copied().map(api_format_name).collect(),
             })
             .collect(),
     )
@@ -1122,17 +1840,13 @@ async fn provider_pricing(
     State(state): State<CoreState>,
     Path((provider_id, offering_id)): Path<(String, String)>,
 ) -> Result<Json<ProviderPricingResponse>, ApiError> {
-    let offering = crate::provider::builtin_offering(&provider_id, &offering_id)
+    let descriptor = crate::provider::ProviderRegistry::get(&provider_id, &offering_id)
         .ok_or_else(|| ApiError::not_found("provider offering not found"))?;
-    let is_go = offering.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-        && offering.offering_id == crate::provider::GO_OFFERING_ID;
-    let is_zen = offering.provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
-        && offering.offering_id == crate::provider::ANONYMOUS_FREE_OFFERING_ID;
-    let snapshot = if is_go {
+    let snapshot = if descriptor.pricing.availability == "available" {
         state
             .db
             .lock()
-            .latest_provider_pricing_snapshot(offering.provider_id, offering.offering_id)
+            .latest_provider_pricing_snapshot(descriptor.provider_id, descriptor.offering_id)
             .map_err(ApiError::internal)?
     } else {
         None
@@ -1140,13 +1854,7 @@ async fn provider_pricing(
     Ok(Json(ProviderPricingResponse {
         provider_id,
         offering_id,
-        availability: if is_go {
-            "available"
-        } else if is_zen {
-            "not_applicable"
-        } else {
-            "unavailable"
-        },
+        availability: descriptor.pricing.availability,
         snapshot,
     }))
 }
@@ -1174,19 +1882,16 @@ async fn provider_account_usage(
         .get_account(&id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
-    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
-        .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
-    let capability = crate::usage_sync::provider_adapter::provider_usage_capability(
-        &account.provider_id,
-        &account.offering_id,
-    );
-    if plan.usage_availability == "unavailable" {
+    let descriptor =
+        crate::provider::ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .ok_or_else(|| ApiError::bad_request("unknown provider offering"))?;
+    if descriptor.usage.catalog_availability == "unavailable" {
         return Ok(Json(ProviderUsageResponse {
             account_id: id,
             provider_id: account.provider_id,
             offering_id: account.offering_id,
-            availability: "unavailable",
-            experimental: capability.is_some_and(|capability| capability.experimental),
+            availability: descriptor.usage.catalog_availability,
+            experimental: descriptor.usage.experimental,
             free_cooldown_until: None,
             quota_windows: Vec::new(),
             credit_balances: Vec::new(),
@@ -1195,22 +1900,16 @@ async fn provider_account_usage(
                 .map_err(ApiError::internal)?,
         }));
     }
-    let is_go = account.provider_id == crate::provider::OPENCODE_PROVIDER_ID
-        && account.offering_id == crate::provider::GO_OFFERING_ID;
-    let is_zen = account.provider_id == crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
-        && account.offering_id == crate::provider::ANONYMOUS_FREE_OFFERING_ID;
-    let capability = capability
-        .ok_or_else(|| ApiError::bad_request("account provider usage capability is unknown"))?;
-    let free_cooldown_until = if is_zen {
+    let free_cooldown_until = if descriptor.error_cooldown.egress_ip_shared_free_cooldown {
         db.free_channel_cooldown_until()
             .map_err(ApiError::internal)?
     } else {
         None
     };
-    let quota_windows = if is_go {
+    let quota_windows = if descriptor.usage.authoritative_for_quota {
         db.live_opencode_go_quota_windows(&account.id, &state.pricing_snapshot().limits)
             .map_err(ApiError::internal)?
-    } else if is_zen {
+    } else if descriptor.error_cooldown.egress_ip_shared_free_cooldown {
         vec![crate::provider::QuotaWindow {
             account_id: account.id.clone(),
             window_kind: crate::provider::QUOTA_WINDOW_FREE.to_string(),
@@ -1236,14 +1935,8 @@ async fn provider_account_usage(
         account_id: id,
         provider_id: account.provider_id,
         offering_id: account.offering_id,
-        availability: if is_go {
-            "available"
-        } else if is_zen {
-            "local_state"
-        } else {
-            "unavailable"
-        },
-        experimental: capability.experimental,
+        availability: descriptor.usage.catalog_availability,
+        experimental: descriptor.usage.experimental,
         free_cooldown_until,
         quota_windows,
         credit_balances: db
@@ -1519,6 +2212,9 @@ fn create_account_inner(
             .map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::internal("created account not found"))?
     };
+    state
+        .reload_provider_contracts()
+        .map_err(ApiError::internal)?;
     Ok(Json(dashboard_account(&state, account)))
 }
 
@@ -2256,6 +2952,9 @@ async fn delete_account(
         }));
     }
     staged.purge().map_err(ApiError::internal)?;
+    state
+        .reload_provider_contracts()
+        .map_err(ApiError::internal)?;
     let revision = state.bump_settings_revision();
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -2619,6 +3318,9 @@ async fn put_account_custom_config(
         .lock()
         .upsert_account_custom_config(&id, &input.config, false)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .reload_provider_contracts()
+        .map_err(ApiError::internal)?;
     let account = state
         .db
         .lock()
@@ -2674,6 +3376,9 @@ async fn put_account_model_capabilities(
         .lock()
         .replace_account_model_capabilities(&id, &input.capabilities)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .reload_provider_contracts()
+        .map_err(ApiError::internal)?;
     let account = state
         .db
         .lock()
@@ -2751,10 +3456,31 @@ async fn create_account_acknowledgement(
     Ok(Json(dashboard_account(&state, account)))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountTestRequest {
+    #[serde(default = "default_account_test_model")]
+    model_id: String,
+    #[serde(default)]
+    protocol: crate::provider::UpstreamProtocolKind,
+}
+
+fn default_account_test_model() -> String {
+    crate::models::DEFAULT_ACCOUNT_TEST_MODEL.to_string()
+}
+
+#[derive(Debug, Serialize)]
+struct AccountTestResponse {
+    message: String,
+    model_id: String,
+    protocol: &'static str,
+}
+
 async fn test_account(
     State(state): State<CoreState>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    input: Option<Json<AccountTestRequest>>,
+) -> Result<Json<AccountTestResponse>, ApiError> {
     let account = state
         .db
         .lock()
@@ -2764,9 +3490,11 @@ async fn test_account(
     if account.is_zen_free() {
         return Err(ApiError::bad_request("Zen Free has no credential to test"));
     }
-    if account.provider_id != crate::provider::OPENCODE_PROVIDER_ID
-        || account.offering_id != crate::provider::GO_OFFERING_ID
-    {
+    let adapter = crate::provider::ProviderAdapterKind::from_offering(
+        &account.provider_id,
+        &account.offering_id,
+    );
+    if adapter != Some(crate::provider::ProviderAdapterKind::OpenCodeGo) {
         return Err(ApiError::status(
             StatusCode::CONFLICT,
             "provider account testing is unavailable until its upstream contract is configured",
@@ -2778,6 +3506,11 @@ async fn test_account(
             "account setup is not complete",
         ));
     }
+    let (model_id, protocol) = account_test_case(input.map(|Json(value)| value))?;
+    let format = crate::custom::api_format_for_custom_protocol(protocol);
+    let upstream_path = format
+        .upstream_path()
+        .ok_or_else(|| ApiError::bad_request("unsupported account test protocol"))?;
     let key = state
         .decrypt_key(&account.key_cipher)
         .map_err(ApiError::internal)?;
@@ -2785,11 +3518,22 @@ async fn test_account(
     validate_upstream_url(&config.upstream_base_url)?;
     let response = client
         .post(format!(
-            "{}/v1/chat/completions",
-            config.upstream_base_url.trim_end_matches('/')
+            "{}{}",
+            config.upstream_base_url.trim_end_matches('/'),
+            upstream_path,
         ))
         .bearer_auth(&key)
-        .json(&account_ping_payload())
+        .header(header::CONTENT_TYPE, "application/json")
+        .headers(
+            if protocol == crate::provider::UpstreamProtocolKind::Messages {
+                let mut headers = HeaderMap::new();
+                headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+                headers
+            } else {
+                HeaderMap::new()
+            },
+        )
+        .json(&account_test_payload(protocol, &model_id))
         .timeout(std::time::Duration::from_secs(
             config.non_stream_timeout_secs,
         ))
@@ -2878,9 +3622,33 @@ async fn test_account(
     } else {
         "***".to_string()
     };
-    Ok(Json(serde_json::json!({
-        "message": format!("Ping OK: {} ({})", account.name, masked)
-    })))
+    Ok(Json(AccountTestResponse {
+        message: format!("Ping OK: {} ({})", account.name, masked),
+        model_id,
+        protocol: api_format_name(format),
+    }))
+}
+
+fn account_test_case(
+    input: Option<AccountTestRequest>,
+) -> Result<(String, crate::provider::UpstreamProtocolKind), ApiError> {
+    let input = input.unwrap_or_else(|| AccountTestRequest {
+        model_id: crate::models::DEFAULT_ACCOUNT_TEST_MODEL.to_string(),
+        protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+    });
+    let requested = input.model_id.trim();
+    let Some((canonical, _, supported)) = supported_model_protocol_profiles()
+        .find(|(model_id, _, _)| model_id.eq_ignore_ascii_case(requested))
+    else {
+        return Err(ApiError::bad_request("unknown OpenCode Go test model"));
+    };
+    let format = crate::custom::api_format_for_custom_protocol(input.protocol);
+    if !supported.contains(&format) {
+        return Err(ApiError::bad_request(format!(
+            "model `{canonical}` does not support the selected upstream protocol"
+        )));
+    }
+    Ok((canonical.to_string(), input.protocol))
 }
 
 #[derive(Deserialize)]
@@ -3090,13 +3858,38 @@ async fn read_managed_key_verification_response(
     Ok(text)
 }
 
+fn account_test_payload(
+    protocol: crate::provider::UpstreamProtocolKind,
+    model_id: &str,
+) -> serde_json::Value {
+    match protocol {
+        crate::provider::UpstreamProtocolKind::ChatCompletions => serde_json::json!({
+            "model": model_id,
+            "messages": [{ "role": "user", "content": "ping" }],
+            "max_tokens": 1,
+            "stream": false
+        }),
+        crate::provider::UpstreamProtocolKind::Responses => serde_json::json!({
+            "model": model_id,
+            "input": "ping",
+            "max_output_tokens": 1,
+            "store": false,
+            "stream": false
+        }),
+        crate::provider::UpstreamProtocolKind::Messages => serde_json::json!({
+            "model": model_id,
+            "messages": [{ "role": "user", "content": "ping" }],
+            "max_tokens": 1,
+            "stream": false
+        }),
+    }
+}
+
 fn account_ping_payload() -> serde_json::Value {
-    serde_json::json!({
-        "model": crate::models::DEFAULT_ACCOUNT_TEST_MODEL,
-        "messages": [{ "role": "user", "content": "ping" }],
-        "max_tokens": 1,
-        "stream": false
-    })
+    account_test_payload(
+        crate::provider::UpstreamProtocolKind::ChatCompletions,
+        crate::models::DEFAULT_ACCOUNT_TEST_MODEL,
+    )
 }
 
 fn short_body(body: &str) -> String {
@@ -3113,8 +3906,7 @@ async fn account_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<Json<UsageWindow>, ApiError> {
-    ensure_legacy_go_account(&state, &id)?;
-    let limits = state.pricing_snapshot().limits.clone();
+    let limits = account_usage_limits(&state, &id, false)?;
     state
         .db
         .lock()
@@ -3237,7 +4029,7 @@ async fn update_account_usage(
     Path(id): Path<String>,
     Json(update): Json<AccountUsageUpdate>,
 ) -> Result<Json<UsageWindow>, ApiError> {
-    ensure_legacy_go_account(&state, &id)?;
+    let limits = account_usage_limits(&state, &id, true)?;
     let window = match update.window.as_str() {
         "window_5h" => UsageWindowKind::FiveHours,
         "window_week" => UsageWindowKind::Week,
@@ -3264,7 +4056,6 @@ async fn update_account_usage(
         }
     }
 
-    let limits = state.pricing_snapshot().limits.clone();
     let limit = match window {
         UsageWindowKind::FiveHours => limits.window_5h,
         UsageWindowKind::Week => limits.window_week,
@@ -3287,21 +4078,36 @@ async fn update_account_usage(
         .map_err(ApiError::internal)
 }
 
-fn ensure_legacy_go_account(state: &CoreState, id: &str) -> Result<(), ApiError> {
+fn account_usage_limits(
+    state: &CoreState,
+    id: &str,
+    _require_manual_calibration: bool,
+) -> Result<crate::pricing::PricingLimits, ApiError> {
     let account = state
         .db
         .lock()
         .get_account(id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
-    if account.provider_id != crate::provider::OPENCODE_PROVIDER_ID
-        || account.offering_id != crate::provider::GO_OFFERING_ID
-    {
+    let adapter = crate::provider::ProviderAdapterKind::from_offering(
+        &account.provider_id,
+        &account.offering_id,
+    );
+    if adapter == Some(crate::provider::ProviderAdapterKind::OpenCodeGo) {
+        return Ok(state.pricing_snapshot().limits.clone());
+    }
+    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| ApiError::bad_request("account usage capability is unknown"))?;
+    if !plan.manual_usage_calibration {
         return Err(ApiError::bad_request(
-            "legacy usage windows are only available for OpenCode Go accounts",
+            "manual usage calibration is unavailable for this account",
         ));
     }
-    Ok(())
+    Ok(crate::pricing::PricingLimits {
+        window_5h: crate::provider::COMMAND_CODE_GOAT_QUOTA_5H,
+        window_week: crate::provider::COMMAND_CODE_GOAT_QUOTA_WEEK,
+        window_month: crate::provider::COMMAND_CODE_GOAT_QUOTA_MONTH,
+    })
 }
 
 async fn reset_account_cooldown(
@@ -4203,7 +5009,15 @@ async fn gateway_status(State(state): State<CoreState>) -> Json<GatewayStatus> {
 /// intersected with the active Go pricing table. Highspeed variants inherit
 /// the base row. Empty intersection is `[]`, not an error. Never selects an
 /// account, calls upstream, writes logs, or advances routing state.
+#[cfg(test)]
 fn local_application_models(snapshot: &crate::pricing::PricingSnapshot) -> Vec<String> {
+    local_application_models_with_contracts(snapshot, None)
+}
+
+fn local_application_models_with_contracts(
+    snapshot: &crate::pricing::PricingSnapshot,
+    contracts: Option<&crate::provider_contracts::EffectiveContractSet>,
+) -> Vec<String> {
     let priced = snapshot
         .models
         .iter()
@@ -4214,8 +5028,30 @@ fn local_application_models(snapshot: &crate::pricing::PricingSnapshot) -> Vec<S
         crate::provider::GO_OFFERING_ID,
     )
     .into_iter()
-    .filter(|alias| application_alias_is_priced(alias, &priced))
+    .filter(|alias| {
+        application_alias_is_priced(alias, &priced)
+            && contracts.is_none_or(|contracts| go_alias_has_enabled_protocol(alias, contracts))
+    })
     .collect()
+}
+
+fn go_alias_has_enabled_protocol(
+    alias: &str,
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+) -> bool {
+    match crate::alias::resolve(alias) {
+        Ok(crate::alias::ResolvedModel::Alias { mappings, .. }) => mappings.iter().any(|mapping| {
+            mapping.routeable
+                && mapping.provider_id == crate::provider::OPENCODE_PROVIDER_ID
+                && contracts.mapping_has_enabled_protocol(mapping)
+        }),
+        Ok(crate::alias::ResolvedModel::PinnedRaw { mapping, .. }) => {
+            mapping.routeable
+                && mapping.provider_id == crate::provider::OPENCODE_PROVIDER_ID
+                && contracts.mapping_has_enabled_protocol(&mapping)
+        }
+        Err(_) => false,
+    }
 }
 
 fn application_alias_is_priced(alias: &str, priced: &HashSet<&str>) -> bool {
@@ -4226,7 +5062,10 @@ fn application_alias_is_priced(alias: &str, priced: &HashSet<&str>) -> bool {
 }
 
 async fn application_models(State(state): State<CoreState>) -> Json<Vec<String>> {
-    Json(local_application_models(&state.pricing_snapshot()))
+    Json(local_application_models_with_contracts(
+        &state.pricing_snapshot(),
+        Some(&state.provider_contracts()),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -4585,23 +5424,25 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountOrderInput, AccountSetupUpdate, AccountUsageUpdate, BrowserTarget,
-        DashboardAccountUpdate, DashboardCustomConfigUpdate, DashboardModelCapabilitiesUpdate,
-        ForwardLogQuery, MAX_ACCOUNT_NOTES_CHARS, MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES,
-        MAX_PRICING_MULTIPLIER, ManagedAccountInput, OpenBrowserInput, PricingMultiplierInput,
-        PricingMultiplierUpdate, PricingRefreshPolicy, ProxyTestRequest, SemverVersion,
-        SettingsUpdateRequest, VerifyManagedKeyInput, advance_account_setup, application_models,
-        apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path, create_account,
-        create_account_inner, create_managed_account, dashboard_account, dashboard_summary,
-        format_error_chain, forward_logs, get_settings, is_update_available,
-        load_ready_account_for_official_go_usage, local_application_models,
+        AccountOrderInput, AccountSetupUpdate, AccountTestRequest, AccountUsageUpdate,
+        BrowserTarget, DashboardAccountUpdate, DashboardCustomConfigUpdate,
+        DashboardModelCapabilitiesUpdate, ForwardLogQuery, MAX_ACCOUNT_NOTES_CHARS,
+        MAX_MANAGED_KEY_VERIFICATION_RESPONSE_BYTES, MAX_PRICING_MULTIPLIER, ManagedAccountInput,
+        OpenBrowserInput, PricingMultiplierInput, PricingMultiplierUpdate, PricingRefreshPolicy,
+        ProtocolProbeRequest, ProxyTestRequest, SemverVersion, SettingsUpdateRequest,
+        VerifyManagedKeyInput, account_test_case, account_test_payload, advance_account_setup,
+        application_models, apply_official_go_usage_snapshot, apply_pricing_refresh, asset_path,
+        card_summary, create_account, create_account_inner, create_managed_account,
+        dashboard_account, dashboard_summary, format_error_chain, forward_logs, get_settings,
+        is_update_available, load_ready_account_for_official_go_usage, local_application_models,
         map_official_usage_refresh_error, open_account_browser, parse_semver_version,
         pricing_multiplier_changes, pricing_semantically_equal, provider_account_usage,
         put_account_custom_config, put_account_model_capabilities,
         read_managed_key_verification_response, redact_diagnostic, redact_known_secrets,
-        reorder_accounts, test_proxy, toggle_account, update_account, update_account_usage,
-        update_pricing_multipliers, update_settings, validate_forward_log_query,
-        validate_websocket_origin, verify_managed_account_key,
+        reorder_accounts, require_unique_probe_protocols, run_account_protocol_probes, test_proxy,
+        toggle_account, update_account, update_account_usage, update_pricing_multipliers,
+        update_settings, validate_forward_log_query, validate_websocket_origin,
+        verify_managed_account_key,
     };
     use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
     use crate::crypto::{KeyCipher, StaticKeyCipher};
@@ -4637,6 +5478,217 @@ mod tests {
         dir.push(format!("ocg-dashboard-test-{}-{}", label, nanos));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn account_test_cases_share_the_verified_model_protocol_matrix() {
+        let (model, protocol) = account_test_case(Some(AccountTestRequest {
+            model_id: "GPT-5.6-LUNA".into(),
+            protocol: crate::provider::UpstreamProtocolKind::Responses,
+        }))
+        .expect("known supported pair should resolve");
+        assert_eq!(model, "gpt-5.6-luna");
+        assert_eq!(protocol, crate::provider::UpstreamProtocolKind::Responses);
+        assert_eq!(
+            account_test_payload(protocol, &model)["max_output_tokens"],
+            1
+        );
+
+        let unsupported = account_test_case(Some(AccountTestRequest {
+            model_id: "grok-4.5".into(),
+            protocol: crate::provider::UpstreamProtocolKind::ChatCompletions,
+        }))
+        .expect_err("Responses-only model must reject Chat testing");
+        assert_eq!(unsupported.status, StatusCode::BAD_REQUEST);
+
+        let unknown = account_test_case(Some(AccountTestRequest {
+            model_id: "unknown-model".into(),
+            protocol: crate::provider::UpstreamProtocolKind::Responses,
+        }))
+        .expect_err("unknown models must fail without an upstream request");
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn protocol_probe_rejects_duplicates_before_any_upstream_call() {
+        let unique = [
+            crate::provider::UpstreamProtocolKind::ChatCompletions,
+            crate::provider::UpstreamProtocolKind::Responses,
+        ];
+        require_unique_probe_protocols(&unique).expect("unique caller order is preserved");
+        let error = require_unique_probe_protocols(&[
+            crate::provider::UpstreamProtocolKind::ChatCompletions,
+            crate::provider::UpstreamProtocolKind::Responses,
+            crate::provider::UpstreamProtocolKind::ChatCompletions,
+        ])
+        .expect_err("duplicates must 400 locally");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("duplicate"));
+    }
+
+    fn raw_http_header_value(request: &[u8], name: &str) -> Option<String> {
+        let text = String::from_utf8_lossy(request);
+        let headers = text.split("\r\n\r\n").next().unwrap_or(text.as_ref());
+        let needle = name.to_ascii_lowercase();
+        headers.lines().find_map(|line| {
+            let (header_name, value) = line.split_once(':')?;
+            (header_name.trim().eq_ignore_ascii_case(&needle)).then(|| value.trim().to_string())
+        })
+    }
+
+    async fn spawn_capturing_json_upstream() -> (
+        SocketAddr,
+        Arc<StdMutex<Vec<u8>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let captured = Arc::new(StdMutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("protocol-probe upstream should bind");
+        let address = listener.local_addr().unwrap();
+        let captured_for_task = captured.clone();
+        let body = r#"{"id":"ok","object":"json"}"#;
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let n = stream.read(&mut request).await.unwrap_or(0);
+            *captured_for_task.lock().unwrap() = request[..n].to_vec();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (address, captured, task)
+    }
+
+    #[tokio::test]
+    async fn custom_x_api_key_protocol_probe_sends_x_api_key_not_authorization() {
+        const CUSTOM_KEY: &str = "custom-x-api-key";
+        for protocol in [
+            crate::provider::UpstreamProtocolKind::ChatCompletions,
+            crate::provider::UpstreamProtocolKind::Responses,
+        ] {
+            let (address, captured, upstream) = spawn_capturing_json_upstream().await;
+            let dir = temp_data_dir(&format!("probe-x-api-key-{}", protocol.as_str()));
+            let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+            let state = Arc::new(
+                CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher)
+                    .unwrap(),
+            );
+            let mut config = state.config();
+            config.proxy_mode = ProxyMode::Direct;
+            config.non_stream_timeout_secs = 5;
+            state.set_config(config).unwrap();
+
+            let custom = create_account_inner(
+                state.clone(),
+                AccountInput {
+                    provider_id: crate::provider::CUSTOM_PROVIDER_ID.into(),
+                    offering_id: crate::provider::CUSTOM_API_OFFERING_ID.into(),
+                    name: format!("Custom {}", protocol.as_str()),
+                    username: None,
+                    password: None,
+                    key: CUSTOM_KEY.into(),
+                    referral_code: None,
+                    purchase_date: None,
+                    notes: None,
+                },
+                Some(AccountCustomConfigInput {
+                    base_url: format!("http://{address}"),
+                    upstream_protocol: protocol,
+                    auth_scheme: crate::provider::UpstreamAuthScheme::XApiKey,
+                }),
+                Vec::new(),
+                vec![AccountModelCapabilityInput {
+                    model_id: "org/model".into(),
+                    protocol,
+                    source: None,
+                }],
+            )
+            .expect("Custom x-api-key account should save")
+            .0;
+
+            let response = run_account_protocol_probes(
+                State(state.clone()),
+                AxumPath(custom.id.clone()),
+                Json(ProtocolProbeRequest {
+                    model_id: "org/model".into(),
+                    protocols: vec![protocol],
+                }),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("protocol probe should reach the loopback: {error:?}"));
+            assert_eq!(response.0.results.len(), 1, "{protocol:?}");
+            assert!(
+                response.0.results[0].success,
+                "probe should succeed for {protocol:?}: {:?}",
+                response.0.results[0].error
+            );
+
+            upstream.await.unwrap();
+            let raw = captured.lock().unwrap().clone();
+            let x_api_key = raw_http_header_value(&raw, "x-api-key");
+            let authorization = raw_http_header_value(&raw, "authorization");
+            assert_eq!(
+                x_api_key.as_deref(),
+                Some(CUSTOM_KEY),
+                "Custom x-api-key {protocol:?} probe must send x-api-key: {}",
+                String::from_utf8_lossy(&raw)
+            );
+            assert!(
+                authorization.is_none(),
+                "Custom x-api-key {protocol:?} probe must not send Authorization: {}",
+                String::from_utf8_lossy(&raw)
+            );
+
+            drop(state);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn provider_contract_card_summary_uses_descriptor_capabilities() {
+        let go = crate::provider::ProviderRegistry::get(
+            crate::provider::OPENCODE_PROVIDER_ID,
+            crate::provider::GO_OFFERING_ID,
+        )
+        .unwrap();
+        let go_card = card_summary(go);
+        assert!(!go_card.fetch_zen_models);
+        assert!(!go_card.discover_models);
+        assert!(go_card.protocol_probe);
+        assert!(!go_card.catalog_refresh);
+
+        let zen = crate::provider::ProviderRegistry::get(
+            crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
+            crate::provider::ANONYMOUS_FREE_OFFERING_ID,
+        )
+        .unwrap();
+        let zen_card = card_summary(zen);
+        assert!(zen_card.fetch_zen_models);
+        assert!(zen_card.catalog_refresh);
+        assert!(zen_card.protocol_probe);
+
+        let custom = crate::provider::ProviderRegistry::get(
+            crate::provider::CUSTOM_PROVIDER_ID,
+            crate::provider::CUSTOM_API_OFFERING_ID,
+        )
+        .unwrap();
+        let custom_card = card_summary(custom);
+        assert!(custom_card.discover_models);
+        assert!(custom_card.catalog_refresh);
+        assert!(custom_card.protocol_probe);
+
+        let goat = crate::provider::ProviderRegistry::get(
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            crate::provider::GOAT_OFFERING_ID,
+        )
+        .unwrap();
+        let goat_card = card_summary(goat);
+        assert!(!goat_card.protocol_probe);
+        assert!(!goat_card.catalog_refresh);
     }
 
     async fn spawn_key_verification_upstream(
@@ -5914,15 +6966,15 @@ mod tests {
         let db = Database::open(dir.clone()).unwrap();
         db.create_account(&Account {
             id: "acct-usage".into(),
-            provider_id: crate::provider::default_provider_id(),
-            offering_id: crate::provider::default_offering_id(),
+            provider_id: crate::provider::COMMAND_CODE_PROVIDER_ID.into(),
+            offering_id: crate::provider::GOAT_OFFERING_ID.into(),
             credential_kind: crate::provider::default_credential_kind(),
             quota_scope: crate::provider::default_quota_scope(),
             name: "usage".into(),
             username: None,
             password_cipher: None,
             key_cipher: cipher.encrypt("sk-test").unwrap(),
-            enabled: true,
+            enabled: false,
             account_type: AccountType::Key,
             setup_step: AccountSetupStep::Ready,
             referral_code: None,
@@ -6013,8 +7065,8 @@ mod tests {
         .await
         .expect("valid calibrate should save")
         .0;
-        // 5h 限额 12.0，50% = 6.0
-        assert!((usage.window_5h - 6.0).abs() < 1e-9);
+        // GOAT 5h 限额 14.0，50% = 7.0
+        assert!((usage.window_5h - 7.0).abs() < 1e-9);
         // 倒计时 ≈ 180min
         let reset = usage
             .resets_in_5h
@@ -6039,8 +7091,8 @@ mod tests {
         .await
         .expect("month window calibrate should save")
         .0;
-        // 月限额 60.0，100% = 60.0
-        assert!((usage.window_month - 60.0).abs() < 1e-9);
+        // GOAT 月限额 70.0，100% = 70.0
+        assert!((usage.window_month - 70.0).abs() < 1e-9);
         // resets_in_month 仍是 purchase_date + 1 自然月（2026-01-31 → 2026-02-28）
         // UTC 日期可能比 Local 日期早一天（China UTC+8: 02-28 00:00 CST = 02-27 16:00 UTC），
         // 用 Local 比对避免时区 flake。
@@ -6092,8 +7144,8 @@ mod tests {
             .expect("summary should load")
             .0;
         assert_eq!(
-            summary.available_accounts, 2,
-            "invalid OpenCode ciphertext and unconfigured GOAT must not count"
+            summary.available_accounts, 1,
+            "invalid OpenCode ciphertext and both unconfigured GOAT fixtures must not count"
         );
 
         fs::remove_dir_all(dir).unwrap();

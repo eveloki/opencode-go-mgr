@@ -37,7 +37,7 @@ ocg-manager/
 │   ├── components/    LocaleSwitcher, PricingCatalog, StackedBarChart, …
 │   ├── i18n/          i18n setup + per-locale message tables + tests
 │   ├── styles/        Theme tokens, design-system overrides
-│   └── views/         Dashboard, Keys, Accounts, Pricing, Applications, Logs, Settings (+ unit tests)
+│   └── views/         Dashboard, Keys, Accounts, Providers, Applications, Logs, Settings (+ unit tests)
 ├── src-tauri/         Cross-platform tray app, single-instance, updater bridge, native packaging
 ├── docs/              USER / MAINTAINER / anti-abuse (EN+ZH), CONTRIBUTORS, index
 ├── scripts/           free-dev-port, release, updater manifest, release notes, smokes, …
@@ -283,7 +283,7 @@ difference, and the Claude Desktop three-role persistence behavior.
   rematerializes per account to that card's declared protocol, isolated
   origin, and auth scheme.
 - `zen_models.rs` owns the only Zen Free model-discovery path. A protected,
-  explicit account-card refresh calls the fixed keyless
+  explicit Providers-page refresh calls the fixed keyless
   `https://opencode.ai/zen/v1/models` endpoint through the global proxy,
   follows no redirects, keeps only valid IDs ending in `-free`, and persists
   the complete successful snapshot before swapping runtime state. Each model
@@ -294,8 +294,8 @@ difference, and the Claude Desktop three-role persistence behavior.
 - `selector.rs` filters account cards by capability, enabled/ready state,
   credential validity, cooldown, and request-local failures before applying
   the persisted global manual order. Strict priority, global sticky, and
-  round-robin reuse that same order; do not introduce a provider page,
-  model-routing page, or per-model quota pool. Zen Free quota is shared per
+  round-robin reuse that same order; do not introduce a model-routing page
+  or per-model quota pool. Zen Free quota is shared per
   egress IP: any active `cooldown_free_until` exhausts the whole free channel
   (no key rotation). `limit.rs` parses the upstream 429 reset phrase.
 - `pricing.rs` stores immutable provider-scoped pricing snapshots. Refresh is
@@ -350,26 +350,28 @@ difference, and the Claude Desktop three-role persistence behavior.
   clicks the button; it is not telemetry.
 - Docker may bootstrap the first administrator with `OCG_ADMIN_USERNAME` and
   `OCG_ADMIN_PASSWORD`; otherwise the first registration wins.
-- The side rail exposes Dashboard, Access Keys, Accounts, Pricing,
+- The side rail exposes Dashboard, Access Keys, Accounts, Providers,
   Applications, Logs, and Settings. The Applications view is generated from 16
   guides: Claude Code,
   Claude Desktop, Codex, Gemini CLI, Pi, Kimi Code CLI, OpenCode, WorkBuddy,
   OpenClaw, Hermes, Cherry Studio, VS Code Copilot Chat, Cline, Roo Code,
   Continue, and Chatbox. The Claude Desktop copy action also saves its three
   role models; every other guide only produces client configuration and does
-  not change gateway settings. The Pricing view reads and refreshes the active
-  OpenCode Go snapshot through the protected pricing API.
+  not change gateway settings. The Providers view hosts scoped pricing, Zen
+  catalog refresh, and protocol-probe controls.
 - Account cards are the Plan / credential / quota unit. Zen Free is
   database-owned: it can be enabled, disabled, and reordered, but cannot be
   created or deleted through generic account APIs. GOAT / SCNet drafts stay
   disabled and unroutable. Custom API is catalog-routable after verify-then-
-  enable; create/update still leave the card disabled `pending`. Logs persist provider, offering, route-account, credential-account,
+  enable; create/update still leave the card disabled `pending`. Zen catalog
+  refresh and protocol probes live on Providers rather than account cards.
+  Logs persist provider, offering, route-account, credential-account,
   `requested_model`, `resolved_alias`, `upstream_model`, optional
   `native_cost_*`, raw-cost, quota-debit, and effective-paid-cost. There is
   no `requested_alias` field. The existing model filter exact-matches any
   stored identity (`model`, `requested_model`, `resolved_alias`, or
   `upstream_model`). The side rail keeps the current seven views; do not add
-  a provider page or model-routing page.
+  a model-routing page.
 
 ### Account Lifecycle And Browser Runtime
 
@@ -450,9 +452,10 @@ difference, and the Claude Desktop three-role persistence behavior.
 ### Persistence
 
 - `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
-  queries. `crates/ocg-core/src/models.rs` defines the shared serde types
-  and `AppConfig`. `crates/ocg-core/src/crypto.rs` provides key obfuscation
-  and `.encryption-key` management.
+  queries. `crates/ocg-core/src/provider_contracts.rs` owns provider contract
+  scopes and model-protocol evidence. `crates/ocg-core/src/models.rs` defines
+  the shared serde types and `AppConfig`. `crates/ocg-core/src/crypto.rs`
+  provides key obfuscation and `.encryption-key` management.
 - Schema v22 created explicit immutable provider/offering bindings, provider
   pricing/usage state, quota windows, and provider-aware forward-log fields.
   Schema v23 adds Plan verification state, Alias / upstream log identity
@@ -467,8 +470,10 @@ difference, and the Claude Desktop three-role persistence behavior.
   or a license to run an older binary on the migrated database. Schema v24
   adds the actual proxy route leg to forward logs. Schema v25 adds
   `provider_model_catalogs`; the Zen Free refresh stores its
-  last successful filtered model snapshot there. This additive migration does
-  not create separate pre-v24 or pre-v25 backups. On every `Database::open`, enabled
+  last successful filtered model snapshot there. Schema v26 adds
+  `provider_contract_scopes` and `provider_contract_model_protocols` for
+  provider contract scope and model-protocol evidence. These additive
+  migrations do not create separate pre-v24, pre-v25, or pre-v26 backups. On every `Database::open`, enabled
   leftovers for Command Code GOAT and all three SCNet
   Token Plan tiers are disabled without changing `updated_at`. Custom API
   enabled state is preserved. Verification and configuration remain intact,
@@ -987,9 +992,10 @@ most of them; the manual parts need a real desktop.
       and selectable. Spot-check that copied results contain no masked key,
       and actually launch Claude Desktop and Gemini CLI once each for a text
       and a tool call.
-- [ ] Cover schema v16 migration, schema v25 (`data.sqlite.pre-v23.*.bak`
+- [ ] Cover schema v16 migration, schema v26 (`data.sqlite.pre-v23.*.bak`
       rollback, Alias / upstream log identity, optional native cost, unverified
-      GOAT rows stay disabled `pending`, Zen Free catalog persistence), legacy `key + ready`, managed transitions (forward one step /
+      GOAT rows stay disabled `pending`, Zen Free catalog persistence, provider
+      contract scopes / model-protocol tables), legacy `key + ready`, managed transitions (forward one step /
       rewind earlier steps / no skip-forward), pending-route isolation, the
       invite URL allowlist and demo-default write-back, and the
       `2xx`/`429`/`401`/`403`/network/`5xx` key-verification branches. Confirm
@@ -1110,8 +1116,8 @@ most of them; the manual parts need a real desktop.
   Docker, macOS, and Linux dashboards must keep hiding the switch.
 - **Local Alias lists stay local.** Authenticated `GET /v1/models` and
   dashboard `application-models` must not grow request-time upstream discovery.
-  The explicit Zen Free refresh is the only directory-fetch exception and is
-  restricted to the fixed official endpoint.
+  The explicit Zen Free refresh on Providers is the only directory-fetch
+  exception and is restricted to the fixed official endpoint.
   Do not equate the two lists; do not invent a `requested_alias` log field.
 - **Don't re-invent `cargo test` ergonomics.** The CLI uses
   `parking_lot::Mutex`, which is not re-entrant. When a function needs to

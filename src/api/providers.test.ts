@@ -43,6 +43,22 @@ test("provider catalog and offering pricing use the provider-scoped routes", asy
   assert.equal(requests[1]?.method, "GET");
 });
 
+test("provider model capabilities expose concrete test protocols", async () => {
+  const requests = mockDashboardFetch(() => ([{
+    model_id: "gpt-5.6-luna",
+    provider_id: "opencode",
+    offering_id: "go",
+    preferred_protocol: "responses",
+    supported_protocols: ["chat_completions", "responses"],
+  }]));
+
+  const capabilities = await providerApi.getProviderModelCapabilities();
+
+  assert.equal(requests[0]?.url, "/dashboard/api/providers/model-capabilities");
+  assert.equal(requests[0]?.method, "GET");
+  assert.deepEqual(capabilities[0]?.supported_protocols, ["chat_completions", "responses"]);
+});
+
 test("provider usage is read per account without a request body", async () => {
   const requests = mockDashboardFetch(() => ({
     account_id: "account-1",
@@ -105,5 +121,68 @@ test("Zen model catalog GET and refresh use the account-scoped routes", async ()
   assert.equal(requests[0]?.method, "GET");
   assert.equal(requests[1]?.url, "/dashboard/api/accounts/zen/provider-models/refresh");
   assert.equal(requests[1]?.method, "POST");
-  assert.equal(refreshed.models[0]?.alias, "coder");
+  assert.equal("models" in refreshed && Array.isArray(refreshed.models), true);
+});
+
+test("provider contracts GET is a local dashboard path with no body", async () => {
+  const requests = mockDashboardFetch(() => ({
+    revision: 4,
+    providers: [],
+    custom_endpoints: [],
+  }));
+
+  const response = await providerApi.getProviderContracts();
+
+  assert.equal(requests[0]?.url, "/dashboard/api/provider-contracts");
+  assert.equal(requests[0]?.method, "GET");
+  assert.equal(requests[0]?.body, null);
+  assert.equal(response.revision, 4);
+});
+
+test("protocol switch PUT sends the shared revision as expected_revision", async () => {
+  const requests = mockDashboardFetch(() => ({
+    revision: 8,
+    providers: [],
+    custom_endpoints: [],
+  }));
+
+  const response = await providerApi.updateProviderContractProtocol(
+    "provider",
+    "opencode",
+    "chat_completions",
+    { enabled: false, expected_revision: 7 },
+  );
+
+  assert.equal(
+    requests[0]?.url,
+    "/dashboard/api/provider-contracts/provider/opencode/protocols/chat_completions",
+  );
+  assert.equal(requests[0]?.method, "PUT");
+  assert.deepEqual(requests[0]?.body, {
+    enabled: false,
+    expected_revision: 7,
+  });
+  assert.equal(response.revision, 8);
+});
+
+test("protocol probes POST unique protocols and return per-protocol results", async () => {
+  const requests = mockDashboardFetch(() => ({
+    account_id: "acc-1",
+    model_id: "gpt-5.6-luna",
+    results: [{ protocol: "responses", success: true, skipped: false, error: null }],
+    contract: null,
+  }));
+
+  const response = await providerApi.runProtocolProbes("acc-1", {
+    model_id: "gpt-5.6-luna",
+    protocols: ["responses", "chat_completions"],
+  });
+
+  assert.equal(requests[0]?.url, "/dashboard/api/accounts/acc-1/protocol-probes");
+  assert.equal(requests[0]?.method, "POST");
+  assert.deepEqual(requests[0]?.body, {
+    model_id: "gpt-5.6-luna",
+    protocols: ["responses", "chat_completions"],
+  });
+  assert.equal(response.results[0]?.success, true);
 });

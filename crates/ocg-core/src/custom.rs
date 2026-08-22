@@ -4,9 +4,13 @@
 //! Account model capabilities are the client-facing IDs and the exact upstream
 //! IDs. Verification sends one protocol-correct non-stream request against the
 //! first declared model. Discovery never mutates the declared list.
+//! The adapter identity is Configurable HTTP, not a base class other providers
+//! inherit from. Custom keeps configurable URL/auth and
+//! verified-then-explicit-enable.
 
 use crate::custom_http::{
-    self, CustomHttpClient, CustomHttpError, join_custom_endpoint, json_content_headers,
+    self, CustomHttpClient, CustomHttpError, HttpInferenceTransport, InferenceHttpError,
+    join_custom_endpoint, json_content_headers,
 };
 use crate::gateway::protocol::ApiFormat;
 use crate::models::{
@@ -18,7 +22,6 @@ use crate::provider::{
     CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, UpstreamAuthScheme, UpstreamProtocolKind,
     custom_endpoint_relative_path, is_custom_api,
 };
-use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -423,23 +426,17 @@ fn advance_model_discovery_cursor(
 async fn read_custom_model_discovery_body(
     response: reqwest::Response,
 ) -> Result<Vec<u8>, CustomModelDiscoveryFailure> {
-    if let Some(length) = response.content_length()
-        && length > MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES as u64
-    {
-        return Err(oversized_model_discovery_body());
-    }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| CustomModelDiscoveryFailure {
-            message: format!("Custom model discovery response body failed: {error}"),
-        })?;
-        model_discovery_body_size_allowed(body.len().saturating_add(chunk.len()))?;
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    HttpInferenceTransport::read_body_limited(response, MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES)
+        .await
+        .map_err(|error| match error {
+            InferenceHttpError::Oversize { .. } => oversized_model_discovery_body(),
+            other => CustomModelDiscoveryFailure {
+                message: format!("Custom model discovery response body failed: {other}"),
+            },
+        })
 }
 
+#[cfg(test)]
 fn model_discovery_body_size_allowed(size: usize) -> Result<(), CustomModelDiscoveryFailure> {
     if size > MAX_CUSTOM_MODEL_DISCOVERY_BODY_BYTES {
         Err(oversized_model_discovery_body())
@@ -572,23 +569,14 @@ pub async fn probe_custom_connection(
 async fn read_custom_verification_body(
     response: reqwest::Response,
 ) -> Result<Vec<u8>, CustomVerifyFailure> {
-    if let Some(length) = response.content_length()
-        && length > MAX_CUSTOM_VERIFICATION_BODY_BYTES as u64
-    {
-        return Err(oversized_verification_body());
-    }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| CustomVerifyFailure {
-            message: format!("Custom verification response body failed: {error}"),
-        })?;
-        if body.len().saturating_add(chunk.len()) > MAX_CUSTOM_VERIFICATION_BODY_BYTES {
-            return Err(oversized_verification_body());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    HttpInferenceTransport::read_body_limited(response, MAX_CUSTOM_VERIFICATION_BODY_BYTES)
+        .await
+        .map_err(|error| match error {
+            InferenceHttpError::Oversize { .. } => oversized_verification_body(),
+            other => CustomVerifyFailure {
+                message: format!("Custom verification response body failed: {other}"),
+            },
+        })
 }
 
 fn oversized_verification_body() -> CustomVerifyFailure {
@@ -627,6 +615,57 @@ impl CustomHttpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_runtime_identity_is_configurable_http_not_a_base_class() {
+        use crate::provider::{
+            ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, ConfigurableHttpAdapter,
+            GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+            ProviderAdapterKind, SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+            VerificationAdapter, builtin_plan,
+        };
+        assert_eq!(
+            ProviderAdapterKind::from_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
+            Some(ProviderAdapterKind::ConfigurableHttp)
+        );
+        for (provider_id, offering_id) in [
+            (OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
+            (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID),
+            (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
+            (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
+        ] {
+            assert_ne!(
+                ProviderAdapterKind::from_offering(provider_id, offering_id),
+                Some(ProviderAdapterKind::ConfigurableHttp)
+            );
+        }
+        let runtime = CustomAccountRuntime {
+            account_id: "acc".into(),
+            enabled: true,
+            verification_status: ConnectionVerificationStatus::Verified,
+            setup_ready: true,
+            has_key: true,
+            config: AccountCustomConfig {
+                account_id: "acc".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            capabilities: Vec::new(),
+        };
+        assert!(runtime.eligible());
+        let plan = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
+        let verification = ConfigurableHttpAdapter::verification(plan);
+        assert!(verification.never_auto_enable);
+        assert!(verification.probe_first_declared_model);
+        assert!(!verification.uses_get_models);
+        assert_eq!(
+            verification.runtime_availability,
+            plan.verification_runtime_availability
+        );
+    }
 
     #[test]
     fn custom_model_id_matching_is_exact_or_case_folded_without_separator_folding() {

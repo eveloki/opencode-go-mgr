@@ -256,9 +256,11 @@ pub async fn models(
 
 fn published_alias_models_response(state: &CoreState) -> axum::response::Response {
     let zen_catalog = state.zen_free_model_catalog();
+    let contracts = state.provider_contracts();
     let published = alias::published_routeable_aliases_with_zen(&zen_catalog.models);
     let mut data: Vec<serde_json::Value> = published
         .iter()
+        .filter(|item| published_alias_has_enabled_protocol(item, &zen_catalog.models, &contracts))
         .map(|item| {
             serde_json::json!({
                 "id": item.alias,
@@ -268,7 +270,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
             })
         })
         .collect();
-    let custom_ids = eligible_custom_model_ids(state);
+    let custom_ids = eligible_custom_model_ids(state, &contracts);
     for id in custom_ids {
         if published
             .iter()
@@ -295,13 +297,43 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
     .into_response()
 }
 
-fn eligible_custom_model_ids(state: &CoreState) -> Vec<String> {
-    state
-        .db
-        .lock()
-        .list_custom_account_runtimes()
-        .map(|runtimes| crate::custom::eligible_custom_model_ids(&runtimes))
-        .unwrap_or_default()
+fn published_alias_has_enabled_protocol(
+    item: &alias::PublishedAlias,
+    zen_models: &[String],
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+) -> bool {
+    match alias::resolve_with_provider_models(&item.alias, zen_models, &[]) {
+        Ok(alias::ResolvedModel::Alias { mappings, .. }) => mappings
+            .iter()
+            .any(|mapping| mapping.routeable && contracts.mapping_has_enabled_protocol(mapping)),
+        Ok(alias::ResolvedModel::PinnedRaw { mapping, .. }) => {
+            mapping.routeable && contracts.mapping_has_enabled_protocol(&mapping)
+        }
+        Err(_) => false,
+    }
+}
+
+fn eligible_custom_model_ids(
+    state: &CoreState,
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+) -> Vec<String> {
+    let Ok(runtimes) = state.db.lock().list_custom_account_runtimes() else {
+        return Vec::new();
+    };
+    crate::custom::eligible_custom_model_ids(&runtimes)
+        .into_iter()
+        .filter(|id| {
+            runtimes.iter().any(|runtime| {
+                runtime.eligible()
+                    && runtime.capability_matching(id).is_some()
+                    && contracts
+                        .scope(&crate::provider_contracts::ContractScope::custom_endpoint(
+                            &runtime.account_id,
+                        ))
+                        .is_some_and(|contract| contract.model_has_enabled_protocol(id))
+            })
+        })
+        .collect()
 }
 
 async fn proxy_handler(
@@ -372,7 +404,8 @@ async fn proxy_handler_inner(
     } else {
         parsed.requested_model.clone()
     };
-    let custom_model_ids = eligible_custom_model_ids(&state);
+    let contracts = state.provider_contracts();
+    let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
     let zen_catalog = state.zen_free_model_catalog();
     let resolved = match alias::resolve_with_provider_models(
         &routing_model,
@@ -404,6 +437,7 @@ async fn proxy_handler_inner(
         routing_model,
         config,
         Some(client_key_id),
+        contracts,
     )
     .await
 }
@@ -468,7 +502,8 @@ async fn gemini_proxy_handler(
     };
     let client_model = parsed.requested_model.clone();
     let routing_model = parsed.requested_model.clone();
-    let custom_model_ids = eligible_custom_model_ids(&state);
+    let contracts = state.provider_contracts();
+    let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
     let zen_catalog = state.zen_free_model_catalog();
     let resolved = match alias::resolve_with_provider_models(
         &routing_model,
@@ -499,6 +534,7 @@ async fn gemini_proxy_handler(
         routing_model,
         config,
         Some(client_key_id),
+        contracts,
     )
     .await
 }
@@ -516,6 +552,7 @@ async fn execute_plan(
     routing_model: String,
     config: AppConfig,
     client_key_id: Option<String>,
+    contracts: std::sync::Arc<crate::provider_contracts::EffectiveContractSet>,
 ) -> axum::response::Response {
     // One logical client request, including safe retries and account fallback,
     // must use one immutable pricing revision from start to finish.
@@ -656,6 +693,7 @@ async fn execute_plan(
             &client_body,
             free_available,
             &custom_runtimes,
+            &contracts,
         ) {
             Ok(route_set) => route_set,
             Err(error) => {

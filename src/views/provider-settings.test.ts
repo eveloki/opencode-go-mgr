@@ -26,6 +26,7 @@ const catalogEntry = (
   managed_registration: provider_id === "opencode",
   pricing_availability: "available",
   usage_availability: "available",
+  manual_usage_calibration: false,
   quota_unit: "usd",
   model_source: "test",
   auth_schemes: ["bearer"],
@@ -106,6 +107,8 @@ test("pricing catalog fetches the provider catalog explicitly and keeps the Go t
 
   assert.match(catalog, /providerApi\.getProviderCatalog\(\)/);
   assert.match(catalog, /onMounted\(\(\) => void loadProviderCatalog\(\)\)/);
+  assert.match(catalog, /buildScopedPlanPricingGroups/);
+  assert.match(catalog, /props\.providerId/);
   // No auto-refresh of the catalog or prices.
   assert.doesNotMatch(catalog, /setInterval|setTimeout/);
   // Loading and error states with retry; every catalog plan has an explicit
@@ -119,7 +122,7 @@ test("pricing catalog fetches the provider catalog explicitly and keeps the Go t
   assert.match(catalog, /resolvePlanPricingDisplay/);
   assert.match(catalog, /v-for="group in planGroups"/);
   // OpenCode Go keeps the full table/edit/manual-refresh flow.
-  assert.match(catalog, /onMounted\(\(\) => void loadPricing\(\)\)/);
+  assert.match(catalog, /if \(!props\.providerId \|\| props\.providerId === "opencode"\) void loadPricing\(\)/);
   assert.match(catalog, /@click="requestPricingRefresh"/);
   const goBlockStart = catalog.indexOf("group.content.kind === 'opencode-go'");
   assert.notEqual(goBlockStart, -1);
@@ -171,8 +174,10 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.match(accountForm, /\.full-width-field,[\s\S]*?grid-column: 1 \/ -1;/);
   assert.doesNotMatch(accountForm, /实验性 · 未配置/);
   assert.match(accountCard, /planLabel\(account, catalog\)/);
-  assert.match(accountCard, /<GoatQuotaReference v-if="isGoat"/);
-  assert.match(accountCard, /grid-template-columns: repeat\(5, 40px\)/);
+  assert.doesNotMatch(accountCard, /<AccountTestPopover/);
+  assert.match(accountCard, /前往供应商/);
+  assert.match(accountCard, /plan\.value\?\.manual_usage_calibration \?\? isGoat\.value/);
+  assert.match(accountCard, /grid-template-columns: repeat\(4, 40px\)/);
   assert.match(accountCard, /account-action--enabled/);
   assert.doesNotMatch(accountCard, /<n-tag v-if="isDraft"/);
   assert.match(accounts, /:catalog="providerCatalog"/);
@@ -182,14 +187,19 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.match(chooser, /t\(option\.creationHint\)/);
 });
 
-test("GOAT cards show official plan-limit bars without claiming synchronized usage", () => {
-  const reference = readFileSync(new URL("../components/GoatQuotaReference.vue", import.meta.url), "utf8");
+test("GOAT cards share the usage strip and reserve calibration for providers without usage queries", () => {
+  const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  const usage = readFileSync(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+  const providers = readFileSync(new URL("./account-providers.ts", import.meta.url), "utf8");
 
-  assert.match(reference, /label: "5 小时额度", amount: "\$14"/);
-  assert.match(reference, /label: "周额度", amount: "\$35"/);
-  assert.match(reference, /label: "月额度", amount: "\$70"/);
-  assert.match(reference, /Command Code CLI 运行 \/usage 查看/);
-  assert.doesNotMatch(reference, /used|remaining|percentage|provider-usage/);
+  assert.match(card, /v-if="manualUsageCalibration && accountIsReady\(account\) && edits"/);
+  assert.doesNotMatch(card, /v-if="isGo && accountIsReady\(account\) && edits"/);
+  assert.match(card, /服务商未开放用量查询，显示值由你手工校准/);
+  assert.match(card, /<UsageStrip[\s\S]*?:limits="limits"/);
+  assert.match(providers, /window_5h: 14/);
+  assert.match(providers, /window_week: 35/);
+  assert.match(providers, /window_month: 70/);
+  assert.match(usage, /isCommandCodeGoatAccount\(account\)/);
 });
 
 test("Applications labels all model selectors as Alias-first", () => {
