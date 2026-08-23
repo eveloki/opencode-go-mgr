@@ -1273,6 +1273,75 @@
       ],
       "type": "object"
     },
+    "CustomModelDiscoveryRequest": {
+      "additionalProperties": false,
+      "description": "POST `/custom/models/discover` body. Operational probe: CAS tokens must\nnot be sent. `apiKey` is write-only; an edit form may send `accountId`\ninstead so the handler can use the stored Custom key. Unknown fields are\nrejected.",
+      "properties": {
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "apiKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authScheme": {
+          "$ref": "#/$defs/AccountAuthScheme"
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        }
+      },
+      "required": [
+        "baseUrl",
+        "upstreamProtocol",
+        "authScheme"
+      ],
+      "type": "object"
+    },
+    "CustomModelDiscoveryResponse": {
+      "additionalProperties": false,
+      "description": "Custom model-list probe result. Identity tokens are the captured current\nrevision / process generation / pricing snapshot id; this response never\nechoes the supplied key or mutates control state.",
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "models",
+        "truncated",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
     "DailyCostByModel": {
       "additionalProperties": false,
       "description": "GET `/dashboard/daily-cost-by-model` envelope.",
@@ -4486,6 +4555,12 @@
     },
     {
       "$ref": "#/$defs/ProxyTestResponse"
+    },
+    {
+      "$ref": "#/$defs/CustomModelDiscoveryRequest"
+    },
+    {
+      "$ref": "#/$defs/CustomModelDiscoveryResponse"
     }
   ],
   "title": "DashboardApiV3"

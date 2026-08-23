@@ -102,7 +102,9 @@ export type DashboardApiV3 =
   | AuthLogin
   | AuthLogout
   | ProxyTestRequest
-  | ProxyTestResponse;
+  | ProxyTestResponse
+  | CustomModelDiscoveryRequest
+  | CustomModelDiscoveryResponse;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -1292,4 +1294,29 @@ export interface ProxyTestResponse {
   proxyMode: ProxyMode;
   revision: number;
   status: number;
+}
+/**
+ * POST `/custom/models/discover` body. Operational probe: CAS tokens must
+ * not be sent. `apiKey` is write-only; an edit form may send `accountId`
+ * instead so the handler can use the stored Custom key. Unknown fields are
+ * rejected.
+ */
+export interface CustomModelDiscoveryRequest {
+  accountId?: string | null;
+  apiKey?: string | null;
+  authScheme: AccountAuthScheme;
+  baseUrl: string;
+  upstreamProtocol: AccountUpstreamProtocol;
+}
+/**
+ * Custom model-list probe result. Identity tokens are the captured current
+ * revision / process generation / pricing snapshot id; this response never
+ * echoes the supplied key or mutates control state.
+ */
+export interface CustomModelDiscoveryResponse {
+  models: string[];
+  pricingRevision: string;
+  processGeneration: number;
+  revision: number;
+  truncated: boolean;
 }
