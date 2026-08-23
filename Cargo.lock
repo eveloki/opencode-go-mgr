@@ -2793,6 +2793,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "ocg-domain",
+ "ocg-gateway",
  "ocg-infra",
  "parking_lot",
  "reqwest 0.12.28",
@@ -2818,6 +2819,16 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ocg-gateway"
+version = "1.8.2"
+dependencies = [
+ "anyhow",
+ "ocg-domain",
+ "syn 2.0.118",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

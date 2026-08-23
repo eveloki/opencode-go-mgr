@@ -18,6 +18,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 ocg-domain = { path = "../ocg-domain" }
+ocg-gateway = { path = "../ocg-gateway" }
 ocg-infra = { path = "../ocg-infra" }
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = [

@@ -1,559 +1,88 @@
-//! Transport-boundary description of one upstream inference attempt.
+//! Compatibility facade for [`ocg_gateway::attempt`].
 //!
-//! [`AttemptSpec`] is data only: endpoint/base URL, path, upstream protocol,
-//! auth scheme, redirect policy, an opaque credential handle, and the
-//! proxy-routing model. Provider adapters produce this value. They never
-//! receive Host state, a database handle, or an HTTP client, and they never
-//! see plaintext credentials.
-//!
-//! [`CredentialResolver`] is the Host-side seam. The single-attempt executor
-//! resolves the handle, constructs the authorization header, and selects the
-//! outbound client from [`ProxyRoutingModel`]. This slice does not rewrite
-//! the outer fallback loop.
-//!
-//! [`AttemptTimeouts`] and [`AttemptTransportError`] describe the single POST
-//! boundary. `forward_once` in `forwarder` performs exactly one `.send()` and
-//! owns only transport selection and those timeouts.
-//!
-//! The temporary process-host resolver and `DbAttemptSink` live in `forwarder`
-//! because `state.rs` / `db.rs` are outside this lease. A later host slice
-//! should move the concrete resolver next to `KeyHost`.
+//! Crate-private items match the historical `ocg_core::gateway::attempt`
+//! surface. The public module path is unchanged; item visibility is not
+//! widened. Do not glob-reexport or reexport the module itself.
 
-use crate::kernel::protocol::ApiFormat;
-use std::time::Duration;
-
-/// Authentication belongs to the provider/offering adapter, not to the wire
-/// protocol. In particular, a Messages endpoint does not imply `x-api-key`
-/// for every future provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UpstreamAuth {
-    OpenCodeProtocolDefault,
-    Bearer,
-    XApiKey,
-    None,
-}
-
-/// How the single-attempt executor selects an outbound client and URL/header
-/// policy. This replaces `provider_id` / `custom_route` branches in the
-/// forwarder send path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProxyRoutingModel {
-    /// Frozen request-entry `ForwardRouteSet` snapshot (OpenCode Go / Zen Free).
-    /// Follows redirects. Restricted URL (https or loopback http). Forwards
-    /// harmless client headers.
-    RequestEntrySnapshot,
-    /// Process-wide default-leg client with redirects disabled (GOAT loopback).
-    /// Restricted URL. Forwards harmless client headers.
-    ProcessWideNoRedirect,
-    /// Custom trusted-admin isolated client: process-wide proxy, no redirects,
-    /// no client-header forwarding, administrator-trusted URL.
-    IsolatedTrustedAdmin,
-}
-
-/// Opaque credential identity. Adapters store only an account id (or none);
-/// plaintext is resolved by [`CredentialResolver`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CredentialHandle {
-    /// Anonymous / keyless route (Zen Free). Host must not decrypt.
-    None,
-    /// Host decrypts this account's stored key. Never contains plaintext.
-    Account { id: String },
-}
-
-impl CredentialHandle {
-    pub(crate) fn account_id(&self) -> Option<&str> {
-        match self {
-            Self::None => None,
-            Self::Account { id } => Some(id.as_str()),
-        }
-    }
-}
-
-/// Data-only description of one upstream inference attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AttemptSpec {
-    pub base_url: String,
-    pub path: String,
-    pub upstream: ApiFormat,
-    pub auth: UpstreamAuth,
-    /// Redirect policy: OpenCode Go / Zen follow redirects; GOAT and Custom
-    /// trusted-admin do not. The selected routing model must enforce the same
-    /// policy; this field keeps that transport contract explicit and testable.
-    pub follow_redirects: bool,
-    pub credential: CredentialHandle,
-    pub proxy_routing: ProxyRoutingModel,
-}
-
-impl AttemptSpec {
-    pub(crate) fn credential_account_id(&self) -> Option<&str> {
-        self.credential.account_id()
-    }
-
-    /// Restricted OpenCode/GOAT URL check: https or loopback http. Custom
-    /// trusted-admin destinations skip this.
-    pub(crate) fn restricted_upstream_url(&self) -> bool {
-        !matches!(self.proxy_routing, ProxyRoutingModel::IsolatedTrustedAdmin)
-    }
-
-    pub(crate) fn isolates_client_headers(&self) -> bool {
-        matches!(self.proxy_routing, ProxyRoutingModel::IsolatedTrustedAdmin)
-    }
-
-    /// Wire auth after OpenCode protocol-default mapping. Messages uses
-    /// `x-api-key`; other OpenCode defaults use Bearer.
-    pub(crate) fn wire_auth(&self) -> UpstreamAuth {
-        match self.auth {
-            UpstreamAuth::OpenCodeProtocolDefault if self.upstream == ApiFormat::Messages => {
-                UpstreamAuth::XApiKey
-            }
-            UpstreamAuth::OpenCodeProtocolDefault => UpstreamAuth::Bearer,
-            auth => auth,
-        }
-    }
-
-    pub(crate) fn request_url(&self) -> Result<String, String> {
-        let path = if self.path.is_empty() {
-            self.upstream
-                .upstream_path()
-                .ok_or_else(|| "Gemini is a client-only protocol".to_string())?
-                .to_string()
-        } else {
-            self.path.clone()
-        };
-        Ok(format!("{}{}", self.base_url.trim_end_matches('/'), path))
-    }
-}
-
-/// Timeouts applied at the single-POST boundary. Non-stream uses reqwest's
-/// per-request timeout; stream wraps `.send()` with a header-wait timeout.
-/// Body idle timeouts, SSE conversion, and retry stay outside `forward_once`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AttemptTimeouts {
-    pub non_stream: Duration,
-    pub stream_header: Duration,
-}
-
-impl AttemptTimeouts {
-    pub(crate) fn from_secs(non_stream: u64, stream_header: u64) -> Self {
-        Self {
-            non_stream: Duration::from_secs(non_stream),
-            stream_header: Duration::from_secs(stream_header),
-        }
-    }
-}
-
-/// Classification kind of one host send failure. Connect is assigned first so a
-/// connect timeout stays retry-eligible; [`TransportSendFailure::timed_out`] is
-/// the independent timeout bit used for Stage 0 user/log text and HTTP status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransportFailureKind {
-    Timeout,
-    Connect,
-    Other,
-}
-
-/// Neutral owned send failure. Captured at the host `.send()` site; does not
-/// retain a concrete HTTP-client error type. `message` is the Stage 0 user/log
-/// text (`upstream request timed out|failed: …`) copied from the host error
-/// Display. Caller-side sanitizers still run on this string.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TransportSendFailure {
-    pub kind: TransportFailureKind,
-    pub timed_out: bool,
-    pub message: String,
-}
-
-impl TransportSendFailure {
-    /// Convert host send flags at the single `.send()` boundary.
-    /// `is_connect` wins for [`Self::kind`]; `is_timeout` independently selects
-    /// the Stage 0 timeout prefix and [`Self::timed_out`].
-    pub(crate) fn from_send_error(
-        is_connect: bool,
-        is_timeout: bool,
-        cause: impl Into<String>,
-    ) -> Self {
-        let cause = cause.into();
-        let kind = if is_connect {
-            TransportFailureKind::Connect
-        } else if is_timeout {
-            TransportFailureKind::Timeout
-        } else {
-            TransportFailureKind::Other
-        };
-        let message = if is_timeout {
-            format!("upstream request timed out: {cause}")
-        } else {
-            format!("upstream request failed: {cause}")
-        };
-        Self {
-            kind,
-            timed_out: is_timeout,
-            message,
-        }
-    }
-}
-
-impl std::fmt::Display for TransportSendFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-/// Errors from the single upstream POST. Classification, logging, cooldown,
-/// CAS, usage scheduling, and retry stay in the caller.
-#[derive(Debug)]
-pub(crate) enum AttemptTransportError {
-    HeaderTimeout { timeout: Duration },
-    Send(TransportSendFailure),
-}
-
-impl std::fmt::Display for AttemptTransportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::HeaderTimeout { timeout } => write!(
-                f,
-                "upstream did not return response headers within {}s",
-                timeout.as_secs()
-            ),
-            Self::Send(failure) => write!(f, "{failure}"),
-        }
-    }
-}
-
-impl std::error::Error for AttemptTransportError {}
-
-/// Host-side seam: decrypts an opaque [`CredentialHandle`]. Provider adapters
-/// never receive this trait or the resulting plaintext. The single-attempt
-/// executor constructs the authorization header from the resolved secret and
-/// [`AttemptSpec::wire_auth`].
-pub(crate) trait CredentialResolver {
-    fn resolve_credential(
-        &self,
-        handle: &CredentialHandle,
-    ) -> Result<Option<String>, CredentialResolveError>;
-}
-
-#[derive(Debug)]
-pub(crate) enum CredentialResolveError {
-    Decrypt(anyhow::Error),
-    HandleMismatch { expected: String, actual: String },
-}
-
-impl std::fmt::Display for CredentialResolveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Decrypt(error) => write!(f, "{error}"),
-            Self::HandleMismatch { expected, actual } => write!(
-                f,
-                "credential handle `{actual}` does not match selected account `{expected}`"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for CredentialResolveError {}
+pub(crate) use ocg_gateway::attempt::{
+    AttemptSpec, AttemptTimeouts, AttemptTransportError, CredentialHandle, CredentialResolveError,
+    CredentialResolver, ProxyRoutingModel, TransportFailureKind, TransportSendFailure,
+    UpstreamAuth,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    struct MapResolver(HashMap<String, String>);
-
-    impl CredentialResolver for MapResolver {
-        fn resolve_credential(
-            &self,
-            handle: &CredentialHandle,
-        ) -> Result<Option<String>, CredentialResolveError> {
-            match handle.account_id() {
-                None => Ok(None),
-                Some(id) => Ok(self.0.get(id).cloned()),
-            }
-        }
-    }
-
-    fn spec(
-        auth: UpstreamAuth,
-        upstream: ApiFormat,
-        follow_redirects: bool,
-        credential: CredentialHandle,
-        proxy_routing: ProxyRoutingModel,
-    ) -> AttemptSpec {
-        AttemptSpec {
-            base_url: "https://opencode.ai/zen/go".into(),
-            path: "/v1/chat/completions".into(),
-            upstream,
-            auth,
-            follow_redirects,
-            credential,
-            proxy_routing,
-        }
-    }
+    use std::any::TypeId;
 
     #[test]
-    fn attempt_spec_is_data_only_and_describes_the_transport_boundary() {
-        let spec = spec(
-            UpstreamAuth::OpenCodeProtocolDefault,
-            ApiFormat::ChatCompletions,
-            true,
-            CredentialHandle::Account { id: "go-1".into() },
-            ProxyRoutingModel::RequestEntrySnapshot,
-        );
-        assert_eq!(spec.base_url, "https://opencode.ai/zen/go");
-        assert_eq!(spec.path, "/v1/chat/completions");
-        assert_eq!(spec.upstream, ApiFormat::ChatCompletions);
-        assert_eq!(spec.auth, UpstreamAuth::OpenCodeProtocolDefault);
-        assert!(spec.follow_redirects);
-        assert_eq!(spec.credential_account_id(), Some("go-1"));
-        assert_eq!(spec.proxy_routing, ProxyRoutingModel::RequestEntrySnapshot);
-        assert!(spec.restricted_upstream_url());
-        assert!(!spec.isolates_client_headers());
+    fn facade_reexports_gateway_attempt_types_without_widening() {
         assert_eq!(
-            spec.request_url().unwrap(),
-            "https://opencode.ai/zen/go/v1/chat/completions"
+            TypeId::of::<AttemptSpec>(),
+            TypeId::of::<ocg_gateway::attempt::AttemptSpec>()
         );
-        let debug = format!("{spec:?}");
-        assert!(debug.contains("go-1"));
-        assert!(!debug.contains("sk-"));
-    }
-
-    #[test]
-    fn attempt_spec_production_source_does_not_name_host_state() {
-        let source = include_str!("attempt.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source precedes tests");
-        assert!(
-            !production.contains("CoreState"),
-            "AttemptSpec must not name CoreState"
+        assert_eq!(
+            TypeId::of::<AttemptTimeouts>(),
+            TypeId::of::<ocg_gateway::attempt::AttemptTimeouts>()
         );
-        assert!(
-            !production.contains("Database"),
-            "AttemptSpec must not name Database"
+        assert_eq!(
+            TypeId::of::<AttemptTransportError>(),
+            TypeId::of::<ocg_gateway::attempt::AttemptTransportError>()
         );
-        assert!(
-            !production.contains("reqwest::Client"),
-            "AttemptSpec must not name reqwest::Client"
+        assert_eq!(
+            TypeId::of::<CredentialHandle>(),
+            TypeId::of::<ocg_gateway::attempt::CredentialHandle>()
         );
-        assert!(
-            !production.contains("reqwest::Error"),
-            "AttemptTransportError must not wrap reqwest::Error"
+        assert_eq!(
+            TypeId::of::<CredentialResolveError>(),
+            TypeId::of::<ocg_gateway::attempt::CredentialResolveError>()
+        );
+        assert_eq!(
+            TypeId::of::<ProxyRoutingModel>(),
+            TypeId::of::<ocg_gateway::attempt::ProxyRoutingModel>()
+        );
+        assert_eq!(
+            TypeId::of::<TransportFailureKind>(),
+            TypeId::of::<ocg_gateway::attempt::TransportFailureKind>()
+        );
+        assert_eq!(
+            TypeId::of::<TransportSendFailure>(),
+            TypeId::of::<ocg_gateway::attempt::TransportSendFailure>()
+        );
+        assert_eq!(
+            TypeId::of::<UpstreamAuth>(),
+            TypeId::of::<ocg_gateway::attempt::UpstreamAuth>()
+        );
+        assert_eq!(
+            TypeId::of::<dyn CredentialResolver>(),
+            TypeId::of::<dyn ocg_gateway::attempt::CredentialResolver>()
         );
     }
 
     #[test]
-    fn wire_auth_maps_opencode_protocol_default_without_provider_id() {
-        let chat = spec(
-            UpstreamAuth::OpenCodeProtocolDefault,
-            ApiFormat::ChatCompletions,
-            true,
-            CredentialHandle::Account { id: "go-1".into() },
-            ProxyRoutingModel::RequestEntrySnapshot,
-        );
-        assert_eq!(chat.wire_auth(), UpstreamAuth::Bearer);
-        let messages = AttemptSpec {
-            path: "/v1/messages".into(),
-            upstream: ApiFormat::Messages,
-            ..chat.clone()
-        };
-        assert_eq!(messages.wire_auth(), UpstreamAuth::XApiKey);
-        let custom = spec(
-            UpstreamAuth::XApiKey,
-            ApiFormat::ChatCompletions,
-            false,
-            CredentialHandle::Account {
-                id: "custom-1".into(),
-            },
-            ProxyRoutingModel::IsolatedTrustedAdmin,
-        );
-        assert_eq!(custom.wire_auth(), UpstreamAuth::XApiKey);
-        assert!(!custom.restricted_upstream_url());
-        assert!(custom.isolates_client_headers());
-        assert!(!custom.follow_redirects);
-        let goat = spec(
-            UpstreamAuth::Bearer,
-            ApiFormat::ChatCompletions,
-            false,
-            CredentialHandle::Account {
-                id: "goat-1".into(),
-            },
-            ProxyRoutingModel::ProcessWideNoRedirect,
-        );
-        assert!(goat.restricted_upstream_url());
-        assert!(!goat.isolates_client_headers());
-        let zen = spec(
-            UpstreamAuth::None,
-            ApiFormat::ChatCompletions,
-            true,
-            CredentialHandle::None,
-            ProxyRoutingModel::RequestEntrySnapshot,
-        );
-        assert_eq!(zen.wire_auth(), UpstreamAuth::None);
-        assert!(zen.credential_account_id().is_none());
-    }
-
-    #[test]
-    fn empty_path_uses_upstream_protocol_path() {
-        let spec = AttemptSpec {
-            path: String::new(),
-            ..spec(
-                UpstreamAuth::Bearer,
-                ApiFormat::Responses,
-                true,
-                CredentialHandle::None,
-                ProxyRoutingModel::RequestEntrySnapshot,
-            )
-        };
-        assert_eq!(
-            spec.request_url().unwrap(),
-            "https://opencode.ai/zen/go/v1/responses"
-        );
-        let gemini = AttemptSpec {
-            path: String::new(),
-            upstream: ApiFormat::Gemini,
-            ..spec
-        };
-        assert!(
-            gemini
-                .request_url()
-                .unwrap_err()
-                .contains("Gemini is a client-only protocol")
-        );
-    }
-
-    #[test]
-    fn credential_resolver_seam_decrypts_handles_not_adapter_secrets() {
-        let mut secrets = HashMap::new();
-        secrets.insert("go-1".into(), "sk-live-secret".into());
-        let resolver = MapResolver(secrets);
-        assert_eq!(
-            resolver
-                .resolve_credential(&CredentialHandle::Account { id: "go-1".into() })
-                .unwrap()
-                .as_deref(),
-            Some("sk-live-secret")
-        );
-        assert_eq!(
-            resolver
-                .resolve_credential(&CredentialHandle::None)
-                .unwrap(),
-            None
-        );
-        let handle = CredentialHandle::Account { id: "go-1".into() };
-        assert!(!format!("{handle:?}").contains("sk-live-secret"));
-    }
-
-    #[test]
-    fn attempt_timeouts_are_transport_durations_only() {
-        let timeouts = AttemptTimeouts::from_secs(900, 300);
-        assert_eq!(timeouts.non_stream, Duration::from_secs(900));
-        assert_eq!(timeouts.stream_header, Duration::from_secs(300));
-        assert_ne!(timeouts.non_stream, timeouts.stream_header);
-    }
-
-    #[test]
-    fn attempt_transport_error_messages_match_stage0_send_text() {
-        let header = AttemptTransportError::HeaderTimeout {
-            timeout: Duration::from_secs(300),
-        };
-        assert_eq!(
-            header.to_string(),
-            "upstream did not return response headers within 300s"
-        );
-        assert!(matches!(
-            header,
-            AttemptTransportError::HeaderTimeout { .. }
-        ));
-    }
-
-    #[test]
-    fn send_failure_kinds_keep_stage0_display_and_connect_first_classification() {
-        let timeout = TransportSendFailure::from_send_error(false, true, "operation timed out");
-        assert_eq!(timeout.kind, TransportFailureKind::Timeout);
-        assert!(timeout.timed_out);
-        assert_eq!(
-            timeout.message,
-            "upstream request timed out: operation timed out"
-        );
-        let timeout_err = AttemptTransportError::Send(timeout.clone());
-        assert_eq!(timeout_err.to_string(), timeout.message);
-        assert!(!matches!(
-            timeout_err,
-            AttemptTransportError::HeaderTimeout { .. }
-        ));
-
-        let connect = TransportSendFailure::from_send_error(true, false, "connection refused");
-        assert_eq!(connect.kind, TransportFailureKind::Connect);
-        assert!(!connect.timed_out);
-        assert_eq!(
-            connect.message,
-            "upstream request failed: connection refused"
-        );
-        assert_eq!(
-            AttemptTransportError::Send(connect.clone()).to_string(),
-            connect.message
-        );
-
-        let connect_timeout =
-            TransportSendFailure::from_send_error(true, true, "error trying to connect");
-        assert_eq!(connect_timeout.kind, TransportFailureKind::Connect);
-        assert!(connect_timeout.timed_out);
-        assert_eq!(
-            connect_timeout.message,
-            "upstream request timed out: error trying to connect"
-        );
-
-        let other = TransportSendFailure::from_send_error(false, false, "connection reset");
-        assert_eq!(other.kind, TransportFailureKind::Other);
-        assert!(!other.timed_out);
-        assert_eq!(other.message, "upstream request failed: connection reset");
-        assert_eq!(
-            AttemptTransportError::Send(other.clone()).to_string(),
-            other.message
-        );
-    }
-
-    #[test]
-    fn attempt_transport_error_contains_no_reqwest_type_or_source() {
+    fn facade_does_not_blanket_reexport_or_widen_item_visibility() {
         let production = include_str!("attempt.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("production source precedes tests");
         assert!(
-            !production.contains("reqwest::Error"),
-            "AttemptTransportError must not name reqwest::Error"
+            production.contains("pub(crate) use ocg_gateway::attempt::{"),
+            "compatibility facade must explicitly reexport crate-private items"
         );
-        assert!(
-            !production.contains("Send(reqwest"),
-            "AttemptTransportError::Send must not wrap a reqwest type"
-        );
-
-        let error = AttemptTransportError::Send(TransportSendFailure::from_send_error(
-            false,
-            false,
-            "connection reset",
-        ));
-        assert!(std::error::Error::source(&error).is_none());
-        for name in [
-            std::any::type_name::<AttemptTransportError>(),
-            std::any::type_name::<TransportSendFailure>(),
-            std::any::type_name::<TransportFailureKind>(),
+        for forbidden in [
+            "pub use ocg_gateway::attempt::*;",
+            "pub use ocg_gateway::attempt;",
+            "pub use ocg_gateway::attempt::{self}",
+            "pub use ocg_gateway::attempt::",
         ] {
             assert!(
-                !name.to_ascii_lowercase().contains("reqwest"),
-                "transport error type name leaked reqwest: {name}"
+                !production.contains(forbidden),
+                "compatibility facade must not widen visibility via `{forbidden}`"
             );
         }
-        let debug = format!("{error:?}");
-        let display = error.to_string();
         assert!(
-            !debug.to_ascii_lowercase().contains("reqwest"),
-            "Debug leaked reqwest: {debug}"
-        );
-        assert!(
-            !display.to_ascii_lowercase().contains("reqwest"),
-            "Display leaked reqwest: {display}"
+            !production.contains("pub use ocg_gateway::"),
+            "compatibility facade must not pub-reexport ocg_gateway items"
         );
     }
 }
