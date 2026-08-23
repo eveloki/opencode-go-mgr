@@ -1,5 +1,12 @@
 //! Inference Gateway protocol, policy, and execution boundaries.
 
+/// Hardcoded I/O-free client alias registry and raw-ID parser.
+///
+/// Public only as the cross-crate bridge; the host crate's `alias`
+/// compatibility facade keeps the historical public paths.
+#[doc(hidden)]
+pub mod alias;
+
 /// Data-only single-attempt transport boundary.
 ///
 /// Public only as the cross-crate bridge; the host crate's `gateway::attempt`
@@ -80,7 +87,7 @@ mod source_boundary {
                 .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
             assert_production_source_boundary(path, &source);
         });
-        for required in ["attempt.rs", "classify.rs", "lib.rs"] {
+        for required in ["alias.rs", "attempt.rs", "classify.rs", "lib.rs"] {
             assert!(
                 scanned.iter().any(|path| {
                     path.file_name().and_then(|name| name.to_str()) == Some(required)

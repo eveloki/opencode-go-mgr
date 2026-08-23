@@ -1,7 +1,6 @@
 //! Compatibility facade for [`ocg_domain::ids`].
 //!
 //! Public items match the historical `ocg_core::kernel::ids` surface.
-//! `looks_raw_shaped` stays crate-private.
 
 pub use ocg_domain::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
@@ -13,5 +12,3 @@ pub use ocg_domain::ids::{
     ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME, custom_model_id_matches, is_free_model,
     normalize_model_name,
 };
-
-pub(crate) use ocg_domain::ids::looks_raw_shaped;
