@@ -135,6 +135,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ProxyTestResponse",
     "CustomModelDiscoveryRequest",
     "CustomModelDiscoveryResponse",
+    "ClaudeDesktopModels",
+    "ClaudeDesktopModelsUpdate",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -517,6 +519,34 @@ pub struct ProxyTestResponse {
     pub latency_ms: u64,
     pub revision: u64,
     pub process_generation: u64,
+}
+
+/// GET/PUT `/claude-desktop/models` resource. Distinct from `AppConfig` and
+/// from `models::ClaudeDesktopModels`. Role values are the resolved mapping
+/// (empty roles inherit the first configured model). CAS tokens follow the
+/// Settings convention: `revision` and `processGeneration` only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaudeDesktopModels {
+    pub sonnet: String,
+    pub opus: String,
+    pub haiku: String,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// PUT `/claude-desktop/models` body. CAS tokens and all three roles are
+/// required. Unknown fields, including any Key material, are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaudeDesktopModelsUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub sonnet: String,
+    pub opus: String,
+    pub haiku: String,
 }
 
 /// POST `/keys` body. CAS tokens are required; `name` is required. Unknown
@@ -2082,6 +2112,7 @@ pub fn contract_schema() -> Value {
     include_type::<AuthStatus>(&mut serialize);
     include_type::<ProxyTestResponse>(&mut serialize);
     include_type::<CustomModelDiscoveryResponse>(&mut serialize);
+    include_type::<ClaudeDesktopModels>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -2116,6 +2147,7 @@ pub fn contract_schema() -> Value {
     include_type::<AuthLogout>(&mut deserialize);
     include_type::<ProxyTestRequest>(&mut deserialize);
     include_type::<CustomModelDiscoveryRequest>(&mut deserialize);
+    include_type::<ClaudeDesktopModelsUpdate>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -3613,6 +3645,8 @@ mod tests {
         "CustomModelDiscoveryRequest",
         "CustomModelDiscoveryResponse",
     ];
+    const CLAUDE_DESKTOP_CATALOG_TYPES: &[&str] =
+        &["ClaudeDesktopModels", "ClaudeDesktopModelsUpdate"];
 
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
@@ -3652,7 +3686,12 @@ mod tests {
             &CATALOG_TYPE_NAMES[proxy_end..custom_discovery_end],
             CUSTOM_DISCOVERY_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), custom_discovery_end);
+        let claude_end = custom_discovery_end + CLAUDE_DESKTOP_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[custom_discovery_end..claude_end],
+            CLAUDE_DESKTOP_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), claude_end);
     }
 
     #[test]
@@ -4530,6 +4569,142 @@ mod tests {
             assert!(
                 !response_props.contains_key(forbidden),
                 "ProxyTestResponse must not expose {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_desktop_models_are_camel_case_cas_and_secret_free() {
+        let models = ClaudeDesktopModels {
+            sonnet: "glm-5.2".into(),
+            opus: "grok-4.5".into(),
+            haiku: "mimo-v2.5".into(),
+            revision: 11,
+            process_generation: 9,
+        };
+        let value = serde_json::to_value(&models).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "sonnet": "glm-5.2",
+                "opus": "grok-4.5",
+                "haiku": "mimo-v2.5",
+                "revision": 11,
+                "processGeneration": 9,
+            })
+        );
+        let object = value.as_object().unwrap();
+        for forbidden in [
+            "pricingRevision",
+            "pricing_revision",
+            "key",
+            "gatewayKey",
+            "gateway_key",
+            "primaryKey",
+            "cipher",
+            "secret",
+            "token",
+        ] {
+            assert!(
+                !object.contains_key(forbidden),
+                "ClaudeDesktopModels must not expose {forbidden}"
+            );
+        }
+
+        let parsed: ClaudeDesktopModelsUpdate = serde_json::from_value(json!({
+            "expectedRevision": 11,
+            "processGeneration": 9,
+            "sonnet": "glm-5.2",
+            "opus": "",
+            "haiku": "mimo-v2.5"
+        }))
+        .unwrap();
+        assert_eq!(parsed.expectation.expected_revision, 11);
+        assert_eq!(parsed.expectation.process_generation, 9);
+        assert_eq!(parsed.sonnet, "glm-5.2");
+        assert_eq!(parsed.opus, "");
+        assert_eq!(parsed.haiku, "mimo-v2.5");
+
+        assert!(
+            serde_json::from_value::<ClaudeDesktopModelsUpdate>(json!({
+                "processGeneration": 9,
+                "sonnet": "glm-5.2",
+                "opus": "",
+                "haiku": ""
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ClaudeDesktopModelsUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "opus": "",
+                "haiku": ""
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ClaudeDesktopModelsUpdate>(json!({
+                "expectedRevision": 11,
+                "processGeneration": 9,
+                "sonnet": "glm-5.2",
+                "opus": "",
+                "haiku": "",
+                "gatewayKey": "ocg-secret"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn claude_desktop_catalog_registers_required_roles_and_cas() {
+        let schema = contract_schema();
+        let defs = schema["$defs"].as_object().expect("catalog $defs");
+        for name in CLAUDE_DESKTOP_CATALOG_TYPES {
+            assert!(defs.contains_key(*name), "schema missing {name}");
+            assert_eq!(defs[*name]["additionalProperties"], false);
+        }
+
+        let response_required = defs["ClaudeDesktopModels"]["required"]
+            .as_array()
+            .expect("ClaudeDesktopModels.required");
+        assert_eq!(
+            response_required,
+            &vec![
+                json!("sonnet"),
+                json!("opus"),
+                json!("haiku"),
+                json!("revision"),
+                json!("processGeneration"),
+            ]
+        );
+        let response_props = defs["ClaudeDesktopModels"]["properties"]
+            .as_object()
+            .expect("ClaudeDesktopModels.properties");
+        assert!(!response_props.contains_key("pricingRevision"));
+        assert!(!response_props.contains_key("key"));
+        assert!(!response_props.contains_key("gatewayKey"));
+
+        let update_required = defs["ClaudeDesktopModelsUpdate"]["required"]
+            .as_array()
+            .expect("ClaudeDesktopModelsUpdate.required");
+        assert_eq!(
+            update_required,
+            &vec![
+                json!("expectedRevision"),
+                json!("processGeneration"),
+                json!("sonnet"),
+                json!("opus"),
+                json!("haiku"),
+            ]
+        );
+        let update_props = defs["ClaudeDesktopModelsUpdate"]["properties"]
+            .as_object()
+            .expect("ClaudeDesktopModelsUpdate.properties");
+        for forbidden in ["key", "gatewayKey", "primaryKey", "pricingRevision"] {
+            assert!(
+                !update_props.contains_key(forbidden),
+                "ClaudeDesktopModelsUpdate must not expose {forbidden}"
             );
         }
     }

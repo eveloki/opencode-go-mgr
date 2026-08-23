@@ -262,14 +262,16 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[auth_end..proxy_end],
         ["ProxyTestRequest", "ProxyTestResponse"]
     );
+    let custom_discovery_end = proxy_end + CUSTOM_DISCOVERY_CATALOG_TYPES.len();
     assert_eq!(
-        &CATALOG_TYPE_NAMES[proxy_end..],
+        &CATALOG_TYPE_NAMES[proxy_end..custom_discovery_end],
         CUSTOM_DISCOVERY_CATALOG_TYPES
     );
     assert_eq!(
-        CATALOG_TYPE_NAMES.len(),
-        proxy_end + CUSTOM_DISCOVERY_CATALOG_TYPES.len()
+        &CATALOG_TYPE_NAMES[custom_discovery_end..],
+        ["ClaudeDesktopModels", "ClaudeDesktopModelsUpdate"]
     );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), custom_discovery_end + 2);
 }
 
 #[test]
