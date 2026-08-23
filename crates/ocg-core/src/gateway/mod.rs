@@ -32,14 +32,14 @@ pub use listener::ListenerStopOutcome;
 const MAX_GATEWAY_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const _: () = assert!(MAX_GATEWAY_REQUEST_BODY_BYTES > 2 * 1024 * 1024);
 
-pub fn build_router(state: CoreState) -> Router {
+pub(crate) fn inference_router(state: CoreState) -> Router<CoreState> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
         .expose_headers([HeaderName::from_static(diagnostics::REQUEST_ID_HEADER)]);
 
-    let gateway_api = Router::new()
+    Router::new()
         .route("/v1/chat/completions", post(handler::chat_completions))
         .route("/v1/responses", post(handler::responses))
         .route("/v1/messages", post(handler::messages))
@@ -63,27 +63,9 @@ pub fn build_router(state: CoreState) -> Router {
         .layer(cors)
         .layer(DefaultBodyLimit::max(MAX_GATEWAY_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn_with_state(
-            state.clone(),
+            state,
             handler::request_trace_middleware,
-        ));
-
-    Router::new()
-        .merge(gateway_api)
-        .nest(
-            "/dashboard/api/v3",
-            crate::dashboard_v3::api_router(state.clone()),
-        )
-        .nest(
-            "/dashboard/api",
-            crate::dashboard::api_router(state.clone()),
-        )
-        .route("/dashboard", get(crate::dashboard::serve_index))
-        .route("/dashboard/", get(crate::dashboard::serve_index))
-        .route(
-            "/dashboard/assets/{*path}",
-            get(crate::dashboard::serve_asset),
-        )
-        .with_state(state)
+        ))
 }
 
 pub async fn start_gateway(state: CoreState, port: u16) -> Result<GatewayHandle> {

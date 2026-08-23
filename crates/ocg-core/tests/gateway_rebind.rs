@@ -3,7 +3,7 @@
 
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
-use ocg_core::gateway::{self, GatewayLifecycle, ListenerStopOutcome};
+use ocg_core::gateway::{GatewayLifecycle, ListenerStopOutcome};
 use ocg_core::state::{CoreState, CoreStateInner, GatewayHandle};
 use std::fs;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
@@ -74,7 +74,7 @@ async fn install_held_listener(
     let local_addr = listener.local_addr().expect("held listener local address");
     let dashboard_is_local = local_addr.ip().is_loopback();
     state.set_dashboard_local_mode(dashboard_is_local);
-    let app = gateway::build_router(state.clone());
+    let app = ocg_core::host_router::build_router(state.clone());
     let port = local_addr.port();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (shutdown_seen_tx, shutdown_seen_rx) = oneshot::channel();

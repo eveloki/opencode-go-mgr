@@ -14,6 +14,7 @@
 
 use crate::state::{CoreState, GatewayHandle};
 use anyhow::Result;
+use axum::Router;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -23,6 +24,16 @@ use tokio::sync::oneshot;
 pub const LISTENER_STOP_WAIT: Duration = Duration::from_secs(5);
 
 pub struct GatewayLifecycle;
+
+/// Supplies the complete HTTP router to the listener without making the
+/// gateway depend on the dashboard composition modules.
+///
+/// The implementation belongs to the host composition root. Keeping this
+/// contract at the listener boundary makes that dependency inversion explicit
+/// instead of relying on an inherent method defined in another module.
+pub(crate) trait GatewayRouterHost {
+    fn compose_router(state: CoreState) -> Router;
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ListenerStopOutcome {
@@ -94,7 +105,9 @@ impl GatewayLifecycle {
         let public_registration =
             (!dashboard_is_local).then(|| PublicListenerRegistration::new(state.clone()));
         spawn_forward_log_backfill(state.clone());
-        let app = super::build_router(state);
+        // Composed by the host root through the explicit listener boundary so
+        // this module does not import dashboard mounts.
+        let app = <CoreState as GatewayRouterHost>::compose_router(state);
         let port = local_addr.port();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();

@@ -15,6 +15,7 @@ pub mod desktop;
 pub mod gateway;
 pub mod gateway_keys;
 pub mod go_usage;
+pub mod host_router;
 pub(crate) mod http_client;
 pub mod kernel;
 pub mod models;

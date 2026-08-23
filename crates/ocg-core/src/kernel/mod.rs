@@ -30,6 +30,7 @@ mod dependency_guard {
         "use crate::db",
         "use crate::state",
         "use crate::dashboard",
+        "use crate::host_router",
         "use crate::gateway",
         "use crate::http_client",
         "use crate::custom",
@@ -51,6 +52,7 @@ mod dependency_guard {
         "db",
         "state",
         "dashboard",
+        "host_router",
         "gateway",
         "http_client",
         "custom",
@@ -64,13 +66,7 @@ mod dependency_guard {
         "pricing",
     ];
 
-    const EXPECTED_HOST_SCC: &[&str] = &[
-        "dashboard",
-        "dashboard_v3",
-        "gateway",
-        "protocol_probe",
-        "state",
-    ];
+    const EXPECTED_HOST_SCC: &[&str] = &["gateway", "state"];
 
     #[test]
     fn kernel_modules_do_not_import_io_or_control_plane() {
@@ -296,7 +292,8 @@ mod dependency_guard {
                 && modules.contains("pricing")
                 && modules.contains("kernel")
                 && modules.contains("redaction")
-                && modules.contains("upstream_limit"),
+                && modules.contains("upstream_limit")
+                && modules.contains("host_router"),
             "lib.rs should declare the production modules under test, got {modules:?}"
         );
 
@@ -377,7 +374,42 @@ mod dependency_guard {
             graph
                 .get("protocol_probe")
                 .is_some_and(|edges| { edges.contains("gateway") && edges.contains("state") }),
-            "protocol_probe may join the host SCC only via gateway/state"
+            "protocol_probe still depends on gateway/state for probe transport"
+        );
+        assert!(
+            !graph.get("gateway").is_some_and(|edges| {
+                edges.contains("dashboard")
+                    || edges.contains("dashboard_v3")
+                    || edges.contains("host_router")
+                    || edges.contains("protocol_probe")
+            }),
+            "gateway must not import dashboard mounts, host_router, or protocol_probe, graph={graph:?}"
+        );
+        assert!(
+            !graph.get("state").is_some_and(|edges| {
+                edges.contains("dashboard")
+                    || edges.contains("dashboard_v3")
+                    || edges.contains("host_router")
+                    || edges.contains("protocol_probe")
+            }),
+            "state must not import dashboard mounts, host_router, or protocol_probe, graph={graph:?}"
+        );
+        assert!(
+            graph.get("host_router").is_some_and(|edges| {
+                edges.contains("dashboard")
+                    && edges.contains("dashboard_v3")
+                    && edges.contains("gateway")
+            }),
+            "host_router must compose dashboard mounts onto gateway, graph={graph:?}"
+        );
+        assert!(
+            !graph.get("host_router").is_some_and(|edges| {
+                edges.contains("protocol_probe")
+                    || edges.contains("usage_sync")
+                    || edges.contains("db")
+                    || edges.contains("http_client")
+            }),
+            "host_router must stay composition-only, graph={graph:?}"
         );
         let protocol_probe_source =
             production_source(&read_to_string(&src_root.join("protocol_probe.rs")));
@@ -474,16 +506,17 @@ mod dependency_guard {
         // inversion). This lease cut gateway_keys and usage_sync out of the
         // measured host SCC by depending on KeyHost/UsageSyncHost instead.
         // account_control uses the same pattern (AccountControlHost in state)
-        // so it stays outside the host SCC. dashboard_v3 joined the remaining
-        // cycle when the contract kernel mounted at the gateway router.
-        // protocol_probe joins the same host SCC through gateway/state
-        // (shared admin probe transport) without a dashboard or dashboard_v3
-        // edge. Inverting the remaining pure catalog/sanitizer edges from
-        // provider_contracts into gateway also dropped auth, db, and
-        // provider_contracts out of that cycle. The Go usage endpoint now
-        // lives in the I/O-free kernel catalog, removing provider -> go_usage
-        // and the former catalog SCC. Whitelist every remaining nontrivial
-        // SCC exactly so a new non-gateway cycle cannot pass unnoticed.
+        // so it stays outside the host SCC. HTTP router composition now lives
+        // in host_router, so dashboard and dashboard_v3 are one-way clients of
+        // gateway/state instead of members of that cycle.
+        // protocol_probe still depends on gateway/state for probe transport
+        // without a dashboard or dashboard_v3 edge. Inverting the remaining
+        // pure catalog/sanitizer edges from provider_contracts into gateway
+        // also dropped auth, db, and provider_contracts out of that cycle.
+        // The Go usage endpoint now lives in the I/O-free kernel catalog,
+        // removing provider -> go_usage and the former catalog SCC. Whitelist
+        // every remaining nontrivial SCC exactly so a new non-gateway cycle
+        // cannot pass unnoticed.
         let mut measured = graph.clone();
         measured.remove("pricing");
         for edges in measured.values_mut() {
@@ -514,9 +547,118 @@ mod dependency_guard {
                 && !host_scc.contains("upstream_limit")
                 && !host_scc.contains("db")
                 && !host_scc.contains("auth")
-                && !host_scc.contains("account_control"),
-            "inverted contract/redaction/account_control leaves must stay outside the host SCC, host_scc={host_scc:?}"
+                && !host_scc.contains("account_control")
+                && !host_scc.contains("dashboard")
+                && !host_scc.contains("dashboard_v3")
+                && !host_scc.contains("protocol_probe")
+                && !host_scc.contains("host_router"),
+            "inverted leaves and host composition must stay outside the host SCC, host_scc={host_scc:?}"
         );
+        for name in ["dashboard", "dashboard_v3", "protocol_probe", "host_router"] {
+            let component = tarjan(&measured)
+                .into_iter()
+                .find(|component| component.contains(name))
+                .unwrap_or_else(|| panic!("{name} module should exist in the production graph"));
+            assert_eq!(
+                component.len(),
+                1,
+                "{name} must not remain in a multi-node production SCC, component={component:?}, graph={graph:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_router_is_composition_only() {
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let host_router_raw = read_to_string(&src_root.join("host_router.rs"));
+        let host_router = production_source(&host_router_raw);
+        let gateway_mod = production_source(&read_to_string(&src_root.join("gateway/mod.rs")));
+        let listener = production_source(&read_to_string(&src_root.join("gateway/listener.rs")));
+
+        assert!(
+            host_router_raw.contains("\"/dashboard/api/v3\"")
+                && host_router_raw.contains("\"/dashboard/api\"")
+                && host_router_raw.contains("\"/dashboard\"")
+                && host_router_raw.contains("\"/dashboard/\"")
+                && host_router_raw.contains("\"/dashboard/assets/{*path}\"")
+                && host_router.contains("dashboard_v3::api_router")
+                && host_router.contains("dashboard::api_router")
+                && host_router.contains("dashboard::serve_index")
+                && host_router.contains("dashboard::serve_asset")
+                && host_router.contains("inference_router")
+                && host_router.contains("fn build_router")
+                && host_router.contains("impl GatewayRouterHost for CoreState")
+                && host_router.contains("fn compose_router"),
+            "host_router must own the dashboard mounts and inference merge"
+        );
+        assert!(
+            !host_router.contains("impl GatewayLifecycle"),
+            "host_router must not add inherent GatewayLifecycle methods"
+        );
+        for needle in [
+            "forward_once",
+            "GatewayExecutor",
+            "axum::serve",
+            "TcpListener",
+            "start_gateway",
+            "ControlPlaneWorkers",
+            "protocol_probe",
+        ] {
+            assert!(
+                !host_router.contains(needle),
+                "host_router must not take on runtime work ({needle})"
+            );
+        }
+
+        let host_roots = crate_path_roots(&host_router);
+        for required in ["dashboard", "dashboard_v3", "gateway"] {
+            assert!(
+                host_roots.contains(required),
+                "host_router must depend on {required}, roots={host_roots:?}"
+            );
+        }
+        for forbidden in [
+            "protocol_probe",
+            "usage_sync",
+            "db",
+            "http_client",
+            "provider_contracts",
+        ] {
+            assert!(
+                !host_roots.contains(forbidden),
+                "host_router must not depend on {forbidden}, roots={host_roots:?}"
+            );
+        }
+
+        assert!(
+            gateway_mod.contains("fn inference_router")
+                && !gateway_mod.contains("crate::dashboard")
+                && !crate_path_roots(&gateway_mod).contains("dashboard")
+                && !crate_path_roots(&gateway_mod).contains("dashboard_v3")
+                && !crate_path_roots(&gateway_mod).contains("host_router"),
+            "gateway inference assembly must not mount dashboards"
+        );
+        assert!(
+            listener.contains("GatewayRouterHost")
+                && listener.contains("GatewayRouterHost>::compose_router")
+                && !crate_path_roots(&listener).contains("dashboard")
+                && !crate_path_roots(&listener).contains("dashboard_v3")
+                && !crate_path_roots(&listener).contains("host_router"),
+            "listener must consume composed routes through GatewayRouterHost without importing dashboard mounts"
+        );
+
+        let mut gateway_source = String::new();
+        visit_rust_files(&src_root.join("gateway"), &mut |path| {
+            gateway_source.push_str(&production_source(&read_to_string(path)));
+            gateway_source.push('\n');
+        });
+        let gateway_roots = crate_path_roots(&gateway_source);
+        for forbidden in ["dashboard", "dashboard_v3", "host_router", "protocol_probe"] {
+            assert!(
+                !gateway_roots.contains(forbidden),
+                "gateway production sources must not import {forbidden}, roots={gateway_roots:?}"
+            );
+        }
     }
 
     fn named_set(names: &[&str]) -> BTreeSet<String> {

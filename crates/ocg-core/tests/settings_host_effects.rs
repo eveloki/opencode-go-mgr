@@ -1,5 +1,5 @@
 //! Host settings-effects extraction: shared CoreState path, hook rollback,
-//! V2/V3 adapter mapping, and unchanged production host SCC.
+//! V2/V3 adapter mapping, and production host SCC membership.
 
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::dashboard_v3::{
@@ -59,7 +59,7 @@ async fn install_held_listener(state: &CoreState) -> (u16, oneshot::Receiver<()>
         .expect("held listener should bind");
     let local_addr = listener.local_addr().expect("held listener local address");
     state.set_dashboard_local_mode(true);
-    let app = gateway::build_router(state.clone());
+    let app = ocg_core::host_router::build_router(state.clone());
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (shutdown_seen_tx, shutdown_seen_rx) = oneshot::channel();
     let release = Arc::new(Barrier::new(2));
@@ -326,22 +326,11 @@ fn production_host_scc_membership_is_unchanged() {
     let block = &kernel[start..];
     let end = block.find(';').expect("EXPECTED_HOST_SCC should end");
     let members: Vec<&str> = block[..end]
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim().trim_end_matches(',');
-            trimmed.strip_prefix('"')?.strip_suffix('"')
-        })
+        .split('"')
+        .enumerate()
+        .filter_map(|(i, part)| (i % 2 == 1).then_some(part))
         .collect();
-    assert_eq!(
-        members,
-        [
-            "dashboard",
-            "dashboard_v3",
-            "gateway",
-            "protocol_probe",
-            "state"
-        ]
-    );
+    assert_eq!(members, ["gateway", "state"]);
 }
 
 #[test]

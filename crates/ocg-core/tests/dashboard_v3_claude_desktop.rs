@@ -237,22 +237,11 @@ fn dashboard_v3_claude_desktop_does_not_expand_host_scc() {
     let block = &kernel[start..];
     let end = block.find(';').expect("EXPECTED_HOST_SCC should end");
     let members: Vec<&str> = block[..end]
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim().trim_end_matches(',');
-            trimmed.strip_prefix('"')?.strip_suffix('"')
-        })
+        .split('"')
+        .enumerate()
+        .filter_map(|(i, part)| (i % 2 == 1).then_some(part))
         .collect();
-    assert_eq!(
-        members,
-        [
-            "dashboard",
-            "dashboard_v3",
-            "gateway",
-            "protocol_probe",
-            "state"
-        ]
-    );
+    assert_eq!(members, ["gateway", "state"]);
 
     let lib = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
     assert!(
