@@ -8,6 +8,17 @@ import { t } from "../i18n/index.ts";
  */
 
 export const DASHBOARD_AUTH_REQUIRED_EVENT = "ocg-dashboard-auth-required";
+/**
+ * Kept in sync with the V3 transport event so an already-loaded legacy SPA
+ * can hand a retired V2 endpoint to the shell's existing refresh banner.
+ */
+export const DASHBOARD_GONE_EVENT = "ocg-dashboard-gone";
+
+const DASHBOARD_V2_REMOVED_CODE = "dashboardV2Removed";
+
+function dashboardV2RemovedGuidance(): string {
+  return "页面版本与服务不匹配，请刷新页面后重试；若仍失败请升级到最新版本";
+}
 
 export class DashboardAuthError extends Error {
   constructor(message: string) {
@@ -74,9 +85,21 @@ export async function request<T>(
       try {
         const body = JSON.parse(responseText) as {
           error?: unknown;
+          code?: unknown;
+          message?: unknown;
           next_allowed_at?: unknown;
         };
         if (typeof body.error === "string") message = body.error;
+        // V2 removal is deliberately a standalone migration envelope rather
+        // than the V3 `V3Error` shape. Preserve the legacy error type for
+        // callers, but notify the shell so it presents the refresh/upgrade
+        // prompt instead of a generic 410.
+        if (response.status === 410 && body.code === DASHBOARD_V2_REMOVED_CODE) {
+          if (typeof body.message === "string" && body.message) message = body.message;
+          window.dispatchEvent(new CustomEvent(DASHBOARD_GONE_EVENT, {
+            detail: { message, guidance: dashboardV2RemovedGuidance(), path },
+          }));
+        }
         if (typeof body.next_allowed_at === "string") nextAllowedAt = body.next_allowed_at;
       } catch {
         message = responseText;

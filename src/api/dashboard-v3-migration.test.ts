@@ -10,6 +10,7 @@ import {
   DashboardGoneError,
   dashboardV3,
 } from "./dashboard-v3.ts";
+import { DashboardRequestError as LegacyDashboardRequestError, request as legacyRequest } from "./http.ts";
 import { useConnectionStore } from "../stores/connection.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { useSessionStore } from "../stores/session.ts";
@@ -331,6 +332,24 @@ test("410 dispatches structured refresh guidance", async () => {
   }), { status: 410, headers: { "Content-Type": "application/json" } }), (event) => events.push(event));
 
   await assert.rejects(() => dashboardV3.getSettings(), (error) => error instanceof DashboardGoneError);
+  assert.equal(events[0]?.type, DASHBOARD_GONE_EVENT);
+  assert.match(String((events[0]?.detail as { guidance?: string })?.guidance), /刷新页面/);
+});
+
+test("legacy V2 removal response dispatches the existing refresh guidance without changing auth handling", async () => {
+  const events: Array<{ type: string; detail?: unknown }> = [];
+  const requests = installBrowser(() => new Response(JSON.stringify({
+    code: "dashboardV2Removed",
+    message: "Dashboard API V2 has been removed; refresh the page and retry.",
+  }), { status: 410, headers: { "Content-Type": "application/json" } }), (event) => events.push(event));
+
+  await assert.rejects(
+    () => legacyRequest("/settings"),
+    (error) => error instanceof LegacyDashboardRequestError
+      && error.status === 410
+      && error.message === "Dashboard API V2 has been removed; refresh the page and retry.",
+  );
+  assert.deepEqual(requests.map(({ url }) => url), ["/dashboard/api/settings"]);
   assert.equal(events[0]?.type, DASHBOARD_GONE_EVENT);
   assert.match(String((events[0]?.detail as { guidance?: string })?.guidance), /刷新页面/);
 });
