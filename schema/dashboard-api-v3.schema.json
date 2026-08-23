@@ -1026,6 +1026,116 @@
       ],
       "type": "object"
     },
+    "BrowserCapabilities": {
+      "additionalProperties": false,
+      "description": "GET `/browser/capabilities` body. Read-only; no `expectedRevision`.\nDistinct from `browser::BrowserCapabilities`. `reason` is required `T | null`.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/BrowserMode"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode",
+        "reason",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "BrowserMode": {
+      "description": "Browser runtime mode. Wire values match V2 lowercase `native` / `remote` /\n`unsupported`. Distinct from `browser::BrowserMode`.",
+      "enum": [
+        "native",
+        "remote",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "BrowserOpen": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/browser` result. Distinct from `browser::BrowserOpenResult`.\n\nNative mode always emits `sessionToken: null`. Remote mode emits only the\nopaque dashboard-bound display token — never a worker URL or control token.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/BrowserMode"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessionToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "sessionToken",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "BrowserOpenRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/browser` body. CAS tokens and `target` are required.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/$defs/BrowserTarget"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "target"
+      ],
+      "type": "object"
+    },
+    "BrowserTarget": {
+      "description": "Managed-browser launch target. Wire values match V2 snake_case.",
+      "enum": [
+        "google_signup",
+        "google_login",
+        "github_signup",
+        "github_login",
+        "invite",
+        "console"
+      ],
+      "type": "string"
+    },
     "CapabilitySummary": {
       "additionalProperties": false,
       "description": "Registry pricing or usage availability copied as display data.",
@@ -4657,6 +4767,21 @@
     },
     {
       "$ref": "#/$defs/AccountVerify"
+    },
+    {
+      "$ref": "#/$defs/BrowserMode"
+    },
+    {
+      "$ref": "#/$defs/BrowserTarget"
+    },
+    {
+      "$ref": "#/$defs/BrowserCapabilities"
+    },
+    {
+      "$ref": "#/$defs/BrowserOpenRequest"
+    },
+    {
+      "$ref": "#/$defs/BrowserOpen"
     }
   ],
   "title": "DashboardApiV3"

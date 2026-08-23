@@ -107,7 +107,12 @@ export type DashboardApiV3 =
   | CustomModelDiscoveryResponse
   | ClaudeDesktopModels
   | ClaudeDesktopModelsUpdate
-  | AccountVerify;
+  | AccountVerify
+  | BrowserMode
+  | BrowserTarget
+  | BrowserCapabilities
+  | BrowserOpenRequest
+  | BrowserOpen;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -181,6 +186,15 @@ export type PricingAvailability = "available" | "unavailable" | "not_applicable"
  * Registry usage availability. Wire values stay snake_case.
  */
 export type UsageAvailability = "available" | "unavailable" | "local_state";
+/**
+ * Browser runtime mode. Wire values match V2 lowercase `native` / `remote` /
+ * `unsupported`. Distinct from `browser::BrowserMode`.
+ */
+export type BrowserMode = "native" | "remote" | "unsupported";
+/**
+ * Managed-browser launch target. Wire values match V2 snake_case.
+ */
+export type BrowserTarget = "google_signup" | "google_login" | "github_signup" | "github_login" | "invite" | "console";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -1354,4 +1368,34 @@ export interface ClaudeDesktopModelsUpdate {
 export interface AccountVerify {
   expectedRevision: number;
   processGeneration: number;
+}
+/**
+ * GET `/browser/capabilities` body. Read-only; no `expectedRevision`.
+ * Distinct from `browser::BrowserCapabilities`. `reason` is required `T | null`.
+ */
+export interface BrowserCapabilities {
+  mode: BrowserMode;
+  processGeneration: number;
+  reason: string | null;
+  revision: number;
+}
+/**
+ * POST `/accounts/{id}/browser` body. CAS tokens and `target` are required.
+ */
+export interface BrowserOpenRequest {
+  expectedRevision: number;
+  processGeneration: number;
+  target: BrowserTarget;
+}
+/**
+ * POST `/accounts/{id}/browser` result. Distinct from `browser::BrowserOpenResult`.
+ *
+ * Native mode always emits `sessionToken: null`. Remote mode emits only the
+ * opaque dashboard-bound display token — never a worker URL or control token.
+ */
+export interface BrowserOpen {
+  mode: BrowserMode;
+  processGeneration: number;
+  revision: number;
+  sessionToken: string | null;
 }
