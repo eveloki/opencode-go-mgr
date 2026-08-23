@@ -7,6 +7,13 @@
 #[doc(hidden)]
 pub mod attempt;
 
+/// Pure attempt-adjacent provider/transport error classification policy.
+///
+/// Public only as the cross-crate bridge; the host crate's `gateway::classify`
+/// facade keeps these items crate-private.
+#[doc(hidden)]
+pub mod classify;
+
 #[cfg(test)]
 mod source_boundary {
     use std::fs;
@@ -14,7 +21,10 @@ mod source_boundary {
     use syn::parse::Parser;
     use syn::punctuated::Punctuated;
     use syn::visit::{self, Visit};
-    use syn::{Attribute, ExprCall, ExprMethodCall, Item, ItemUse, LitStr, Macro, Meta, Token};
+    use syn::{
+        Attribute, ExprCall, ExprMethodCall, Item, ItemExternCrate, ItemUse, LitStr, Macro, Meta,
+        Token,
+    };
 
     const ALLOWED_DEPENDENCIES: &[&str] = &["anyhow", "ocg-domain"];
     const ALLOWED_DEV_DEPENDENCIES: &[&str] = &["syn", "toml"];
@@ -30,6 +40,26 @@ mod source_boundary {
         "key_cipher",
         "ocg_core",
     ];
+    const FORBIDDEN_STD_MODULES: &[&str] = &["env", "fs", "net", "process"];
+    const FORBIDDEN_MACRO_TOKENS: &[&str] = &[
+        "std::env",
+        "std::fs",
+        "std::net",
+        "std::process",
+        "include!",
+        "CoreState",
+        "Database",
+        "reqwest",
+        "rusqlite",
+        "tokio",
+        "axum",
+        "KeyCipher",
+        "decrypt_key",
+        "key_cipher",
+        "ocg_core",
+        "encrypt(",
+        "INSERT",
+    ];
 
     #[test]
     fn ocg_gateway_dependencies_stay_inside_the_slice_boundary() {
@@ -41,7 +71,8 @@ mod source_boundary {
 
     #[test]
     fn production_sources_name_no_host_io_or_credential_storage() {
-        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src_root = crate_root.join("src");
         let mut scanned = Vec::new();
         visit_rust_files(&src_root, &mut |path| {
             scanned.push(path.to_path_buf());
@@ -49,12 +80,30 @@ mod source_boundary {
                 .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
             assert_production_source_boundary(path, &source);
         });
-        for required in ["attempt.rs", "lib.rs"] {
+        for required in ["attempt.rs", "classify.rs", "lib.rs"] {
             assert!(
                 scanned.iter().any(|path| {
                     path.file_name().and_then(|name| name.to_str()) == Some(required)
                 }),
                 "source boundary guard must scan {required}, scanned={scanned:?}"
+            );
+        }
+
+        let manifest_path = crate_root.join("Cargo.toml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", manifest_path.display()));
+        let build_scripts = build_script_paths(&crate_root, &manifest);
+        for path in &build_scripts {
+            scanned.push(path.clone());
+            let source = fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            assert_production_source_boundary(path, &source);
+        }
+        let default_build = crate_root.join("build.rs");
+        if default_build.is_file() {
+            assert!(
+                scanned.iter().any(|path| path == &default_build),
+                "source boundary guard must scan build.rs when present, scanned={scanned:?}"
             );
         }
     }
@@ -91,7 +140,12 @@ mod source_boundary {
 
             #[cfg(test)]
             mod tests {
-                fn helper() { let _ = std::fs::read("fixture"); }
+                fn helper() {
+                    let _ = std::fs::read("fixture");
+                    let _ = std::net::Ipv4Addr::LOCALHOST;
+                    let _ = std::env::var("TEST");
+                    include!("fixture.rs");
+                }
             }
             "#,
         );
@@ -100,6 +154,81 @@ mod source_boundary {
             #[cfg(any(test, windows))]
             fn production_on_windows() { let _ = std::process::id(); }
             "#,
+        );
+    }
+
+    #[test]
+    fn production_source_guard_rejects_host_networking_and_environment_access() {
+        for source in [
+            r#"fn production() { let _ = std::net::TcpListener::bind("127.0.0.1:0"); }"#,
+            r#"use std::net::SocketAddr;"#,
+            r#"use std::{net::TcpStream, time::Duration};"#,
+            r#"fn production() { let _ = std::env::var("SECRET"); }"#,
+            r#"use std::env;"#,
+            r#"use std::env::{var, var_os};"#,
+            r#"use std::*;"#,
+        ] {
+            assert_source_rejects(source);
+        }
+    }
+
+    #[test]
+    fn production_source_guard_rejects_std_alias_bypasses() {
+        for source in [
+            r#"
+            use std as platform;
+            fn production() { let _ = platform::net::TcpListener::bind("127.0.0.1:0"); }
+            "#,
+            r#"
+            extern crate std as platform;
+            fn production() { let _ = platform::env::var("SECRET"); }
+            "#,
+        ] {
+            assert_source_rejects(source);
+        }
+    }
+
+    #[test]
+    fn production_source_guard_rejects_include_indirection() {
+        for source in [
+            r#"include!("hidden.rs");"#,
+            r#"std::include!("hidden.rs");"#,
+            r#"fn production() { include!("../outside.rs"); }"#,
+            r#"macro_rules! pull { () => { include!("hidden.rs"); } }"#,
+        ] {
+            assert_source_rejects(source);
+        }
+    }
+
+    #[test]
+    fn build_script_guard_rejects_host_io_and_include_bypass() {
+        for source in [
+            r#"fn main() { let _ = std::fs::read("Cargo.toml"); }"#,
+            r#"fn main() { let _ = std::env::var("OUT_DIR"); }"#,
+            r#"fn main() { let _ = std::net::UdpSocket::bind("0.0.0.0:0"); }"#,
+            r#"fn main() { let _ = std::process::id(); }"#,
+            r#"include!("host.rs"); fn main() {}"#,
+        ] {
+            assert_source_rejects_path(Path::new("build.rs"), source);
+        }
+        assert_production_source_boundary(Path::new("build.rs"), "fn main() {}");
+    }
+
+    #[test]
+    fn build_script_paths_include_declared_and_default_scripts() {
+        let crate_root = Path::new("fixture-crate");
+        let declared = valid_gateway_manifest().replace(
+            "version = \"1.0.0\"",
+            "version = \"1.0.0\"\n            build = \"custom-build.rs\"",
+        );
+        let paths = build_script_paths(crate_root, &declared);
+        assert!(
+            paths.iter().any(|path| path.ends_with("custom-build.rs")),
+            "declared package.build path must be scanned, got {paths:?}"
+        );
+        assert_eq!(
+            build_script_paths(crate_root, valid_gateway_manifest()),
+            Vec::<PathBuf>::new()
         );
     }
 
@@ -130,13 +259,37 @@ mod source_boundary {
     }
 
     fn assert_source_rejects(source: &str) {
+        assert_source_rejects_path(Path::new("fixture.rs"), source);
+    }
+
+    fn assert_source_rejects_path(path: &Path, source: &str) {
+        let path = path.to_path_buf();
         assert!(
             std::panic::catch_unwind(|| {
-                assert_production_source_boundary(Path::new("fixture.rs"), source);
+                assert_production_source_boundary(&path, source);
             })
             .is_err(),
-            "source guard must reject: {source}"
+            "source guard must reject {}: {source}",
+            path.display()
         );
+    }
+
+    fn build_script_paths(crate_root: &Path, manifest: &str) -> Vec<PathBuf> {
+        let parsed: toml::Value = toml::from_str(manifest)
+            .unwrap_or_else(|error| panic!("parse build-script manifest: {error}"));
+        let mut paths = Vec::new();
+        if let Some(relative) = parsed
+            .get("package")
+            .and_then(|package| package.get("build"))
+            .and_then(toml::Value::as_str)
+        {
+            paths.push(crate_root.join(relative));
+        }
+        let default_build = crate_root.join("build.rs");
+        if default_build.is_file() && !paths.contains(&default_build) {
+            paths.push(default_build);
+        }
+        paths
     }
 
     fn assert_manifest_boundary(manifest_path: &Path, manifest: &str) {
@@ -239,25 +392,31 @@ mod source_boundary {
                 .iter()
                 .map(|segment| segment.ident.to_string())
                 .collect::<Vec<_>>();
-            if segments.starts_with(&["std".to_string(), "fs".to_string()])
-                || segments.starts_with(&["std".to_string(), "process".to_string()])
-            {
-                self.violations.push(segments.join("::"));
+            if let Some(violation) = forbidden_std_path(&segments) {
+                self.violations.push(violation);
             }
             visit::visit_path(self, path);
         }
 
         fn visit_item_use(&mut self, item: &'ast ItemUse) {
+            if use_tree_aliases_std(&item.tree) {
+                self.violations.push("std alias".to_string());
+            }
             let mut paths = Vec::new();
             flatten_use_tree(Vec::new(), &item.tree, &mut paths);
             for path in paths {
-                if path.starts_with(&["std".to_string(), "fs".to_string()])
-                    || path.starts_with(&["std".to_string(), "process".to_string()])
-                {
-                    self.violations.push(path.join("::"));
+                if let Some(violation) = forbidden_std_path(&path) {
+                    self.violations.push(violation);
                 }
             }
             visit::visit_item_use(self, item);
+        }
+
+        fn visit_item_extern_crate(&mut self, item: &'ast ItemExternCrate) {
+            if item.ident == "std" {
+                self.violations.push("extern crate std".to_string());
+            }
+            visit::visit_item_extern_crate(self, item);
         }
 
         fn visit_expr_call(&mut self, call: &'ast ExprCall) {
@@ -288,34 +447,62 @@ mod source_boundary {
         }
 
         fn visit_macro(&mut self, mac: &'ast Macro) {
+            if is_include_macro_path(&mac.path) {
+                self.violations.push("include!".to_string());
+            }
             let compact = mac
                 .tokens
                 .to_string()
                 .chars()
                 .filter(|ch| !ch.is_whitespace())
                 .collect::<String>();
-            for forbidden in [
-                "std::fs",
-                "std::process",
-                "CoreState",
-                "Database",
-                "reqwest",
-                "rusqlite",
-                "tokio",
-                "axum",
-                "KeyCipher",
-                "decrypt_key",
-                "key_cipher",
-                "ocg_core",
-                "encrypt(",
-                "INSERT",
-            ] {
+            for forbidden in FORBIDDEN_MACRO_TOKENS {
                 if compact.contains(forbidden) {
                     self.violations.push(format!("macro token `{forbidden}`"));
                 }
             }
             visit::visit_macro(self, mac);
         }
+    }
+
+    fn forbidden_std_path(segments: &[String]) -> Option<String> {
+        match segments {
+            [std, module, ..]
+                if std == "std" && FORBIDDEN_STD_MODULES.contains(&module.as_str()) =>
+            {
+                Some(segments.join("::"))
+            }
+            [std, glob] if std == "std" && glob == "*" => Some("std::*".to_string()),
+            _ => None,
+        }
+    }
+
+    fn use_tree_aliases_std(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Rename(rename) => rename.ident == "std",
+            syn::UseTree::Path(path) if path.ident == "std" => {
+                use_tree_aliases_std_after_root(&path.tree)
+            }
+            syn::UseTree::Group(group) => group.items.iter().any(use_tree_aliases_std),
+            _ => false,
+        }
+    }
+
+    fn use_tree_aliases_std_after_root(tree: &syn::UseTree) -> bool {
+        match tree {
+            syn::UseTree::Rename(rename) => rename.ident == "self",
+            syn::UseTree::Group(group) => group.items.iter().any(use_tree_aliases_std_after_root),
+            _ => false,
+        }
+    }
+
+    fn is_include_macro_path(path: &syn::Path) -> bool {
+        path.is_ident("include")
+            || path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .eq(["std", "include"])
     }
 
     fn flatten_use_tree(
@@ -336,7 +523,10 @@ mod source_boundary {
                 prefix.push(rename.ident.to_string());
                 output.push(prefix);
             }
-            syn::UseTree::Glob(_) => output.push(prefix),
+            syn::UseTree::Glob(_) => {
+                prefix.push("*".to_string());
+                output.push(prefix);
+            }
             syn::UseTree::Group(group) => {
                 for tree in &group.items {
                     flatten_use_tree(prefix.clone(), tree, output);

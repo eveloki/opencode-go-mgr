@@ -224,14 +224,6 @@ fn map_attempt_send_error(error: reqwest::Error) -> AttemptTransportError {
     ))
 }
 
-fn send_failure_classify_input(kind: TransportFailureKind) -> TransportClassifyInput {
-    match kind {
-        TransportFailureKind::Connect => TransportClassifyInput::Connect,
-        TransportFailureKind::Timeout => TransportClassifyInput::SendTimeout,
-        TransportFailureKind::Other => TransportClassifyInput::OtherSendFailure,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ForwardAction {
     Return,
@@ -738,7 +730,8 @@ async fn forward_request_impl(
         }
         Err(AttemptTransportError::Send(failure)) => {
             let upstream_wait_ms = upstream_started.elapsed().as_millis() as u64;
-            let class = classify_transport(send_failure_classify_input(failure.kind));
+            let kind: TransportFailureKind = failure.kind;
+            let class = classify_transport(kind.into());
             let connect_failure = matches!(class, ProviderErrorClass::Connect);
             let outcome_unknown = matches!(class, ProviderErrorClass::OutcomeUnknown);
             let detail = failure.message;
@@ -3506,7 +3499,7 @@ mod forward_once_tests {
     fn send_failure_kinds_keep_stage0_classification() {
         let timeout = TransportSendFailure::from_send_error(false, true, "operation timed out");
         assert_eq!(
-            classify_transport(send_failure_classify_input(timeout.kind)),
+            classify_transport(timeout.kind.into()),
             ProviderErrorClass::OutcomeUnknown
         );
         assert!(timeout.timed_out);
@@ -3518,7 +3511,7 @@ mod forward_once_tests {
 
         let connect = TransportSendFailure::from_send_error(true, false, "connection refused");
         assert_eq!(
-            classify_transport(send_failure_classify_input(connect.kind)),
+            classify_transport(connect.kind.into()),
             ProviderErrorClass::Connect
         );
         assert!(!connect.timed_out);
@@ -3530,7 +3523,7 @@ mod forward_once_tests {
 
         let other = TransportSendFailure::from_send_error(false, false, "connection reset");
         assert_eq!(
-            classify_transport(send_failure_classify_input(other.kind)),
+            classify_transport(other.kind.into()),
             ProviderErrorClass::OutcomeUnknown
         );
         assert!(!other.timed_out);
@@ -3538,7 +3531,7 @@ mod forward_once_tests {
         let connect_timeout =
             TransportSendFailure::from_send_error(true, true, "error trying to connect");
         assert_eq!(
-            classify_transport(send_failure_classify_input(connect_timeout.kind)),
+            classify_transport(connect_timeout.kind.into()),
             ProviderErrorClass::Connect
         );
         assert!(connect_timeout.timed_out);
