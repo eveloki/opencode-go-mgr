@@ -296,11 +296,19 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[browser_end..updater_end],
         UPDATER_CATALOG_TYPES
     );
+    assert_eq!(CATALOG_TYPE_NAMES[updater_end], "AccountManagedKeyVerify");
+    const USAGE_REFRESH_CATALOG_TYPES: &[&str] = &[
+        "UsageRefresh",
+        "UsageRefreshUpdate",
+        "UsageRefreshThrottleError",
+    ];
+    let usage_refresh_start = updater_end + 1;
+    let usage_refresh_end = usage_refresh_start + USAGE_REFRESH_CATALOG_TYPES.len();
     assert_eq!(
-        &CATALOG_TYPE_NAMES[updater_end..],
-        ["AccountManagedKeyVerify"]
+        &CATALOG_TYPE_NAMES[usage_refresh_start..usage_refresh_end],
+        USAGE_REFRESH_CATALOG_TYPES
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), updater_end + 1);
+    assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_end);
 }
 
 #[test]

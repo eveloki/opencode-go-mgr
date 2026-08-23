@@ -200,11 +200,17 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
         &CATALOG_TYPE_NAMES[updater_start..managed_start],
         ["UpdateCheck", "DesktopUpdate", "InstallUpdate"]
     );
+    assert_eq!(CATALOG_TYPE_NAMES[managed_start], "AccountManagedKeyVerify");
+    let usage_refresh_start = managed_start + 1;
     assert_eq!(
-        &CATALOG_TYPE_NAMES[managed_start..],
-        ["AccountManagedKeyVerify"]
+        &CATALOG_TYPE_NAMES[usage_refresh_start..],
+        [
+            "UsageRefresh",
+            "UsageRefreshUpdate",
+            "UsageRefreshThrottleError",
+        ]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), managed_start + 1);
+    assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_start + 3);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");
