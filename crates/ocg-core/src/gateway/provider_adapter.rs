@@ -219,7 +219,20 @@ fn resolve_route_with_policy(
     }
 }
 
-impl OpenCodeGoAdapter {
+/// Local trait so route construction can live in this crate after the
+/// zero-sized adapter identities moved to `ocg_domain`. Inherent impls on
+/// those types are illegal across the crate boundary; a local trait is not.
+trait RuntimeRouteAdapter {
+    fn resolve(
+        self,
+        account: &Account,
+        config: &AppConfig,
+        plan: &RequestPlan,
+        policy: RoutePolicy<'_>,
+    ) -> Result<AttemptSpec, String>;
+}
+
+impl RuntimeRouteAdapter for OpenCodeGoAdapter {
     fn resolve(
         self,
         account: &Account,
@@ -255,7 +268,7 @@ impl OpenCodeGoAdapter {
     }
 }
 
-impl ZenFreeAdapter {
+impl RuntimeRouteAdapter for ZenFreeAdapter {
     fn resolve(
         self,
         account: &Account,
@@ -301,7 +314,7 @@ impl ZenFreeAdapter {
     }
 }
 
-impl CommandCodeGoatAdapter {
+impl RuntimeRouteAdapter for CommandCodeGoatAdapter {
     fn resolve(
         self,
         account: &Account,
@@ -356,7 +369,7 @@ impl CommandCodeGoatAdapter {
     }
 }
 
-impl ScnetAdapter {
+impl RuntimeRouteAdapter for ScnetAdapter {
     fn resolve(
         self,
         account: &Account,
@@ -373,7 +386,7 @@ impl ScnetAdapter {
     }
 }
 
-impl ConfigurableHttpAdapter {
+impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
     fn resolve(
         self,
         account: &Account,

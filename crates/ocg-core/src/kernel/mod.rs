@@ -6,10 +6,13 @@
 //! `ocg_core::kernel::{catalog,ids,protocol,zen}` keep compiling without
 //! widening crate-private items. `pricing` stays in this crate so
 //! [`pricing::PricingSnapshot`] retains inherent `estimate`/`estimate_at`
-//! methods in the host pricing module.
+//! methods in the host pricing module. The provider catalog lives in
+//! `ocg_domain::provider` and is re-exported item-by-item from
+//! `crate::provider`, not this kernel module.
 //!
 //! Domain sources must not import db, state, dashboard, gateway execution,
-//! reqwest, rusqlite, tokio, axum, filesystem, clocks, or process/host code.
+//! reqwest, rusqlite, tokio, axum, ocg-core, filesystem, clocks, or
+//! process/host code.
 
 pub mod catalog;
 pub mod ids;
@@ -28,9 +31,10 @@ mod dependency_guard {
     use syn::{Attribute, Item, Meta, Token, UseTree, Visibility};
     use toml::{Table, Value};
 
-    const ALLOWED_DOMAIN_DEPENDENCIES: &[&str] = &["chrono", "serde", "serde_json"];
+    const ALLOWED_DOMAIN_DEPENDENCIES: &[&str] = &["chrono", "serde", "serde_json", "sha2"];
     const ALLOWED_CHRONO_FEATURES: &[&str] = &["serde", "std"];
-    const FORBIDDEN_EXTERNAL_CRATES: &[&str] = &["reqwest", "rusqlite", "tokio", "axum"];
+    const FORBIDDEN_EXTERNAL_CRATES: &[&str] =
+        &["reqwest", "rusqlite", "tokio", "axum", "ocg_core"];
     const FORBIDDEN_STD_MODULES: &[&str] = &["fs", "process"];
 
     const FORBIDDEN_KERNEL_CRATE_MODULES: &[&str] = &[
@@ -84,6 +88,41 @@ mod dependency_guard {
             }),
             "domain purity guard must recursively scan lib.rs, scanned={scanned:?}"
         );
+        assert!(
+            scanned.iter().any(|path| {
+                path.file_name().and_then(|name| name.to_str()) == Some("provider.rs")
+                    && path.components().any(|component| {
+                        component.as_os_str() == std::ffi::OsStr::new("ocg-domain")
+                    })
+            }),
+            "domain purity guard must recursively scan provider.rs, scanned={scanned:?}"
+        );
+
+        let core_provider = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider.rs");
+        assert_no_blanket_domain_reexport(&core_provider);
+        let core_provider_source = production_source(&read_to_string(&core_provider));
+        assert!(
+            !core_provider_source.contains("ocg_domain::provider::*")
+                && !core_provider_source.contains("pub use ocg_domain::provider;"),
+            "ocg-core provider.rs must reexport domain items explicitly, not by glob or module"
+        );
+
+        let domain_provider = domain_root.join("provider.rs");
+        assert!(
+            domain_provider.is_file(),
+            "ocg-domain provider.rs must exist"
+        );
+        let domain_provider_source = production_source(&read_to_string(&domain_provider));
+        assert!(
+            domain_provider_source.contains("sha2") && domain_provider_source.contains("Sha256"),
+            "domain provider.rs must use sha2 for acknowledgement hashing"
+        );
+        for needle in ["reqwest", "ocg_core", "rusqlite", "tokio", "axum"] {
+            assert!(
+                !domain_provider_source.contains(needle),
+                "domain provider.rs must not name `{needle}`"
+            );
+        }
         assert!(
             kernel_root.join("pricing.rs").is_file(),
             "kernel pricing.rs must remain in ocg-core"
@@ -144,6 +183,38 @@ mod dependency_guard {
                 "whole-crate reexports must not bypass the compatibility facade guard: {source}"
             );
         }
+    }
+
+    #[test]
+    fn syntax_guard_rejects_provider_module_reexports() {
+        for source in [
+            "pub use ocg_domain::provider;",
+            "pub use ocg_domain::provider::*;",
+            "pub use ocg_domain::provider::{self};",
+            "pub use ocg_domain::provider as provider;",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    assert_no_blanket_domain_reexport_source(Path::new("compat.rs"), source);
+                })
+                .is_err(),
+                "provider whole-module reexports must not bypass the compatibility facade guard: {source}"
+            );
+        }
+        assert_no_blanket_domain_reexport_source(
+            Path::new("compat.rs"),
+            "pub use ocg_domain::provider::{BuiltinPlan, ProviderBindingError};",
+        );
+    }
+
+    #[test]
+    fn syntax_guard_rejects_ocg_core_and_permits_sha2() {
+        assert_guard_rejects("use ocg_core::provider::BuiltinPlan;");
+        assert_guard_rejects("fn f() { let _ = ocg_core::db::Database; }");
+        assert_source_is_io_free(
+            Path::new("provider.rs"),
+            "use sha2::{Digest, Sha256};\nfn hash(body: &str) -> Sha256 { Sha256::new() }",
+        );
     }
 
     #[test]
@@ -232,6 +303,18 @@ mod dependency_guard {
             valid_domain_manifest()
         );
         assert_manifest_rejects(&manifest);
+    }
+
+    #[test]
+    fn manifest_guard_rejects_ocg_core_and_reqwest_while_permitting_sha2() {
+        let with_ocg_core = format!(
+            "{}\nocg-core = {{ path = \"../ocg-core\" }}\n",
+            valid_domain_manifest()
+        );
+        assert_manifest_rejects(&with_ocg_core);
+        let with_reqwest = format!("{}\nreqwest = \"0.12\"\n", valid_domain_manifest());
+        assert_manifest_rejects(&with_reqwest);
+        assert_domain_manifest_is_pure(Path::new("ocg-domain/Cargo.toml"), valid_domain_manifest());
     }
 
     #[test]
@@ -942,6 +1025,7 @@ mod dependency_guard {
             chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
             serde = { version = "1", features = ["derive"] }
             serde_json = "1"
+            sha2 = "0.10"
         "#
     }
 
@@ -980,7 +1064,7 @@ mod dependency_guard {
                 }
             }
         }
-        for required in ["chrono", "serde", "serde_json"] {
+        for required in ["chrono", "serde", "serde_json", "sha2"] {
             assert!(
                 names.contains(required),
                 "{} must declare `{required}`",
@@ -1593,7 +1677,12 @@ mod dependency_guard {
             import.segments.as_slice(),
             [domain, module]
                 if domain == "ocg_domain"
-                    && ["catalog", "ids", "pricing", "protocol", "zen"].contains(&module.as_str())
+                    && ["catalog", "ids", "pricing", "protocol", "provider", "zen"]
+                        .contains(&module.as_str())
+        ) || matches!(
+            import.segments.as_slice(),
+            [domain, _module, self_segment]
+                if domain == "ocg_domain" && self_segment == "self"
         ) || (import
             .segments
             .first()

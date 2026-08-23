@@ -4,4 +4,5 @@
 pub mod catalog;
 pub mod ids;
 pub mod protocol;
+pub mod provider;
 pub mod zen;
