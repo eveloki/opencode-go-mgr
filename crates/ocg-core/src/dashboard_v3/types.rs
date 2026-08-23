@@ -137,6 +137,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CustomModelDiscoveryResponse",
     "ClaudeDesktopModels",
     "ClaudeDesktopModelsUpdate",
+    "AccountVerify",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -870,6 +871,16 @@ pub struct AccountAcknowledgementCreate {
 pub struct AccountAcknowledgementWrite {
     pub acknowledgement_id: String,
     pub version: String,
+}
+
+/// POST `/accounts/{id}/verify` body. CAS tokens are required. Unknown
+/// fields, including any Key material, are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountVerify {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
 }
 
 /// Wire identity matching V2 `api_key` / `none`.
@@ -2131,6 +2142,7 @@ pub fn contract_schema() -> Value {
     include_type::<AccountModelCapabilityWrite>(&mut deserialize);
     include_type::<AccountAcknowledgementCreate>(&mut deserialize);
     include_type::<AccountAcknowledgementWrite>(&mut deserialize);
+    include_type::<AccountVerify>(&mut deserialize);
     include_type::<ZenFreeSettingsUpdate>(&mut deserialize);
     include_type::<ProtocolSwitchUpdate>(&mut deserialize);
     include_type::<ProtocolProbeRequest>(&mut deserialize);
@@ -2680,6 +2692,35 @@ mod tests {
         assert_eq!(patched.enabled, Some(false));
         assert!(patched.key.is_none());
         assert!(patched.name.is_none());
+
+        let verify: AccountVerify = serde_json::from_value(json!({
+            "expectedRevision": 4,
+            "processGeneration": 9
+        }))
+        .unwrap();
+        assert_eq!(verify.expectation.expected_revision, 4);
+        assert_eq!(verify.expectation.process_generation, 9);
+        assert!(
+            serde_json::from_value::<AccountVerify>(json!({
+                "expectedRevision": 4,
+                "processGeneration": 9,
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AccountVerify>(json!({
+                "processGeneration": 9
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AccountVerify>(json!({
+                "expected_revision": 4,
+                "processGeneration": 9
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3691,7 +3732,8 @@ mod tests {
             &CATALOG_TYPE_NAMES[custom_discovery_end..claude_end],
             CLAUDE_DESKTOP_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), claude_end);
+        assert_eq!(&CATALOG_TYPE_NAMES[claude_end..], ["AccountVerify"]);
+        assert_eq!(CATALOG_TYPE_NAMES.len(), claude_end + 1);
     }
 
     #[test]

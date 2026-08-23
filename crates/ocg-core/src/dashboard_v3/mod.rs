@@ -3,14 +3,15 @@
 //! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
 //! router. This module owns the shared DTO / error / CAS envelope, process
 //! generation, public auth/session issuance, connection/settings reads, the settings write path,
-//! access-key lifecycle, the local accounts control plane, local account usage
-//! calibration and provider-usage reads, the local/Zen provider catalog,
+//! access-key lifecycle, the local accounts control plane including connection
+//! verify, local account usage calibration and provider-usage reads, the local/Zen provider catalog,
 //! contracts, Zen Free control plane, pricing, the settings proxy diagnostic,
 //! read-only observability, Go/Zen protocol probes, and the Claude Desktop
 //! three-role model mapping. Custom model discovery is an authenticated
 //! operational probe (no `expectedRevision`, no revision bump). Custom
 //! protocol probes stay account-owned on V2.
 
+mod account_verify;
 mod accounts;
 mod auth;
 mod claude_desktop;
@@ -50,24 +51,24 @@ pub use types::{
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
     AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
     AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
-    AccountVerificationStatus, ApplicationModels, AuthLogin, AuthLogout, AuthRegister, AuthStatus,
-    CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ClaudeDesktopModels,
-    ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey, ContractScopeKind,
-    ControlRevision, CreditBalance, CustomEndpointContract, CustomModelDiscoveryRequest,
-    CustomModelDiscoveryResponse, DailyCostByModel, DailyCostQuery, DailyModelCost,
-    DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
-    ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED, ERROR_OUTBOUND_FAILED,
-    ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
-    ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols,
-    EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels,
-    ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs,
-    GatewayStatus, KeyCreate, KeyUpdate, MutationAck, MutationExpectation, PricingAdjustment,
-    PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
-    PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy,
-    PricingRefreshStatus, PricingRefreshUpdate, PricingRevision, PricingSnapshot,
-    PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult,
-    ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice, ProviderCatalog,
-    ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin, AuthLogout,
+    AuthRegister, AuthStatus, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
+    ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey,
+    ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
+    CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyCostByModel, DailyCostQuery,
+    DailyModelCost, DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
+    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
+    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
+    EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey,
+    ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog,
+    GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate, MutationAck,
+    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
+    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
+    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
+    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
+    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
+    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
     ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
     ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode, ProxySupportedModel,
     ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings, SettingsUpdate,
@@ -75,6 +76,8 @@ pub use types::{
     ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema, contract_schema_pretty,
 };
 
+#[cfg(debug_assertions)]
+pub use account_verify::{CustomVerifyProbeGuard, install_custom_verify_probe_for_tests};
 #[cfg(debug_assertions)]
 pub use pricing::{
     OfficialPricingFetchGuard, install_official_pricing_fetch_error_for_tests,
@@ -155,6 +158,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/accounts/{id}/provider-usage",
             get(usage::get_provider_usage),
+        )
+        .route(
+            "/accounts/{id}/verify",
+            post(account_verify::verify_account),
         )
         .route("/providers", get(providers::get_providers))
         .route(

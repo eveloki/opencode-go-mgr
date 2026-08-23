@@ -267,11 +267,13 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[proxy_end..custom_discovery_end],
         CUSTOM_DISCOVERY_CATALOG_TYPES
     );
+    let claude_end = custom_discovery_end + 2;
     assert_eq!(
-        &CATALOG_TYPE_NAMES[custom_discovery_end..],
+        &CATALOG_TYPE_NAMES[custom_discovery_end..claude_end],
         ["ClaudeDesktopModels", "ClaudeDesktopModelsUpdate"]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), custom_discovery_end + 2);
+    assert_eq!(&CATALOG_TYPE_NAMES[claude_end..], ["AccountVerify"]);
+    assert_eq!(CATALOG_TYPE_NAMES.len(), claude_end + 1);
 }
 
 #[test]
