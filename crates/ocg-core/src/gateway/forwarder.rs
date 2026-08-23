@@ -2,7 +2,8 @@ use crate::custom_http::{build_custom_http_client, json_content_headers};
 use crate::db::{Database, ForwardLogDiagnosticUpdate};
 use crate::gateway::attempt::{
     AttemptSpec, AttemptTimeouts, AttemptTransportError, CredentialHandle, CredentialResolveError,
-    CredentialResolver, ProxyRoutingModel, UpstreamAuth,
+    CredentialResolver, ProxyRoutingModel, TransportFailureKind, TransportSendFailure,
+    UpstreamAuth,
 };
 use crate::gateway::classify::{
     PreflightKind, ProviderErrorClass, RateLimitFallback, StreamClassifyInput,
@@ -204,15 +205,31 @@ async fn forward_once(
     let send_future = request.send();
     let result = if stream {
         match tokio::time::timeout(timeouts.stream_header, send_future).await {
-            Ok(result) => result.map_err(AttemptTransportError::Send),
+            Ok(result) => result.map_err(map_attempt_send_error),
             Err(_) => Err(AttemptTransportError::HeaderTimeout {
                 timeout: timeouts.stream_header,
             }),
         }
     } else {
-        send_future.await.map_err(AttemptTransportError::Send)
+        send_future.await.map_err(map_attempt_send_error)
     };
     Ok(ForwardOnceOutput { started, result })
+}
+
+fn map_attempt_send_error(error: reqwest::Error) -> AttemptTransportError {
+    AttemptTransportError::Send(TransportSendFailure::from_send_error(
+        error.is_connect(),
+        error.is_timeout(),
+        error.to_string(),
+    ))
+}
+
+fn send_failure_classify_input(kind: TransportFailureKind) -> TransportClassifyInput {
+    match kind {
+        TransportFailureKind::Connect => TransportClassifyInput::Connect,
+        TransportFailureKind::Timeout => TransportClassifyInput::SendTimeout,
+        TransportFailureKind::Other => TransportClassifyInput::OtherSendFailure,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -719,28 +736,18 @@ async fn forward_request_impl(
                 error_message: Some(error_message),
             });
         }
-        Err(AttemptTransportError::Send(e)) => {
+        Err(AttemptTransportError::Send(failure)) => {
             let upstream_wait_ms = upstream_started.elapsed().as_millis() as u64;
-            let class = classify_transport(if e.is_connect() {
-                TransportClassifyInput::Connect
-            } else if e.is_timeout() {
-                TransportClassifyInput::SendTimeout
-            } else {
-                TransportClassifyInput::OtherSendFailure
-            });
+            let class = classify_transport(send_failure_classify_input(failure.kind));
             let connect_failure = matches!(class, ProviderErrorClass::Connect);
             let outcome_unknown = matches!(class, ProviderErrorClass::OutcomeUnknown);
-            let detail = if e.is_timeout() {
-                format!("upstream request timed out: {e}")
-            } else {
-                format!("upstream request failed: {e}")
-            };
+            let detail = failure.message;
             let error_message = if outcome_unknown {
                 outcome_unknown_message(&detail)
             } else {
                 detail.clone()
             };
-            let status = if e.is_timeout() {
+            let status = if failure.timed_out {
                 StatusCode::GATEWAY_TIMEOUT
             } else {
                 StatusCode::BAD_GATEWAY
@@ -3373,6 +3380,8 @@ mod host_credential_resolver_tests {
 
 #[cfg(test)]
 mod forward_once_tests {
+    use super::*;
+
     fn production_source() -> &'static str {
         include_str!("forwarder.rs")
             .split("#[cfg(test)]")
@@ -3382,7 +3391,7 @@ mod forward_once_tests {
 
     fn function_source(name: &str) -> &'static str {
         let production = production_source();
-        let sig = format!("async fn {name}");
+        let sig = format!("fn {name}");
         let start = production
             .find(&sig)
             .unwrap_or_else(|| panic!("missing {name}"));
@@ -3431,6 +3440,8 @@ mod forward_once_tests {
         let source = function_source("forward_once");
         assert_eq!(source.matches(".send()").count(), 1);
         assert!(source.contains("request.send()"));
+        assert!(source.contains("map_attempt_send_error"));
+        assert!(!source.contains("map_err(AttemptTransportError::Send)"));
         assert!(source.contains("timeouts.non_stream"));
         assert!(source.contains("timeouts.stream_header"));
         assert!(source.contains("ProxyRoutingModel::IsolatedTrustedAdmin"));
@@ -3438,6 +3449,20 @@ mod forward_once_tests {
         assert!(source.contains("ProxyRoutingModel::RequestEntrySnapshot"));
         assert!(source.contains("build_custom_http_client"));
         assert!(source.contains("build_no_redirect"));
+    }
+
+    #[test]
+    fn forward_once_converts_reqwest_send_errors_at_the_send_site() {
+        let production = production_source();
+        assert!(production.contains("fn map_attempt_send_error(error: reqwest::Error)"));
+        assert!(production.contains("TransportSendFailure::from_send_error"));
+        assert!(production.contains("error.is_connect()"));
+        assert!(production.contains("error.is_timeout()"));
+        assert!(production.contains("error.to_string()"));
+        let send_site = function_source("map_attempt_send_error");
+        assert!(send_site.contains("is_connect()"));
+        assert!(send_site.contains("is_timeout()"));
+        assert!(!function_source("forward_once").contains("is_connect()"));
     }
 
     #[test]
@@ -3475,5 +3500,54 @@ mod forward_once_tests {
                 "forward_once must not contain policy token `{forbidden}`"
             );
         }
+    }
+
+    #[test]
+    fn send_failure_kinds_keep_stage0_classification() {
+        let timeout = TransportSendFailure::from_send_error(false, true, "operation timed out");
+        assert_eq!(
+            classify_transport(send_failure_classify_input(timeout.kind)),
+            ProviderErrorClass::OutcomeUnknown
+        );
+        assert!(timeout.timed_out);
+        assert!(
+            timeout.message.starts_with("upstream request timed out:"),
+            "{}",
+            timeout.message
+        );
+
+        let connect = TransportSendFailure::from_send_error(true, false, "connection refused");
+        assert_eq!(
+            classify_transport(send_failure_classify_input(connect.kind)),
+            ProviderErrorClass::Connect
+        );
+        assert!(!connect.timed_out);
+        assert!(
+            connect.message.starts_with("upstream request failed:"),
+            "{}",
+            connect.message
+        );
+
+        let other = TransportSendFailure::from_send_error(false, false, "connection reset");
+        assert_eq!(
+            classify_transport(send_failure_classify_input(other.kind)),
+            ProviderErrorClass::OutcomeUnknown
+        );
+        assert!(!other.timed_out);
+
+        let connect_timeout =
+            TransportSendFailure::from_send_error(true, true, "error trying to connect");
+        assert_eq!(
+            classify_transport(send_failure_classify_input(connect_timeout.kind)),
+            ProviderErrorClass::Connect
+        );
+        assert!(connect_timeout.timed_out);
+        assert!(
+            connect_timeout
+                .message
+                .starts_with("upstream request timed out:"),
+            "{}",
+            connect_timeout.message
+        );
     }
 }

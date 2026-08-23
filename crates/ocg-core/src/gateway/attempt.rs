@@ -142,12 +142,69 @@ impl AttemptTimeouts {
     }
 }
 
+/// Classification kind of one host send failure. Connect is assigned first so a
+/// connect timeout stays retry-eligible; [`TransportSendFailure::timed_out`] is
+/// the independent timeout bit used for Stage 0 user/log text and HTTP status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportFailureKind {
+    Timeout,
+    Connect,
+    Other,
+}
+
+/// Neutral owned send failure. Captured at the host `.send()` site; does not
+/// retain a concrete HTTP-client error type. `message` is the Stage 0 user/log
+/// text (`upstream request timed out|failed: …`) copied from the host error
+/// Display. Caller-side sanitizers still run on this string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TransportSendFailure {
+    pub kind: TransportFailureKind,
+    pub timed_out: bool,
+    pub message: String,
+}
+
+impl TransportSendFailure {
+    /// Convert host send flags at the single `.send()` boundary.
+    /// `is_connect` wins for [`Self::kind`]; `is_timeout` independently selects
+    /// the Stage 0 timeout prefix and [`Self::timed_out`].
+    pub(crate) fn from_send_error(
+        is_connect: bool,
+        is_timeout: bool,
+        cause: impl Into<String>,
+    ) -> Self {
+        let cause = cause.into();
+        let kind = if is_connect {
+            TransportFailureKind::Connect
+        } else if is_timeout {
+            TransportFailureKind::Timeout
+        } else {
+            TransportFailureKind::Other
+        };
+        let message = if is_timeout {
+            format!("upstream request timed out: {cause}")
+        } else {
+            format!("upstream request failed: {cause}")
+        };
+        Self {
+            kind,
+            timed_out: is_timeout,
+            message,
+        }
+    }
+}
+
+impl std::fmt::Display for TransportSendFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Errors from the single upstream POST. Classification, logging, cooldown,
 /// CAS, usage scheduling, and retry stay in the caller.
 #[derive(Debug)]
 pub(crate) enum AttemptTransportError {
     HeaderTimeout { timeout: Duration },
-    Send(reqwest::Error),
+    Send(TransportSendFailure),
 }
 
 impl std::fmt::Display for AttemptTransportError {
@@ -158,22 +215,12 @@ impl std::fmt::Display for AttemptTransportError {
                 "upstream did not return response headers within {}s",
                 timeout.as_secs()
             ),
-            Self::Send(error) if error.is_timeout() => {
-                write!(f, "upstream request timed out: {error}")
-            }
-            Self::Send(error) => write!(f, "upstream request failed: {error}"),
+            Self::Send(failure) => write!(f, "{failure}"),
         }
     }
 }
 
-impl std::error::Error for AttemptTransportError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::HeaderTimeout { .. } => None,
-            Self::Send(error) => Some(error),
-        }
-    }
-}
+impl std::error::Error for AttemptTransportError {}
 
 /// Host-side seam: decrypts an opaque [`CredentialHandle`]. Provider adapters
 /// never receive this trait or the resulting plaintext. The single-attempt
@@ -288,6 +335,10 @@ mod tests {
         assert!(
             !production.contains("reqwest::Client"),
             "AttemptSpec must not name reqwest::Client"
+        );
+        assert!(
+            !production.contains("reqwest::Error"),
+            "AttemptTransportError must not wrap reqwest::Error"
         );
     }
 
@@ -414,5 +465,95 @@ mod tests {
             header,
             AttemptTransportError::HeaderTimeout { .. }
         ));
+    }
+
+    #[test]
+    fn send_failure_kinds_keep_stage0_display_and_connect_first_classification() {
+        let timeout = TransportSendFailure::from_send_error(false, true, "operation timed out");
+        assert_eq!(timeout.kind, TransportFailureKind::Timeout);
+        assert!(timeout.timed_out);
+        assert_eq!(
+            timeout.message,
+            "upstream request timed out: operation timed out"
+        );
+        let timeout_err = AttemptTransportError::Send(timeout.clone());
+        assert_eq!(timeout_err.to_string(), timeout.message);
+        assert!(!matches!(
+            timeout_err,
+            AttemptTransportError::HeaderTimeout { .. }
+        ));
+
+        let connect = TransportSendFailure::from_send_error(true, false, "connection refused");
+        assert_eq!(connect.kind, TransportFailureKind::Connect);
+        assert!(!connect.timed_out);
+        assert_eq!(
+            connect.message,
+            "upstream request failed: connection refused"
+        );
+        assert_eq!(
+            AttemptTransportError::Send(connect.clone()).to_string(),
+            connect.message
+        );
+
+        let connect_timeout =
+            TransportSendFailure::from_send_error(true, true, "error trying to connect");
+        assert_eq!(connect_timeout.kind, TransportFailureKind::Connect);
+        assert!(connect_timeout.timed_out);
+        assert_eq!(
+            connect_timeout.message,
+            "upstream request timed out: error trying to connect"
+        );
+
+        let other = TransportSendFailure::from_send_error(false, false, "connection reset");
+        assert_eq!(other.kind, TransportFailureKind::Other);
+        assert!(!other.timed_out);
+        assert_eq!(other.message, "upstream request failed: connection reset");
+        assert_eq!(
+            AttemptTransportError::Send(other.clone()).to_string(),
+            other.message
+        );
+    }
+
+    #[test]
+    fn attempt_transport_error_contains_no_reqwest_type_or_source() {
+        let production = include_str!("attempt.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        assert!(
+            !production.contains("reqwest::Error"),
+            "AttemptTransportError must not name reqwest::Error"
+        );
+        assert!(
+            !production.contains("Send(reqwest"),
+            "AttemptTransportError::Send must not wrap a reqwest type"
+        );
+
+        let error = AttemptTransportError::Send(TransportSendFailure::from_send_error(
+            false,
+            false,
+            "connection reset",
+        ));
+        assert!(std::error::Error::source(&error).is_none());
+        for name in [
+            std::any::type_name::<AttemptTransportError>(),
+            std::any::type_name::<TransportSendFailure>(),
+            std::any::type_name::<TransportFailureKind>(),
+        ] {
+            assert!(
+                !name.to_ascii_lowercase().contains("reqwest"),
+                "transport error type name leaked reqwest: {name}"
+            );
+        }
+        let debug = format!("{error:?}");
+        let display = error.to_string();
+        assert!(
+            !debug.to_ascii_lowercase().contains("reqwest"),
+            "Debug leaked reqwest: {debug}"
+        );
+        assert!(
+            !display.to_ascii_lowercase().contains("reqwest"),
+            "Display leaked reqwest: {display}"
+        );
     }
 }
