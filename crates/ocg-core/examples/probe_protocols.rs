@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use ocg_core::crypto::MachineBoundCipher;
+use ocg_core::crypto::{KeyCipher, MachineBoundCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway::free_models::is_free_model;
 use ocg_core::state::CoreStateInner;
@@ -117,8 +117,8 @@ async fn main() -> anyhow::Result<()> {
             PathBuf::from(home).join(".ocg-mgr")
         });
 
-    let cipher = Arc::new(MachineBoundCipher::new());
-    let db = Database::open(data_dir.clone())?;
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(MachineBoundCipher::new());
+    let db = Database::open_with_cipher(data_dir.clone(), cipher.clone())?;
     let state = CoreStateInner::new(db, data_dir, cipher)?;
     let (config, client) = state.upstream_context();
     let base = config.upstream_base_url.trim_end_matches('/').to_string();

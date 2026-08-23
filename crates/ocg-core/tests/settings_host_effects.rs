@@ -1195,10 +1195,19 @@ async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_and_claud
         revision_after_writers + 1,
         "port-only compensation must make one monotonic persisted revision"
     );
-    let stored = state.db.lock().get_setting("config").unwrap().unwrap();
-    let stored: ocg_core::models::AppConfig = serde_json::from_str(&stored).unwrap();
+    let stored_json = state.db.lock().get_setting("config").unwrap().unwrap();
+    let stored: ocg_core::models::AppConfig = serde_json::from_str(&stored_json).unwrap();
     assert_eq!(stored.gateway_port, serving_port);
-    assert_eq!(stored.gateway_key, primary_after);
+    assert_eq!(
+        state
+            .db
+            .lock()
+            .primary_access_key_value()
+            .unwrap()
+            .as_deref(),
+        Some(primary_after.as_str())
+    );
+    assert_eq!(stored.gateway_key, "");
     assert_eq!(stored.claude_desktop_models.sonnet, "glm-5.2");
 
     let handle = state.gateway.lock().take();

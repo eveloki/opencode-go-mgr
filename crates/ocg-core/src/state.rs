@@ -973,7 +973,9 @@ impl crate::gateway_keys::KeyHost for CoreStateInner {
     ) -> anyhow::Result<(Vec<crate::models::SubGatewayKey>, String)> {
         let db = self.db.lock();
         let keys = Database::list_active_sub_gateway_keys(&db)?;
-        let primary = self.config.lock().gateway_key.clone();
+        let primary = Database::primary_access_key_value(&db)?
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| self.config.lock().gateway_key.clone());
         Ok((keys, primary))
     }
 }
@@ -1228,11 +1230,24 @@ fn normalize_client_root_url_override(value: Option<&str>) -> Result<Option<Stri
 /// Loads persisted config. The `bool` marks config that needs canonical rewriting.
 fn load_config(db: &Database) -> crate::Result<(AppConfig, bool)> {
     let mut config = AppConfig::default();
-    let mut needs_persist = false;
-    if let Some(value) = db.get_setting("config")? {
+    let mut stored_gateway_key = String::new();
+    let mut needs_persist = if let Some(value) = db.get_setting("config")? {
         config = serde_json::from_str(&value)?;
+        stored_gateway_key = config.gateway_key.clone();
         config.claude_desktop_models.normalize();
-        needs_persist = serde_json::to_string(&config)? != value;
+        let mut compare = config.clone();
+        compare.gateway_key = stored_gateway_key.clone();
+        serde_json::to_string(&compare)? != value
+    } else {
+        true
+    };
+    if let Some(primary) = db.primary_access_key_value()? {
+        config.gateway_key = primary;
+    }
+    if !stored_gateway_key.trim().is_empty() {
+        // Sanitized config JSON is no longer the database authority for the
+        // primary key; rewrite leftover plaintext out of settings.
+        needs_persist = true;
     }
     let invite_url =
         normalize_opencode_invite_url(&config.opencode_invite_url).map_err(anyhow::Error::msg)?;
@@ -1268,7 +1283,7 @@ fn load_config(db: &Database) -> crate::Result<(AppConfig, bool)> {
 }
 
 fn save_config(db: &Database, config: &AppConfig) -> crate::Result<()> {
-    db.set_setting("config", &serde_json::to_string(config)?)?;
+    db.set_config(&serde_json::to_string(config)?)?;
     Ok(())
 }
 
@@ -1951,10 +1966,16 @@ mod tests {
         let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
 
         let config = state.config();
-        assert_eq!(config.gateway_key, "ocg-legacy-key");
         assert!(
-            state.credential_entry_for_value("ocg-legacy-key").is_some(),
-            "the legacy scalar authenticates as the primary key"
+            !config.gateway_key.is_empty(),
+            "the live primary still authenticates after v27"
+        );
+        assert_ne!(config.gateway_key, "ocg-old-laptop");
+        assert!(
+            state
+                .credential_entry_for_value(&config.gateway_key)
+                .is_some(),
+            "access_keys is the database authority for the primary key"
         );
         assert!(
             state.credential_entry_for_value("ocg-old-laptop").is_none(),
@@ -1986,6 +2007,41 @@ mod tests {
             Some(crate::gateway_keys::PRIMARY_KEY_NAME),
         );
 
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn persisted_config_json_is_not_the_primary_key_authority() {
+        let dir = temp_data_dir("gateway-key-sanitized");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+        let mut config = state.config();
+        config.gateway_key = "ocg-authority-primary".to_string();
+        state
+            .set_config(config)
+            .expect("primary rotation should save");
+        assert_eq!(state.config().gateway_key, "ocg-authority-primary");
+        assert_eq!(
+            state
+                .db
+                .lock()
+                .primary_access_key_value()
+                .unwrap()
+                .as_deref(),
+            Some("ocg-authority-primary")
+        );
+        let stored: serde_json::Value = serde_json::from_str(
+            &state
+                .db
+                .lock()
+                .get_setting("config")
+                .unwrap()
+                .expect("config json should exist"),
+        )
+        .unwrap();
+        assert_eq!(stored["gateway_key"], "");
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");
     }

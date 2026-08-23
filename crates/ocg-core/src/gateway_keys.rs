@@ -1,10 +1,13 @@
-//! Database-owned sub gateway keys and the in-memory credential snapshot.
+//! Database-owned access keys and the in-memory credential snapshot.
 //!
-//! Two credential tiers share one auth surface:
-//! - the primary key is the legacy `AppConfig::gateway_key` scalar: never
-//!   disabled or deleted, attributed under the fixed [`PRIMARY_KEY_ID`];
-//! - sub keys live in the `sub_gateway_keys` table (schema v20) and change
-//!   only through the key lifecycle API.
+//! Two credential tiers share one auth surface and one `access_keys` table
+//! (schema v27):
+//! - the primary key is the fixed [`PRIMARY_KEY_ID`] row: enabled, not
+//!   deleted, non-empty, and never disabled or removed. Public `AppConfig`
+//!   and dashboard APIs still expose `gateway_key`; the sanitized config JSON
+//!   is no longer the database authority after migration;
+//! - sub keys are the non-primary rows and change only through the key
+//!   lifecycle API. Soft-delete preserves identity/name and clears the value.
 //!
 //! The credential snapshot maps value -> (id, name) and is the single source
 //! for both the auth hot path and forward-log name snapshots; readers never
@@ -13,10 +16,11 @@
 //!
 //! Invalidation model: the table is written only by this module's mutation
 //! entry points (called with the `settings_update` lock held, snapshot
-//! updated in the same critical section) and the config scalar only through
-//! `set_config` (which refreshes the primary entry). Direct external edits to
-//! SQLite or the config store are outside the model and do not take effect
-//! until the next restart.
+//! updated in the same critical section) and the primary row only through
+//! `set_config` (which writes the access-keys row and sanitized config JSON
+//! in one database transaction, then refreshes the primary snapshot entry).
+//! Direct external edits to SQLite or the config store are outside the model
+//! and do not take effect until the next restart.
 
 use crate::models::SubGatewayKey;
 use chrono::{DateTime, Utc};
@@ -823,13 +827,26 @@ mod tests {
         assert!(!stored.enabled, "disabled keys keep their plaintext");
         assert_eq!(stored.key, created.key);
 
-        // The bypass sequence: an unchecked writer makes the primary adopt
-        // the disabled key's value, then re-enabling must be rejected.
+        // Schema v27 unique-indexes all live access-key values, so an
+        // ordinary set_config cannot adopt a disabled sub key's plaintext.
+        let mut config = state.config();
+        config.gateway_key = created.key.clone();
+        assert!(
+            state.set_config(config).is_err(),
+            "active access key values must stay unique at the database"
+        );
+
+        // Drop the unique index to simulate the pre-v27 unchecked bypass,
+        // then re-enabling must still be rejected by the API gate.
+        rusqlite::Connection::open(dir.join("data.sqlite"))
+            .unwrap()
+            .execute_batch("DROP INDEX IF EXISTS idx_access_keys_active_key;")
+            .unwrap();
         let mut config = state.config();
         config.gateway_key = created.key.clone();
         state
             .set_config(config)
-            .expect("set_config itself carries no cross-tier gate");
+            .expect("index-less writer can still collide");
         let re_enable = set_sub_key_enabled(&state, &created.id, true);
         assert_eq!(
             re_enable.unwrap_err(),
@@ -941,8 +958,12 @@ mod tests {
     fn primary_attribution_survives_an_out_of_model_value_collision() {
         let (dir, state) = temp_state("collision-hardening");
         let created = create_sub_key(&state, "Laptop").expect("sub key should create");
-        // An unchecked writer makes the primary adopt the enabled sub key's
-        // value (out of model; every real settings writer gates this).
+        // An unchecked writer that drops the unique index can still collide;
+        // snapshot rebuild must keep attributing the shared value to primary.
+        rusqlite::Connection::open(dir.join("data.sqlite"))
+            .unwrap()
+            .execute_batch("DROP INDEX IF EXISTS idx_access_keys_active_key;")
+            .unwrap();
         let mut config = state.config();
         config.gateway_key = created.key.clone();
         state.set_config(config).expect("save should work");

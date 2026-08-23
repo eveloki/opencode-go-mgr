@@ -157,8 +157,8 @@ fn assert_unrelated_config(harness: &V3Harness, before: &ocg_core::models::AppCo
 }
 
 #[test]
-fn dashboard_v3_claude_desktop_schema_version_stays_at_v26() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+fn dashboard_v3_claude_desktop_schema_version_stays_at_v27() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
 }
 
 #[test]

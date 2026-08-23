@@ -345,8 +345,8 @@ async fn create_custom_account(harness: &V3Harness, base_url: &str, auth: &str) 
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v26() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+fn dashboard_v3_schema_version_stays_at_v27() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
 }
 
 #[tokio::test]
@@ -930,7 +930,7 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
     assert_eq!(v3["models"][0], "org/model-a");
     assert_eq!(v3["revision"], before);
     assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
     harness.stop();
 }
 

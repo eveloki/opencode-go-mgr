@@ -221,8 +221,35 @@ fn key_mutation_routes(id: &str) -> Vec<(Method, String)> {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v26() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+fn dashboard_v3_schema_version_stays_at_v27() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+}
+
+#[test]
+fn dashboard_v3_keys_release_source_hides_access_key_unique_index_seam() {
+    let source = include_str!("../src/db.rs");
+    let tests_mod = source
+        .rfind("#[cfg(test)]\nmod tests {")
+        .expect("db.rs tests module");
+    let production = &source[..tests_mod];
+    let needle = "fn test_drop_access_key_unique_index";
+    let idx = production
+        .find(needle)
+        .expect("debug/test unique-index seam should exist");
+    let prefix = &production[idx.saturating_sub(160)..idx];
+    assert!(
+        prefix.contains("#[cfg(any(test, debug_assertions))]")
+            || prefix.contains("#[cfg(debug_assertions)]"),
+        "access-key unique-index seam must be absent from release production source: {prefix}"
+    );
+    assert!(
+        !prefix.contains("#[cfg(not(debug_assertions))]"),
+        "access-key unique-index seam must not compile in release"
+    );
+    assert!(
+        !production[idx + needle.len()..].contains(needle),
+        "only one unique-index test seam is allowed"
+    );
 }
 
 #[tokio::test]
@@ -812,37 +839,46 @@ async fn dashboard_v3_cap_uniqueness_and_collision_errors() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let mut config = harness.state.config();
-    config.gateway_key = target.value.clone();
-    harness.state.set_config(config).unwrap();
-    let (status, collide) = send_json(
-        &harness,
-        Method::PATCH,
-        &format!("/keys/{}", target.id),
-        &cas(
+    #[cfg(debug_assertions)]
+    {
+        harness
+            .state
+            .db
+            .lock()
+            .test_drop_access_key_unique_index()
+            .unwrap();
+        let mut config = harness.state.config();
+        config.gateway_key = target.value.clone();
+        harness.state.set_config(config).unwrap();
+        let (status, collide) = send_json(
             &harness,
-            json!({
-                "name": "Renamed",
-                "enabled": true
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{collide}");
-    assert_v3_error(&collide, ERROR_INVALID_REQUEST);
-    assert_eq!(
-        collide["message"],
-        "key value collides with the primary key"
-    );
-    let stored = harness
-        .state
-        .db
-        .lock()
-        .get_sub_gateway_key(&target.id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.name, "Renamed");
-    assert!(!stored.enabled);
+            Method::PATCH,
+            &format!("/keys/{}", target.id),
+            &cas(
+                &harness,
+                json!({
+                    "name": "Renamed",
+                    "enabled": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{collide}");
+        assert_v3_error(&collide, ERROR_INVALID_REQUEST);
+        assert_eq!(
+            collide["message"],
+            "key value collides with the primary key"
+        );
+        let stored = harness
+            .state
+            .db
+            .lock()
+            .get_sub_gateway_key(&target.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.name, "Renamed");
+        assert!(!stored.enabled);
+    }
 
     harness.stop();
 }

@@ -29,7 +29,7 @@ pub fn run() {
             std::process::exit(1);
         }
     };
-    let db = match Database::open(data_dir.clone()) {
+    let db = match Database::open_with_cipher(data_dir.clone(), cipher.clone()) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("failed to open database: {}", e);
@@ -171,6 +171,14 @@ mod host_lifecycle_surface {
             "no generate_handler registrations may remain"
         );
         assert!(!production.contains("#[tauri::command]"));
+        assert!(
+            production.contains("Database::open_with_cipher"),
+            "desktop Host must open SQLite with the already-resolved cipher"
+        );
+        assert!(
+            !production.contains("Database::open("),
+            "desktop Host must not use the cipher-less convenience open path"
+        );
 
         for path in [
             include_str!("host/mod.rs"),

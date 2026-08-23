@@ -1,3 +1,4 @@
+use crate::crypto::KeyCipher;
 use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
 use crate::kernel::pricing::{PricingLimits, PricingSnapshot, SEED_LIMITS};
 use crate::models::*;
@@ -13,13 +14,18 @@ use ocg_infra::sqlite_logs::{
     ForwardLogIdentityPatch, ForwardLogInsertRow, ForwardLogUpdateRow, GatewayLogInsertRow,
 };
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Row, Transaction, params, params_from_iter,
+    Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params,
+    params_from_iter,
     types::{Type, Value},
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fmt,
+    fs::OpenOptions,
+    io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub struct Database {
@@ -47,8 +53,30 @@ pub const PRE_V22_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v22.";
 /// One-time, non-overwriting SQLite snapshot taken before an existing pre-v23
 /// database receives any migration writes on its way to v23.
 pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
+/// Fresh unique SQLite snapshot taken after a database has reached canonical
+/// v26 and before any v27 write. Not created for a brand-new empty database.
+pub const PRE_V3_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v3.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 26;
+pub const CURRENT_SCHEMA_VERSION: i32 = 27;
+/// Schema the v27 rewrite expects as its committed source. Historical databases
+/// always migrate through this version first.
+pub const V26_SCHEMA_VERSION: i32 = 26;
+/// Bounded retries of the whole v27 preflight/backup when a writer races the
+/// captured `PRAGMA data_version`.
+const V27_WRITER_RACE_RETRIES: u32 = 8;
+/// Fixed read size for streaming SHA-256 evidence of a pre-v3 backup.
+const BACKUP_HASH_BUFFER_LEN: usize = 64 * 1024;
+/// Ceiling on active (non-deleted, non-primary) access keys. Matches the
+/// key-lifecycle API; tombstones do not count.
+const MAX_ACTIVE_NON_PRIMARY_ACCESS_KEYS: i64 = 64;
+
+const USAGE_SYNC_ACCOUNT_COLUMNS: &[&str] = &[
+    "usage_sync_last_success_at",
+    "usage_sync_last_attempt_at",
+    "usage_sync_next_eligible_at",
+    "usage_sync_failure_streak",
+    "usage_sync_last_expedited_at",
+];
 
 const PROVIDER_CONTRACT_V26_DDL: &str = "
     CREATE TABLE IF NOT EXISTS provider_contract_scopes (
@@ -610,6 +638,692 @@ fn ensure_pre_v23_backup(conn: &Connection, db_path: &Path) -> Result<()> {
     ensure_schema_backup(conn, db_path, PRE_V23_BACKUP_FILE_PREFIX, source_version)
 }
 
+fn is_fresh_empty_database(conn: &Connection, source_version: i32) -> Result<bool> {
+    Ok(source_version == 0 && !has_unversioned_legacy_tables(conn)?)
+}
+
+fn sqlite_data_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("PRAGMA data_version", [], |row| row.get(0))?)
+}
+
+fn sqlite_quick_check(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA quick_check")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        rows.len() == 1 && rows[0].eq_ignore_ascii_case("ok"),
+        "sqlite quick_check failed: {}",
+        rows.join("; ")
+    );
+    Ok(())
+}
+
+fn sqlite_foreign_key_check(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    anyhow::ensure!(rows.is_empty(), "sqlite foreign_key_check failed: {rows:?}");
+    Ok(())
+}
+
+fn probe_account_cipher(
+    cipher: Option<&dyn KeyCipher>,
+    id: &str,
+    column: &str,
+    value: &str,
+) -> Result<()> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let Some(cipher) = cipher else {
+        anyhow::bail!(
+            "database open requires the host encryption cipher to migrate account {id}.{column}; use Database::open_with_cipher"
+        );
+    };
+    cipher.decrypt(value).with_context(|| {
+        format!("host cipher rejected account {id}.{column}; ciphertext bytes were not rewritten")
+    })?;
+    Ok(())
+}
+
+fn preflight_ciphertext_probes(conn: &Connection, cipher: Option<&dyn KeyCipher>) -> Result<()> {
+    if !table_exists(conn, "accounts")? {
+        return Ok(());
+    }
+    if table_has_column(conn, "accounts", "key_cipher")? {
+        let mut stmt = conn.prepare("SELECT id, key_cipher FROM accounts")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, value) in rows {
+            probe_account_cipher(cipher, &id, "key_cipher", &value)?;
+        }
+    }
+    if table_has_column(conn, "accounts", "password_cipher")? {
+        let mut stmt = conn.prepare(
+            "SELECT id, password_cipher FROM accounts WHERE password_cipher IS NOT NULL AND password_cipher <> ''",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, value) in rows {
+            probe_account_cipher(cipher, &id, "password_cipher", &value)?;
+        }
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to read {} for SHA-256 evidence", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; BACKUP_HASH_BUFFER_LEN];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn sync_file(path: &Path) -> Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .or_else(|_| std::fs::File::open(path))
+        .with_context(|| format!("failed to open {} for durability sync", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", path.display()))?;
+    Ok(())
+}
+
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        let dir = std::fs::File::open(parent).with_context(|| {
+            format!(
+                "failed to open directory {} for durability sync",
+                parent.display()
+            )
+        })?;
+        dir.sync_all()
+            .with_context(|| format!("failed to sync directory {}", parent.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+    }
+    Ok(())
+}
+
+fn write_backup_sha256_evidence(backup_path: &Path) -> Result<String> {
+    sync_file(backup_path)?;
+    let digest = sha256_file(backup_path)?;
+    let file_name = backup_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("backup path is not UTF-8: {}", backup_path.display()))?;
+    let evidence_path = backup_path.with_file_name(format!("{file_name}.sha256"));
+    let tmp_path = backup_path.with_file_name(format!(
+        "{file_name}.sha256.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    {
+        let mut tmp = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .with_context(|| {
+                format!(
+                    "failed to create SHA-256 evidence temp {}",
+                    tmp_path.display()
+                )
+            })?;
+        tmp.write_all(format!("{digest}  {file_name}\n").as_bytes())
+            .with_context(|| {
+                format!(
+                    "failed to write SHA-256 evidence temp {}",
+                    tmp_path.display()
+                )
+            })?;
+        tmp.flush()?;
+        tmp.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, &evidence_path).with_context(|| {
+        format!(
+            "failed to publish SHA-256 evidence {} -> {}",
+            tmp_path.display(),
+            evidence_path.display()
+        )
+    })?;
+    sync_parent_dir(&evidence_path)?;
+    Ok(digest)
+}
+
+fn verify_pre_v3_backup(path: &Path) -> Result<()> {
+    sqlite_quick_check(&Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?)?;
+    verify_schema_backup(path, PRE_V3_BACKUP_FILE_PREFIX, V26_SCHEMA_VERSION)?;
+    let backup = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to reopen pre-v3 backup {}", path.display()))?;
+    sqlite_quick_check(&backup)?;
+    Ok(())
+}
+
+fn create_pre_v3_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf> {
+    for _ in 0..8 {
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%S%9fZ");
+        let backup_path =
+            db_path.with_file_name(format!("{PRE_V3_BACKUP_FILE_PREFIX}{timestamp}.bak"));
+        if backup_path.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
+        let backup_value = backup_path.to_string_lossy().into_owned();
+        #[cfg(test)]
+        let vacuum_race = v27_test_hooks::install_vacuum_race(db_path, &backup_path);
+        let vacuum = conn.execute("VACUUM main INTO ?1", [&backup_value]);
+        #[cfg(test)]
+        if let Some(race) = vacuum_race {
+            race.finish();
+        }
+        vacuum.with_context(|| {
+            format!(
+                "failed to create pre-v3 database backup {}",
+                backup_path.display()
+            )
+        })?;
+        verify_pre_v3_backup(&backup_path)?;
+        write_backup_sha256_evidence(&backup_path)?;
+        return Ok(backup_path);
+    }
+    anyhow::bail!("failed to allocate a unique pre-v3 backup filename")
+}
+
+fn access_keys_v27_ddl() -> String {
+    format!(
+        "
+        CREATE TABLE IF NOT EXISTS access_keys (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            key TEXT NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+            deleted_at TEXT,
+            created_at TEXT NOT NULL,
+            CHECK (
+                is_primary = 0 OR (
+                    id = '{PRIMARY_KEY_ID}'
+                    AND enabled = 1
+                    AND deleted_at IS NULL
+                    AND key <> ''
+                )
+            ),
+            CHECK (
+                id <> '{PRIMARY_KEY_ID}' OR is_primary = 1
+            )
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_access_keys_live_primary
+            ON access_keys(is_primary) WHERE is_primary = 1 AND deleted_at IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_access_keys_active_key
+            ON access_keys(key) WHERE deleted_at IS NULL AND key <> '';
+        CREATE TRIGGER IF NOT EXISTS access_keys_protect_primary_delete
+        BEFORE DELETE ON access_keys
+        WHEN OLD.id = '{PRIMARY_KEY_ID}'
+        BEGIN
+            SELECT RAISE(ABORT, 'primary access key cannot be deleted');
+        END;
+        "
+    )
+}
+
+fn mint_unique_primary_access_key(conn: &Connection) -> Result<String> {
+    let mut taken = Vec::new();
+    if table_exists(conn, "sub_gateway_keys")? {
+        let mut stmt = conn
+            .prepare("SELECT key FROM sub_gateway_keys WHERE deleted_at IS NULL AND key <> ''")?;
+        taken = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+    }
+    for _ in 0..64 {
+        let left = uuid::Uuid::new_v4().simple().to_string();
+        let right = uuid::Uuid::new_v4().simple().to_string();
+        let candidate = format!("ocg-{}-{}", &left[..8], &right[..8]);
+        if !taken.iter().any(|value| value == &candidate) {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!("failed to mint a unique primary access key")
+}
+
+fn load_config_gateway_key(conn: &Connection) -> Result<Option<String>> {
+    let Some(json) = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'config'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+    Ok(parsed
+        .get("gateway_key")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string))
+}
+
+fn sanitize_config_json_primary_key(json: &str) -> Result<(String, Option<String>)> {
+    let mut value: serde_json::Value = serde_json::from_str(json)?;
+    let primary = value
+        .get("gateway_key")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string);
+    if let Some(object) = value.as_object_mut() {
+        if object.contains_key("gateway_key") {
+            object.insert(
+                "gateway_key".to_string(),
+                serde_json::Value::String(String::new()),
+            );
+        }
+    }
+    Ok((serde_json::to_string(&value)?, primary))
+}
+
+fn upsert_primary_access_key_on(conn: &Connection, key: &str) -> Result<()> {
+    let key = key.trim();
+    anyhow::ensure!(!key.is_empty(), "primary access key cannot be empty");
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO access_keys (id, name, key, is_primary, enabled, deleted_at, created_at)
+         VALUES (?1, ?2, ?3, 1, 1, NULL, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+            key = excluded.key,
+            name = excluded.name,
+            is_primary = 1,
+            enabled = 1,
+            deleted_at = NULL",
+        params![PRIMARY_KEY_ID, PRIMARY_KEY_NAME, key, now],
+    )?;
+    Ok(())
+}
+
+fn drop_column_if_exists(tx: &Transaction<'_>, table: &str, column: &str) -> Result<()> {
+    if table_has_column(tx, table, column)? {
+        tx.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])?;
+    }
+    Ok(())
+}
+
+fn assert_v27_access_key_invariants(conn: &Connection) -> Result<()> {
+    anyhow::ensure!(
+        table_exists(conn, "access_keys")?,
+        "v27 requires the access_keys table"
+    );
+    anyhow::ensure!(
+        !table_exists(conn, "sub_gateway_keys")?,
+        "v27 must drop sub_gateway_keys after copying into access_keys"
+    );
+    for column in USAGE_SYNC_ACCOUNT_COLUMNS {
+        anyhow::ensure!(
+            !table_has_column(conn, "accounts", column)?,
+            "v27 must drop leftover accounts.{column}"
+        );
+    }
+    let primary_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM access_keys WHERE is_primary = 1 AND deleted_at IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        primary_count == 1,
+        "v27 requires exactly one live primary access key, found {primary_count}"
+    );
+    let (id, enabled, deleted_at, key): (String, i64, Option<String>, String) = conn.query_row(
+        "SELECT id, enabled, deleted_at, key FROM access_keys WHERE is_primary = 1 LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    anyhow::ensure!(
+        id == PRIMARY_KEY_ID,
+        "live primary access key id must be {PRIMARY_KEY_ID}, found {id}"
+    );
+    anyhow::ensure!(enabled == 1, "primary access key must stay enabled");
+    anyhow::ensure!(
+        deleted_at.is_none(),
+        "primary access key must not be deleted"
+    );
+    anyhow::ensure!(
+        !key.trim().is_empty(),
+        "primary access key must be non-empty"
+    );
+    let active_non_primary: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM access_keys WHERE is_primary = 0 AND deleted_at IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        active_non_primary <= MAX_ACTIVE_NON_PRIMARY_ACCESS_KEYS,
+        "at most {MAX_ACTIVE_NON_PRIMARY_ACCESS_KEYS} active non-primary access keys are supported, found {active_non_primary}"
+    );
+    let duplicate_active: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (
+            SELECT key FROM access_keys
+            WHERE deleted_at IS NULL AND key <> ''
+            GROUP BY key HAVING COUNT(*) > 1
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        duplicate_active == 0,
+        "active access key values must be unique"
+    );
+    Ok(())
+}
+
+fn migrate_v27_body(tx: &Transaction<'_>) -> Result<()> {
+    let account_count: i64 = if table_exists(tx, "accounts")? {
+        tx.query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?
+    } else {
+        0
+    };
+    let sub_count: i64 = if table_exists(tx, "sub_gateway_keys")? {
+        tx.query_row("SELECT COUNT(*) FROM sub_gateway_keys", [], |row| {
+            row.get(0)
+        })?
+    } else {
+        0
+    };
+    if table_exists(tx, "sub_gateway_keys")? {
+        let reserved: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM sub_gateway_keys WHERE id = ?1",
+            [PRIMARY_KEY_ID],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            reserved == 0,
+            "sub_gateway_keys must not reuse the fixed primary id {PRIMARY_KEY_ID}"
+        );
+    }
+
+    tx.execute_batch(&access_keys_v27_ddl())?;
+
+    let mut primary = load_config_gateway_key(tx)?.unwrap_or_default();
+    if primary.is_empty() {
+        primary = mint_unique_primary_access_key(tx)?;
+    }
+    upsert_primary_access_key_on(tx, &primary)?;
+
+    if table_exists(tx, "sub_gateway_keys")? {
+        tx.execute(
+            "INSERT INTO access_keys (id, name, key, is_primary, enabled, deleted_at, created_at)
+             SELECT id, name, key, 0, enabled, deleted_at, created_at
+             FROM sub_gateway_keys",
+            [],
+        )?;
+        tx.execute_batch("DROP TABLE IF EXISTS sub_gateway_keys;")?;
+    }
+
+    if let Some(json) = tx
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'config'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        let (sanitized, _) = sanitize_config_json_primary_key(&json)?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('config', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [sanitized],
+        )?;
+    }
+
+    for column in USAGE_SYNC_ACCOUNT_COLUMNS {
+        drop_column_if_exists(tx, "accounts", column)?;
+    }
+
+    let access_count: i64 =
+        tx.query_row("SELECT COUNT(*) FROM access_keys", [], |row| row.get(0))?;
+    anyhow::ensure!(
+        access_count == sub_count + 1,
+        "v27 access_keys row count {access_count} must equal copied sub keys {sub_count} plus the primary row"
+    );
+    let migrated_accounts: i64 = if table_exists(tx, "accounts")? {
+        tx.query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?
+    } else {
+        0
+    };
+    anyhow::ensure!(
+        migrated_accounts == account_count,
+        "v27 must conserve account rows ({account_count} -> {migrated_accounts})"
+    );
+
+    sqlite_quick_check(tx)?;
+    sqlite_foreign_key_check(tx)?;
+    assert_v27_access_key_invariants(tx)?;
+    Ok(())
+}
+
+struct ForeignKeysRestore<'a> {
+    conn: &'a Connection,
+    previous: i64,
+}
+
+impl Drop for ForeignKeysRestore<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.conn.pragma_update(None, "foreign_keys", self.previous) {
+            eprintln!(
+                "warning: failed to restore PRAGMA foreign_keys={}: {error}",
+                self.previous
+            );
+        }
+    }
+}
+
+fn with_foreign_keys_off<T>(conn: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    let previous: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    conn.pragma_update(None, "foreign_keys", 0)?;
+    let _restore = ForeignKeysRestore { conn, previous };
+    body()
+}
+
+fn migrate_to_v27(
+    conn: &Connection,
+    db_path: &Path,
+    cipher: Option<&dyn KeyCipher>,
+    is_fresh: bool,
+) -> Result<()> {
+    for _ in 0..V27_WRITER_RACE_RETRIES {
+        let version = schema_version_on(conn)?;
+        if version >= CURRENT_SCHEMA_VERSION {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            version == V26_SCHEMA_VERSION,
+            "v27 requires a canonical schema v26 source, found {version}"
+        );
+
+        let data_version = sqlite_data_version(conn)?;
+        v27_fault(V27MigrationFault::AfterDataVersionCapture)?;
+        v27_fault(V27MigrationFault::BeforePreflight)?;
+        sqlite_quick_check(conn)?;
+        preflight_ciphertext_probes(conn, cipher)?;
+
+        if !is_fresh {
+            v27_fault(V27MigrationFault::BeforeBackup)?;
+            create_pre_v3_backup(conn, db_path)?;
+            v27_fault(V27MigrationFault::AfterBackup)?;
+        }
+
+        let migrated = with_foreign_keys_off(conn, || {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let version_locked = schema_version_on(&tx)?;
+            if version_locked >= CURRENT_SCHEMA_VERSION {
+                tx.rollback()?;
+                return Ok(true);
+            }
+            let data_version_locked = sqlite_data_version(&tx)?;
+            if data_version_locked != data_version {
+                tx.rollback()?;
+                return Ok(false);
+            }
+            anyhow::ensure!(
+                version_locked == V26_SCHEMA_VERSION,
+                "v27 writer lock observed schema {version_locked}, expected {V26_SCHEMA_VERSION}"
+            );
+            migrate_v27_body(&tx)?;
+            v27_fault(V27MigrationFault::BeforeSchemaVersion)?;
+            tx.execute_batch(&format!(
+                "INSERT OR REPLACE INTO schema_version (version) VALUES ({CURRENT_SCHEMA_VERSION});"
+            ))?;
+            v27_fault(V27MigrationFault::BeforeCommit)?;
+            tx.commit()?;
+            Ok(true)
+        })?;
+        if migrated {
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "v27 migration retried {V27_WRITER_RACE_RETRIES} times because a writer raced the pre-v3 backup"
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum V27MigrationFault {
+    BeforePreflight,
+    BeforeBackup,
+    AfterBackup,
+    AfterDataVersionCapture,
+    BeforeSchemaVersion,
+    BeforeCommit,
+}
+
+fn v27_fault(point: V27MigrationFault) -> Result<()> {
+    #[cfg(test)]
+    {
+        v27_test_hooks::inject(point)?;
+    }
+    let _ = point;
+    Ok(())
+}
+
+#[cfg(test)]
+mod v27_test_hooks {
+    use super::V27MigrationFault;
+    use rusqlite::Connection;
+    use std::cell::Cell;
+    use std::path::Path;
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    thread_local! {
+        static FAULT: Cell<Option<V27MigrationFault>> = const { Cell::new(None) };
+        static RACE_DURING_VACUUM: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn inject(point: V27MigrationFault) -> anyhow::Result<()> {
+        if FAULT.get() == Some(point) {
+            anyhow::bail!("injected v27 fault at {point:?}");
+        }
+        Ok(())
+    }
+
+    pub struct VacuumRace {
+        join: Option<JoinHandle<()>>,
+    }
+
+    impl VacuumRace {
+        pub fn finish(mut self) {
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    pub fn install_vacuum_race(db_path: &Path, backup_path: &Path) -> Option<VacuumRace> {
+        if !RACE_DURING_VACUUM.get() {
+            return None;
+        }
+        RACE_DURING_VACUUM.set(false);
+        let path = db_path.to_path_buf();
+        let backup = backup_path.to_path_buf();
+        let join = thread::spawn(move || {
+            let wait_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < wait_deadline && !backup.exists() {
+                thread::yield_now();
+            }
+            let write_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < write_deadline {
+                if let Ok(writer) = Connection::open(&path) {
+                    let _ = writer.busy_timeout(Duration::from_millis(250));
+                    if writer
+                        .execute(
+                            "INSERT INTO settings (key, value) VALUES ('v27-vacuum-race', 'committed')
+                             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            [],
+                        )
+                        .is_ok()
+                    {
+                        return;
+                    }
+                }
+                thread::yield_now();
+            }
+        });
+        Some(VacuumRace { join: Some(join) })
+    }
+
+    pub fn set_fault(point: Option<V27MigrationFault>) {
+        FAULT.set(point);
+    }
+
+    pub fn set_race_during_vacuum(enabled: bool) {
+        RACE_DURING_VACUUM.set(enabled);
+    }
+
+    pub fn reset() {
+        FAULT.set(None);
+        RACE_DURING_VACUUM.set(false);
+    }
+}
+
 fn insert_account_row(
     conn: &Connection,
     account: &Account,
@@ -941,7 +1655,25 @@ fn disable_unroutable_catalog_accounts(tx: &Transaction<'_>) -> Result<()> {
 }
 
 impl Database {
+    /// Test/open convenience. Production hosts must call
+    /// [`Self::open_with_cipher`] so account ciphertext probes use the
+    /// Host-resolved cipher. This path still runs the v27 rewrite and fails
+    /// closed on any non-empty `accounts.key_cipher` /
+    /// `accounts.password_cipher`. Plaintext access keys are not probed.
     pub fn open(data_dir: PathBuf) -> Result<Self> {
+        Self::open_internal(data_dir, None)
+    }
+
+    /// Production open path: migrate with the already-resolved Host cipher.
+    /// Account ciphertext is validated in place and never rewritten.
+    pub fn open_with_cipher(
+        data_dir: PathBuf,
+        cipher: Arc<dyn KeyCipher + Send + Sync>,
+    ) -> Result<Self> {
+        Self::open_internal(data_dir, Some(cipher.as_ref()))
+    }
+
+    fn open_internal(data_dir: PathBuf, cipher: Option<&dyn KeyCipher>) -> Result<Self> {
         std::fs::create_dir_all(&data_dir)?;
         let db_path = data_dir.join("data.sqlite");
         let conn = Connection::open(&db_path)?;
@@ -951,6 +1683,7 @@ impl Database {
             existing_version <= CURRENT_SCHEMA_VERSION,
             "database schema version {existing_version} is newer than this build supports ({CURRENT_SCHEMA_VERSION}); restore a matching data directory and encryption key"
         );
+        let is_fresh = is_fresh_empty_database(&conn, existing_version)?;
         ensure_pre_v22_backup(&conn, &db_path)?;
         ensure_pre_v23_backup(&conn, &db_path)?;
         // WAL keeps request-path log writes off the rollback-journal FULL fsync;
@@ -960,6 +1693,7 @@ impl Database {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         let db = Self { conn };
         db.migrate()?;
+        migrate_to_v27(&db.conn, &db_path, cipher, is_fresh)?;
         Ok(db)
     }
 
@@ -2126,17 +2860,21 @@ impl Database {
         // on released v1.6.3 libraries and on fresh installs.
         ensure_column(&tx, "accounts", "notes", "TEXT")?;
         // Idempotent backstop for v21 columns when an unreleased draft already
-        // reported a higher schema_version number without these fields.
-        ensure_column(&tx, "accounts", "usage_sync_last_success_at", "TEXT")?;
-        ensure_column(&tx, "accounts", "usage_sync_last_attempt_at", "TEXT")?;
-        ensure_column(&tx, "accounts", "usage_sync_next_eligible_at", "TEXT")?;
-        ensure_column(
-            &tx,
-            "accounts",
-            "usage_sync_failure_streak",
-            "INTEGER NOT NULL DEFAULT 0",
-        )?;
-        ensure_column(&tx, "accounts", "usage_sync_last_expedited_at", "TEXT")?;
+        // reported a higher schema_version number without these fields. v27
+        // drops these leftovers in favor of `provider_usage_sync_state`; never
+        // resurrect them on a v27+ database.
+        if version < CURRENT_SCHEMA_VERSION {
+            ensure_column(&tx, "accounts", "usage_sync_last_success_at", "TEXT")?;
+            ensure_column(&tx, "accounts", "usage_sync_last_attempt_at", "TEXT")?;
+            ensure_column(&tx, "accounts", "usage_sync_next_eligible_at", "TEXT")?;
+            ensure_column(
+                &tx,
+                "accounts",
+                "usage_sync_failure_streak",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            ensure_column(&tx, "accounts", "usage_sync_last_expedited_at", "TEXT")?;
+        }
         ensure_column(
             &tx,
             "accounts",
@@ -2785,11 +3523,49 @@ impl Database {
     }
 
     pub fn set_config(&self, config_json: &str) -> Result<()> {
-        self.conn.execute(
+        let (sanitized, primary) = sanitize_config_json_primary_key(config_json)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO settings (key, value) VALUES ('config', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [config_json],
+            [sanitized],
         )?;
+        if table_exists(&tx, "access_keys")? {
+            if let Some(primary) = primary {
+                upsert_primary_access_key_on(&tx, &primary)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Live primary access-key value. After schema v27 this row is the
+    /// database authority; sanitized config JSON is not.
+    pub fn primary_access_key_value(&self) -> Result<Option<String>> {
+        if !table_exists(&self.conn, "access_keys")? {
+            return Ok(None);
+        }
+        let value = self
+            .conn
+            .query_row(
+                "SELECT key FROM access_keys
+                 WHERE is_primary = 1 AND deleted_at IS NULL
+                 LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(value.filter(|key| !key.trim().is_empty()))
+    }
+
+    /// Test-only seam: drop the live unique index so out-of-model collision
+    /// drills can still exercise snapshot/API gates. Compiled only for unit
+    /// tests and debug builds; release production source does not expose it.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn test_drop_access_key_unique_index(&self) -> Result<()> {
+        self.conn
+            .execute_batch("DROP INDEX IF EXISTS idx_access_keys_active_key;")?;
         Ok(())
     }
 
@@ -4276,13 +5052,14 @@ impl Database {
         Ok(keys)
     }
 
-    // ----- sub gateway keys (schema v20) -----
+    // ----- access keys (schema v27; sub-key view excludes the primary row) -----
 
-    /// All sub keys including soft-delete tombstones, in creation order.
+    /// All non-primary keys including soft-delete tombstones, in creation order.
     pub fn list_sub_gateway_keys(&self) -> Result<Vec<SubGatewayKey>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, key, enabled, deleted_at, created_at
-             FROM sub_gateway_keys
+             FROM access_keys
+             WHERE is_primary = 0
              ORDER BY created_at ASC, rowid ASC",
         )?;
         let rows = stmt.query_map([], sub_gateway_key_from_row)?;
@@ -4298,10 +5075,11 @@ impl Database {
     }
 
     /// Count of non-deleted sub keys; tombstones never count against the
-    /// active ceiling.
+    /// active ceiling. The live primary row is not counted.
     pub fn count_active_sub_gateway_keys(&self) -> Result<usize> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM sub_gateway_keys WHERE deleted_at IS NULL",
+            "SELECT COUNT(*) FROM access_keys
+             WHERE is_primary = 0 AND deleted_at IS NULL",
             [],
             |row| row.get(0),
         )?;
@@ -4309,11 +5087,14 @@ impl Database {
     }
 
     pub fn get_sub_gateway_key(&self, id: &str) -> Result<Option<SubGatewayKey>> {
+        if id == PRIMARY_KEY_ID {
+            return Ok(None);
+        }
         let key = self
             .conn
             .query_row(
                 "SELECT id, name, key, enabled, deleted_at, created_at
-                 FROM sub_gateway_keys WHERE id = ?1",
+                 FROM access_keys WHERE id = ?1 AND is_primary = 0",
                 params![id],
                 sub_gateway_key_from_row,
             )
@@ -4322,12 +5103,17 @@ impl Database {
     }
 
     /// Inserts a new sub key. The partial unique index backstops value
-    /// uniqueness among non-deleted sub keys; a collision surfaces as a
-    /// constraint error the caller maps to a clear rejection.
+    /// uniqueness among all non-deleted access keys, including the primary;
+    /// a collision surfaces as a constraint error the caller maps to a clear
+    /// rejection.
     pub fn insert_sub_gateway_key(&self, key: &SubGatewayKey) -> Result<()> {
+        anyhow::ensure!(
+            key.id != PRIMARY_KEY_ID,
+            "sub access keys cannot use the fixed primary id"
+        );
         self.conn.execute(
-            "INSERT INTO sub_gateway_keys (id, name, key, enabled, deleted_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO access_keys (id, name, key, is_primary, enabled, deleted_at, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
             params![
                 key.id,
                 key.name,
@@ -4343,18 +5129,26 @@ impl Database {
     /// Renames a non-deleted sub key. Returns `false` when the id matches no
     /// active row.
     pub fn rename_sub_gateway_key(&self, id: &str, name: &str) -> Result<bool> {
+        if id == PRIMARY_KEY_ID {
+            return Ok(false);
+        }
         let updated = self.conn.execute(
-            "UPDATE sub_gateway_keys SET name = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            "UPDATE access_keys SET name = ?2
+             WHERE id = ?1 AND is_primary = 0 AND deleted_at IS NULL",
             params![id, name],
         )?;
         Ok(updated == 1)
     }
 
     /// Flips the enabled flag of a non-deleted sub key. Returns `false` when
-    /// the id matches no active row.
+    /// the id matches no active row. The primary row cannot be disabled.
     pub fn set_sub_gateway_key_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
+        if id == PRIMARY_KEY_ID {
+            return Ok(false);
+        }
         let updated = self.conn.execute(
-            "UPDATE sub_gateway_keys SET enabled = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            "UPDATE access_keys SET enabled = ?2
+             WHERE id = ?1 AND is_primary = 0 AND deleted_at IS NULL",
             params![id, enabled as i32],
         )?;
         Ok(updated == 1)
@@ -4363,8 +5157,12 @@ impl Database {
     /// Assigns a fresh value to a non-deleted sub key. Returns `false` when
     /// the id matches no active row.
     pub fn update_sub_gateway_key_value(&self, id: &str, new_value: &str) -> Result<bool> {
+        if id == PRIMARY_KEY_ID {
+            return Ok(false);
+        }
         let updated = self.conn.execute(
-            "UPDATE sub_gateway_keys SET key = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            "UPDATE access_keys SET key = ?2
+             WHERE id = ?1 AND is_primary = 0 AND deleted_at IS NULL",
             params![id, new_value],
         )?;
         Ok(updated == 1)
@@ -4372,12 +5170,15 @@ impl Database {
 
     /// Soft-deletes a sub key: clears the plaintext, disables it, and keeps
     /// id/name/deleted_at for log attribution. Returns `false` when the id
-    /// matches no active row.
+    /// matches no active row. The primary row cannot be deleted.
     pub fn soft_delete_sub_gateway_key(&self, id: &str, now: DateTime<Utc>) -> Result<bool> {
+        if id == PRIMARY_KEY_ID {
+            return Ok(false);
+        }
         let updated = self.conn.execute(
-            "UPDATE sub_gateway_keys
+            "UPDATE access_keys
              SET key = '', enabled = 0, deleted_at = ?2
-             WHERE id = ?1 AND deleted_at IS NULL",
+             WHERE id = ?1 AND is_primary = 0 AND deleted_at IS NULL",
             params![id, now.to_rfc3339()],
         )?;
         Ok(updated == 1)
@@ -4387,8 +5188,8 @@ impl Database {
     /// used to keep generated values unique across tiers.
     pub fn active_sub_gateway_key_values(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT key FROM sub_gateway_keys
-             WHERE deleted_at IS NULL AND key <> ''",
+            "SELECT key FROM access_keys
+             WHERE is_primary = 0 AND deleted_at IS NULL AND key <> ''",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -4400,8 +5201,8 @@ impl Database {
     pub fn sub_gateway_key_value_exists(&self, value: &str) -> Result<bool> {
         let found: i64 = self.conn.query_row(
             "SELECT EXISTS(
-                SELECT 1 FROM sub_gateway_keys
-                WHERE deleted_at IS NULL AND key = ?1 LIMIT 1
+                SELECT 1 FROM access_keys
+                WHERE is_primary = 0 AND deleted_at IS NULL AND key = ?1 LIMIT 1
             )",
             params![value],
             |row| row.get(0),
@@ -5817,7 +6618,36 @@ fn parse_datetime(s: String) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{V27MigrationFault, v27_test_hooks};
+    use crate::crypto::{KeyCipher, StaticKeyCipher};
     use std::fs;
+    use std::sync::Arc;
+
+    const TEST_HOST_SECRET: &str = "ocg-db-v27-test-host";
+    const FIXTURE_ACCOUNT_PLAINTEXT: &str = "sk-fixture";
+
+    fn test_host_cipher() -> Arc<dyn KeyCipher + Send + Sync> {
+        Arc::new(StaticKeyCipher::new(TEST_HOST_SECRET))
+    }
+
+    fn fixture_account_key_cipher() -> String {
+        test_host_cipher()
+            .encrypt(FIXTURE_ACCOUNT_PLAINTEXT)
+            .expect("test host cipher should encrypt fixture account keys")
+    }
+
+    fn open_with_host_cipher(dir: PathBuf) -> Result<Database> {
+        Database::open_with_cipher(dir, test_host_cipher())
+    }
+
+    fn assert_fixture_account_cipher(value: &str) {
+        assert_eq!(
+            test_host_cipher()
+                .decrypt(value)
+                .expect("fixture account cipher should decrypt with the test host"),
+            FIXTURE_ACCOUNT_PLAINTEXT
+        );
+    }
 
     fn temp_data_dir(label: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
@@ -5832,7 +6662,9 @@ mod tests {
 
     fn create_v21_fixture(dir: &Path, include_reserved_account_conflict: bool) {
         let db = Database::open(dir.to_path_buf()).expect("fixture database should open");
-        db.create_account(&account("rollback-account"))
+        let mut rollback = account("rollback-account");
+        rollback.key_cipher = fixture_account_key_cipher();
+        db.create_account(&rollback)
             .expect("representative account should save");
         db.log_forward(&forward_log("rollback-account", "success", 4.25))
             .expect("representative forward log should save");
@@ -5846,6 +6678,18 @@ mod tests {
         let conn = Connection::open(dir.join("data.sqlite")).expect("fixture db should reopen");
         conn.execute_batch(
             "PRAGMA foreign_keys=OFF;
+             DROP TRIGGER IF EXISTS access_keys_protect_primary_delete;
+             DROP TABLE IF EXISTS access_keys;
+             CREATE TABLE IF NOT EXISTS sub_gateway_keys (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                deleted_at TEXT,
+                created_at TEXT NOT NULL
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_gateway_keys_key
+                ON sub_gateway_keys(key) WHERE deleted_at IS NULL AND key <> '';
              DROP INDEX IF EXISTS idx_forward_logs_route_account;
              DROP INDEX IF EXISTS idx_forward_logs_provider_offering;
              DROP INDEX IF EXISTS idx_account_model_capabilities_account;
@@ -5883,18 +6727,38 @@ mod tests {
              PRAGMA foreign_keys=ON;",
         )
         .expect("v21 fixture should be created");
+        restore_usage_sync_account_columns(&conn);
+    }
+
+    fn restore_usage_sync_account_columns(conn: &Connection) {
+        for (column, definition) in [
+            ("usage_sync_last_success_at", "TEXT"),
+            ("usage_sync_last_attempt_at", "TEXT"),
+            ("usage_sync_next_eligible_at", "TEXT"),
+            ("usage_sync_failure_streak", "INTEGER NOT NULL DEFAULT 0"),
+            ("usage_sync_last_expedited_at", "TEXT"),
+        ] {
+            if !table_has_column(conn, "accounts", column).unwrap() {
+                conn.execute(
+                    &format!("ALTER TABLE accounts ADD COLUMN {column} {definition}"),
+                    [],
+                )
+                .unwrap();
+            }
+        }
     }
 
     fn create_v20_fixture(dir: &Path, include_reserved_account_conflict: bool) {
         create_v21_fixture(dir, include_reserved_account_conflict);
         let conn = Connection::open(dir.join("data.sqlite")).expect("v21 fixture should reopen");
+        for column in USAGE_SYNC_ACCOUNT_COLUMNS {
+            if table_has_column(&conn, "accounts", column).unwrap() {
+                conn.execute(&format!("ALTER TABLE accounts DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
+        }
         conn.execute_batch(
-            "ALTER TABLE accounts DROP COLUMN usage_sync_last_expedited_at;
-             ALTER TABLE accounts DROP COLUMN usage_sync_failure_streak;
-             ALTER TABLE accounts DROP COLUMN usage_sync_next_eligible_at;
-             ALTER TABLE accounts DROP COLUMN usage_sync_last_attempt_at;
-             ALTER TABLE accounts DROP COLUMN usage_sync_last_success_at;
-             DELETE FROM schema_version;
+            "DELETE FROM schema_version;
              INSERT INTO schema_version (version) VALUES (20);",
         )
         .expect("v20 fixture should be created");
@@ -5934,6 +6798,81 @@ mod tests {
 
     fn pre_v23_backup_paths(dir: &Path) -> Vec<PathBuf> {
         backup_paths_with_prefix(dir, PRE_V23_BACKUP_FILE_PREFIX)
+    }
+
+    fn pre_v3_backup_paths(dir: &Path) -> Vec<PathBuf> {
+        backup_paths_with_prefix(dir, PRE_V3_BACKUP_FILE_PREFIX)
+    }
+
+    fn reverse_current_to_v26(dir: &Path) {
+        let path = dir.join("data.sqlite");
+        let conn = Connection::open(&path).expect("migrated database should reopen for reverse");
+        let primary = conn
+            .query_row(
+                "SELECT key FROM access_keys WHERE is_primary = 1 LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        if let Some(json) = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'config'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap()
+        {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&json).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "gateway_key".to_string(),
+                    serde_json::Value::String(primary.clone()),
+                );
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('config', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [serde_json::to_string(&value).unwrap()],
+            )
+            .unwrap();
+        } else if !primary.is_empty() {
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('config', ?1)",
+                [serde_json::json!({ "gateway_key": primary }).to_string()],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "
+            PRAGMA foreign_keys=OFF;
+            CREATE TABLE IF NOT EXISTS sub_gateway_keys (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                deleted_at TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_gateway_keys_key
+                ON sub_gateway_keys(key) WHERE deleted_at IS NULL AND key <> '';
+            INSERT OR IGNORE INTO sub_gateway_keys (id, name, key, enabled, deleted_at, created_at)
+                SELECT id, name, key, enabled, deleted_at, created_at
+                FROM access_keys WHERE is_primary = 0;
+            DROP TRIGGER IF EXISTS access_keys_protect_primary_delete;
+            DROP TABLE IF EXISTS access_keys;
+            ",
+        )
+        .expect("access_keys should reverse into sub_gateway_keys");
+        restore_usage_sync_account_columns(&conn);
+        conn.execute_batch(
+            "DELETE FROM schema_version;
+             INSERT INTO schema_version (version) VALUES (26);
+             PRAGMA foreign_keys=ON;",
+        )
+        .expect("schema should reverse to v26");
+        assert_eq!(schema_version_on(&conn).unwrap(), V26_SCHEMA_VERSION);
     }
 
     fn account(id: &str) -> Account {
@@ -6192,13 +7131,13 @@ mod tests {
         conn.execute(
             "INSERT INTO accounts
              (id, name, key_cipher, enabled, recharge_date, created_at, updated_at)
-             VALUES ('legacy', 'Legacy', 'cipher', 1, '2026-08-01', ?1, ?1)",
-            [&now],
+             VALUES ('legacy', 'Legacy', ?2, 1, '2026-08-01', ?1, ?1)",
+            params![now, fixture_account_key_cipher()],
         )
         .expect("legacy account should be inserted");
         drop(conn);
 
-        let db = Database::open(dir.clone()).expect("v16 migration should succeed");
+        let db = open_with_host_cipher(dir.clone()).expect("v16 migration should succeed");
         let legacy = db
             .get_account("legacy")
             .expect("legacy account should load")
@@ -6571,8 +7510,8 @@ mod tests {
             conn.execute(
                 "INSERT INTO accounts
                  (id, name, key_cipher, recharge_date, created_at, updated_at, cooldown_until, last_error)
-                 VALUES ('old', 'old', 'cipher', '2026-07-01', ?1, ?1, ?2, ?3)",
-                params![Utc::now().to_rfc3339(), future, error],
+                 VALUES ('old', 'old', ?4, '2026-07-01', ?1, ?1, ?2, ?3)",
+                params![Utc::now().to_rfc3339(), future, error, fixture_account_key_cipher()],
             )
             .expect("v6 account should be inserted");
             if !source_column.is_empty() {
@@ -6584,7 +7523,7 @@ mod tests {
             }
             drop(conn);
 
-            let db = Database::open(dir.clone()).expect("v6 database should migrate");
+            let db = open_with_host_cipher(dir.clone()).expect("v6 database should migrate");
             let version: i32 = db
                 .conn
                 .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
@@ -6650,8 +7589,8 @@ mod tests {
         .expect("v3 schema should be created");
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO accounts (id, name, key_cipher, created_at, updated_at) VALUES (?1, ?1, 'cipher', ?2, ?2)",
-            params!["old", now],
+            "INSERT INTO accounts (id, name, key_cipher, created_at, updated_at) VALUES (?1, ?1, ?3, ?2, ?2)",
+            params!["old", now, fixture_account_key_cipher()],
         )
         .expect("v3 account should be inserted");
         conn.execute(
@@ -6661,7 +7600,7 @@ mod tests {
         .expect("v3 usage should be inserted");
         drop(conn);
 
-        let db = Database::open(dir.clone()).expect("v3 db should migrate");
+        let db = open_with_host_cipher(dir.clone()).expect("v3 db should migrate");
         let version: i32 = db
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
@@ -6738,14 +7677,14 @@ mod tests {
             conn.execute(
                 "INSERT INTO accounts
                  (id, name, key_cipher, recharge_date, created_at, updated_at)
-                 VALUES (?1, ?1, 'cipher', ?2, ?3, ?3)",
-                params![id, recharge_date, created_at],
+                 VALUES (?1, ?1, ?4, ?2, ?3, ?3)",
+                params![id, recharge_date, created_at, fixture_account_key_cipher()],
             )
             .expect("v4 account should be inserted");
         }
         drop(conn);
 
-        let db = Database::open(dir.clone()).expect("v4 db should migrate");
+        let db = open_with_host_cipher(dir.clone()).expect("v4 db should migrate");
         let accounts = db.list_accounts().expect("migrated accounts should load");
         assert_eq!(
             accounts
@@ -6769,7 +7708,7 @@ mod tests {
         assert_eq!(sort_orders, [0, 1, 2, 3, 4]);
         drop(db);
 
-        let reopened = Database::open(dir.clone()).expect("migrated db should reopen");
+        let reopened = open_with_host_cipher(dir.clone()).expect("migrated db should reopen");
         assert_eq!(
             reopened
                 .list_accounts()
@@ -6804,14 +7743,14 @@ mod tests {
             conn.execute(
                 "INSERT INTO accounts
                  (id, name, key_cipher, recharge_date, created_at, updated_at)
-                 VALUES (?1, ?1, 'cipher', ?2, ?3, ?3)",
-                params![id, recharge_date, created_at],
+                 VALUES (?1, ?1, ?4, ?2, ?3, ?3)",
+                params![id, recharge_date, created_at, fixture_account_key_cipher()],
             )
             .expect("legacy account should be inserted");
         }
         drop(conn);
 
-        let db = Database::open(dir.clone()).expect("v7 database should migrate");
+        let db = open_with_host_cipher(dir.clone()).expect("v7 database should migrate");
         let version: i32 = db
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
@@ -6855,8 +7794,8 @@ mod tests {
         conn.execute(
             "INSERT INTO accounts
              (id, name, key_cipher, recharge_date, created_at, updated_at)
-             VALUES ('legacy', 'legacy', 'cipher', '2026-07-01', ?1, ?1)",
-            [&now],
+             VALUES ('legacy', 'legacy', ?2, '2026-07-01', ?1, ?1)",
+            params![now, fixture_account_key_cipher()],
         )
         .expect("legacy account should be inserted");
         for (status, cost) in [("error", 1.25), ("error", 0.0), ("success", 2.0)] {
@@ -6870,7 +7809,8 @@ mod tests {
         }
         drop(conn);
 
-        let db = Database::open(dir.clone()).expect("v7 database should migrate through v10");
+        let db =
+            open_with_host_cipher(dir.clone()).expect("v7 database should migrate through v10");
         let states = db
             .conn
             .prepare("SELECT status, cost, cost_state FROM forward_logs ORDER BY id")
@@ -6936,8 +7876,8 @@ mod tests {
         conn.execute(
             "INSERT INTO accounts
              (id, name, key_cipher, recharge_date, created_at, updated_at)
-             VALUES ('legacy', 'legacy', 'cipher', '2026-07-01', ?1, ?1)",
-            [&now],
+             VALUES ('legacy', 'legacy', ?2, '2026-07-01', ?1, ?1)",
+            params![now, fixture_account_key_cipher()],
         )
         .expect("legacy account should be inserted");
         for (cost, cost_state) in [
@@ -6955,7 +7895,8 @@ mod tests {
         }
         drop(conn);
 
-        let db = Database::open(dir.clone()).expect("v9 database should migrate through v11");
+        let db =
+            open_with_host_cipher(dir.clone()).expect("v9 database should migrate through v11");
         let version: i32 = db
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
@@ -7331,10 +8272,9 @@ mod tests {
             .expect("source forward log should remain readable");
         assert!(!columns.iter().any(|name| name == "provider_id"));
         assert_eq!(version, 21);
-        assert_eq!(
-            preserved_account,
-            ("rollback-account".into(), "cipher".into(), 1)
-        );
+        assert_eq!(preserved_account.0, "rollback-account");
+        assert_eq!(preserved_account.2, 1);
+        assert_fixture_account_cipher(&preserved_account.1);
         assert_eq!(
             preserved_log,
             (
@@ -7567,6 +8507,7 @@ mod tests {
         let dir = temp_data_dir("v13-legacy-calibration");
         let db = Database::open(dir.clone()).expect("db should open");
         let mut acct = account("legacy-calibration");
+        acct.key_cipher = fixture_account_key_cipher();
         acct.purchase_date = local_today();
         db.create_account(&acct).expect("account should be created");
         finalize_success(&db, "legacy-calibration", 2.0, Utc::now());
@@ -7592,7 +8533,7 @@ mod tests {
             .expect("legacy schema version should save");
         drop(db);
 
-        let db = Database::open(dir.clone()).expect("legacy database should migrate");
+        let db = open_with_host_cipher(dir.clone()).expect("legacy database should migrate");
         let usage = db
             .account_usage("legacy-calibration")
             .expect("migrated usage should load");
@@ -9560,7 +10501,7 @@ mod tests {
             let table: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master
-                     WHERE type = 'table' AND name = 'sub_gateway_keys'",
+                     WHERE type = 'table' AND name = 'access_keys'",
                     [],
                     |row| row.get(0),
                 )
@@ -9568,14 +10509,22 @@ mod tests {
             let index: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master
-                     WHERE type = 'index' AND name = 'idx_sub_gateway_keys_key'",
+                     WHERE type = 'index' AND name = 'idx_access_keys_active_key'",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap();
-            (table, index)
+            let legacy: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'sub_gateway_keys'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (table, index, legacy)
         };
-        assert_eq!(probe(&db.conn), (1, 1));
+        assert_eq!(probe(&db.conn), (1, 1, 0));
         let version: i32 = db
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
@@ -9586,7 +10535,7 @@ mod tests {
 
         // Replaying the migration converges to the same shape.
         db.migrate().unwrap();
-        assert_eq!(probe(&db.conn), (1, 1));
+        assert_eq!(probe(&db.conn), (1, 1, 0));
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -9603,14 +10552,11 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        for name in [
-            "usage_sync_last_success_at",
-            "usage_sync_last_attempt_at",
-            "usage_sync_next_eligible_at",
-            "usage_sync_failure_streak",
-            "usage_sync_last_expedited_at",
-        ] {
-            assert!(columns.contains(&name.to_string()), "missing {name}");
+        for name in USAGE_SYNC_ACCOUNT_COLUMNS {
+            assert!(
+                !columns.contains(&name.to_string()),
+                "v27 must drop leftover {name}"
+            );
         }
         assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
 
@@ -9670,7 +10616,7 @@ mod tests {
         let dir = temp_data_dir("v21-v22-backup");
         create_v21_fixture(&dir, false);
 
-        let db = Database::open(dir.clone()).expect("v21 database should migrate");
+        let db = open_with_host_cipher(dir.clone()).expect("v21 database should migrate");
         assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         assert!(
             db.get_account("rollback-account")
@@ -9748,10 +10694,9 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("backup should retain the representative forward log");
-        assert_eq!(
-            backed_up_account,
-            ("rollback-account".into(), "cipher".into(), 1)
-        );
+        assert_eq!(backed_up_account.0, "rollback-account");
+        assert_eq!(backed_up_account.2, 1);
+        assert_fixture_account_cipher(&backed_up_account.1);
         assert_eq!(
             backed_up_log,
             (
@@ -9764,7 +10709,7 @@ mod tests {
         drop(backup);
 
         let backup_bytes = fs::read(backup_path).expect("backup should be readable");
-        let reopened = Database::open(dir.clone()).expect("v22 database should reopen");
+        let reopened = open_with_host_cipher(dir.clone()).expect("v22 database should reopen");
         assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         drop(reopened);
         assert_eq!(pre_v22_backup_paths(&dir), backups_before);
@@ -9781,7 +10726,7 @@ mod tests {
         let dir = temp_data_dir("v20-v22-backup");
         create_v20_fixture(&dir, false);
 
-        let db = Database::open(dir.clone()).expect("v20 database should migrate directly");
+        let db = open_with_host_cipher(dir.clone()).expect("v20 database should migrate directly");
         assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         let account_columns = db
             .conn
@@ -9792,7 +10737,7 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .expect("columns should load");
         assert!(
-            account_columns
+            !account_columns
                 .iter()
                 .any(|name| name == "usage_sync_last_success_at")
         );
@@ -9810,7 +10755,7 @@ mod tests {
         assert!(!table_has_column(&backup, "accounts", "usage_sync_last_success_at").unwrap());
         drop(backup);
 
-        let reopened = Database::open(dir.clone()).expect("v22 database should reopen");
+        let reopened = open_with_host_cipher(dir.clone()).expect("v22 database should reopen");
         assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         drop(reopened);
         assert_eq!(pre_v22_backup_paths(&dir), backups_before);
@@ -9825,7 +10770,9 @@ mod tests {
     fn draft_v19_libraries_without_notes_gain_the_column_on_reopen() {
         let dir = temp_data_dir("draft-v19-notes-repair");
         let db = Database::open(dir.clone()).unwrap();
-        db.create_account(&account("legacy")).unwrap();
+        let mut legacy = account("legacy");
+        legacy.key_cipher = fixture_account_key_cipher();
+        db.create_account(&legacy).unwrap();
         // Unreleased #43 drafts already sat at version 19 (client-key
         // columns + sub-key table) and never received upstream v18 notes.
         db.conn
@@ -9846,7 +10793,7 @@ mod tests {
         assert_eq!(notes_before, 0);
         drop(db);
 
-        let db = Database::open(dir.clone()).expect("draft database should reopen");
+        let db = open_with_host_cipher(dir.clone()).expect("draft database should reopen");
         let (version, notes_after): (i32, i64) = db
             .conn
             .query_row(
@@ -9881,6 +10828,16 @@ mod tests {
         };
         db.insert_sub_gateway_key(&key).unwrap();
         assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 1);
+        let primary_value = db.primary_access_key_value().unwrap().unwrap();
+        let collide_primary = SubGatewayKey {
+            id: "sub-primary-collide".into(),
+            name: "Collide".into(),
+            key: primary_value,
+            enabled: true,
+            deleted_at: None,
+            created_at: now,
+        };
+        assert!(db.insert_sub_gateway_key(&collide_primary).is_err());
         assert_eq!(
             db.list_active_sub_gateway_keys().unwrap(),
             vec![key.clone()]
@@ -10039,9 +10996,12 @@ mod tests {
 
     fn create_v22_fixture(dir: &Path) {
         let db = Database::open(dir.to_path_buf()).expect("fixture database should open");
-        db.create_account(&account("v22-account"))
+        let mut v22_account = account("v22-account");
+        v22_account.key_cipher = fixture_account_key_cipher();
+        db.create_account(&v22_account)
             .expect("representative account should save");
         let mut goat = account("v22-goat");
+        goat.key_cipher = fixture_account_key_cipher();
         goat.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
         goat.offering_id = GOAT_OFFERING_ID.to_string();
         goat.enabled = false;
@@ -10054,6 +11014,18 @@ mod tests {
         let conn = Connection::open(dir.join("data.sqlite")).expect("v23 fixture should reopen");
         conn.execute_batch(
             "PRAGMA foreign_keys=OFF;
+             DROP TRIGGER IF EXISTS access_keys_protect_primary_delete;
+             DROP TABLE IF EXISTS access_keys;
+             CREATE TABLE IF NOT EXISTS sub_gateway_keys (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                deleted_at TEXT,
+                created_at TEXT NOT NULL
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_gateway_keys_key
+                ON sub_gateway_keys(key) WHERE deleted_at IS NULL AND key <> '';
              DROP INDEX IF EXISTS idx_account_model_capabilities_account;
              DROP INDEX IF EXISTS idx_account_acknowledgements_account;
              DROP TABLE IF EXISTS account_custom_configs;
@@ -10074,6 +11046,7 @@ mod tests {
              PRAGMA foreign_keys=ON;",
         )
         .expect("v22 fixture should be created");
+        restore_usage_sync_account_columns(&conn);
     }
 
     #[test]
@@ -10082,7 +11055,7 @@ mod tests {
         create_v22_fixture(&dir);
         assert!(pre_v23_backup_paths(&dir).is_empty());
 
-        let db = Database::open(dir.clone()).expect("v22 database should migrate");
+        let db = open_with_host_cipher(dir.clone()).expect("v22 database should migrate");
         assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         let go = db
             .account_verification_state("v22-account")
@@ -10112,7 +11085,7 @@ mod tests {
         assert!(!table_has_column(&backup, "accounts", "verification_status").unwrap());
         drop(backup);
 
-        let reopened = Database::open(dir.clone()).expect("v23 database should reopen");
+        let reopened = open_with_host_cipher(dir.clone()).expect("v23 database should reopen");
         assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         drop(reopened);
         assert_eq!(pre_v23_backup_paths(&dir).len(), 1);
@@ -10126,7 +11099,7 @@ mod tests {
         db.conn
             .execute_batch(
                 "DELETE FROM schema_version;
-                 INSERT INTO schema_version (version) VALUES (27);",
+                 INSERT INTO schema_version (version) VALUES (28);",
             )
             .unwrap();
         drop(db);
@@ -10140,7 +11113,7 @@ mod tests {
             "{error}"
         );
         let conn = Connection::open(dir.join("data.sqlite")).unwrap();
-        assert_eq!(schema_version_on(&conn).unwrap(), 27);
+        assert_eq!(schema_version_on(&conn).unwrap(), 28);
         drop(conn);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -10207,7 +11180,9 @@ mod tests {
             .unwrap();
             db.conn
                 .execute_batch(
-                    "DROP TABLE IF EXISTS provider_contract_model_protocols;
+                    "DROP TRIGGER IF EXISTS access_keys_protect_primary_delete;
+                     DROP TABLE IF EXISTS access_keys;
+                     DROP TABLE IF EXISTS provider_contract_model_protocols;
                      DROP TABLE IF EXISTS provider_contract_scopes;
                      DELETE FROM schema_version;
                      INSERT INTO schema_version (version) VALUES (25);",
@@ -11696,7 +12671,8 @@ mod tests {
         );
         drop(conn);
 
-        let db = Database::open(dir.clone()).expect("v22 database should migrate and sanitize");
+        let db =
+            open_with_host_cipher(dir.clone()).expect("v22 database should migrate and sanitize");
         assert!(db.get_account("v22-account").unwrap().unwrap().enabled);
         assert!(db.get_account("v22-unknown").unwrap().unwrap().enabled);
         assert!(
@@ -11784,10 +12760,9 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("source forward log should remain readable");
-        assert_eq!(
-            preserved_account,
-            ("v22-account".into(), "cipher".into(), 1)
-        );
+        assert_eq!(preserved_account.0, "v22-account");
+        assert_eq!(preserved_account.2, 1);
+        assert_fixture_account_cipher(&preserved_account.1);
         assert_eq!(preserved_goat, ("v22-goat".into(), 1));
         assert_eq!(
             preserved_log,
@@ -11813,5 +12788,573 @@ mod tests {
             backup_bytes
         );
         fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    struct V27HookGuard;
+    impl Drop for V27HookGuard {
+        fn drop(&mut self) {
+            v27_test_hooks::reset();
+        }
+    }
+
+    fn arm_v27_fault(point: V27MigrationFault) -> V27HookGuard {
+        v27_test_hooks::reset();
+        v27_test_hooks::set_fault(Some(point));
+        V27HookGuard
+    }
+
+    fn populate_v26_source(dir: &Path) -> (String, String) {
+        let db = Database::open(dir.to_path_buf()).expect("fixture database should open");
+        let mut v26_account = account("v26-account");
+        v26_account.key_cipher = fixture_account_key_cipher();
+        db.create_account(&v26_account)
+            .expect("representative account should save");
+        let now = Utc::now();
+        db.insert_sub_gateway_key(&SubGatewayKey {
+            id: "sub-v26".into(),
+            name: "Laptop".into(),
+            key: "ocg-v26-laptop".into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: now,
+        })
+        .expect("sub key should save");
+        let config = serde_json::json!({
+            "gateway_port": 9042,
+            "gateway_key": "ocg-v26-primary",
+            "upstream_base_url": "https://opencode.ai/zen/go",
+        });
+        db.set_config(&config.to_string())
+            .expect("v26 config should persist");
+        drop(db);
+        reverse_current_to_v26(dir);
+        ("ocg-v26-primary".into(), "ocg-v26-laptop".into())
+    }
+
+    #[test]
+    fn v27_fresh_database_skips_pre_v3_backup_and_has_one_primary() {
+        let dir = temp_data_dir("v27-fresh");
+        let db = Database::open(dir.clone()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        assert!(pre_v3_backup_paths(&dir).is_empty());
+        assert!(table_exists(&db.conn, "access_keys").unwrap());
+        assert!(!table_exists(&db.conn, "sub_gateway_keys").unwrap());
+        for column in USAGE_SYNC_ACCOUNT_COLUMNS {
+            assert!(!table_has_column(&db.conn, "accounts", column).unwrap());
+        }
+        let primary = db.primary_access_key_value().unwrap().unwrap();
+        assert!(!primary.is_empty());
+        assert_eq!(db.count_active_sub_gateway_keys().unwrap(), 0);
+        db.migrate().unwrap();
+        for column in USAGE_SYNC_ACCOUNT_COLUMNS {
+            assert!(
+                !table_has_column(&db.conn, "accounts", column).unwrap(),
+                "replaying migrate must not resurrect {column}"
+            );
+        }
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v26_to_v27_copies_keys_drops_columns_and_writes_hashed_backup() {
+        let dir = temp_data_dir("v26-v27-migrate");
+        let (primary, laptop) = populate_v26_source(&dir);
+        let cipher_bytes = {
+            let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+            let key: String = conn
+                .query_row(
+                    "SELECT key_cipher FROM accounts WHERE id = 'v26-account'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            drop(conn);
+            key
+        };
+
+        let db = open_with_host_cipher(dir.clone()).expect("v26 database should migrate to v27");
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            db.primary_access_key_value().unwrap().as_deref(),
+            Some(primary.as_str())
+        );
+        let subs = db.list_active_sub_gateway_keys().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].id, "sub-v26");
+        assert_eq!(subs[0].key, laptop);
+        assert!(!table_exists(&db.conn, "sub_gateway_keys").unwrap());
+        for column in USAGE_SYNC_ACCOUNT_COLUMNS {
+            assert!(!table_has_column(&db.conn, "accounts", column).unwrap());
+        }
+        let stored_cipher: String = db
+            .conn
+            .query_row(
+                "SELECT key_cipher FROM accounts WHERE id = 'v26-account'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_cipher, cipher_bytes,
+            "ciphertext bytes must be preserved"
+        );
+        let config: serde_json::Value =
+            serde_json::from_str(&db.get_setting("config").unwrap().unwrap()).unwrap();
+        assert_eq!(config["gateway_key"], "");
+        drop(db);
+
+        let backups = pre_v3_backup_paths(&dir);
+        assert_eq!(backups.len(), 1);
+        let backup_name = backups[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap();
+        let timestamp = backup_name
+            .strip_prefix(PRE_V3_BACKUP_FILE_PREFIX)
+            .and_then(|name| name.strip_suffix(".bak"))
+            .unwrap();
+        assert_eq!(timestamp.len(), 25);
+        let backup =
+            Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(schema_version_on(&backup).unwrap(), V26_SCHEMA_VERSION);
+        sqlite_quick_check(&backup).unwrap();
+        assert!(table_exists(&backup, "sub_gateway_keys").unwrap());
+        assert!(table_has_column(&backup, "accounts", "usage_sync_last_success_at").unwrap());
+        drop(backup);
+        let digest = sha256_file(&backups[0]).unwrap();
+        let evidence = fs::read_to_string(format!("{}.sha256", backups[0].display())).unwrap();
+        assert!(evidence.starts_with(&digest));
+        assert!(evidence.contains(backup_name));
+
+        let reopened = open_with_host_cipher(dir.clone()).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(reopened);
+        assert_eq!(pre_v3_backup_paths(&dir), backups);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v21_migrates_through_v26_before_v27_backup() {
+        let dir = temp_data_dir("v21-through-v26-v27");
+        create_v21_fixture(&dir, false);
+        let db = open_with_host_cipher(dir.clone()).expect("v21 database should migrate");
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(db);
+        let pre_v3 = pre_v3_backup_paths(&dir);
+        assert_eq!(pre_v3.len(), 1);
+        let backup =
+            Connection::open_with_flags(&pre_v3[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(schema_version_on(&backup).unwrap(), V26_SCHEMA_VERSION);
+        drop(backup);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_fault_before_schema_version_leaves_usable_v26_source() {
+        let dir = temp_data_dir("v27-interrupt");
+        populate_v26_source(&dir);
+        let _guard = arm_v27_fault(V27MigrationFault::BeforeSchemaVersion);
+        assert!(open_with_host_cipher(dir.clone()).is_err());
+        drop(_guard);
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        assert_eq!(schema_version_on(&conn).unwrap(), V26_SCHEMA_VERSION);
+        assert!(table_exists(&conn, "sub_gateway_keys").unwrap());
+        assert!(!table_exists(&conn, "access_keys").unwrap());
+        assert!(table_has_column(&conn, "accounts", "usage_sync_last_success_at").unwrap());
+        drop(conn);
+        assert_eq!(pre_v3_backup_paths(&dir).len(), 1);
+        let db = open_with_host_cipher(dir.clone()).expect("v26 source should still migrate");
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_duplicate_start_converges_on_one_primary() {
+        let dir = temp_data_dir("v27-duplicate-start");
+        populate_v26_source(&dir);
+        let first = dir.clone();
+        let second = dir.clone();
+        let threads = [
+            std::thread::spawn(move || open_with_host_cipher(first)),
+            std::thread::spawn(move || open_with_host_cipher(second)),
+        ];
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("open thread should finish"))
+            .collect::<Vec<_>>();
+        assert!(
+            results.iter().any(|result| result.is_ok()),
+            "at least one opener must finish v27: {:?}",
+            results
+                .iter()
+                .map(|result| result
+                    .as_ref()
+                    .map(|_| "ok")
+                    .map_err(|error| error.to_string()))
+                .collect::<Vec<_>>()
+        );
+        for db in results.into_iter().flatten() {
+            assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+            drop(db);
+        }
+        let db = open_with_host_cipher(dir.clone()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM access_keys WHERE is_primary = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_wrong_cipher_fails_closed_without_claiming_v27() {
+        let dir = temp_data_dir("v27-wrong-cipher");
+        let right: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("right-secret"));
+        let db = Database::open_with_cipher(dir.clone(), right.clone()).unwrap();
+        let mut enc = account("enc-account");
+        enc.key_cipher = right.encrypt("sk-live").unwrap();
+        enc.password_cipher = Some(right.encrypt("pw-live").unwrap());
+        db.create_account(&enc).unwrap();
+        drop(db);
+        reverse_current_to_v26(&dir);
+
+        struct FailingCipher;
+        impl KeyCipher for FailingCipher {
+            fn encrypt(&self, plaintext: &str) -> anyhow::Result<String> {
+                Ok(plaintext.to_string())
+            }
+            fn decrypt(&self, _ciphertext: &str) -> anyhow::Result<String> {
+                anyhow::bail!("wrong cipher")
+            }
+        }
+        let failing: Arc<dyn KeyCipher + Send + Sync> = Arc::new(FailingCipher);
+        assert!(Database::open_with_cipher(dir.clone(), failing).is_err());
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        assert_eq!(schema_version_on(&conn).unwrap(), V26_SCHEMA_VERSION);
+        drop(conn);
+
+        let recovered = Database::open_with_cipher(dir.clone(), right).unwrap();
+        assert_eq!(recovered.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(recovered);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_open_without_cipher_cannot_bypass_ciphertext() {
+        let dir = temp_data_dir("v27-open-bypass");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> =
+            Arc::new(StaticKeyCipher::new("host-secret"));
+        let db = Database::open_with_cipher(dir.clone(), cipher.clone()).unwrap();
+        let mut enc = account("enc-bypass");
+        enc.key_cipher = cipher.encrypt("sk-bypass").unwrap();
+        db.create_account(&enc).unwrap();
+        drop(db);
+        reverse_current_to_v26(&dir);
+        let error = match Database::open(dir.clone()) {
+            Ok(_) => panic!("ciphertext must require the host cipher"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("open_with_cipher")
+                || error.to_string().contains("host encryption cipher"),
+            "{error}"
+        );
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        assert_eq!(schema_version_on(&conn).unwrap(), V26_SCHEMA_VERSION);
+        drop(conn);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_corrupt_account_cipher_fails_before_backup() {
+        let dir = temp_data_dir("v27-corrupt-account-cipher");
+        populate_v26_source(&dir);
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        conn.execute(
+            "UPDATE accounts SET key_cipher = '!!!not-base64!!!' WHERE id = 'v26-account'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let error = match open_with_host_cipher(dir.clone()) {
+            Ok(_) => panic!("corrupt account cipher must fail closed"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("key_cipher"),
+            "corrupt account cipher must name the column: {message}"
+        );
+        assert!(
+            pre_v3_backup_paths(&dir).is_empty(),
+            "corrupt account cipher must fail before the pre-v3 backup"
+        );
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        assert_eq!(schema_version_on(&conn).unwrap(), V26_SCHEMA_VERSION);
+        drop(conn);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_base64_looking_plaintext_access_keys_migrate_without_cipher() {
+        let dir = temp_data_dir("v27-b64-plaintext-keys");
+        let primary = "ABCDEFGHIJKLMNOPQRSTUVWX";
+        let sub = "ZYXWVUTSRQPONMLKJIHGFEDC";
+        assert_eq!(primary.len(), 24);
+        assert_eq!(sub.len(), 24);
+        let db = Database::open(dir.to_path_buf()).unwrap();
+        db.insert_sub_gateway_key(&SubGatewayKey {
+            id: "sub-b64".into(),
+            name: "Laptop".into(),
+            key: sub.into(),
+            enabled: true,
+            deleted_at: None,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        let config = serde_json::json!({
+            "gateway_port": 9042,
+            "gateway_key": primary,
+            "upstream_base_url": "https://opencode.ai/zen/go",
+        });
+        db.set_config(&config.to_string()).unwrap();
+        drop(db);
+        reverse_current_to_v26(&dir);
+        let db = Database::open(dir.clone()).expect(
+            "24-character base64-looking plaintext primary/sub keys must migrate without a host cipher",
+        );
+        assert_eq!(
+            db.primary_access_key_value().unwrap().as_deref(),
+            Some(primary)
+        );
+        let subs = db.list_active_sub_gateway_keys().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].key, sub);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_release_source_hides_access_key_unique_index_seam() {
+        let source = include_str!("db.rs");
+        let tests_mod = source
+            .rfind("#[cfg(test)]\nmod tests {")
+            .expect("db.rs tests module");
+        let production = &source[..tests_mod];
+        let needle = "fn test_drop_access_key_unique_index";
+        let idx = production
+            .find(needle)
+            .expect("debug/test unique-index seam should exist");
+        let prefix = &production[idx.saturating_sub(160)..idx];
+        assert!(
+            prefix.contains("#[cfg(any(test, debug_assertions))]")
+                || prefix.contains("#[cfg(debug_assertions)]"),
+            "access-key unique-index seam must be absent from release production source: {prefix}"
+        );
+        assert!(
+            !prefix.contains("#[cfg(not(debug_assertions))]"),
+            "access-key unique-index seam must not compile in release"
+        );
+        assert!(
+            !production[idx + needle.len()..].contains(needle),
+            "only one unique-index test seam is allowed"
+        );
+    }
+
+    #[test]
+    fn v27_corrupted_source_fails_quick_check_without_claiming_v27() {
+        let dir = temp_data_dir("v27-corrupt");
+        populate_v26_source(&dir);
+        let path = dir.join("data.sqlite");
+        fs::write(&path, b"not a sqlite database").unwrap();
+        assert!(Database::open(dir.clone()).is_err());
+        let raw = fs::read(&path).unwrap();
+        assert_eq!(&raw, b"not a sqlite database");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_backup_includes_wal_committed_rows() {
+        let dir = temp_data_dir("v27-wal-backup");
+        populate_v26_source(&dir);
+        let path = dir.join("data.sqlite");
+        let writer = Connection::open(&path).unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        let _mode: String = writer
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO settings (key, value) VALUES ('wal-marker', 'visible')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .unwrap();
+        let db = open_with_host_cipher(dir.clone()).expect("WAL source should migrate");
+        drop(db);
+        drop(writer);
+        let backups = pre_v3_backup_paths(&dir);
+        assert_eq!(backups.len(), 1);
+        let backup =
+            Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let marker: String = backup
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'wal-marker'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("VACUUM INTO must include WAL-committed rows");
+        assert_eq!(marker, "visible");
+        drop(backup);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_vacuum_into_writer_rejects_stale_backup_and_retries() {
+        let dir = temp_data_dir("v27-vacuum-race");
+        populate_v26_source(&dir);
+        v27_test_hooks::reset();
+        v27_test_hooks::set_race_during_vacuum(true);
+        let _guard = V27HookGuard;
+        let db =
+            open_with_host_cipher(dir.clone()).expect("raced VACUUM INTO should retry and finish");
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(db);
+        let backups = pre_v3_backup_paths(&dir);
+        assert!(
+            backups.len() >= 2,
+            "the first backup must be rejected and a fresh backup taken, got {backups:?}"
+        );
+        let accepted = backups.last().expect("accepted backup should exist");
+        let backup =
+            Connection::open_with_flags(accepted, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let marker: String = backup
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'v27-vacuum-race'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("accepted backup must contain the row committed during VACUUM INTO");
+        assert_eq!(marker, "committed");
+        drop(backup);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_set_config_is_atomic_with_the_primary_row() {
+        let dir = temp_data_dir("v27-config-atomic");
+        let db = Database::open(dir.clone()).unwrap();
+        let original = db.primary_access_key_value().unwrap().unwrap();
+        let initial = serde_json::json!({
+            "gateway_port": 9042,
+            "gateway_key": original,
+            "upstream_base_url": "https://opencode.ai/zen/go",
+            "connect_timeout_secs": 30,
+            "non_stream_timeout_secs": 900,
+            "stream_idle_timeout_secs": 300,
+        });
+        db.set_config(&initial.to_string()).unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_primary_update
+                 BEFORE UPDATE OF key ON access_keys
+                 WHEN NEW.is_primary = 1
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced primary update failure');
+                 END;",
+            )
+            .unwrap();
+        let rotated = serde_json::json!({
+            "gateway_port": 9042,
+            "gateway_key": "ocg-rotated-primary",
+            "upstream_base_url": "https://opencode.ai/zen/go",
+            "connect_timeout_secs": 30,
+            "non_stream_timeout_secs": 900,
+            "stream_idle_timeout_secs": 300,
+        });
+        assert!(db.set_config(&rotated.to_string()).is_err());
+        assert_eq!(
+            db.primary_access_key_value().unwrap().as_deref(),
+            Some(original.as_str())
+        );
+        let stored: serde_json::Value =
+            serde_json::from_str(&db.get_setting("config").unwrap().unwrap()).unwrap();
+        assert_eq!(stored["gateway_key"], "");
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_primary_row_cannot_be_disabled_or_deleted() {
+        let dir = temp_data_dir("v27-primary-protect");
+        let db = Database::open(dir.clone()).unwrap();
+        assert!(
+            !db.set_sub_gateway_key_enabled(PRIMARY_KEY_ID, false)
+                .unwrap()
+        );
+        assert!(
+            !db.soft_delete_sub_gateway_key(PRIMARY_KEY_ID, Utc::now())
+                .unwrap()
+        );
+        assert!(
+            db.conn
+                .execute(
+                    "UPDATE access_keys SET enabled = 0 WHERE id = ?1",
+                    [PRIMARY_KEY_ID],
+                )
+                .is_err()
+        );
+        assert!(
+            db.conn
+                .execute("DELETE FROM access_keys WHERE id = ?1", [PRIMARY_KEY_ID])
+                .is_err()
+        );
+        let primary = db.primary_access_key_value().unwrap().unwrap();
+        assert!(!primary.is_empty());
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_foreign_keys_and_row_conservation_hold() {
+        let dir = temp_data_dir("v27-fk-rows");
+        populate_v26_source(&dir);
+        let before = {
+            let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+            let accounts: i64 = conn
+                .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+                .unwrap();
+            let subs: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sub_gateway_keys", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            drop(conn);
+            (accounts, subs)
+        };
+        let db = open_with_host_cipher(dir.clone()).unwrap();
+        sqlite_foreign_key_check(&db.conn).unwrap();
+        let accounts: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+            .unwrap();
+        let keys: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM access_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(accounts, before.0);
+        assert_eq!(keys, before.1 + 1);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

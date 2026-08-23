@@ -831,10 +831,11 @@ pub struct GatewayStatus {
     pub last_error: Option<String>,
 }
 
-/// One database-owned sub gateway key (schema v20 `sub_gateway_keys`).
+/// One database-owned non-primary access key (schema v27 `access_keys`).
 /// `key` holds the plaintext value and is cleared on soft delete so deleted
 /// credentials never resurface in management APIs while the record stays
-/// resolvable for log attribution.
+/// resolvable for log attribution. The live primary row is not represented
+/// here; public `AppConfig.gateway_key` remains the API-facing primary value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubGatewayKey {
     pub id: String,

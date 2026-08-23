@@ -321,8 +321,8 @@ fn custom_create_body() -> Value {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v26() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+fn dashboard_v3_schema_version_stays_at_v27() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
 }
 
 #[tokio::test]
@@ -1255,6 +1255,6 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     assert_eq!(v3_zen["enabled"], false);
     assert!(v3_zen.get("account").is_none());
 
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
     harness.stop();
 }

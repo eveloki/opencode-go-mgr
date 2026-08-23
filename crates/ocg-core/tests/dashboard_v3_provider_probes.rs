@@ -289,8 +289,8 @@ fn load_go_evidence(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v26() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+fn dashboard_v3_schema_version_stays_at_v27() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
 }
 
 #[tokio::test]
@@ -1139,6 +1139,6 @@ async fn v2_duplicate_custom_and_ceiling_probes_coexist() {
     let call = origin.calls.lock().unwrap().last().cloned().unwrap();
     assert_eq!(call.x_api_key.as_deref(), Some(CUSTOM_KEY));
     assert!(call.authorization.is_none(), "{call:?}");
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
     harness.stop();
 }

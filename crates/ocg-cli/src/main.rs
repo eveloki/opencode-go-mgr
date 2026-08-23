@@ -155,7 +155,7 @@ fn build_state(
     data_dir: PathBuf,
     cipher: Arc<dyn KeyCipher + Send + Sync>,
 ) -> Result<Arc<CoreStateInner>> {
-    let db = Database::open(data_dir.clone())?;
+    let db = Database::open_with_cipher(data_dir.clone(), cipher.clone())?;
     Ok(Arc::new(CoreStateInner::new(db, data_dir, cipher)?))
 }
 
@@ -1176,6 +1176,8 @@ mod tests {
         );
         assert!(production.contains("GatewayLifecycle::stop_and_wait"));
         assert!(production.contains("state.set_config(config.clone())?"));
+        assert!(production.contains("Database::open_with_cipher"));
+        assert!(!production.contains("Database::open("));
         assert!(production.contains("async fn stop_serve"));
         assert!(production.contains("state.gateway.lock().take()"));
     }

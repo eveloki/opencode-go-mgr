@@ -522,8 +522,7 @@ fn single_key_upgrade_drill_backfills_logs_to_the_primary_key_id() {
     // list plus forward_logs rows without a client key.
     let dir = temp_data_dir("upgrade-drill");
     let db = Database::open(dir.clone()).unwrap();
-    db.set_setting(
-        "config",
+    db.set_config(
         &serde_json::json!({
             "gateway_port": 9042,
             "gateway_key": "ocg-legacy-value",

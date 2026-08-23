@@ -506,8 +506,8 @@ fn register_native(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v26() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 26);
+fn dashboard_v3_schema_version_stays_at_v27() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
 }
 
 #[tokio::test]
