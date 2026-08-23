@@ -4342,6 +4342,103 @@
       ],
       "type": "object"
     },
+    "UsageRefresh": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/usage/refresh` result. Nested `usage` is the V3\nwindow projection; `revision` is captured after the shared coordinator\nreturns and is not advanced by official calibration.",
+      "properties": {
+        "lastSuccessAt": {
+          "type": "string"
+        },
+        "nextAllowedAt": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageWindow"
+        }
+      },
+      "required": [
+        "usage",
+        "source",
+        "lastSuccessAt",
+        "nextAllowedAt",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "UsageRefreshThrottleError": {
+      "additionalProperties": false,
+      "description": "Typed 429 body for `POST /accounts/{id}/usage/refresh`.\n\nThis preserves the stable V3 error fields while making the endpoint-only\nabsolute retry time an explicit append-only contract instead of injecting\nan undeclared property into `V3Error`.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "currentRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "nextAllowedAt": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "currentRevision",
+        "processGeneration",
+        "nextAllowedAt"
+      ],
+      "type": "object"
+    },
+    "UsageRefreshUpdate": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/usage/refresh` body. CAS tokens are required;\nunknown fields, including Key material, are rejected.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "UsageSyncState": {
       "additionalProperties": false,
       "description": "Official-usage sync metadata as projected for provider usage. Distinct from\nthe stored `provider_usage_sync_state` row.",
@@ -4951,6 +5048,15 @@
     },
     {
       "$ref": "#/$defs/AccountManagedKeyVerify"
+    },
+    {
+      "$ref": "#/$defs/UsageRefresh"
+    },
+    {
+      "$ref": "#/$defs/UsageRefreshUpdate"
+    },
+    {
+      "$ref": "#/$defs/UsageRefreshThrottleError"
     }
   ],
   "title": "DashboardApiV3"

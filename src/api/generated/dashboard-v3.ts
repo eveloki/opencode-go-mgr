@@ -116,7 +116,10 @@ export type DashboardApiV3 =
   | UpdateCheck
   | DesktopUpdate
   | InstallUpdate
-  | AccountManagedKeyVerify;
+  | AccountManagedKeyVerify
+  | UsageRefresh
+  | UsageRefreshUpdate
+  | UsageRefreshThrottleError;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -1453,4 +1456,39 @@ export interface AccountManagedKeyVerify {
   expectedRevision: number;
   key: string;
   processGeneration: number;
+}
+/**
+ * POST `/accounts/{id}/usage/refresh` result. Nested `usage` is the V3
+ * window projection; `revision` is captured after the shared coordinator
+ * returns and is not advanced by official calibration.
+ */
+export interface UsageRefresh {
+  lastSuccessAt: string;
+  nextAllowedAt: string;
+  processGeneration: number;
+  revision: number;
+  source: string;
+  usage: UsageWindow;
+}
+/**
+ * POST `/accounts/{id}/usage/refresh` body. CAS tokens are required;
+ * unknown fields, including Key material, are rejected.
+ */
+export interface UsageRefreshUpdate {
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * Typed 429 body for `POST /accounts/{id}/usage/refresh`.
+ *
+ * This preserves the stable V3 error fields while making the endpoint-only
+ * absolute retry time an explicit append-only contract instead of injecting
+ * an undeclared property into `V3Error`.
+ */
+export interface UsageRefreshThrottleError {
+  code: string;
+  currentRevision: number | null;
+  message: string;
+  nextAllowedAt: string;
+  processGeneration: number | null;
 }
