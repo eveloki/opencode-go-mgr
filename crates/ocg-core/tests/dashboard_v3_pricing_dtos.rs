@@ -94,6 +94,11 @@ const USAGE_CATALOG_TYPES: &[&str] = &[
     "UsageAvailability",
 ];
 
+const CUSTOM_DISCOVERY_CATALOG_TYPES: &[&str] = &[
+    "CustomModelDiscoveryRequest",
+    "CustomModelDiscoveryResponse",
+];
+
 const SECRET_FIELD_NAMES: &[&str] = &[
     "key",
     "password",
@@ -252,11 +257,19 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[usage_end..auth_end],
         ["AuthStatus", "AuthRegister", "AuthLogin", "AuthLogout"]
     );
+    let proxy_end = auth_end + 2;
     assert_eq!(
-        &CATALOG_TYPE_NAMES[auth_end..],
+        &CATALOG_TYPE_NAMES[auth_end..proxy_end],
         ["ProxyTestRequest", "ProxyTestResponse"]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), auth_end + 2);
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[proxy_end..],
+        CUSTOM_DISCOVERY_CATALOG_TYPES
+    );
+    assert_eq!(
+        CATALOG_TYPE_NAMES.len(),
+        proxy_end + CUSTOM_DISCOVERY_CATALOG_TYPES.len()
+    );
 }
 
 #[test]

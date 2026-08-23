@@ -5,9 +5,10 @@
 //! control-plane mutation, including `/auth/register`, `/auth/login`, and
 //! `/auth/logout`. Pricing mutations also require `expectedPricingRevision`.
 //! Operational diagnostics such as `POST /settings/test-proxy` are not mutations
-//! and neither require nor accept CAS tokens. Plaintext keys must not appear on
-//! `Settings` or provider/Zen/contract DTOs —
-//! `ConnectionInfo` is the only secret-bearing V3 DTO. Protocol path/switch tokens
+//! and neither require nor accept CAS tokens. Custom model discovery is also an
+//! operational probe without `expectedRevision`. Plaintext keys must not appear on `Settings` or
+//! provider/Zen/contract DTOs — `ConnectionInfo` is the only secret-bearing
+//! V3 response DTO. `CustomModelDiscoveryRequest.apiKey` is write-only. Protocol path/switch tokens
 //! stay `chat_completions`, `responses`, and `messages`. Pricing wire DTOs are
 //! distinct from `kernel::pricing` and from stored provider pricing blobs. Usage
 //! wire DTOs are distinct from `models::UsageWindow` and from stored quota/sync
@@ -132,6 +133,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AuthLogout",
     "ProxyTestRequest",
     "ProxyTestResponse",
+    "CustomModelDiscoveryRequest",
+    "CustomModelDiscoveryResponse",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -1357,6 +1360,37 @@ pub struct ProtocolProbeResponse {
     pub pricing_revision: String,
 }
 
+/// POST `/custom/models/discover` body. Operational probe: CAS tokens must
+/// not be sent. `apiKey` is write-only; an edit form may send `accountId`
+/// instead so the handler can use the stored Custom key. Unknown fields are
+/// rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CustomModelDiscoveryRequest {
+    pub base_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
+    pub auth_scheme: AccountAuthScheme,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
+/// Custom model-list probe result. Identity tokens are the captured current
+/// revision / process generation / pricing snapshot id; this response never
+/// echoes the supplied key or mutates control state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CustomModelDiscoveryResponse {
+    pub models: Vec<String>,
+    pub truncated: bool,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
 /// Contract scope kind. Wire values match V2 `provider` / `custom_endpoint`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -2047,6 +2081,7 @@ pub fn contract_schema() -> Value {
     include_type::<UsageAvailability>(&mut serialize);
     include_type::<AuthStatus>(&mut serialize);
     include_type::<ProxyTestResponse>(&mut serialize);
+    include_type::<CustomModelDiscoveryResponse>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -2080,6 +2115,7 @@ pub fn contract_schema() -> Value {
     include_type::<AuthLogin>(&mut deserialize);
     include_type::<AuthLogout>(&mut deserialize);
     include_type::<ProxyTestRequest>(&mut deserialize);
+    include_type::<CustomModelDiscoveryRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -3354,6 +3390,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn custom_model_discovery_is_an_operational_probe_without_cas() {
+        let request: CustomModelDiscoveryRequest = serde_json::from_value(json!({
+            "baseUrl": "https://api.example.com/v1",
+            "upstreamProtocol": "chat_completions",
+            "authScheme": "bearer",
+            "apiKey": "sk-secret"
+        }))
+        .unwrap();
+        assert_eq!(request.base_url, "https://api.example.com/v1");
+        assert_eq!(
+            request.upstream_protocol,
+            AccountUpstreamProtocol::ChatCompletions
+        );
+        assert_eq!(request.auth_scheme, AccountAuthScheme::Bearer);
+        assert_eq!(request.api_key.as_deref(), Some("sk-secret"));
+        assert!(request.account_id.is_none());
+
+        let with_account: CustomModelDiscoveryRequest = serde_json::from_value(json!({
+            "baseUrl": "http://127.0.0.1:9/v1",
+            "upstreamProtocol": "messages",
+            "authScheme": "x-api-key",
+            "accountId": "acct-1"
+        }))
+        .unwrap();
+        assert_eq!(with_account.account_id.as_deref(), Some("acct-1"));
+        assert!(with_account.api_key.is_none());
+
+        assert!(
+            serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
+                "baseUrl": "https://api.example.com/v1",
+                "upstreamProtocol": "chat_completions",
+                "authScheme": "bearer",
+                "expectedRevision": 11
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
+                "base_url": "https://api.example.com/v1",
+                "upstreamProtocol": "chat_completions",
+                "authScheme": "bearer"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
+                "baseUrl": "https://api.example.com/v1",
+                "upstreamProtocol": "chat_completions",
+                "authScheme": "bearer",
+                "key": "sk-secret"
+            }))
+            .is_err()
+        );
+
+        let response = CustomModelDiscoveryResponse {
+            models: vec!["org/model".into()],
+            truncated: false,
+            revision: 11,
+            process_generation: 9,
+            pricing_revision: "seed".into(),
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["models"][0], "org/model");
+        assert_eq!(value["truncated"], false);
+        assert_eq!(value["revision"], 11);
+        assert_eq!(value["processGeneration"], 9);
+        assert_eq!(value["pricingRevision"], "seed");
+        assert!(value.get("apiKey").is_none());
+        assert!(value.get("api_key").is_none());
+        assert!(value.get("baseUrl").is_none());
+        assert_secret_free(&value);
+
+        let schema = contract_schema();
+        let request_schema = &schema["$defs"]["CustomModelDiscoveryRequest"];
+        assert_eq!(request_schema["additionalProperties"], false);
+        let required = request_schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|value| value == "baseUrl"));
+        assert!(required.iter().any(|value| value == "upstreamProtocol"));
+        assert!(required.iter().any(|value| value == "authScheme"));
+        assert!(!required.iter().any(|value| value == "apiKey"));
+        assert!(!required.iter().any(|value| value == "accountId"));
+        assert!(!required.iter().any(|value| value == "expectedRevision"));
+        assert!(!required.iter().any(|value| value == "processGeneration"));
+        let response_required = schema["$defs"]["CustomModelDiscoveryResponse"]["required"]
+            .as_array()
+            .unwrap();
+        for field in [
+            "models",
+            "truncated",
+            "revision",
+            "processGeneration",
+            "pricingRevision",
+        ] {
+            assert!(
+                response_required.iter().any(|value| value == field),
+                "{field} must stay required"
+            );
+        }
+        assert!(
+            schema["$defs"]["CustomModelDiscoveryResponse"]["properties"]["truncated"]["type"]
+                == "boolean"
+        );
+    }
+
     const PROVIDER_CATALOG_TYPES: &[&str] = &[
         "ProviderCatalog",
         "ProviderCatalogEntry",
@@ -3468,6 +3609,11 @@ mod tests {
 
     const PROXY_TEST_CATALOG_TYPES: &[&str] = &["ProxyTestRequest", "ProxyTestResponse"];
 
+    const CUSTOM_DISCOVERY_CATALOG_TYPES: &[&str] = &[
+        "CustomModelDiscoveryRequest",
+        "CustomModelDiscoveryResponse",
+    ];
+
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
         let prefix_len = ACCOUNTS_CATALOG_PREFIX.len() + PROVIDER_CATALOG_TYPES.len();
@@ -3501,7 +3647,12 @@ mod tests {
             &CATALOG_TYPE_NAMES[auth_end..proxy_end],
             PROXY_TEST_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), proxy_end);
+        let custom_discovery_end = proxy_end + CUSTOM_DISCOVERY_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[proxy_end..custom_discovery_end],
+            CUSTOM_DISCOVERY_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), custom_discovery_end);
     }
 
     #[test]

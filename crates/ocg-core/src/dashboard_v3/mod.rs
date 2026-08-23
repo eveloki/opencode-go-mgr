@@ -6,12 +6,15 @@
 //! access-key lifecycle, the local accounts control plane, local account usage
 //! calibration and provider-usage reads, the local/Zen provider catalog,
 //! contracts, Zen Free control plane, pricing, the settings proxy diagnostic,
-//! read-only observability, and Go/Zen
-//! protocol probes. Custom protocol probes stay account-owned on V2.
+//! read-only observability, and Go/Zen protocol probes. Custom model discovery
+//! is an authenticated operational
+//! probe (no `expectedRevision`, no revision bump). Custom protocol probes
+//! stay account-owned on V2.
 
 mod accounts;
 mod auth;
 mod connection;
+mod custom_discovery;
 mod keys;
 mod observability;
 mod pricing;
@@ -48,26 +51,26 @@ pub use types::{
     AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
     AccountVerificationStatus, ApplicationModels, AuthLogin, AuthLogout, AuthRegister, AuthStatus,
     CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract, DailyCostByModel,
-    DailyCostQuery, DailyModelCost, DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL,
-    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
-    ERROR_NOT_IMPLEMENTED, ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED,
-    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog,
-    EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog,
-    ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary,
-    ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate,
-    MutationAck, MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits,
-    PricingModel, PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate,
-    PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate,
-    PricingRevision, PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest,
-    ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches,
-    ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField,
-    ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts, ProviderModelCapability,
-    ProviderOfferingChoice, ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode,
-    ProxySupportedModel, ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings,
-    SettingsUpdate, UsageAvailability, UsageMutation, UsageSyncState, UsageWindow, V3Error,
-    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
-    contract_schema_pretty,
+    ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
+    CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyCostByModel, DailyCostQuery,
+    DailyModelCost, DashboardSummary, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
+    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
+    ERROR_SERVICE_UNAVAILABLE, ERROR_UNAUTHORIZED, EffectiveCatalog, EffectiveModelContract,
+    EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog, ForwardLogClientKey,
+    ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary, ForwardLogs, GatewayLog,
+    GatewayLogQuery, GatewayLogs, GatewayStatus, KeyCreate, KeyUpdate, MutationAck,
+    MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits, PricingModel,
+    PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate, PricingRefresh,
+    PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate, PricingRevision,
+    PricingSnapshot, PricingTimeWindow, ProtocolProbeRequest, ProtocolProbeResponse,
+    ProtocolProbeResult, ProtocolSwitchUpdate, ProtocolSwitches, ProviderAccountChoice,
+    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
+    ProviderPricing, ProviderUsage, ProxyListDirection, ProxyMode, ProxySupportedModel,
+    ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings, SettingsUpdate,
+    UsageAvailability, UsageMutation, UsageSyncState, UsageWindow, V3Error, ZenFreeModel,
+    ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema, contract_schema_pretty,
 };
 
 #[cfg(debug_assertions)]
@@ -197,6 +200,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/logs/forward/keys",
             get(observability::get_forward_log_keys),
+        )
+        .route(
+            "/custom/models/discover",
+            post(custom_discovery::discover_custom_models),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -412,6 +419,17 @@ fn parse_mutation_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiErro
     };
     if !object.contains_key("expectedRevision") {
         return Err(V3ApiError::missing_expected_revision());
+    }
+    serde_json::from_value(value).map_err(|_| V3ApiError::invalid_json())
+}
+
+/// Operational-body parser. Unknown fields and malformed JSON are
+/// `invalidJson`. Unlike [`parse_mutation_json`], this does not require
+/// `expectedRevision`.
+fn parse_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, V3ApiError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| V3ApiError::invalid_json())?;
+    if !value.is_object() {
+        return Err(V3ApiError::invalid_json());
     }
     serde_json::from_value(value).map_err(|_| V3ApiError::invalid_json())
 }
