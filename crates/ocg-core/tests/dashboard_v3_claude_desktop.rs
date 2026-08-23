@@ -241,7 +241,10 @@ fn dashboard_v3_claude_desktop_does_not_expand_host_scc() {
         .enumerate()
         .filter_map(|(i, part)| (i % 2 == 1).then_some(part))
         .collect();
-    assert_eq!(members, ["gateway", "state"]);
+    assert!(
+        members.is_empty(),
+        "Phase 1 cut must leave no multi-node host SCC, members={members:?}"
+    );
 
     let lib = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
     assert!(

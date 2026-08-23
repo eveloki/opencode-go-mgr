@@ -31,6 +31,9 @@ mod dependency_guard {
         "use crate::state",
         "use crate::dashboard",
         "use crate::host_router",
+        "use crate::host_gateway",
+        "use crate::gateway_runtime",
+        "use crate::routing_runtime",
         "use crate::gateway",
         "use crate::http_client",
         "use crate::custom",
@@ -53,6 +56,9 @@ mod dependency_guard {
         "state",
         "dashboard",
         "host_router",
+        "host_gateway",
+        "gateway_runtime",
+        "routing_runtime",
         "gateway",
         "http_client",
         "custom",
@@ -66,7 +72,7 @@ mod dependency_guard {
         "pricing",
     ];
 
-    const EXPECTED_HOST_SCC: &[&str] = &["gateway", "state"];
+    const EXPECTED_HOST_SCC: &[&str] = &[];
 
     #[test]
     fn kernel_modules_do_not_import_io_or_control_plane() {
@@ -293,7 +299,10 @@ mod dependency_guard {
                 && modules.contains("kernel")
                 && modules.contains("redaction")
                 && modules.contains("upstream_limit")
-                && modules.contains("host_router"),
+                && modules.contains("host_router")
+                && modules.contains("host_gateway")
+                && modules.contains("gateway_runtime")
+                && modules.contains("routing_runtime"),
             "lib.rs should declare the production modules under test, got {modules:?}"
         );
 
@@ -312,7 +321,10 @@ mod dependency_guard {
         );
 
         let graph = production_graph(&src_root, &modules);
-        let expected_host = named_set(EXPECTED_HOST_SCC);
+        assert!(
+            EXPECTED_HOST_SCC.is_empty(),
+            "Phase 1 cut must not whitelist a multi-node host SCC"
+        );
         assert!(
             !graph
                 .get("provider")
@@ -381,9 +393,10 @@ mod dependency_guard {
                 edges.contains("dashboard")
                     || edges.contains("dashboard_v3")
                     || edges.contains("host_router")
+                    || edges.contains("host_gateway")
                     || edges.contains("protocol_probe")
             }),
-            "gateway must not import dashboard mounts, host_router, or protocol_probe, graph={graph:?}"
+            "gateway must not import dashboard mounts, host composition, or protocol_probe, graph={graph:?}"
         );
         assert!(
             !graph.get("state").is_some_and(|edges| {
@@ -393,6 +406,59 @@ mod dependency_guard {
                     || edges.contains("protocol_probe")
             }),
             "state must not import dashboard mounts, host_router, or protocol_probe, graph={graph:?}"
+        );
+        assert!(
+            !graph.get("state").is_some_and(|edges| {
+                edges.contains("gateway") || edges.contains("host_gateway")
+            }),
+            "state must not depend on gateway or the host rebind adapter, graph={graph:?}"
+        );
+        assert!(
+            graph
+                .get("gateway")
+                .is_some_and(|edges| edges.contains("state")),
+            "gateway -> state may remain one-way after the Phase 1 cut, graph={graph:?}"
+        );
+        assert!(
+            graph.get("state").is_some_and(|edges| {
+                edges.contains("gateway_runtime") && edges.contains("routing_runtime")
+            }),
+            "state must own the extracted runtime slots without a gateway edge, graph={graph:?}"
+        );
+        assert!(
+            graph
+                .get("host_gateway")
+                .is_some_and(|edges| { edges.contains("gateway") && edges.contains("state") }),
+            "host_gateway must adapt gateway lifecycle onto state, graph={graph:?}"
+        );
+        assert!(
+            !graph.get("host_gateway").is_some_and(|edges| {
+                edges.contains("dashboard")
+                    || edges.contains("dashboard_v3")
+                    || edges.contains("protocol_probe")
+                    || edges.contains("usage_sync")
+                    || edges.contains("db")
+                    || edges.contains("http_client")
+            }),
+            "host_gateway must stay a rebind adapter, graph={graph:?}"
+        );
+        assert!(
+            !graph.get("gateway_runtime").is_some_and(|edges| {
+                edges.contains("gateway")
+                    || edges.contains("state")
+                    || edges.contains("host_gateway")
+                    || edges.contains("host_router")
+            }),
+            "gateway_runtime must stay outside state/gateway, graph={graph:?}"
+        );
+        assert!(
+            !graph.get("routing_runtime").is_some_and(|edges| {
+                edges.contains("gateway")
+                    || edges.contains("state")
+                    || edges.contains("host_gateway")
+                    || edges.contains("host_router")
+            }),
+            "routing_runtime must stay outside state/gateway, graph={graph:?}"
         );
         assert!(
             graph.get("host_router").is_some_and(|edges| {
@@ -502,60 +568,32 @@ mod dependency_guard {
             "account_control must not join a production SCC, account_control_component={account_control_component:?}"
         );
 
-        // Clocked `pricing` still has state/dashboard edges (next host
-        // inversion). This lease cut gateway_keys and usage_sync out of the
-        // measured host SCC by depending on KeyHost/UsageSyncHost instead.
-        // account_control uses the same pattern (AccountControlHost in state)
-        // so it stays outside the host SCC. HTTP router composition now lives
-        // in host_router, so dashboard and dashboard_v3 are one-way clients of
-        // gateway/state instead of members of that cycle.
-        // protocol_probe still depends on gateway/state for probe transport
-        // without a dashboard or dashboard_v3 edge. Inverting the remaining
-        // pure catalog/sanitizer edges from provider_contracts into gateway
-        // also dropped auth, db, and provider_contracts out of that cycle.
-        // The Go usage endpoint now lives in the I/O-free kernel catalog,
-        // removing provider -> go_usage and the former catalog SCC. Whitelist
-        // every remaining nontrivial SCC exactly so a new non-gateway cycle
-        // cannot pass unnoticed.
-        let mut measured = graph.clone();
-        measured.remove("pricing");
-        for edges in measured.values_mut() {
-            edges.remove("pricing");
-        }
-        let mut nontrivial: Vec<BTreeSet<String>> = tarjan(&measured)
+        // The Phase 1 cut moved GatewayHandle and RoutingRuntime out of both
+        // `gateway` and `state`. Settings rebind goes through GatewayRebindHost,
+        // implemented only in host_gateway. gateway -> state remains one-way.
+        // HTTP router composition stays in host_router. Tarjan runs against the
+        // complete measured production graph; any multi-node SCC is a failure.
+        let mut nontrivial: Vec<BTreeSet<String>> = tarjan(&graph)
             .into_iter()
             .filter(|component| component.len() > 1)
             .collect();
         nontrivial.sort();
-        let expected_sccs = vec![expected_host.clone()];
-        assert_eq!(
-            nontrivial, expected_sccs,
-            "approved production SCCs after pricing exclusion should be {expected_sccs:?}, sccs={nontrivial:?}, graph={graph:?}"
-        );
-        let host_scc = nontrivial
-            .iter()
-            .find(|component| component.contains("gateway"))
-            .cloned()
-            .expect("gateway should remain in a production SCC");
-        assert_eq!(
-            host_scc, expected_host,
-            "remaining production host SCC should be {expected_host:?}, sccs={nontrivial:?}, graph={graph:?}"
-        );
         assert!(
-            !host_scc.contains("provider_contracts")
-                && !host_scc.contains("redaction")
-                && !host_scc.contains("upstream_limit")
-                && !host_scc.contains("db")
-                && !host_scc.contains("auth")
-                && !host_scc.contains("account_control")
-                && !host_scc.contains("dashboard")
-                && !host_scc.contains("dashboard_v3")
-                && !host_scc.contains("protocol_probe")
-                && !host_scc.contains("host_router"),
-            "inverted leaves and host composition must stay outside the host SCC, host_scc={host_scc:?}"
+            nontrivial.is_empty(),
+            "production graph must have no multi-node SCC, sccs={nontrivial:?}, graph={graph:?}"
         );
-        for name in ["dashboard", "dashboard_v3", "protocol_probe", "host_router"] {
-            let component = tarjan(&measured)
+        for name in [
+            "gateway",
+            "state",
+            "dashboard",
+            "dashboard_v3",
+            "protocol_probe",
+            "host_router",
+            "host_gateway",
+            "gateway_runtime",
+            "routing_runtime",
+        ] {
+            let component = tarjan(&graph)
                 .into_iter()
                 .find(|component| component.contains(name))
                 .unwrap_or_else(|| panic!("{name} module should exist in the production graph"));
@@ -653,12 +691,98 @@ mod dependency_guard {
             gateway_source.push('\n');
         });
         let gateway_roots = crate_path_roots(&gateway_source);
-        for forbidden in ["dashboard", "dashboard_v3", "host_router", "protocol_probe"] {
+        for forbidden in [
+            "dashboard",
+            "dashboard_v3",
+            "host_router",
+            "host_gateway",
+            "protocol_probe",
+        ] {
             assert!(
                 !gateway_roots.contains(forbidden),
                 "gateway production sources must not import {forbidden}, roots={gateway_roots:?}"
             );
         }
+    }
+
+    #[test]
+    fn host_gateway_is_rebind_adapter() {
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let host_gateway_raw = read_to_string(&src_root.join("host_gateway.rs"));
+        let host_gateway = production_source(&host_gateway_raw);
+        let state = production_source(&read_to_string(&src_root.join("state.rs")));
+        let runtime = production_source(&read_to_string(&src_root.join("gateway_runtime.rs")));
+
+        assert!(
+            host_gateway.contains("impl GatewayRebindHost for CoreState")
+                && host_gateway.contains("GatewayLifecycle::rebind")
+                && host_gateway.contains("rebind_from_serving_request"),
+            "host_gateway must implement the rebind port against GatewayLifecycle"
+        );
+        assert!(
+            !host_gateway.contains("impl GatewayLifecycle"),
+            "host_gateway must not add inherent GatewayLifecycle methods"
+        );
+        for needle in [
+            "forward_once",
+            "GatewayExecutor",
+            "axum::serve",
+            "TcpListener",
+            "start_gateway",
+            "ControlPlaneWorkers",
+            "protocol_probe",
+            "inference_router",
+            "dashboard::",
+        ] {
+            assert!(
+                !host_gateway.contains(needle),
+                "host_gateway must not take on runtime or dashboard work ({needle})"
+            );
+        }
+
+        let host_roots = crate_path_roots(&host_gateway);
+        for required in ["gateway", "state"] {
+            assert!(
+                host_roots.contains(required),
+                "host_gateway must depend on {required}, roots={host_roots:?}"
+            );
+        }
+        for forbidden in [
+            "dashboard",
+            "dashboard_v3",
+            "protocol_probe",
+            "usage_sync",
+            "db",
+            "http_client",
+            "provider_contracts",
+        ] {
+            assert!(
+                !host_roots.contains(forbidden),
+                "host_gateway must not depend on {forbidden}, roots={host_roots:?}"
+            );
+        }
+
+        assert!(
+            state.contains("GatewayRebindHost::rebind")
+                && state.contains("rebind_from_serving_request")
+                && state.contains("rebind_gateway_listener_if_port_changed"),
+            "state must rebind through GatewayRebindHost"
+        );
+        assert!(
+            !crate_path_roots(&state).contains("gateway"),
+            "state production source must not have a crate::gateway edge"
+        );
+        assert!(
+            !crate_path_roots(&state).contains("host_gateway"),
+            "state must not import the host rebind adapter"
+        );
+        assert!(
+            runtime.contains("pub trait GatewayRebindHost")
+                && runtime.contains("pub struct GatewayHandle")
+                && crate_path_roots(&runtime).is_empty(),
+            "gateway_runtime must stay a crate-level DAG leaf, roots={:?}",
+            crate_path_roots(&runtime)
+        );
     }
 
     fn named_set(names: &[&str]) -> BTreeSet<String> {

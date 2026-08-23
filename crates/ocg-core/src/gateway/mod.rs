@@ -15,7 +15,9 @@ mod response;
 pub mod routing;
 pub mod selector;
 
-use crate::state::{CoreState, GatewayHandle};
+use crate::state::CoreState;
+
+pub use crate::gateway_runtime::GatewayHandle;
 use anyhow::Result;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;

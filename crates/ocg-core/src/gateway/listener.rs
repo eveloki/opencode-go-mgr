@@ -12,7 +12,8 @@
 //! mode only when the installed listener is loopback and no public listener
 //! remains.
 
-use crate::state::{CoreState, GatewayHandle};
+use crate::gateway_runtime::GatewayHandle;
+use crate::state::CoreState;
 use anyhow::Result;
 use axum::Router;
 use std::net::SocketAddr;

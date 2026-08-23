@@ -1,11 +1,8 @@
 use crate::db::Database;
 use crate::kernel::ids::{
-    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
-    CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
+    ANONYMOUS_FREE_OFFERING_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use crate::models::{Account, UpstreamChannel};
-use crate::provider::{CredentialKind, validate_account_binding};
 use anyhow::Result;
 use chrono::Utc;
 
@@ -45,17 +42,7 @@ impl AccountSelector {
         channel: UpstreamChannel,
         exclude_ids: &[&str],
     ) -> bool {
-        let now = Utc::now();
-        account.enabled
-            && account.setup_step.is_ready()
-            && account_matches_channel(account, channel)
-            && match account.credential_kind {
-                CredentialKind::ApiKey => !account.key_cipher.is_empty(),
-                CredentialKind::None => true,
-            }
-            && account.auth_error.is_none()
-            && !exclude_ids.iter().any(|excluded| account.id == *excluded)
-            && !account.is_cooling_for(channel, now)
+        crate::routing_runtime::account_is_available_for(account, channel, exclude_ids)
     }
 
     pub fn first_available(accounts: &[Account], exclude_ids: &[&str]) -> Option<Account> {
@@ -115,29 +102,6 @@ impl AccountSelector {
                 account.id == account_id && Self::is_available_for(account, channel, exclude_ids)
             })
             .cloned()
-    }
-}
-
-fn account_matches_channel(account: &Account, channel: UpstreamChannel) -> bool {
-    if validate_account_binding(
-        &account.id,
-        &account.provider_id,
-        &account.offering_id,
-        account.credential_kind,
-        account.quota_scope,
-    )
-    .is_err()
-    {
-        return false;
-    }
-    match (account.provider_id.as_str(), account.offering_id.as_str()) {
-        (OPENCODE_PROVIDER_ID, GO_OFFERING_ID)
-        | (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID)
-        | (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID) => channel == UpstreamChannel::Go,
-        (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
-            channel == UpstreamChannel::Free
-        }
-        _ => false,
     }
 }
 

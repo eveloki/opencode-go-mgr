@@ -1,11 +1,13 @@
 use crate::crypto::KeyCipher;
 use crate::db::Database;
 use crate::desktop::DesktopCapabilities;
+use crate::gateway_runtime::GatewayRebindHost;
 use crate::kernel::pricing::{PricingEstimate, PricingSnapshot};
 use crate::models::{
     AppConfig, normalize_client_root_url, normalize_opencode_invite_url, normalize_proxy_url,
 };
 use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
+use crate::routing_runtime::RoutingRuntime;
 use parking_lot::{Mutex, RwLock};
 use std::fmt;
 use std::net::SocketAddr;
@@ -19,21 +21,9 @@ pub use crate::desktop::{
     AutoStartSync, DesktopUpdatePhase, DesktopUpdateStartError, DesktopUpdateStarter,
     DesktopUpdateStatus, DockVisibilitySync,
 };
+pub use crate::gateway_runtime::GatewayHandle;
 
 const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
-
-pub struct GatewayHandle {
-    pub port: u16,
-    /// Bound listen address. HTTP settings port changes rebind this IP to the
-    /// configured port through [`crate::gateway::GatewayLifecycle`].
-    pub listen_addr: SocketAddr,
-    /// Whether this listener is bound only to a loopback interface. The
-    /// lifecycle uses this metadata to keep the shared dashboard trust mode
-    /// fail-closed while replacing listeners.
-    pub dashboard_is_local: bool,
-    pub shutdown: tokio::sync::oneshot::Sender<()>,
-    pub task: tokio::task::JoinHandle<()>,
-}
 
 // Note: Mutex lock ordering is (1) settings_update, (2) db, (3) config,
 // (4) http_client, (5) gateway, (6) pricing, (7) zen_free_models,
@@ -92,7 +82,7 @@ pub struct CoreStateInner {
     zen_free_models: RwLock<Arc<crate::kernel::zen::ZenFreeModelCatalog>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
     provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
-    pub routing: crate::gateway::routing::RoutingRuntime,
+    pub routing: RoutingRuntime,
     pub browser: crate::browser::BrowserRuntime,
     /// Official Go usage sync gates (concurrency, dedupe, clock/jitter seams).
     /// The background loop is started from gateway startup, not construction.
@@ -233,7 +223,7 @@ impl CoreStateInner {
             zen_free_models: RwLock::new(Arc::new(zen_free_models)),
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
-            routing: crate::gateway::routing::RoutingRuntime::new(),
+            routing: RoutingRuntime::new(),
             browser: crate::browser::BrowserRuntime::new(),
             usage_sync: crate::usage_sync::UsageSyncRuntime::new(),
             data_dir,
@@ -684,10 +674,9 @@ impl CoreStateInner {
         };
         let target = SocketAddr::new(listen_addr.ip(), next_port);
         let rebind = if wait_for_previous {
-            crate::gateway::GatewayLifecycle::rebind(Arc::clone(self), target).await
+            GatewayRebindHost::rebind(self, target).await
         } else {
-            crate::gateway::GatewayLifecycle::rebind_from_serving_request(Arc::clone(self), target)
-                .await
+            GatewayRebindHost::rebind_from_serving_request(self, target).await
         };
         rebind.map(|_| ()).map_err(HostSettingsError::GatewayBind)
     }

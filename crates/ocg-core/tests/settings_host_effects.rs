@@ -244,8 +244,19 @@ fn v2_and_v3_settings_updates_share_the_core_state_host_path() {
     );
 
     assert!(state_production.contains("rebind_gateway_listener_if_port_changed"));
-    assert!(state_production.contains("GatewayLifecycle::rebind"));
+    assert!(state_production.contains("GatewayRebindHost::rebind"));
     assert!(state_production.contains("rebind_from_serving_request"));
+    assert!(
+        !state_production.contains("crate::gateway::"),
+        "state must not name crate::gateway after the Phase 1 cut"
+    );
+    let host_gateway_src =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host_gateway.rs"));
+    let host_gateway_production = production_prefix(host_gateway_src);
+    assert!(host_gateway_production.contains("GatewayLifecycle::rebind"));
+    assert!(host_gateway_production.contains("rebind_from_serving_request"));
+    assert!(host_gateway_production.contains("impl GatewayRebindHost for CoreState"));
+    assert!(!host_gateway_production.contains("impl GatewayLifecycle"));
     assert!(state_production.contains("settings_host_effects"));
     assert!(state_production.contains("lock_settings_host_effects"));
     assert!(state_production.contains("rebind_listener_after_settings_commit"));
@@ -318,7 +329,7 @@ fn v2_and_v3_settings_updates_share_the_core_state_host_path() {
 }
 
 #[test]
-fn production_host_scc_membership_is_unchanged() {
+fn production_host_scc_is_empty_after_state_gateway_cut() {
     let kernel = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/kernel/mod.rs"));
     let start = kernel
         .find("const EXPECTED_HOST_SCC:")
@@ -330,7 +341,10 @@ fn production_host_scc_membership_is_unchanged() {
         .enumerate()
         .filter_map(|(i, part)| (i % 2 == 1).then_some(part))
         .collect();
-    assert_eq!(members, ["gateway", "state"]);
+    assert!(
+        members.is_empty(),
+        "Phase 1 cut must leave no multi-node host SCC, members={members:?}"
+    );
 }
 
 #[test]
