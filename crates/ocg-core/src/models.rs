@@ -4,235 +4,16 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::kernel::ids::ZEN_FREE_ACCOUNT_ID;
 use crate::provider::{
-    ConnectionVerificationStatus, CredentialKind, QuotaScope, UpstreamAuthScheme,
-    UpstreamProtocolKind, default_credential_kind, default_offering_id, default_provider_id,
-    default_quota_scope, validate_account_binding,
+    ConnectionVerificationStatus, UpstreamAuthScheme, UpstreamProtocolKind, default_offering_id,
+    default_provider_id,
 };
 
 pub use crate::kernel::ids::DEFAULT_ACCOUNT_TEST_MODEL;
+pub use ocg_domain::account::{Account, AccountSetupStep, AccountType, UpstreamChannel};
 
 /// Maximum persisted freeform account note length, counted in Unicode scalars.
 pub const MAX_ACCOUNT_NOTES_CHARS: usize = 4000;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Account {
-    pub id: String,
-    #[serde(default = "default_provider_id")]
-    pub provider_id: String,
-    #[serde(default = "default_offering_id")]
-    pub offering_id: String,
-    #[serde(default = "default_credential_kind")]
-    pub credential_kind: CredentialKind,
-    #[serde(default = "default_quota_scope")]
-    pub quota_scope: QuotaScope,
-    pub name: String,
-    pub username: Option<String>,
-    pub password_cipher: Option<String>,
-    pub key_cipher: String,
-    pub enabled: bool,
-    #[serde(default)]
-    pub account_type: AccountType,
-    #[serde(default)]
-    pub setup_step: AccountSetupStep,
-    pub referral_code: Option<String>,
-    #[serde(alias = "recharge_date")]
-    pub purchase_date: String,
-    #[serde(default)]
-    pub expires_on: String,
-    /// Derived: when the account becomes usable after every active cooldown expires.
-    /// Kept for backwards compatibility; `None` means currently available.
-    pub cooldown_until: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub cooldown_generic_until: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub cooldown_5h_until: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub cooldown_week_until: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub cooldown_month_until: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub cooldown_free_until: Option<DateTime<Utc>>,
-    pub last_error: Option<String>,
-    /// A persisted upstream 401 marker. Accounts with an auth error remain
-    /// enabled for management purposes, but are excluded from gateway routing
-    /// until their key is replaced or a direct ping proves the key works again.
-    #[serde(default)]
-    pub auth_error: Option<String>,
-    /// Optional freeform note. Empty or omitted is valid.
-    #[serde(default)]
-    pub notes: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AccountType {
-    #[default]
-    Key,
-    Managed,
-}
-
-impl AccountType {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Key => "key",
-            Self::Managed => "managed",
-        }
-    }
-}
-
-impl TryFrom<&str> for AccountType {
-    type Error = String;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "key" => Ok(Self::Key),
-            "managed" => Ok(Self::Managed),
-            _ => Err(format!("unknown account type `{value}`")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AccountSetupStep {
-    GoogleAccount,
-    OpencodeRegistration,
-    Payment,
-    KeyVerification,
-    #[default]
-    Ready,
-}
-
-impl AccountSetupStep {
-    pub fn next(self) -> Option<Self> {
-        match self {
-            Self::GoogleAccount => Some(Self::OpencodeRegistration),
-            Self::OpencodeRegistration => Some(Self::Payment),
-            Self::Payment => Some(Self::KeyVerification),
-            Self::KeyVerification | Self::Ready => None,
-        }
-    }
-
-    pub fn is_ready(self) -> bool {
-        self == Self::Ready
-    }
-
-    /// Wizard progress index for unfinished steps. `ready` is not part of the wizard.
-    pub const fn wizard_index(self) -> Option<u8> {
-        match self {
-            Self::GoogleAccount => Some(0),
-            Self::OpencodeRegistration => Some(1),
-            Self::Payment => Some(2),
-            Self::KeyVerification => Some(3),
-            Self::Ready => None,
-        }
-    }
-
-    /// Forward exactly one step, or rewind to any earlier unfinished step.
-    pub fn can_transition_to(self, to: Self) -> bool {
-        let Some(from_i) = self.wizard_index() else {
-            return false;
-        };
-        let Some(to_i) = to.wizard_index() else {
-            return false;
-        };
-        to_i == from_i + 1 || to_i < from_i
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::GoogleAccount => "google_account",
-            Self::OpencodeRegistration => "opencode_registration",
-            Self::Payment => "payment",
-            Self::KeyVerification => "key_verification",
-            Self::Ready => "ready",
-        }
-    }
-}
-
-impl TryFrom<&str> for AccountSetupStep {
-    type Error = String;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "google_account" => Ok(Self::GoogleAccount),
-            "opencode_registration" => Ok(Self::OpencodeRegistration),
-            "payment" => Ok(Self::Payment),
-            "key_verification" => Ok(Self::KeyVerification),
-            "ready" => Ok(Self::Ready),
-            _ => Err(format!("unknown account setup step `{value}`")),
-        }
-    }
-}
-
-impl Account {
-    /// Compatibility wrapper around [`crate::provider::validate_account_binding`].
-    pub fn validate_provider_binding(&self) -> Result<(), crate::provider::ProviderBindingError> {
-        validate_account_binding(
-            &self.id,
-            &self.provider_id,
-            &self.offering_id,
-            self.credential_kind,
-            self.quota_scope,
-        )
-    }
-
-    pub fn is_zen_free(&self) -> bool {
-        self.id == ZEN_FREE_ACCOUNT_ID
-    }
-
-    /// Latest end among every cooldown window (UI / any-channel busy).
-    pub fn cooldown_ends_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        [
-            self.cooldown_generic_until,
-            self.cooldown_5h_until,
-            self.cooldown_week_until,
-            self.cooldown_month_until,
-            self.cooldown_free_until,
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|until| *until > now)
-        .max()
-    }
-
-    pub fn is_cooling_at(&self, now: DateTime<Utc>) -> bool {
-        self.cooldown_ends_at(now).is_some()
-    }
-
-    /// Go routing ignores free promo cooldown; free routing ignores Go usage windows.
-    /// Free 429s are IP-shared: the selector treats any active `cooldown_free_until`
-    /// as exhausting the whole free channel.
-    pub fn cooldown_ends_at_for(
-        &self,
-        channel: UpstreamChannel,
-        now: DateTime<Utc>,
-    ) -> Option<DateTime<Utc>> {
-        let windows: &[Option<DateTime<Utc>>] = match channel {
-            UpstreamChannel::Go => &[
-                self.cooldown_generic_until,
-                self.cooldown_5h_until,
-                self.cooldown_week_until,
-                self.cooldown_month_until,
-            ],
-            UpstreamChannel::Free => &[self.cooldown_generic_until, self.cooldown_free_until],
-        };
-        windows
-            .iter()
-            .copied()
-            .flatten()
-            .filter(|until| *until > now)
-            .max()
-    }
-
-    pub fn is_cooling_for(&self, channel: UpstreamChannel, now: DateTime<Utc>) -> bool {
-        self.cooldown_ends_at_for(channel, now).is_some()
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountInput {
@@ -486,13 +267,6 @@ fn next_month(year: i32, month: u32) -> Result<(i32, u32), PurchaseDateError> {
 
 fn format_date(date: NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
-}
-
-/// Upstream product channel for account selection and cooldown windows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpstreamChannel {
-    Go,
-    Free,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1133,6 +907,34 @@ mod tests {
         normalize_account_notes, normalize_opencode_invite_url, normalize_proxy_url,
         normalize_purchase_date, purchase_expires_on,
     };
+
+    #[test]
+    fn historical_account_model_paths_compile() {
+        use std::any::TypeId;
+
+        use crate as ocg_core;
+        use ocg_core::models::{Account, AccountSetupStep, AccountType, UpstreamChannel};
+
+        assert_eq!(
+            TypeId::of::<Account>(),
+            TypeId::of::<ocg_domain::account::Account>()
+        );
+        assert_eq!(
+            TypeId::of::<AccountType>(),
+            TypeId::of::<ocg_domain::account::AccountType>()
+        );
+        assert_eq!(
+            TypeId::of::<AccountSetupStep>(),
+            TypeId::of::<ocg_domain::account::AccountSetupStep>()
+        );
+        assert_eq!(
+            TypeId::of::<UpstreamChannel>(),
+            TypeId::of::<ocg_domain::account::UpstreamChannel>()
+        );
+        assert_eq!(AccountType::Key.as_str(), "key");
+        assert_eq!(AccountSetupStep::Ready.as_str(), "ready");
+        let _ = UpstreamChannel::Go;
+    }
 
     #[test]
     fn claude_desktop_models_map_aliases_and_inherit_by_role_priority() {

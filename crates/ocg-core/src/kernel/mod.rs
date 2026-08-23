@@ -8,7 +8,9 @@
 //! [`pricing::PricingSnapshot`] retains inherent `estimate`/`estimate_at`
 //! methods in the host pricing module. The provider catalog lives in
 //! `ocg_domain::provider` and is re-exported item-by-item from
-//! `crate::provider`, not this kernel module.
+//! `crate::provider`, not this kernel module. The account aggregate lives
+//! in `ocg_domain::account` and is re-exported item-by-item from
+//! `crate::models`, not this kernel module.
 //!
 //! Domain sources must not import db, state, dashboard, gateway execution,
 //! reqwest, rusqlite, tokio, axum, ocg-core, filesystem, clocks, or
@@ -79,27 +81,22 @@ mod dependency_guard {
             assert_production_is_io_free(path);
         });
 
-        assert!(
-            scanned.iter().any(|path| {
-                path.file_name().and_then(|name| name.to_str()) == Some("lib.rs")
-                    && path.components().any(|component| {
-                        component.as_os_str() == std::ffi::OsStr::new("ocg-domain")
-                    })
-            }),
-            "domain purity guard must recursively scan lib.rs, scanned={scanned:?}"
-        );
-        assert!(
-            scanned.iter().any(|path| {
-                path.file_name().and_then(|name| name.to_str()) == Some("provider.rs")
-                    && path.components().any(|component| {
-                        component.as_os_str() == std::ffi::OsStr::new("ocg-domain")
-                    })
-            }),
-            "domain purity guard must recursively scan provider.rs, scanned={scanned:?}"
-        );
+        for domain_file in ["lib.rs", "provider.rs", "account.rs"] {
+            assert!(
+                scanned.iter().any(|path| {
+                    path.file_name().and_then(|name| name.to_str()) == Some(domain_file)
+                        && path.components().any(|component| {
+                            component.as_os_str() == std::ffi::OsStr::new("ocg-domain")
+                        })
+                }),
+                "domain purity guard must recursively scan {domain_file}, scanned={scanned:?}"
+            );
+        }
 
         let core_provider = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider.rs");
         assert_no_blanket_domain_reexport(&core_provider);
+        let core_models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/models.rs");
+        assert_no_blanket_domain_reexport(&core_models);
         let core_provider_source = production_source(&read_to_string(&core_provider));
         assert!(
             !core_provider_source.contains("ocg_domain::provider::*")
@@ -204,6 +201,28 @@ mod dependency_guard {
         assert_no_blanket_domain_reexport_source(
             Path::new("compat.rs"),
             "pub use ocg_domain::provider::{BuiltinPlan, ProviderBindingError};",
+        );
+    }
+
+    #[test]
+    fn syntax_guard_rejects_account_module_reexports() {
+        for source in [
+            "pub use ocg_domain::account;",
+            "pub use ocg_domain::account::*;",
+            "pub use ocg_domain::account::{self};",
+            "pub use ocg_domain::account as account;",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| {
+                    assert_no_blanket_domain_reexport_source(Path::new("compat.rs"), source);
+                })
+                .is_err(),
+                "account whole-module reexports must not bypass the compatibility facade guard: {source}"
+            );
+        }
+        assert_no_blanket_domain_reexport_source(
+            Path::new("compat.rs"),
+            "pub use ocg_domain::account::{Account, AccountSetupStep, AccountType, UpstreamChannel};",
         );
     }
 
@@ -1677,7 +1696,7 @@ mod dependency_guard {
             import.segments.as_slice(),
             [domain, module]
                 if domain == "ocg_domain"
-                    && ["catalog", "ids", "pricing", "protocol", "provider", "zen"]
+                    && ["account", "catalog", "ids", "pricing", "protocol", "provider", "zen"]
                         .contains(&module.as_str())
         ) || matches!(
             import.segments.as_slice(),
