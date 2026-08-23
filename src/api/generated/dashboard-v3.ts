@@ -115,7 +115,8 @@ export type DashboardApiV3 =
   | BrowserOpen
   | UpdateCheck
   | DesktopUpdate
-  | InstallUpdate;
+  | InstallUpdate
+  | AccountManagedKeyVerify;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -1442,5 +1443,14 @@ export interface DesktopUpdate {
 export interface InstallUpdate {
   expectedRevision: number;
   expectedVersion: string;
+  processGeneration: number;
+}
+/**
+ * POST `/accounts/{id}/setup/verify-key` body. CAS tokens and the write-only
+ * `key` are required. Unknown fields are rejected. The key is never echoed.
+ */
+export interface AccountManagedKeyVerify {
+  expectedRevision: number;
+  key: string;
   processGeneration: number;
 }

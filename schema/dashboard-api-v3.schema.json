@@ -541,6 +541,31 @@
       ],
       "type": "object"
     },
+    "AccountManagedKeyVerify": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/setup/verify-key` body. CAS tokens and the write-only\n`key` are required. Unknown fields are rejected. The key is never echoed.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "key"
+      ],
+      "type": "object"
+    },
     "AccountModelCapabilitiesUpdate": {
       "additionalProperties": false,
       "description": "PUT `/accounts/{id}/model-capabilities` body.",
@@ -4923,6 +4948,9 @@
     },
     {
       "$ref": "#/$defs/InstallUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountManagedKeyVerify"
     }
   ],
   "title": "DashboardApiV3"
