@@ -106,13 +106,25 @@
             <div class="desktop-title">{{ currentTitle }}</div>
             <div class="mobile-nav">
               <span class="brand-mark">OCG</span>
-              <n-menu
-                mode="horizontal"
-                responsive
-                :options="menuOptions"
-                :value="activeKey"
-                @update:value="(key: string) => selectView(key)"
-              />
+              <n-dropdown
+                class="mobile-nav-dropdown"
+                trigger="click"
+                :keyboard="true"
+                :show="mobileMenuShown"
+                :options="mobileMenuOptions"
+                @select="selectMobileView"
+                @update:show="mobileMenuShown = $event"
+              >
+                <n-button
+                  quaternary
+                  class="mobile-nav-trigger"
+                  aria-haspopup="menu"
+                  :aria-expanded="mobileMenuShown"
+                  :aria-label="currentTitle"
+                >
+                  {{ currentTitle }}
+                </n-button>
+              </n-dropdown>
             </div>
             <div class="header-actions">
               <LocaleSwitcher />
@@ -297,6 +309,7 @@ const activeKey = ref<ViewKey>(readView());
 const themeStorage = getThemeStorage();
 const themeName = ref<ThemeName>(readTheme(themeStorage));
 const themeMenuShown = ref(false);
+const mobileMenuShown = ref(false);
 const characterImage = new URL("../assets/opencode-mascot.png", import.meta.url).href;
 const authUsername = ref("");
 const authPassword = ref("");
@@ -340,6 +353,13 @@ const menuOptions = computed(() => [
   { label: t("日志"), key: "logs", icon: renderIcon(FileTextOutlined) },
   { label: t("设置"), key: "settings", icon: renderIcon(SettingOutlined) },
 ]);
+const mobileMenuOptions = computed<DropdownOption[]>(() => menuOptions.value.map((option) => ({
+  ...option,
+  props: {
+    role: "menuitemradio",
+    "aria-checked": option.key === activeKey.value ? "true" : "false",
+  },
+})));
 const currentTitle = computed(() => t(viewConfig[activeKey.value]));
 const themeNames = new Set<ThemeName>(THEME_OPTIONS.map(({ value }) => value));
 const themeLabel = computed(() => {
@@ -403,6 +423,11 @@ function selectView(key: string, extras?: ProviderScopeQuery) {
     );
   }
   activeKey.value = view;
+}
+
+function selectMobileView(key: string | number) {
+  mobileMenuShown.value = false;
+  selectView(String(key));
 }
 
 function syncView(view: ViewKey) {
@@ -786,9 +811,11 @@ onUnmounted(() => {
     display: flex;
     flex: 1 1 auto;
   }
-  .mobile-nav :deep(.n-menu) {
-    flex: 1 1 auto;
+  .mobile-nav-dropdown {
     min-width: 0;
+  }
+  .mobile-nav-trigger {
+    max-width: 100%;
   }
   .app-header {
     padding: 0 12px;
