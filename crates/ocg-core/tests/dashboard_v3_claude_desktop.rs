@@ -184,8 +184,9 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
         CLAUDE_DESKTOP_CATALOG_TYPES
     );
     assert_eq!(CATALOG_TYPE_NAMES[account_verify_start], "AccountVerify");
+    let updater_start = account_verify_start + 6;
     assert_eq!(
-        &CATALOG_TYPE_NAMES[account_verify_start + 1..],
+        &CATALOG_TYPE_NAMES[account_verify_start + 1..updater_start],
         [
             "BrowserMode",
             "BrowserTarget",
@@ -194,7 +195,11 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "BrowserOpen",
         ]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), account_verify_start + 6);
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[updater_start..],
+        ["UpdateCheck", "DesktopUpdate", "InstallUpdate"]
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), updater_start + 3);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");

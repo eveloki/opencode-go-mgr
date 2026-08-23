@@ -99,6 +99,8 @@ const CUSTOM_DISCOVERY_CATALOG_TYPES: &[&str] = &[
     "CustomModelDiscoveryResponse",
 ];
 
+const UPDATER_CATALOG_TYPES: &[&str] = &["UpdateCheck", "DesktopUpdate", "InstallUpdate"];
+
 const SECRET_FIELD_NAMES: &[&str] = &[
     "key",
     "password",
@@ -289,7 +291,12 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[account_verify_end..browser_end],
         BROWSER_CATALOG_TYPES
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), browser_end);
+    let updater_end = browser_end + UPDATER_CATALOG_TYPES.len();
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[browser_end..updater_end],
+        UPDATER_CATALOG_TYPES
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), updater_end);
 }
 
 #[test]
