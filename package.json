@@ -25,7 +25,8 @@
     "@novnc/novnc": "^1.7.0",
     "@tauri-apps/cli": "^2.11.4",
     "@vicons/antd": "^0.13.0",
-    "naive-ui": "^2.44.1"
+    "naive-ui": "^2.44.1",
+    "pinia": "^4.0.3"
   },
   "devDependencies": {
     "@types/node": "^20",
