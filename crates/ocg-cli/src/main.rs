@@ -1,17 +1,15 @@
 use anyhow::Result;
-use chrono::Utc;
 use clap::{Parser, Subcommand};
-use ocg_core::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
+use ocg_core::account_control;
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher, load_or_create_static_cipher};
 use ocg_core::db::Database;
-use ocg_core::gateway;
+use ocg_core::gateway::{self, GatewayLifecycle};
 use ocg_core::models::{Account, AppConfig};
 use ocg_core::provider::CredentialKind;
 use ocg_core::state::CoreStateInner;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "ocg-manager-cli")]
@@ -221,8 +219,7 @@ async fn start_serve(
 async fn stop_serve(state: &CoreStateInner) {
     let handle = state.gateway.lock().take();
     if let Some(handle) = handle {
-        let _ = handle.shutdown.send(());
-        let _ = tokio::time::timeout(Duration::from_secs(5), handle.task).await;
+        let _ = GatewayLifecycle::stop_and_wait(handle).await;
     }
     let _ = state
         .db
@@ -272,104 +269,19 @@ async fn key_command(
             username,
             password,
         } => {
-            let id = uuid::Uuid::new_v4().to_string();
-            let now = Utc::now();
-            let key_cipher = state.encrypt_key(&key)?;
-            let password_cipher = match password {
-                Some(p) if !p.trim().is_empty() => Some(state.encrypt_key(p.trim())?),
-                _ => None,
-            };
-            let account = Account {
-                id: id.clone(),
-                provider_id: ocg_core::provider::OPENCODE_PROVIDER_ID.to_string(),
-                offering_id: ocg_core::provider::GO_OFFERING_ID.to_string(),
-                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
-                quota_scope: ocg_core::provider::QuotaScope::Key,
-                name,
-                username: username.and_then(|s| {
-                    let trimmed = s.trim().to_string();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed)
-                    }
-                }),
-                password_cipher,
-                key_cipher,
-                enabled: true,
-                account_type: ocg_core::models::AccountType::Key,
-                setup_step: ocg_core::models::AccountSetupStep::Ready,
-                referral_code: None,
-                purchase_date: String::new(),
-                expires_on: String::new(),
-                cooldown_until: None,
-                cooldown_generic_until: None,
-                cooldown_5h_until: None,
-                cooldown_week_until: None,
-                cooldown_month_until: None,
-                cooldown_free_until: None,
-                last_error: None,
-                auth_error: None,
-                notes: None,
-                created_at: now,
-                updated_at: now,
-            };
-            ocg_core::provider::ensure_enabled_offering_is_routable(
-                &account.provider_id,
-                &account.offering_id,
-                account.enabled,
-            )?;
-            db.create_account(&account)?;
-            let account = db
-                .get_account(&id)?
-                .ok_or_else(|| anyhow::anyhow!("created key not found: {}", id))?;
-            db.log_gateway(
-                "info",
-                "account",
-                &format!("cli added account {}", account.name),
-            )?;
-            println!("added key {} ({})", id, account.name);
+            drop(db);
+            let account =
+                account_control::create_go_api_key(&state, name, key, username, password)?;
+            println!("added key {} ({})", account.id, account.name);
         }
         KeyAction::Remove { id } => {
-            // ponytail: drop the outer guard from line 197 before re-locking —
-            // parking_lot::Mutex is not re-entrant, so the second lock() would deadlock.
             drop(db);
             let account = state
                 .db
                 .lock()
                 .get_account(&id)?
                 .ok_or_else(|| anyhow::anyhow!("key not found: {}", id))?;
-            reject_zen_key_operation(&account)?;
-            let browser_operation = state.browser.operation().await;
-            state.recover_browser_profiles_for_account(&id)?;
-            browser_operation.stop_account(&id).await?;
-            let staged = StagedBrowserProfiles::stage(
-                &state.data_dir(),
-                &id,
-                BrowserProfileOperationKind::DeleteAccount,
-            )?;
-            let delete_result = {
-                let mut db = state.db.lock();
-                let result = db.delete_account(&id);
-                if result.is_ok() {
-                    let _ = db.log_gateway(
-                        "info",
-                        "account",
-                        &format!("cli removed account {}", account.name),
-                    );
-                }
-                result
-            };
-            if let Err(error) = delete_result {
-                let restore_error = staged.restore().err();
-                match restore_error {
-                    Some(restore) => anyhow::bail!(
-                        "failed to remove account: {error}; failed to restore browser profile: {restore}"
-                    ),
-                    None => anyhow::bail!("failed to remove account: {error}"),
-                }
-            }
-            staged.purge()?;
+            account_control::delete_account(&state, &id, None).await?;
             println!("removed key {} ({})", id, account.name);
         }
         KeyAction::Enable { id } => {
@@ -394,37 +306,7 @@ async fn key_command(
 }
 
 fn toggle_account(state: &Arc<CoreStateInner>, id: &str, enabled: bool) -> Result<()> {
-    let db = state.db.lock();
-    let account = db
-        .get_account(id)?
-        .ok_or_else(|| anyhow::anyhow!("key not found: {}", id))?;
-    reject_zen_key_operation(&account)?;
-    if enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
-        anyhow::bail!("account setup is not complete and cannot be enabled");
-    }
-    if enabled {
-        ocg_core::provider::ensure_offering_can_enable(&account.provider_id, &account.offering_id)?;
-    }
-    let update = ocg_core::models::AccountUpdate {
-        name: None,
-        username: None,
-        password: None,
-        key: None,
-        enabled: Some(enabled),
-        referral_code: None,
-        purchase_date: None,
-        notes: None,
-    };
-    db.update_account(id, &update, None, None)?;
-    db.log_gateway(
-        "info",
-        "account",
-        &format!(
-            "cli {} account {}",
-            if enabled { "enabled" } else { "disabled" },
-            account.name
-        ),
-    )?;
+    let account = account_control::set_account_enabled(state, id, enabled)?;
     println!(
         "{} key {} ({})",
         if enabled { "enabled" } else { "disabled" },
@@ -537,19 +419,19 @@ async fn ping_keys(
         let db = state.db.lock();
         match id {
             Some(i) => match db.get_account(i)? {
-                Some(a) if a.is_zen_free() => anyhow::bail!(
-                    "Zen Free is provider-owned; use the dashboard provider-settings operation"
-                ),
-                Some(a)
+                Some(a) => {
+                    reject_zen_key_operation(&a)?;
                     if a.credential_kind == CredentialKind::ApiKey
                         && a.provider_id == ocg_core::provider::OPENCODE_PROVIDER_ID
                         && a.offering_id == ocg_core::provider::GO_OFFERING_ID
                         && a.setup_step.is_ready()
-                        && !a.key_cipher.is_empty() =>
-                {
-                    vec![a]
+                        && !a.key_cipher.is_empty()
+                    {
+                        vec![a]
+                    } else {
+                        anyhow::bail!("account setup is not complete and cannot be pinged")
+                    }
                 }
-                Some(_) => anyhow::bail!("account setup is not complete and cannot be pinged"),
                 None => anyhow::bail!("key not found: {}", i),
             },
             None => db
@@ -1075,7 +957,7 @@ mod tests {
             let error = key_command(dir.clone(), cipher.clone(), action)
                 .await
                 .expect_err("Zen must not be mutable through CLI key commands");
-            assert!(error.to_string().contains("provider-owned"));
+            assert!(error.to_string().contains("Zen Free"), "{error}");
         }
 
         let state_after = build_state(dir.clone(), cipher).unwrap();
@@ -1269,10 +1151,21 @@ mod tests {
             .next()
             .expect("production source precedes the test module");
         assert!(
-            !production.contains("bump_settings_revision"),
-            "CLI must not share the dashboard CAS token"
+            production.contains("account_control::create_go_api_key"),
+            "CLI key add must use the shared control-plane create"
         );
-        assert!(!production.contains("expected_revision"));
+        assert!(
+            production.contains("account_control::set_account_enabled"),
+            "CLI enable/disable must use the shared control-plane mutation"
+        );
+        assert!(
+            production.contains("account_control::delete_account"),
+            "CLI key remove must use the shared control-plane delete"
+        );
+        assert!(
+            !production.contains("expected_revision"),
+            "CLI does not send a Dashboard CAS token; the shared service bumps revision itself"
+        );
         assert!(
             !production.contains("CUSTOM_PROVIDER_ID"),
             "CLI key add is hardcoded to OpenCode Go and cannot create Custom"
@@ -1281,6 +1174,7 @@ mod tests {
             !production.contains("usage_sync"),
             "CLI stop_serve must not cancel the process-level usage worker"
         );
+        assert!(production.contains("GatewayLifecycle::stop_and_wait"));
         assert!(production.contains("state.set_config(config.clone())?"));
         assert!(production.contains("async fn stop_serve"));
         assert!(production.contains("state.gateway.lock().take()"));
@@ -1319,7 +1213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_key_mutations_do_not_bump_a_live_serve_revision() {
+    async fn cli_key_mutations_share_control_plane_revision_in_process() {
         let dir = temp_dir("cli-cas-split");
         let dash = dir.join("dist");
         std::fs::create_dir_all(&dash).unwrap();
@@ -1369,7 +1263,7 @@ mod tests {
         assert_eq!(
             serving.settings_revision(),
             revision_after_serve,
-            "CLI key add/list/status must not bump the live serve CAS token"
+            "out-of-process CLI key add/list/status cannot bump another CoreState CAS token"
         );
 
         key_command(
@@ -1410,8 +1304,8 @@ mod tests {
         );
         assert_eq!(
             serving.settings_revision(),
-            before_toggle,
-            "in-process CLI toggle_account must not bump settings_revision"
+            before_toggle + 1,
+            "in-process CLI toggle_account must bump the shared settings_revision"
         );
 
         key_command(
@@ -1422,13 +1316,17 @@ mod tests {
         .await
         .unwrap();
         assert!(serving.db.lock().get_account(&go.id).unwrap().is_none());
-        assert_eq!(serving.settings_revision(), revision_after_serve);
+        assert_eq!(
+            serving.settings_revision(),
+            before_toggle + 1,
+            "out-of-process CLI key remove cannot bump the live serve CAS token"
+        );
 
         stop_serve(&serving).await;
         assert!(serving.gateway.lock().is_none());
         assert_eq!(
             serving.settings_revision(),
-            revision_after_serve,
+            before_toggle + 1,
             "stop_serve must leave settings_revision untouched"
         );
         assert_eq!(serving.config().gateway_port, port);
@@ -1437,7 +1335,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_enables_pending_custom_without_dashboard_verification() {
+    async fn cli_enable_rejects_pending_custom_until_verified() {
         let dir = temp_dir("cli-custom-enable");
         let cipher = test_cipher();
         let state = build_state(dir.clone(), cipher.clone()).unwrap();
@@ -1455,12 +1353,13 @@ mod tests {
         assert_eq!(before.status, ConnectionVerificationStatus::Pending);
         let revision = state.settings_revision();
 
-        toggle_account(&state, "cli-custom", true).unwrap();
-        let enabled = state.db.lock().get_account("cli-custom").unwrap().unwrap();
+        let error = toggle_account(&state, "cli-custom", true).unwrap_err();
         assert!(
-            enabled.enabled,
-            "CLI enablement does not consult Custom verification status"
+            error.to_string().contains("verify the account connection"),
+            "{error}"
         );
+        let disabled = state.db.lock().get_account("cli-custom").unwrap().unwrap();
+        assert!(!disabled.enabled);
         let after = state
             .db
             .lock()
@@ -1478,9 +1377,9 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .expect_err("CLI enable must use Dashboard verify-first policy");
         assert!(
-            state
+            !state
                 .db
                 .lock()
                 .get_account("cli-custom")

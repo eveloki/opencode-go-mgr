@@ -225,19 +225,22 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production lib.rs precedes any test module");
-        let handler_start = production
-            .find("tauri::generate_handler![")
-            .expect("invoke handler");
-        let handler = production[handler_start..]
-            .split(']')
-            .next()
-            .expect("handler list");
-        assert!(handler.contains("commands::setting::update_settings"));
-        assert!(handler.contains("commands::gateway::restart_gateway"));
-        assert!(!handler.contains("updater"));
-        assert!(!handler.contains("install_update"));
-        assert!(!handler.contains("check_update"));
+        assert!(
+            !production.contains("tauri::generate_handler"),
+            "updater must not be registered as a WebView command"
+        );
+        assert!(!production.contains("invoke_handler"));
+        assert!(!production.contains("#[tauri::command]"));
+        assert!(!production.contains("install_update"));
+        assert!(!production.contains("check_update"));
         assert!(production.contains("updater::configure("));
+
+        let updater_production = include_str!("updater.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production updater.rs precedes tests");
+        assert!(!updater_production.contains("#[tauri::command]"));
+        assert!(!updater_production.contains("generate_handler"));
 
         let capabilities = include_str!("../capabilities/default.json");
         assert!(

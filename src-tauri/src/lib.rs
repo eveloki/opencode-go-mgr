@@ -1,5 +1,5 @@
 pub mod autostart;
-pub mod commands;
+pub mod host;
 pub mod native_browser;
 pub mod state;
 pub mod tray;
@@ -13,7 +13,6 @@ use ocg_core::crypto::MachineBoundCipher;
 #[cfg(not(windows))]
 use ocg_core::crypto::load_or_create_static_cipher;
 use ocg_core::db::Database;
-use ocg_core::gateway;
 use ocg_core::state::CoreStateInner;
 use parking_lot::Mutex;
 use state::{BrowserProcessState, GuiState};
@@ -46,99 +45,11 @@ pub fn run() {
         }
     };
 
-    #[cfg(all(windows, not(debug_assertions)))]
-    {
-        core_state.set_auto_start_sync(autostart::sync);
-        if let Err(e) = core_state.sync_auto_start(core_state.config().auto_start) {
-            let _ = core_state.db.lock().log_gateway(
-                "warn",
-                "startup",
-                &format!("failed to synchronize auto-start: {e}"),
-            );
-        }
-    }
+    host::register_desktop_settings(&core_state);
 
     let browser_processes = Arc::new(Mutex::new(BrowserProcessState::default()));
-    match native_browser::native_browser_name() {
-        Ok(browser_name) => {
-            let launcher_data_dir = core_state.data_dir();
-            let launcher_processes = browser_processes.clone();
-            let launcher: ocg_core::browser::NativeBrowserLauncher =
-                Arc::new(move |account_id, url| {
-                    native_browser::open_external_browser(
-                        launcher_data_dir.clone(),
-                        launcher_processes.clone(),
-                        account_id,
-                        url,
-                    )
-                    .map(|_| ())
-                    .map_err(anyhow::Error::msg)
-                });
-            let stopper_processes = browser_processes.clone();
-            let stopper_data_dir = core_state.data_dir();
-            let stopper: ocg_core::browser::NativeBrowserStopper = Arc::new(move |account_id| {
-                native_browser::stop_external_browser(
-                    &stopper_processes,
-                    account_id,
-                    Some(&stopper_data_dir),
-                )
-                .map_err(anyhow::Error::msg)
-            });
-            if let Err(error) = core_state.browser.register_native_hooks(launcher, stopper) {
-                let _ = core_state.db.lock().log_gateway(
-                    "warn",
-                    "browser",
-                    &format!("failed to register native browser hooks: {error}"),
-                );
-            } else {
-                let _ = core_state.db.lock().log_gateway(
-                    "info",
-                    "browser",
-                    &format!("native browser available: {browser_name}"),
-                );
-            }
-        }
-        Err(reason) => {
-            if let Err(error) = core_state
-                .browser
-                .register_native_unavailable_reason(reason.clone())
-            {
-                let _ = core_state.db.lock().log_gateway(
-                    "warn",
-                    "browser",
-                    &format!("failed to register native browser availability: {error}"),
-                );
-            }
-            let _ = core_state.db.lock().log_gateway("warn", "browser", &reason);
-        }
-    }
-
-    // Start gateway on startup
-    let config = core_state.config();
-    let gateway_state = core_state.clone();
-    let gateway_handle = match tauri::async_runtime::block_on(gateway::start_gateway(
-        gateway_state,
-        config.gateway_port,
-    )) {
-        Ok(handle) => {
-            let _ = core_state.db.lock().log_gateway(
-                "info",
-                "gateway",
-                &format!("gateway started on port {}", handle.port),
-            );
-            Some(handle)
-        }
-        Err(e) => {
-            let _ = core_state.db.lock().log_gateway(
-                "error",
-                "gateway",
-                &format!("failed to start gateway: {}", e),
-            );
-            None
-        }
-    };
-
-    *core_state.gateway.lock() = gateway_handle;
+    host::register_native_browser(&core_state, browser_processes.clone());
+    host::gateway::start_on_configured_port(&core_state);
 
     let gui_state = Arc::new(GuiState {
         core: core_state.clone(),
@@ -160,24 +71,7 @@ pub fn run() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 setup_core_state.set_dashboard_dir(Some(resource_dir.join("dist")));
             }
-            #[cfg(target_os = "macos")]
-            {
-                let app_handle = app.handle().clone();
-                setup_core_state.set_dock_visibility_sync(Arc::new(move |visible| {
-                    app_handle
-                        .set_dock_visibility(visible)
-                        .map_err(anyhow::Error::from)
-                }));
-                if let Err(error) =
-                    setup_core_state.sync_dock_visibility(setup_core_state.config().show_dock_icon)
-                {
-                    let _ = setup_core_state.db.lock().log_gateway(
-                        "warn",
-                        "startup",
-                        &format!("failed to synchronize Dock visibility: {error}"),
-                    );
-                }
-            }
+            host::register_dock_visibility(&setup_core_state, app);
             updater::configure(app.handle(), setup_core_state.clone())?;
             tray::setup_tray(app)?;
             if !autostart::is_startup_launch() {
@@ -191,40 +85,12 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            commands::account::get_accounts,
-            commands::account::create_account,
-            commands::account::update_account,
-            commands::account::delete_account,
-            commands::account::toggle_account,
-            commands::account::test_account,
-            commands::account::get_account_usage,
-            commands::account::reset_account_cooldown,
-            commands::setting::get_settings,
-            commands::setting::update_settings,
-            commands::setting::regenerate_gateway_key,
-            commands::gateway::get_gateway_status,
-            commands::gateway::restart_gateway,
-            commands::log::get_gateway_logs,
-            commands::log::get_forward_logs,
-            commands::dashboard::get_dashboard_summary,
-            commands::dashboard::get_daily_cost_by_model,
-            commands::browser::open_browser,
-            commands::browser::close_browser,
-            commands::browser::close_account_browser,
-            commands::browser::reset_browser_profile,
-        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(move |_app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                let _ = native_browser::close_all_browser_processes(
-                    &app_state.browser_processes,
-                    Some(&core_state.data_dir()),
-                );
-                if let Some(handle) = core_state.gateway.lock().take() {
-                    gateway::stop_gateway(handle);
-                }
+                host::close_native_browsers(&app_state.browser_processes, &core_state.data_dir());
+                host::gateway::stop_listener(&core_state);
                 let _ = core_state
                     .db
                     .lock()
@@ -264,14 +130,13 @@ mod host_lifecycle_surface {
             .next()
             .expect("production lib.rs precedes this test module");
         assert!(production.contains("home.join(\".ocg-mgr\")"));
-        assert!(production.contains("if let Some(handle) = core_state.gateway.lock().take()"));
-        assert!(production.contains("gateway::stop_gateway(handle)"));
+        assert!(production.contains("host::gateway::stop_listener"));
         assert!(
             !production.contains("usage_sync"),
             "application exit stops the gateway listener and does not cancel the CoreState usage worker"
         );
-        assert!(production.contains("autostart::sync"));
-        assert!(production.contains("set_dock_visibility_sync"));
+        assert!(production.contains("host::register_desktop_settings"));
+        assert!(production.contains("host::register_dock_visibility"));
         assert!(production.contains("updater::configure"));
 
         let capabilities = include_str!("../capabilities/default.json");
@@ -285,17 +150,43 @@ mod host_lifecycle_surface {
             .split("#[cfg(test)]")
             .next()
             .expect("production lib.rs precedes this test module");
-        assert!(production.contains("native_browser::native_browser_name()"));
-        assert!(production.contains("native_browser::open_external_browser"));
-        assert!(production.contains("native_browser::stop_external_browser"));
-        assert!(production.contains("native_browser::close_all_browser_processes"));
-        assert!(!production.contains("commands::browser::native_browser_name"));
-        assert!(!production.contains("commands::browser::open_external_browser"));
-        assert!(!production.contains("commands::browser::stop_external_browser"));
-        assert!(!production.contains("commands::browser::close_all_browser_processes"));
-        assert!(production.contains("commands::browser::open_browser"));
-        assert!(production.contains("commands::browser::close_browser"));
-        assert!(production.contains("commands::browser::close_account_browser"));
-        assert!(production.contains("commands::browser::reset_browser_profile"));
+        assert!(production.contains("host::register_native_browser"));
+        assert!(production.contains("host::close_native_browsers"));
+        assert!(!production.contains("pub mod commands"));
+        assert!(!production.contains("commands::"));
+    }
+
+    #[test]
+    fn no_tauri_invoke_commands_remain() {
+        let production = include_str!("lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production lib.rs precedes this test module");
+        assert!(
+            !production.contains("invoke_handler"),
+            "WebView invoke commands must be removed"
+        );
+        assert!(
+            !production.contains("tauri::generate_handler"),
+            "no generate_handler registrations may remain"
+        );
+        assert!(!production.contains("#[tauri::command]"));
+
+        for path in [
+            include_str!("host/mod.rs"),
+            include_str!("host/gateway.rs"),
+            include_str!("native_browser.rs"),
+            include_str!("updater.rs"),
+            include_str!("tray.rs"),
+            include_str!("autostart.rs"),
+            include_str!("state.rs"),
+        ] {
+            let source = path.split("#[cfg(test)]").next().unwrap_or(path);
+            assert!(
+                !source.contains("#[tauri::command]"),
+                "host capability modules must not register WebView commands"
+            );
+            assert!(!source.contains("tauri::generate_handler"));
+        }
     }
 }

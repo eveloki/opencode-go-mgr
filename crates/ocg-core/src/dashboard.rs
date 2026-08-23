@@ -4304,41 +4304,50 @@ async fn update_settings(
     State(state): State<CoreState>,
     Json(input): Json<SettingsUpdateRequest>,
 ) -> Result<Json<SettingsRevisionResponse>, ApiError> {
-    let _settings_update = state.settings_update.lock();
-    if input
-        .expected_revision
-        .is_some_and(|revision| revision != state.settings_revision())
-    {
-        return Err(ApiError::status(
-            StatusCode::CONFLICT,
-            "settings changed since they were loaded; reload and try again",
-        ));
-    }
-    let mut config = input.config;
-    config.gateway_key = config.gateway_key.trim().to_string();
-    if config.gateway_key.is_empty() {
-        // Minimal payload sanity guard: an empty/blank gateway_key means a
-        // truncated or hand-written settings body, which must not silently
-        // reset every other field to its default.
-        return Err(ApiError::bad_request(PRIMARY_KEY_REQUIRED_MESSAGE));
-    }
-    // Unified cross-tier gate (shared with the Tauri update path and the sub
-    // key enable path): the primary value must differ from every non-deleted
-    // sub key's value, enabled or disabled.
-    {
-        let db = state.db.lock();
-        crate::gateway_keys::ensure_primary_value_allowed(&db, &config.gateway_key)
-            .map_err(key_api_error)?;
-    }
-    let previous_config = state.config();
-    config.claude_desktop_models = previous_config.claude_desktop_models.clone();
-    config.validate().map_err(ApiError::bad_request)?;
-    validate_proxy_list(&state, &mut config).map_err(ApiError::bad_request)?;
-    validate_upstream_url(&config.upstream_base_url)?;
-    config.client_root_url =
-        normalize_client_root_url(&config.client_root_url).map_err(ApiError::bad_request)?;
+    let _effects = state.lock_settings_host_effects().await;
+    let (previous_config, config, committed_revision) = {
+        let _settings_update = state.settings_update.lock();
+        if input
+            .expected_revision
+            .is_some_and(|revision| revision != state.settings_revision())
+        {
+            return Err(ApiError::status(
+                StatusCode::CONFLICT,
+                "settings changed since they were loaded; reload and try again",
+            ));
+        }
+        let mut config = input.config;
+        config.gateway_key = config.gateway_key.trim().to_string();
+        if config.gateway_key.is_empty() {
+            // Minimal payload sanity guard: an empty/blank gateway_key means a
+            // truncated or hand-written settings body, which must not silently
+            // reset every other field to its default.
+            return Err(ApiError::bad_request(PRIMARY_KEY_REQUIRED_MESSAGE));
+        }
+        // Unified cross-tier gate (shared with the sub key enable path): the
+        // primary value must differ from every non-deleted sub key's value,
+        // enabled or disabled.
+        {
+            let db = state.db.lock();
+            crate::gateway_keys::ensure_primary_value_allowed(&db, &config.gateway_key)
+                .map_err(key_api_error)?;
+        }
+        let previous_config = state.config();
+        config.claude_desktop_models = previous_config.claude_desktop_models.clone();
+        config.validate().map_err(ApiError::bad_request)?;
+        validate_proxy_list(&state, &mut config).map_err(ApiError::bad_request)?;
+        validate_upstream_url(&config.upstream_base_url)?;
+        config.client_root_url =
+            normalize_client_root_url(&config.client_root_url).map_err(ApiError::bad_request)?;
+        state
+            .apply_host_settings(&previous_config, config.clone())
+            .map_err(map_host_settings_error)?;
+        let committed_revision = state.settings_revision();
+        (previous_config, config, committed_revision)
+    };
     state
-        .apply_host_settings(&previous_config, config)
+        .rebind_listener_after_settings_commit(previous_config, config, committed_revision, false)
+        .await
         .map_err(map_host_settings_error)?;
     Ok(Json(SettingsRevisionResponse {
         revision: state.settings_revision(),
@@ -4355,6 +4364,7 @@ fn map_host_settings_error(error: HostSettingsError) -> ApiError {
         }
         HostSettingsError::Persist(error) => ApiError::internal(error),
         HostSettingsError::Sync(message) => ApiError::internal(message),
+        HostSettingsError::GatewayBind(error) => ApiError::internal(error),
     }
 }
 

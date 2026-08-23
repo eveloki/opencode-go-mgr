@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Barrier, oneshot};
 
 struct DropSignal(Arc<AtomicBool>);
@@ -91,6 +92,7 @@ async fn install_held_listener(
     });
     *state.gateway.lock() = Some(GatewayHandle {
         port,
+        listen_addr: loopback(port),
         dashboard_is_local,
         shutdown: shutdown_tx,
         task,
@@ -427,6 +429,7 @@ async fn stop_timeout_aborts_and_awaits_listener_task_termination() {
     let outcome = GatewayLifecycle::stop_and_wait_for(
         GatewayHandle {
             port: 1,
+            listen_addr: loopback(1),
             dashboard_is_local: false,
             shutdown: shutdown_tx,
             task,
@@ -440,6 +443,46 @@ async fn stop_timeout_aborts_and_awaits_listener_task_termination() {
         dropped.load(Ordering::Acquire),
         "timeout handling must await task cancellation before returning"
     );
+}
+
+#[tokio::test]
+async fn signal_only_public_to_loopback_restores_trust_after_old_listener_quiesces() {
+    let (dir, state) = temp_state("signal-only-public-to-loopback");
+    let (old_port, shutdown_seen, release) = install_held_listener(&state, public(0)).await;
+    assert!(!state.dashboard_local_mode());
+    assert_dashboard_auth(old_port, reqwest::StatusCode::UNAUTHORIZED).await;
+
+    let new_port = GatewayLifecycle::rebind_from_serving_request(state.clone(), loopback(0))
+        .await
+        .expect("signal-only public-to-loopback rebind should bind the new listener");
+    tokio::time::timeout(Duration::from_secs(2), shutdown_seen)
+        .await
+        .expect("signal-only rebind should signal the old listener")
+        .expect("shutdown observation channel should stay open");
+
+    assert!(!state.dashboard_local_mode());
+    assert_eq!(state.active_gateway_port(), new_port);
+    assert_dashboard_auth(old_port, reqwest::StatusCode::UNAUTHORIZED).await;
+    assert_dashboard_auth(new_port, reqwest::StatusCode::UNAUTHORIZED).await;
+
+    release.wait().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state.dashboard_local_mode() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("trust must restore after the displaced public listener quiesces");
+
+    assert!(state.dashboard_local_mode());
+    assert_eq!(state.active_gateway_port(), new_port);
+    assert_dashboard_auth(new_port, reqwest::StatusCode::OK).await;
+    assert_not_serving(old_port, &state.config().gateway_key).await;
+
+    cleanup(dir, state).await;
 }
 
 #[tokio::test]
@@ -465,4 +508,148 @@ async fn independently_bound_public_listener_keeps_shared_trust_fail_closed() {
     let _ = GatewayLifecycle::stop_and_wait(loopback_handle).await;
     drop(state);
     let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn stopping_last_independent_public_listener_restores_installed_loopback_trust() {
+    let (dir, state) = temp_state("independent-public-stop-restores-trust");
+    let loopback_port = install_listener(&state).await;
+    assert!(state.dashboard_local_mode());
+
+    let public_handle = GatewayLifecycle::bind(state.clone(), public(0))
+        .await
+        .expect("independent public listener should bind");
+    let public_port = public_handle.port;
+    assert!(!state.dashboard_local_mode());
+    assert_dashboard_auth(loopback_port, reqwest::StatusCode::UNAUTHORIZED).await;
+    assert_dashboard_auth(public_port, reqwest::StatusCode::UNAUTHORIZED).await;
+
+    let _ = GatewayLifecycle::stop_and_wait(public_handle).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state.dashboard_local_mode() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("last public unregister must restore installed loopback trust");
+    assert_dashboard_auth(loopback_port, reqwest::StatusCode::OK).await;
+
+    cleanup(dir, state).await;
+}
+
+#[tokio::test]
+async fn new_independent_public_during_displaced_public_drain_stays_fail_closed() {
+    let (dir, state) = temp_state("overlapping-public-drain");
+    let old_public = GatewayLifecycle::bind(state.clone(), public(0))
+        .await
+        .expect("initial public listener should bind");
+    let old_port = old_public.port;
+    *state.gateway.lock() = Some(old_public);
+
+    // Confirm an in-flight body extractor before triggering graceful shutdown.
+    // The incomplete request keeps the displaced public task draining while a
+    // new independent public listener is registered.
+    let mut held_request = tokio::net::TcpStream::connect(("127.0.0.1", old_port))
+        .await
+        .expect("held request should connect");
+    let headers = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\n\
+         Host: 127.0.0.1:{old_port}\r\n\
+         Authorization: Bearer {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: 128\r\n\
+         Expect: 100-continue\r\n\r\n",
+        state.config().gateway_key
+    );
+    held_request
+        .write_all(headers.as_bytes())
+        .await
+        .expect("held request headers should write");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut buffer = [0_u8; 256];
+        loop {
+            let read = held_request
+                .read(&mut buffer)
+                .await
+                .expect("100-continue response should read");
+            assert_ne!(read, 0, "connection closed before 100 Continue");
+            response.extend_from_slice(&buffer[..read]);
+            if response.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("server should acknowledge the pending body");
+    assert!(
+        String::from_utf8_lossy(&response).contains("100 Continue"),
+        "server must be waiting on the incomplete request body: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    let loopback_port = GatewayLifecycle::rebind_from_serving_request(state.clone(), loopback(0))
+        .await
+        .expect("signal-only public-to-loopback rebind should install loopback");
+    assert!(!state.dashboard_local_mode());
+
+    let overlapping_public = GatewayLifecycle::bind(state.clone(), public(0))
+        .await
+        .expect("new independent public listener should bind during old drain");
+    let overlapping_port = overlapping_public.port;
+    assert_eq!(state.dashboard_public_listener_count(), 2);
+    assert_dashboard_auth(loopback_port, reqwest::StatusCode::UNAUTHORIZED).await;
+    assert_dashboard_auth(overlapping_port, reqwest::StatusCode::UNAUTHORIZED).await;
+
+    held_request
+        .write_all(&[b' '; 128])
+        .await
+        .expect("completing the held request body should write");
+    let mut completed_response = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        held_request.read_to_end(&mut completed_response),
+    )
+    .await
+    .expect("completed request should finish during graceful drain")
+    .expect("completed response should read to EOF");
+    drop(held_request);
+    // Axum may retain the listener task until the lifecycle's five-second
+    // bounded graceful-shutdown fallback even after the in-flight response
+    // closes. Await the exact old-registration 2 -> 1 transition instead of
+    // probing the socket and perturbing its accept backlog.
+    tokio::time::timeout(Duration::from_secs(7), async {
+        loop {
+            if state.dashboard_public_listener_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("older displaced public listener should finish draining");
+    assert!(
+        !state.dashboard_local_mode(),
+        "older observer must not restore trust while a newer public listener exists"
+    );
+    assert_dashboard_auth(loopback_port, reqwest::StatusCode::UNAUTHORIZED).await;
+
+    let _ = GatewayLifecycle::stop_and_wait(overlapping_public).await;
+    assert_eq!(state.dashboard_public_listener_count(), 0);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state.dashboard_local_mode() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("final public unregister should restore loopback trust");
+    assert_dashboard_auth(loopback_port, reqwest::StatusCode::OK).await;
+
+    cleanup(dir, state).await;
 }

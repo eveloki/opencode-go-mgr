@@ -1317,6 +1317,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[tokio::test]
+    async fn settings_port_rebind_keeps_started_usage_loop() {
+        let (dir, state) = test_state("settings-rebind-loop");
+        let handle = crate::gateway::start_gateway_on(state.clone(), loopback_ephemeral())
+            .await
+            .unwrap();
+        let first_port = handle.port;
+        *state.gateway.lock() = Some(handle);
+        assert!(
+            usage_loop_started(&state),
+            "public start_gateway_on must start the process-level usage worker"
+        );
+
+        state
+            .rebind_gateway_listener_if_port_changed(first_port, 0, true)
+            .await
+            .expect("settings-shaped rebind should bind an ephemeral port");
+        assert_ne!(state.active_gateway_port(), first_port);
+        assert!(
+            usage_loop_started(&state),
+            "HTTP settings Gateway rebind must not terminate the process-level usage worker"
+        );
+        ControlPlaneWorkers::ensure_started(state.clone());
+        assert!(
+            usage_loop_started(&state),
+            "ensure_started after settings rebind must not spawn a second worker"
+        );
+
+        crate::gateway::stop_gateway(state.gateway.lock().take().unwrap());
+        assert!(
+            usage_loop_started(&state),
+            "listener stop after settings rebind must not clear the usage worker"
+        );
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn failure_backoff_ladder_caps_at_six_hours() {
         assert_eq!(failure_backoff(1), Duration::minutes(5));

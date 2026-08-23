@@ -6,7 +6,11 @@
 //! [`GatewayLifecycle::stop_and_wait`] signals shutdown and awaits the listener
 //! task for up to [`LISTENER_STOP_WAIT`], aborting and joining it on timeout.
 //! [`GatewayLifecycle::rebind`] serializes the complete slot-aware transition:
-//! same-port stop-then-bind, new-port bind-first.
+//! same-port stop-then-bind, new-port bind-first. Signal-only replacement from
+//! a serving request keeps dashboard trust fail-closed, then a detached
+//! observer awaits the old listener with bounded abort and restores local
+//! mode only when the installed listener is loopback and no public listener
+//! remains.
 
 use crate::state::{CoreState, GatewayHandle};
 use anyhow::Result;
@@ -44,7 +48,9 @@ impl PublicListenerRegistration {
 
 impl Drop for PublicListenerRegistration {
     fn drop(&mut self) {
-        self.0.unregister_dashboard_public_listener();
+        if self.0.unregister_dashboard_public_listener() {
+            GatewayLifecycle::schedule_dashboard_trust_recompute(self.0.clone());
+        }
     }
 }
 
@@ -106,6 +112,7 @@ impl GatewayLifecycle {
 
         GatewayHandle {
             port,
+            listen_addr: local_addr,
             dashboard_is_local,
             shutdown: shutdown_tx,
             task: handle,
@@ -176,6 +183,18 @@ impl GatewayLifecycle {
     /// workers, and does not mutate settings, config, revision, routing, or
     /// desktop/updater state.
     pub async fn rebind(state: CoreState, addr: SocketAddr) -> Result<u16> {
+        Self::rebind_inner(state, addr, true).await
+    }
+
+    /// Bind-first replacement that signals the previous listener to stop
+    /// without waiting for it. HTTP settings handlers must use this when the
+    /// request is being served by the listener that will be replaced;
+    /// awaiting that listener from inside the request would deadlock.
+    pub async fn rebind_from_serving_request(state: CoreState, addr: SocketAddr) -> Result<u16> {
+        Self::rebind_inner(state, addr, false).await
+    }
+
+    async fn rebind_inner(state: CoreState, addr: SocketAddr, wait_for_old: bool) -> Result<u16> {
         let _lifecycle = state.lock_gateway_lifecycle().await;
         Self::repair_active_dashboard_trust(&state);
 
@@ -186,6 +205,10 @@ impl GatewayLifecycle {
         };
 
         if same_port {
+            anyhow::ensure!(
+                wait_for_old,
+                "same-port rebind must wait for the previous listener to release the port"
+            );
             let old_handle = state
                 .gateway
                 .lock()
@@ -228,13 +251,66 @@ impl GatewayLifecycle {
         let port = handle.port;
         let old_handle = state.gateway.lock().replace(handle);
         if let Some(handle) = old_handle {
-            let _outcome = Self::stop_and_wait(handle).await;
+            if wait_for_old {
+                let _outcome = Self::stop_and_wait(handle).await;
+            } else {
+                Self::observe_displaced_listener(state.clone(), handle);
+            }
         }
         // A loopback listener becomes trusted only after every replaced public
         // listener is confirmed stopped (gracefully or by an awaited abort).
-        state
-            .set_dashboard_local_mode(dashboard_is_local && !state.has_dashboard_public_listener());
+        // Signal-only replacement from a serving request cannot wait; keep
+        // fail-closed while a public listener may still be draining. The
+        // detached observer restores trust once the installed listener is
+        // loopback and the public count is zero.
+        if wait_for_old {
+            state.set_dashboard_local_mode(
+                dashboard_is_local && !state.has_dashboard_public_listener(),
+            );
+        } else if !dashboard_is_local {
+            state.set_dashboard_local_mode(false);
+        }
         Ok(port)
+    }
+
+    /// Signal the displaced listener and wait with the same bounded abort as
+    /// [`Self::stop_and_wait`]. Trust is recomputed only after that wait under
+    /// the lifecycle gate.
+    fn observe_displaced_listener(state: CoreState, handle: GatewayHandle) {
+        std::mem::drop(tokio::spawn(async move {
+            let _outcome = Self::stop_and_wait(handle).await;
+            let _lifecycle = state.lock_gateway_lifecycle().await;
+            Self::recompute_dashboard_trust(&state);
+        }));
+    }
+
+    /// A public-listener registration is owned by the listener task, so its
+    /// final unregister runs from `Drop` and cannot await the lifecycle mutex.
+    /// Defer the recomputation without retaining any synchronous lock. If the
+    /// runtime is already gone, leaving trust fail-closed is the safe shutdown
+    /// behavior.
+    fn schedule_dashboard_trust_recompute(state: CoreState) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        std::mem::drop(runtime.spawn(async move {
+            let _lifecycle = state.lock_gateway_lifecycle().await;
+            Self::recompute_dashboard_trust(&state);
+        }));
+    }
+
+    /// Recompute from lifecycle-owned facts. The lifecycle gate prevents a
+    /// new independent public bind from registering between the count check
+    /// and the mode write.
+    fn recompute_dashboard_trust(state: &CoreState) {
+        let installed_is_loopback = {
+            let slot = state.gateway.lock();
+            slot.as_ref()
+                .is_some_and(|handle| handle.dashboard_is_local)
+        };
+        state.set_dashboard_local_mode(
+            installed_is_loopback && !state.has_dashboard_public_listener(),
+        );
     }
 
     fn repair_active_dashboard_trust(state: &CoreState) {

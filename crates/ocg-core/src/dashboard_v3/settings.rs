@@ -28,7 +28,7 @@ pub(super) async fn put_settings(
     body: Bytes,
 ) -> Result<Json<MutationAck>, V3ApiError> {
     let update = parse_settings_update(&body)?;
-    update_settings(&state, update).map(Json)
+    update_settings(&state, update).await.map(Json)
 }
 
 fn parse_settings_update(bytes: &[u8]) -> Result<SettingsUpdate, V3ApiError> {
@@ -44,41 +44,59 @@ fn parse_settings_update(bytes: &[u8]) -> Result<SettingsUpdate, V3ApiError> {
 
 /// Validates, then commits one settings patch. Bumps the unified revision
 /// exactly once on success (`set_config`). The primary Key is preserved from
-/// the live config; this path never accepts Key plaintext.
-fn update_settings(state: &CoreState, update: SettingsUpdate) -> Result<MutationAck, V3ApiError> {
-    let _settings_update = state.settings_update.lock();
-    if update.expectation.expected_revision != state.settings_revision()
-        || update.expectation.process_generation != state.process_generation()
-    {
-        return Err(V3ApiError::revision_conflict(state));
-    }
+/// the live config; this path never accepts Key plaintext. A Gateway port
+/// change rebinds a running listener through `CoreState` after persist;
+/// `settings_host_effects` serializes persist → rebind → compensation
+/// without holding `settings_update` across the await.
+async fn update_settings(
+    state: &CoreState,
+    update: SettingsUpdate,
+) -> Result<MutationAck, V3ApiError> {
+    let _effects = state.lock_settings_host_effects().await;
+    let (previous_config, config, committed_revision) = {
+        let _settings_update = state.settings_update.lock();
+        if update.expectation.expected_revision != state.settings_revision()
+            || update.expectation.process_generation != state.process_generation()
+        {
+            return Err(V3ApiError::revision_conflict(state));
+        }
 
-    let previous_config = state.config();
-    let mut config = previous_config.clone();
-    apply_settings_patch(&mut config, &update);
-    {
-        let db = state.db.lock();
-        crate::gateway_keys::ensure_primary_value_allowed(&db, &config.gateway_key).map_err(
-            |error| match error {
-                crate::gateway_keys::KeyError::BadRequest(message) => {
-                    V3ApiError::invalid_request_at(state, message)
-                }
-                crate::gateway_keys::KeyError::Internal(message) => V3ApiError::internal(message),
-            },
-        )?;
-    }
-    config
-        .validate()
-        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
-    validate_proxy_list(state, &mut config)
-        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
-    validate_upstream_url(&config.upstream_base_url)
-        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
-    config.client_root_url = normalize_client_root_url(&config.client_root_url)
-        .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+        let previous_config = state.config();
+        let mut config = previous_config.clone();
+        apply_settings_patch(&mut config, &update);
+        {
+            let db = state.db.lock();
+            crate::gateway_keys::ensure_primary_value_allowed(&db, &config.gateway_key).map_err(
+                |error| match error {
+                    crate::gateway_keys::KeyError::BadRequest(message) => {
+                        V3ApiError::invalid_request_at(state, message)
+                    }
+                    crate::gateway_keys::KeyError::Internal(message) => {
+                        V3ApiError::internal(message)
+                    }
+                },
+            )?;
+        }
+        config
+            .validate()
+            .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+        validate_proxy_list(state, &mut config)
+            .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+        validate_upstream_url(&config.upstream_base_url)
+            .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+        config.client_root_url = normalize_client_root_url(&config.client_root_url)
+            .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+
+        state
+            .apply_host_settings(&previous_config, config.clone())
+            .map_err(|error| map_host_settings_error(state, error))?;
+        let committed_revision = state.settings_revision();
+        (previous_config, config, committed_revision)
+    };
 
     state
-        .apply_host_settings(&previous_config, config)
+        .rebind_listener_after_settings_commit(previous_config, config, committed_revision, false)
+        .await
         .map_err(|error| map_host_settings_error(state, error))?;
 
     Ok(MutationAck {
@@ -97,6 +115,7 @@ fn map_host_settings_error(state: &CoreState, error: HostSettingsError) -> V3Api
         }
         HostSettingsError::Persist(error) => V3ApiError::internal(error),
         HostSettingsError::Sync(message) => V3ApiError::internal(message),
+        HostSettingsError::GatewayBind(error) => V3ApiError::internal(error),
     }
 }
 

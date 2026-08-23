@@ -13,7 +13,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::Utc;
 
-use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
+use crate::account_control::{self, AccountControlError};
 use crate::db::ReorderAccountsError;
 use crate::models::{
     Account as ModelAccount, AccountCustomConfigInput, AccountModelCapabilityInput,
@@ -484,60 +484,16 @@ async fn delete_account_locked(
     id: &str,
     expectation: &MutationExpectation,
 ) -> Result<AccountMutation, V3ApiError> {
-    {
-        let _settings_update = state.settings_update.lock();
-        check_expectation(state, expectation)?;
-        reject_zen_free_delete(state, id)?;
-        state
-            .recover_browser_profiles_for_account(id)
-            .map_err(V3ApiError::internal)?;
-        load_model_account(state, id)?;
-    }
-
-    let browser_operation = state.browser.operation().await;
-    browser_operation
-        .stop_account(id)
-        .await
-        .map_err(|error| V3ApiError::service_unavailable(state, error))?;
-
-    let _settings_update = state.settings_update.lock();
-    check_expectation(state, expectation)?;
-    reject_zen_free_delete(state, id)?;
-    let account = load_model_account(state, id)?;
-    let staged = StagedBrowserProfiles::stage(
-        &state.data_dir(),
+    let revision = account_control::delete_account(
+        state,
         id,
-        BrowserProfileOperationKind::DeleteAccount,
+        Some((
+            expectation.expected_revision,
+            expectation.process_generation,
+        )),
     )
-    .map_err(V3ApiError::internal)?;
-    let delete_result = {
-        let mut db = state.db.lock();
-        let result = db.delete_account(id);
-        if result.is_ok() {
-            let _ = db.log_gateway(
-                "info",
-                "account",
-                &format!("deleted account {} ({})", id, account.name),
-            );
-        }
-        result
-    };
-    if let Err(error) = delete_result {
-        let restore_error = staged.restore().err();
-        return Err(V3ApiError::internal(match restore_error {
-            Some(restore) => format!(
-                "failed to delete account: {error}; failed to restore browser profile: {restore}"
-            ),
-            None => format!("failed to delete account: {error}"),
-        }));
-    }
-    let (revision, ()) = with_committed_revision(state, || {
-        staged.purge().map_err(V3ApiError::internal)?;
-        state
-            .reload_provider_contracts()
-            .map_err(V3ApiError::internal)?;
-        Ok(())
-    })?;
+    .await
+    .map_err(|error| map_account_control_error(state, error))?;
     Ok(AccountMutation {
         account: None,
         revision,
@@ -583,38 +539,10 @@ fn toggle_account_locked(
     let _settings_update = state.settings_update.lock();
     check_expectation(state, expectation)?;
     let account = load_model_account(state, id)?;
-    if account.is_zen_free() {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "Zen Free settings must use the dedicated provider-settings endpoint",
-        ));
-    }
     let next_enabled = !account.enabled;
-    if next_enabled && (!account.setup_step.is_ready() || account.key_cipher.is_empty()) {
-        return Err(V3ApiError::conflict_at(
-            state,
-            "account setup is not complete and cannot be enabled",
-        ));
-    }
-    if next_enabled {
-        ensure_account_can_enable(state, &account)?;
-    }
-    let update = ModelAccountUpdate {
-        name: None,
-        username: None,
-        password: None,
-        key: None,
-        enabled: Some(next_enabled),
-        referral_code: None,
-        purchase_date: None,
-        notes: None,
-    };
-    {
-        let db = state.db.lock();
-        db.update_account(id, &update, None, None)
-            .map_err(|error| map_account_write_error(state, error))?;
-    }
-    mutation_after_commit(state, id, false)
+    let account = account_control::set_account_enabled_locked(state, id, next_enabled)
+        .map_err(|error| map_account_control_error(state, error))?;
+    mutation_at(state, account, state.settings_revision())
 }
 
 fn advance_setup_locked(
@@ -761,26 +689,21 @@ fn create_acknowledgement_locked(
 }
 
 fn ensure_account_can_enable(state: &CoreState, account: &ModelAccount) -> Result<(), V3ApiError> {
-    crate::provider::ensure_offering_can_enable(&account.provider_id, &account.offering_id)
-        .map_err(|error| map_provider_binding_error(state, error))?;
-    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
-        .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
-    if plan.verification_policy == VerificationPolicy::Required {
-        let status = state
-            .db
-            .lock()
-            .account_verification_state(&account.id)
-            .map_err(V3ApiError::internal)?
-            .map(|state| state.status)
-            .unwrap_or(crate::provider::ConnectionVerificationStatus::Pending);
-        if !status.allows_enablement() {
-            return Err(V3ApiError::conflict_at(
-                state,
-                "verify the account connection before enabling it",
-            ));
+    account_control::ensure_account_can_enable(state, account)
+        .map_err(|error| map_account_control_error(state, error))
+}
+
+fn map_account_control_error(state: &CoreState, error: AccountControlError) -> V3ApiError {
+    match error {
+        AccountControlError::NotFound => V3ApiError::not_found(state),
+        AccountControlError::RevisionConflict => V3ApiError::revision_conflict(state),
+        AccountControlError::Invalid(message) => V3ApiError::invalid_request_at(state, message),
+        AccountControlError::Conflict(message) => V3ApiError::conflict_at(state, message),
+        AccountControlError::Unavailable(message) => {
+            V3ApiError::service_unavailable(state, message)
         }
+        AccountControlError::Internal(error) => V3ApiError::internal(error),
     }
-    Ok(())
 }
 
 fn require_custom_plan(
@@ -804,17 +727,6 @@ pub(super) fn load_model_account(state: &CoreState, id: &str) -> Result<ModelAcc
         .get_account(id)
         .map_err(V3ApiError::internal)?
         .ok_or_else(|| V3ApiError::not_found(state))
-}
-
-fn reject_zen_free_delete(state: &CoreState, id: &str) -> Result<(), V3ApiError> {
-    if id == crate::provider::ZEN_FREE_ACCOUNT_ID {
-        Err(V3ApiError::invalid_request_at(
-            state,
-            "Zen Free is a built-in singleton and cannot be deleted",
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 /// Advance the shared CAS token immediately after a persistence commit.

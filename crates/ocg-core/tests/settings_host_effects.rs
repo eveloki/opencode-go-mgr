@@ -6,18 +6,24 @@ use ocg_core::dashboard_v3::{
     ERROR_INTERNAL, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_REVISION_CONFLICT,
 };
 use ocg_core::db::Database;
-use ocg_core::state::{CoreStateInner, DockVisibilitySync, HostSettingsError};
+use ocg_core::gateway::{self, GatewayLifecycle};
+use ocg_core::state::{
+    CoreState, CoreStateInner, DockVisibilitySync, GatewayHandle, HostSettingsError,
+};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::fs;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{Barrier, oneshot};
 
 #[path = "fixtures/dashboard_v3/harness.rs"]
 mod harness;
 
-use harness::{V3Harness, start_loopback};
+use harness::{V3Harness, loopback_client, start_loopback};
 
 fn production_prefix(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
@@ -42,6 +48,40 @@ fn new_state(label: &str) -> (Arc<CoreStateInner>, PathBuf) {
         Arc::new(CoreStateInner::new(db, dir.clone(), cipher).unwrap()),
         dir,
     )
+}
+
+/// Installs a loopback listener whose graceful-shutdown future pauses after
+/// observing the signal. A normal lifecycle rebind can then hold the async
+/// lifecycle gate while HTTP settings persistence and unrelated writers run.
+async fn install_held_listener(state: &CoreState) -> (u16, oneshot::Receiver<()>, Arc<Barrier>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("held listener should bind");
+    let local_addr = listener.local_addr().expect("held listener local address");
+    state.set_dashboard_local_mode(true);
+    let app = gateway::build_router(state.clone());
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (shutdown_seen_tx, shutdown_seen_rx) = oneshot::channel();
+    let release = Arc::new(Barrier::new(2));
+    let server_release = release.clone();
+    let task = tokio::spawn(async move {
+        let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+            let _ = shutdown_seen_tx.send(());
+            server_release.wait().await;
+        });
+        if let Err(error) = server.await {
+            panic!("held Gateway server failed: {error}");
+        }
+    });
+    *state.gateway.lock() = Some(GatewayHandle {
+        port: local_addr.port(),
+        listen_addr: local_addr,
+        dashboard_is_local: true,
+        shutdown: shutdown_tx,
+        task,
+    });
+    (local_addr.port(), shutdown_seen_rx, release)
 }
 
 fn persisted_auto_start(state: &CoreStateInner) -> bool {
@@ -203,8 +243,29 @@ fn v2_and_v3_settings_updates_share_the_core_state_host_path() {
         "supported Dock invoke must not be gated on a changed flag"
     );
 
+    assert!(state_production.contains("rebind_gateway_listener_if_port_changed"));
+    assert!(state_production.contains("GatewayLifecycle::rebind"));
+    assert!(state_production.contains("rebind_from_serving_request"));
+    assert!(state_production.contains("settings_host_effects"));
+    assert!(state_production.contains("lock_settings_host_effects"));
+    assert!(state_production.contains("rebind_listener_after_settings_commit"));
+    assert!(state_production.contains("compensate_failed_listener_rebind"));
+    assert!(state_production.contains("live.gateway_port != committed.gateway_port"));
+    let listener_src = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/gateway/listener.rs"
+    ));
+    let listener_production = production_prefix(listener_src);
+    assert!(listener_production.contains("observe_displaced_listener"));
+    assert!(listener_production.contains("schedule_dashboard_trust_recompute"));
+    assert!(listener_production.contains("recompute_dashboard_trust"));
+    assert!(listener_production.contains("stop_and_wait(handle)"));
     assert!(v2_production.contains("apply_host_settings"));
     assert!(v3_production.contains("apply_host_settings"));
+    assert!(v2_production.contains("lock_settings_host_effects"));
+    assert!(v3_production.contains("lock_settings_host_effects"));
+    assert!(v2_production.contains("rebind_listener_after_settings_commit"));
+    assert!(v3_production.contains("rebind_listener_after_settings_commit"));
     assert!(v2_production.contains("map_host_settings_error"));
     assert!(v3_production.contains("map_host_settings_error"));
 
@@ -237,6 +298,18 @@ fn v2_and_v3_settings_updates_share_the_core_state_host_path() {
             !adapter.contains("Dock visibility is unavailable in this runtime"),
             "unsupported messages must live on HostSettingsError"
         );
+        assert!(
+            !adapter.contains("GatewayLifecycle::"),
+            "HTTP adapters must rebind through CoreState, not GatewayLifecycle directly"
+        );
+        assert!(
+            !adapter.contains("apply_host_settings(&config, previous_config)"),
+            "adapters must not unconditionally restore previous_config after a failed rebind"
+        );
+        assert!(
+            !adapter.contains("rebind_gateway_listener_if_port_changed"),
+            "HTTP adapters must rebind through the serialized host-effect commit helper"
+        );
     }
 
     assert!(!lib_production.contains("mod host_settings"));
@@ -262,6 +335,7 @@ fn production_host_scc_membership_is_unchanged() {
     assert_eq!(
         members,
         [
+            "account_control",
             "dashboard",
             "dashboard_v3",
             "gateway",
@@ -854,4 +928,445 @@ async fn put_json(harness: &V3Harness, body: &Value) -> (StatusCode, Value) {
     let status = response.status();
     let body = response.json().await.unwrap_or(Value::Null);
     (status, body)
+}
+
+fn free_port() -> u16 {
+    TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[tokio::test]
+async fn http_v3_port_change_rebinds_running_listener_or_keeps_old_on_failure() {
+    let (state, dir) = new_state("http-port-rebind");
+    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let old_port = handle.port;
+    *state.gateway.lock() = Some(handle);
+    assert!(TcpStream::connect(("127.0.0.1", old_port)).is_ok());
+
+    let client = loopback_client();
+    let new_port = free_port();
+    let response = client
+        .put(format!(
+            "http://127.0.0.1:{old_port}/dashboard/api/v3/settings"
+        ))
+        .json(&json!({
+            "expectedRevision": state.settings_revision(),
+            "processGeneration": state.process_generation(),
+            "gatewayPort": new_port,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{response:?}");
+    assert_eq!(state.config().gateway_port, new_port);
+    assert_eq!(state.active_gateway_port(), new_port);
+    assert!(
+        TcpStream::connect(("127.0.0.1", new_port)).is_ok(),
+        "settings port change must bind the new listener before returning"
+    );
+
+    let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+    let fail = client
+        .put(format!(
+            "http://127.0.0.1:{new_port}/dashboard/api/v3/settings"
+        ))
+        .json(&json!({
+            "expectedRevision": state.settings_revision(),
+            "processGeneration": state.process_generation(),
+            "gatewayPort": occupied_port,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fail.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(state.active_gateway_port(), new_port);
+    assert_eq!(state.config().gateway_port, new_port);
+    assert!(TcpStream::connect(("127.0.0.1", new_port)).is_ok());
+
+    if let Some(handle) = state.gateway.lock().take() {
+        gateway::stop_gateway(handle);
+    }
+    drop(occupied);
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn failed_rebind_compensation_skips_unrelated_successful_commit() {
+    let (state, dir) = new_state("compensate-fingerprint");
+    let previous = state.config();
+    let original_timeout = previous.connect_timeout_secs;
+    let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+
+    let mut failed_port = previous.clone();
+    failed_port.gateway_port = occupied_port;
+    state
+        .apply_host_settings(&previous, failed_port.clone())
+        .expect("A persist must succeed before rebind");
+    let committed_revision = state.settings_revision();
+    let committed = state.config();
+    assert_eq!(committed.gateway_port, occupied_port);
+
+    let mut timeout_write = previous.clone();
+    timeout_write.connect_timeout_secs = 12;
+    state
+        .apply_host_settings(&committed, timeout_write)
+        .expect("B timeout persist must succeed");
+    assert_eq!(state.config().connect_timeout_secs, 12);
+    assert_eq!(state.config().gateway_port, previous.gateway_port);
+
+    let restored = state
+        .compensate_failed_listener_rebind(&committed, previous.clone(), committed_revision)
+        .expect("compensation decision should not fail");
+    assert!(
+        !restored,
+        "compensation must not overwrite B's successful timeout commit"
+    );
+    assert_eq!(state.config().connect_timeout_secs, 12);
+    assert_eq!(state.config().gateway_port, previous.gateway_port);
+    assert_ne!(state.config().connect_timeout_secs, original_timeout);
+
+    drop(occupied);
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn failed_rebind_compensation_still_restores_after_revision_only_bump() {
+    let (state, dir) = new_state("compensate-revision-only");
+    let previous = state.config();
+    let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+
+    let mut failed_port = previous.clone();
+    failed_port.gateway_port = occupied_port;
+    state
+        .apply_host_settings(&previous, failed_port)
+        .expect("A persist must succeed before rebind");
+    let committed_revision = state.settings_revision();
+    let committed = state.config();
+    state.bump_settings_revision();
+    assert_ne!(state.settings_revision(), committed_revision);
+
+    let restored = state
+        .compensate_failed_listener_rebind(&committed, previous.clone(), committed_revision)
+        .expect("port restore should persist");
+    assert!(
+        restored,
+        "account/key revision bumps must not skip restore of a failed port write"
+    );
+    assert_eq!(state.config().gateway_port, previous.gateway_port);
+
+    drop(occupied);
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn failed_http_rebind_releases_sync_gate_and_preserves_later_key_and_claude_writes() {
+    let (state, dir) = new_state("http-compensate-live-config");
+    let (held_port, shutdown_seen, release) = install_held_listener(&state).await;
+
+    // Hold gateway_lifecycle in a normal wait-for-old transition. The new
+    // listener is installed before the held old listener is released, so it
+    // can serve the settings and independent writer probes below.
+    let lifecycle_state = state.clone();
+    let lifecycle = tokio::spawn(async move {
+        GatewayLifecycle::rebind(lifecycle_state, SocketAddr::from(([127, 0, 0, 1], 0))).await
+    });
+    tokio::time::timeout(Duration::from_secs(2), shutdown_seen)
+        .await
+        .expect("lifecycle rebind should signal the held listener")
+        .expect("shutdown observation channel should stay open");
+    let serving_port = state.active_gateway_port();
+    assert_ne!(serving_port, held_port);
+
+    // Keep configured/listener state aligned before starting the failed write.
+    {
+        let _settings_update = state.settings_update.lock();
+        let mut config = state.config();
+        config.gateway_port = serving_port;
+        state
+            .set_config(config)
+            .expect("port alignment should persist");
+    }
+
+    let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let failed_port = occupied.local_addr().unwrap().port();
+    let client = loopback_client();
+    let settings_state = state.clone();
+    let settings_client = client.clone();
+    let failed_settings = tokio::spawn(async move {
+        settings_client
+            .put(format!(
+                "http://127.0.0.1:{serving_port}/dashboard/api/v3/settings"
+            ))
+            .json(&json!({
+                "expectedRevision": settings_state.settings_revision(),
+                "processGeneration": settings_state.process_generation(),
+                "gatewayPort": failed_port,
+            }))
+            .send()
+            .await
+            .expect("failed-port settings request should receive a response")
+    });
+
+    // The port persist happens before waiting on gateway_lifecycle. Once it is
+    // visible, settings_update must already be released.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state.config().gateway_port == failed_port {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("settings request should persist before its listener await");
+
+    let claude = tokio::time::timeout(
+        Duration::from_secs(2),
+        client
+            .put(format!(
+                "http://127.0.0.1:{serving_port}/dashboard/api/v3/claude-desktop/models"
+            ))
+            .json(&json!({
+                "expectedRevision": state.settings_revision(),
+                "processGeneration": state.process_generation(),
+                "sonnet": "glm-5.2",
+                "opus": "",
+                "haiku": "",
+            }))
+            .send(),
+    )
+    .await
+    .expect("Claude writer must not block on settings_update across the listener await")
+    .expect("Claude writer should receive a response");
+    assert_eq!(claude.status(), StatusCode::OK);
+
+    let primary_before = state.config().gateway_key;
+    let key = tokio::time::timeout(
+        Duration::from_secs(2),
+        client
+            .post(format!(
+                "http://127.0.0.1:{serving_port}/dashboard/api/v3/keys/primary/regenerate"
+            ))
+            .json(&json!({
+                "expectedRevision": state.settings_revision(),
+                "processGeneration": state.process_generation(),
+            }))
+            .send(),
+    )
+    .await
+    .expect("primary-Key writer must not block on settings_update across the listener await")
+    .expect("primary-Key writer should receive a response");
+    assert_eq!(key.status(), StatusCode::OK);
+    let primary_after = state.config().gateway_key;
+    assert_ne!(primary_after, primary_before);
+    let revision_after_writers = state.settings_revision();
+
+    release.wait().await;
+    let installed_port = lifecycle
+        .await
+        .expect("lifecycle task should finish")
+        .expect("lifecycle rebind should succeed");
+    assert_eq!(installed_port, serving_port);
+    let failed_settings = failed_settings
+        .await
+        .expect("settings task should finish after the lifecycle gate opens");
+    assert_eq!(failed_settings.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let live = state.config();
+    assert_eq!(live.gateway_port, serving_port);
+    assert_eq!(state.active_gateway_port(), serving_port);
+    assert_eq!(live.gateway_key, primary_after);
+    assert_eq!(live.claude_desktop_models.sonnet, "glm-5.2");
+    assert_eq!(
+        state.settings_revision(),
+        revision_after_writers + 1,
+        "port-only compensation must make one monotonic persisted revision"
+    );
+    let stored = state.db.lock().get_setting("config").unwrap().unwrap();
+    let stored: ocg_core::models::AppConfig = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored.gateway_port, serving_port);
+    assert_eq!(stored.gateway_key, primary_after);
+    assert_eq!(stored.claude_desktop_models.sonnet, "glm-5.2");
+
+    let handle = state.gateway.lock().take();
+    if let Some(handle) = handle {
+        let _ = GatewayLifecycle::stop_and_wait(handle).await;
+    }
+    drop(occupied);
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn concurrent_port_changes_keep_configured_and_active_ports_in_agreement() {
+    let (state, dir) = new_state("concurrent-two-ports");
+    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    *state.gateway.lock() = Some(handle);
+
+    let first = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let second = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let first_port = first.local_addr().unwrap().port();
+    let second_port = second.local_addr().unwrap().port();
+    assert_ne!(first_port, second_port);
+    drop(first);
+    drop(second);
+    let start = Arc::new(tokio::sync::Barrier::new(3));
+
+    let a_state = state.clone();
+    let a_start = start.clone();
+    let a = tokio::spawn(async move {
+        a_start.wait().await;
+        let previous = a_state.config();
+        let mut next = previous.clone();
+        next.gateway_port = first_port;
+        a_state
+            .apply_host_settings_and_rebind_listener(previous, next, false)
+            .await
+            .map(|_| a_state.active_gateway_port())
+    });
+
+    let b_state = state.clone();
+    let b_start = start.clone();
+    let b = tokio::spawn(async move {
+        b_start.wait().await;
+        let previous = b_state.config();
+        let mut next = previous.clone();
+        next.gateway_port = second_port;
+        b_state
+            .apply_host_settings_and_rebind_listener(previous, next, false)
+            .await
+            .map(|_| b_state.active_gateway_port())
+    });
+
+    start.wait().await;
+    let (a, b) = tokio::join!(a, b);
+    let a = a.expect("first port task should finish");
+    let b = b.expect("second port task should finish");
+    assert!(
+        a.is_ok() && b.is_ok(),
+        "both concurrent port changes should succeed: {a:?} {b:?}"
+    );
+    let configured = state.config().gateway_port;
+    let active = state.active_gateway_port();
+    assert_eq!(
+        configured, active,
+        "final configured port must agree with the installed listener"
+    );
+    assert!(
+        configured == first_port || configured == second_port,
+        "final port {configured} must be one of the concurrent writes"
+    );
+    assert!(TcpStream::connect(("127.0.0.1", active)).is_ok());
+
+    if let Some(handle) = state.gateway.lock().take() {
+        gateway::stop_gateway(handle);
+    }
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn http_v2_and_v3_concurrent_port_changes_agree_on_configured_and_active_port() {
+    let (state, dir) = new_state("http-concurrent-ports");
+    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let old_port = handle.port;
+    *state.gateway.lock() = Some(handle);
+    let first = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let second = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let first_port = first.local_addr().unwrap().port();
+    let second_port = second.local_addr().unwrap().port();
+    assert_ne!(first_port, second_port);
+    drop(first);
+    drop(second);
+    let client = loopback_client();
+    let start = Arc::new(tokio::sync::Barrier::new(3));
+
+    let a_state = state.clone();
+    let a_client = client.clone();
+    let a_start = start.clone();
+    let a = tokio::spawn(async move {
+        a_start.wait().await;
+        let mut body = a_state.config();
+        body.gateway_port = first_port;
+        a_client
+            .post(format!(
+                "http://127.0.0.1:{old_port}/dashboard/api/settings"
+            ))
+            .timeout(Duration::from_secs(5))
+            .json(&v2_payload(&body, None))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    let b_state = state.clone();
+    let b_client = client.clone();
+    let b_start = start.clone();
+    let b = tokio::spawn(async move {
+        b_start.wait().await;
+        b_client
+            .put(format!(
+                "http://127.0.0.1:{old_port}/dashboard/api/v3/settings"
+            ))
+            .timeout(Duration::from_secs(5))
+            .json(&json!({
+                "expectedRevision": b_state.settings_revision(),
+                "processGeneration": b_state.process_generation(),
+                "gatewayPort": second_port,
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    start.wait().await;
+    let (a, b) = tokio::join!(a, b);
+    let a = a.expect("V2 port task should finish");
+    let b = b.expect("V3 port task should finish");
+    let a_ok = a.status() == StatusCode::OK;
+    let b_ok = b.status() == StatusCode::OK;
+    assert!(
+        a_ok || b_ok,
+        "at least one concurrent port write must succeed: {} {}",
+        a.status(),
+        b.status()
+    );
+    if a_ok && !b_ok {
+        let a_body: Value = a.json().await.unwrap();
+        assert_eq!(a_body["revision"], state.settings_revision());
+    }
+    if b_ok && !a_ok {
+        let b_body: Value = b.json().await.unwrap();
+        assert_eq!(b_body["revision"], state.settings_revision());
+        assert_eq!(b_body["processGeneration"], state.process_generation());
+    }
+    let configured = state.config().gateway_port;
+    let active = state.active_gateway_port();
+    assert_eq!(configured, active);
+    assert!(
+        configured == first_port || configured == second_port,
+        "final port {configured} must be one of the concurrent writes"
+    );
+    assert!(TcpStream::connect(("127.0.0.1", active)).is_ok());
+
+    if let Some(handle) = state.gateway.lock().take() {
+        gateway::stop_gateway(handle);
+    }
+    drop(state);
+    let _ = fs::remove_dir_all(dir);
 }

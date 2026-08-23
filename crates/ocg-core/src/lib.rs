@@ -1,3 +1,4 @@
+pub mod account_control;
 pub mod alias;
 pub mod auth;
 pub mod browser;

@@ -65,6 +65,7 @@ mod dependency_guard {
     ];
 
     const EXPECTED_HOST_SCC: &[&str] = &[
+        "account_control",
         "dashboard",
         "dashboard_v3",
         "gateway",

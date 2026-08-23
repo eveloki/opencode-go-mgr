@@ -8,6 +8,7 @@ use crate::models::{
 use crate::pricing::{embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage};
 use parking_lot::{Mutex, RwLock};
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -23,6 +24,9 @@ const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 
 pub struct GatewayHandle {
     pub port: u16,
+    /// Bound listen address. HTTP settings port changes rebind this IP to the
+    /// configured port through [`crate::gateway::GatewayLifecycle`].
+    pub listen_addr: SocketAddr,
     /// Whether this listener is bound only to a loopback interface. The
     /// lifecycle uses this metadata to keep the shared dashboard trust mode
     /// fail-closed while replacing listeners.
@@ -45,11 +49,19 @@ pub struct GatewayHandle {
 // snapshot read lock. Never acquire in reverse order; always drop one before
 // acquiring another where possible. Do not hold the routing lock across DB
 // or network I/O.
+// Async gates: `settings_host_effects` (settings persist → listener rebind →
+// compensation) is acquired before `gateway_lifecycle` when a settings write
+// also rebinds. Never hold a parking_lot lock across those awaits.
+// Account, key, and usage-sync writers take `settings_update` only.
 pub struct CoreStateInner {
     pub db: Mutex<Database>,
     pub config: Mutex<AppConfig>,
     client_root_url_override: Option<String>,
     pub settings_update: Mutex<()>,
+    /// Serializes settings persist → listener rebind → compensation. This async
+    /// gate may span listener bind awaits; the synchronous `settings_update`
+    /// mutex may not. Account, key, and usage-sync writers do not take it.
+    settings_host_effects: tokio::sync::Mutex<()>,
     settings_revision: AtomicU64,
     /// Dashboard V3 process generation. Assigned once per CoreState, never
     /// persisted, and independent of `settings_revision` so a CAS token from a
@@ -101,6 +113,7 @@ pub enum HostSettingsError {
     DockVisibilityUnsupported,
     Persist(anyhow::Error),
     Sync(String),
+    GatewayBind(anyhow::Error),
 }
 
 impl HostSettingsError {
@@ -116,6 +129,7 @@ impl fmt::Display for HostSettingsError {
             Self::DockVisibilityUnsupported => f.write_str(Self::DOCK_VISIBILITY_UNAVAILABLE),
             Self::Persist(error) => write!(f, "{error}"),
             Self::Sync(message) => f.write_str(message),
+            Self::GatewayBind(error) => write!(f, "failed to rebind gateway listener: {error}"),
         }
     }
 }
@@ -123,7 +137,7 @@ impl fmt::Display for HostSettingsError {
 impl std::error::Error for HostSettingsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Persist(error) => Some(error.as_ref()),
+            Self::Persist(error) | Self::GatewayBind(error) => Some(error.as_ref()),
             Self::AutoStartUnsupported | Self::DockVisibilityUnsupported | Self::Sync(_) => None,
         }
     }
@@ -197,6 +211,7 @@ impl CoreStateInner {
             config: Mutex::new(config),
             client_root_url_override,
             settings_update: Mutex::new(()),
+            settings_host_effects: tokio::sync::Mutex::new(()),
             // Use a per-runtime random epoch so a browser tab left open across a
             // process restart cannot accidentally match the new runtime's first
             // revision. The low 48 bits leave ample room for monotonic increments.
@@ -371,15 +386,31 @@ impl CoreStateInner {
         self.set_dashboard_local_mode(false);
     }
 
-    pub(crate) fn unregister_dashboard_public_listener(&self) {
+    /// Removes one live public-listener registration and reports whether it
+    /// was the last one. The listener lifecycle uses the transition to zero
+    /// to schedule a serialized dashboard-trust recomputation; doing that
+    /// work directly from the registration guard's `Drop` would require an
+    /// async lock and can deadlock a listener shutdown.
+    pub(crate) fn unregister_dashboard_public_listener(&self) -> bool {
         let previous = self
             .dashboard_public_listeners
             .fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "public listener count must not underflow");
+        previous == 1
     }
 
     pub(crate) fn has_dashboard_public_listener(&self) -> bool {
         self.dashboard_public_listeners.load(Ordering::Acquire) != 0
+    }
+
+    /// Lifecycle evidence for integration tests that need to await an exact
+    /// public registration transition without probing the TCP accept backlog
+    /// and perturbing graceful shutdown. This doc-hidden observation is
+    /// available in every profile because integration tests link the library
+    /// without `cfg(test)` and release verification disables debug assertions.
+    #[doc(hidden)]
+    pub fn dashboard_public_listener_count(&self) -> u64 {
+        self.dashboard_public_listeners.load(Ordering::Acquire)
     }
 
     pub fn set_dashboard_local_mode(&self, local: bool) {
@@ -534,6 +565,131 @@ impl CoreStateInner {
             return Err(HostSettingsError::Sync(message));
         }
         Ok(())
+    }
+
+    pub(crate) async fn lock_settings_host_effects(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.settings_host_effects.lock().await
+    }
+
+    /// Persist `next`, then rebind a running listener and conditionally
+    /// compensate. Serializes the full settings host-effect transaction.
+    /// Callers must not hold `settings_update` across this await.
+    pub async fn apply_host_settings_and_rebind_listener(
+        self: &Arc<Self>,
+        previous: AppConfig,
+        next: AppConfig,
+        wait_for_previous: bool,
+    ) -> Result<(), HostSettingsError> {
+        let _effects = self.lock_settings_host_effects().await;
+        let committed_revision = {
+            let _settings_update = self.settings_update.lock();
+            self.apply_host_settings(&previous, next.clone())?;
+            self.settings_revision()
+        };
+        self.rebind_listener_after_settings_commit(
+            previous,
+            next,
+            committed_revision,
+            wait_for_previous,
+        )
+        .await
+    }
+
+    /// Listener follow-up for a settings persist. Callers must already hold
+    /// `settings_host_effects` and must not hold `settings_update`. A failed
+    /// rebind restores only the previous Gateway port when the live port is
+    /// still the failed committed port. Other live AppConfig fields may have
+    /// been updated by independent Key or Claude writers while the bind was
+    /// pending and must be preserved.
+    pub(crate) async fn rebind_listener_after_settings_commit(
+        self: &Arc<Self>,
+        previous: AppConfig,
+        committed: AppConfig,
+        committed_revision: u64,
+        wait_for_previous: bool,
+    ) -> Result<(), HostSettingsError> {
+        if let Err(error) = self
+            .rebind_gateway_listener_if_port_changed(
+                previous.gateway_port,
+                committed.gateway_port,
+                wait_for_previous,
+            )
+            .await
+        {
+            if let Err(rollback_error) =
+                self.compensate_failed_listener_rebind(&committed, previous, committed_revision)
+            {
+                return Err(HostSettingsError::GatewayBind(anyhow::anyhow!(
+                    "{error}; failed to restore the configured Gateway port: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Restore only the previous port after a failed listener rebind, but only
+    /// while the live port still equals the failed committed port. The restore
+    /// clones the live config so later Key, Claude mapping, and other AppConfig
+    /// writes survive. A later port commit is authoritative and skips restore.
+    /// Persistence failure is returned to the caller instead of being hidden
+    /// behind the original bind error.
+    pub fn compensate_failed_listener_rebind(
+        &self,
+        committed: &AppConfig,
+        previous: AppConfig,
+        committed_revision: u64,
+    ) -> Result<bool, HostSettingsError> {
+        let _settings_update = self.settings_update.lock();
+        let live_revision = self.settings_revision();
+        let mut live = self.config();
+        if live.gateway_port != committed.gateway_port {
+            return Ok(false);
+        }
+        // The failed committed port is the transaction identity. Revision-only
+        // changes and unrelated AppConfig writes must not skip compensation.
+        debug_assert!(
+            live_revision >= committed_revision,
+            "settings revision must not move backwards during compensation"
+        );
+        live.gateway_port = previous.gateway_port;
+        self.set_config(live).map_err(HostSettingsError::Persist)?;
+        Ok(true)
+    }
+
+    /// Rebind a running listener onto `next_port` at the same listen IP.
+    ///
+    /// No-ops when the port is unchanged or no listener is installed in
+    /// `gateway`. Listener-only: does not start, cancel, or duplicate the
+    /// process-level usage worker. Callers must not hold `settings_update`
+    /// across this await. HTTP settings handlers must pass
+    /// `wait_for_previous = false` so they do not await the listener that is
+    /// serving the current request.
+    pub async fn rebind_gateway_listener_if_port_changed(
+        self: &Arc<Self>,
+        previous_port: u16,
+        next_port: u16,
+        wait_for_previous: bool,
+    ) -> Result<(), HostSettingsError> {
+        if previous_port == next_port {
+            return Ok(());
+        }
+        let Some(listen_addr) = self
+            .gateway
+            .lock()
+            .as_ref()
+            .map(|handle| handle.listen_addr)
+        else {
+            return Ok(());
+        };
+        let target = SocketAddr::new(listen_addr.ip(), next_port);
+        let rebind = if wait_for_previous {
+            crate::gateway::GatewayLifecycle::rebind(Arc::clone(self), target).await
+        } else {
+            crate::gateway::GatewayLifecycle::rebind_from_serving_request(Arc::clone(self), target)
+                .await
+        };
+        rebind.map(|_| ()).map_err(HostSettingsError::GatewayBind)
     }
 
     fn apply_persisted_config(
