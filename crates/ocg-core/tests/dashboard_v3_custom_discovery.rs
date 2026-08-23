@@ -871,53 +871,38 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
     point_direct(&harness);
     let before = harness.state.settings_revision();
 
-    let v2 = harness
-        .client
-        .post(format!("{}/custom/models/discover", harness.v2_base))
-        .json(&json!({
-            "base_url": origin.url,
-            "upstream_protocol": "chat_completions",
-            "auth_scheme": "bearer",
-            "api_key": CUSTOM_KEY
-        }))
-        .send()
-        .await
-        .unwrap();
-    let v2_status = v2.status();
-    let v2_body: Value = v2.json().await.unwrap();
-    assert_eq!(v2_status, StatusCode::OK, "{v2_body}");
-    assert_eq!(v2_body["models"][0], "org/model-a");
-    assert_eq!(v2_body["truncated"], false);
-    assert!(v2_body.get("revision").is_none(), "{v2_body}");
-    assert!(v2_body.get("processGeneration").is_none(), "{v2_body}");
-    assert!(v2_body.get("api_key").is_none(), "{v2_body}");
+    harness
+        .assert_v2_path_removed(
+            Method::POST,
+            "/custom/models/discover",
+            Some(json!({
+                "base_url": origin.url,
+                "upstream_protocol": "chat_completions",
+                "auth_scheme": "bearer",
+                "api_key": CUSTOM_KEY
+            })),
+        )
+        .await;
+    assert_eq!(origin.call_count(), 0);
 
     let auth_origin = start_discovery_origin(OriginScript::Fixed {
         status: StatusCode::UNAUTHORIZED,
         body: LEAKY_401_BODY.into(),
     })
     .await;
-    let v2_auth = harness
-        .client
-        .post(format!("{}/custom/models/discover", harness.v2_base))
-        .json(&json!({
-            "base_url": auth_origin.url,
-            "upstream_protocol": "chat_completions",
-            "auth_scheme": "bearer",
-            "api_key": CUSTOM_KEY
-        }))
-        .send()
-        .await
-        .unwrap();
-    let v2_auth_status = v2_auth.status();
-    let v2_auth_body: Value = v2_auth.json().await.unwrap_or(Value::Null);
-    assert_eq!(v2_auth_status, StatusCode::BAD_REQUEST, "{v2_auth_body}");
-    let v2_text = v2_auth_body.to_string();
-    assert!(
-        v2_text.contains("authentication failed") || v2_text.contains("401"),
-        "{v2_auth_body}"
-    );
-    assert!(!v2_text.contains(CUSTOM_KEY), "{v2_auth_body}");
+    harness
+        .assert_v2_path_removed(
+            Method::POST,
+            "/custom/models/discover",
+            Some(json!({
+                "base_url": auth_origin.url,
+                "upstream_protocol": "chat_completions",
+                "auth_scheme": "bearer",
+                "api_key": CUSTOM_KEY
+            })),
+        )
+        .await;
+    assert_eq!(auth_origin.call_count(), 0);
 
     let (status, v3) = send_json(
         &harness,
@@ -928,6 +913,26 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
     .await;
     assert_eq!(status, StatusCode::OK, "{v3}");
     assert_eq!(v3["models"][0], "org/model-a");
+
+    let (status, v3_auth) = send_json(
+        &harness,
+        Method::POST,
+        "/custom/models/discover",
+        &discover_body(
+            &auth_origin.url,
+            "chat_completions",
+            "bearer",
+            Some(CUSTOM_KEY),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v3_auth}");
+    let v3_text = v3_auth.to_string();
+    assert!(
+        v3_text.contains("authentication failed") || v3_text.contains("401"),
+        "{v3_auth}"
+    );
+    assert!(!v3_text.contains(CUSTOM_KEY), "{v3_auth}");
     assert_eq!(v3["revision"], before);
     assert_eq!(harness.state.settings_revision(), before);
     assert_eq!(CURRENT_SCHEMA_VERSION, 27);

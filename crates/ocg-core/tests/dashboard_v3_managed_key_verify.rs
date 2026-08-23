@@ -1158,24 +1158,23 @@ async fn dashboard_v3_delayed_verify_loses_to_revisionless_v2_key_replacement() 
                 .await
                 .unwrap();
             let status = response.status();
-            let body = response.text().await.unwrap();
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-            assert!(!body.contains(V2_REPLACEMENT_KEY));
+            let body = response.json().await.unwrap_or(Value::Null);
+            V3Harness::assert_v2_removed(status, &body);
+            assert!(!body.to_string().contains(V2_REPLACEMENT_KEY));
             assert_eq!(harness.state.settings_revision(), before);
-            assert_retained_key(&harness, "managed-1", V2_REPLACEMENT_KEY);
             v3_hold.release();
             status
         }
     );
 
-    assert_eq!(v2_status, StatusCode::BAD_REQUEST);
-    assert_eq!(v3_result.0, StatusCode::CONFLICT, "{}", v3_result.1);
-    assert_v3_error(&v3_result.1, ERROR_CONFLICT);
-    assert_eq!(v3_result.1["currentRevision"], before);
-    assert_eq!(harness.state.settings_revision(), before);
-    assert_still_pending(&harness, "managed-1", before);
-    assert_retained_key(&harness, "managed-1", V2_REPLACEMENT_KEY);
-    assert_eq!(v2_origin.call_count(), 1);
+    assert_eq!(v2_status, StatusCode::GONE);
+    assert_eq!(v3_result.0, StatusCode::OK, "{}", v3_result.1);
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    let stored = stored_account(&harness, "managed-1");
+    assert_eq!(stored.setup_step, ModelSetupStep::Ready);
+    assert!(stored.enabled);
+    assert_retained_key(&harness, "managed-1", OPAQUE_KEY);
+    assert_eq!(v2_origin.call_count(), 0);
     assert_eq!(v3_origin.call_count(), 1);
     assert_secret_free(&v3_result.1, &[OPAQUE_KEY, V2_REPLACEMENT_KEY]);
 
@@ -1303,12 +1302,19 @@ async fn dashboard_v3_v2_verify_key_still_completes_beside_v3() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        v2.status(),
-        StatusCode::OK,
-        "{}",
-        v2.text().await.unwrap_or_default()
-    );
+    V3Harness::assert_v2_removed(v2.status(), &v2.json().await.unwrap());
+    let v2_account = stored_account(&harness, "v2-managed");
+    assert_eq!(v2_account.setup_step, ModelSetupStep::KeyVerification);
+    assert!(!v2_account.enabled);
+
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &verify_path("v2-managed"),
+        &cas(&harness, json!({ "key": OPAQUE_KEY })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     let v2_account = stored_account(&harness, "v2-managed");
     assert_eq!(v2_account.setup_step, ModelSetupStep::Ready);
     assert!(v2_account.enabled);

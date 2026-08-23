@@ -1143,42 +1143,50 @@ async fn dashboard_v3_refresh_coexists_with_v2_and_shares_throttle() {
     assert!(v3.get("processGeneration").is_some());
     assert!(v3.get("last_success_at").is_none());
 
-    let v2_get = harness
-        .client
-        .get(format!("{}/accounts/{go_id}/usage", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_get.status(), StatusCode::OK);
-    let v2_usage: Value = v2_get.json().await.unwrap();
-    assert!((v2_usage["window_5h"].as_f64().unwrap() - limits.window_5h * 0.5).abs() < 1e-9);
-    assert!(v2_usage.get("window5h").is_none());
-    assert!(v2_usage.get("processGeneration").is_none());
+    harness
+        .assert_v2_path_removed(Method::GET, &format!("/accounts/{go_id}/usage"), None)
+        .await;
+    let (status, v3_usage) = harness
+        .get_json(&format!("{}/accounts/{go_id}/usage", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v3_usage}");
+    assert!((v3_usage["window5h"].as_f64().unwrap() - limits.window_5h * 0.5).abs() < 1e-9);
+    assert!(v3_usage.get("window_5h").is_none());
+    assert!(v3_usage.get("processGeneration").is_some());
 
-    let v2_refresh = harness
+    harness
+        .assert_v2_path_removed(
+            Method::POST,
+            &format!("/accounts/{go_id}/usage/refresh"),
+            None,
+        )
+        .await;
+
+    let throttled = harness
         .client
         .post(format!(
             "{}/accounts/{go_id}/usage/refresh",
-            harness.v2_base
+            harness.v3_base
         ))
+        .json(&cas(&harness, json!({})))
         .send()
         .await
         .unwrap();
-    assert_eq!(v2_refresh.status(), StatusCode::TOO_MANY_REQUESTS);
-    let retry_after = v2_refresh
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = throttled
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let v2_body: Value = v2_refresh.json().await.unwrap();
+    let body: Value = throttled.json().await.unwrap();
     assert_eq!(retry_after.as_deref(), Some("15"));
     assert_eq!(
-        v2_body["next_allowed_at"],
+        body["nextAllowedAt"],
         (now + Duration::seconds(15)).to_rfc3339()
     );
-    assert!(v2_body.get("nextAllowedAt").is_none());
-    assert!(v2_body.get("processGeneration").is_none());
-    assert!(v2_body.get("code").is_none());
+    assert!(body.get("next_allowed_at").is_none());
+    assert!(body.get("processGeneration").is_some());
+    assert_eq!(body["code"], ERROR_THROTTLED);
 
     harness.stop();
 }

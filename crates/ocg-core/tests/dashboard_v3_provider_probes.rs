@@ -1054,43 +1054,60 @@ async fn v2_duplicate_custom_and_ceiling_probes_coexist() {
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
 
-    let duplicate = harness
-        .client
-        .post(format!(
-            "{}/accounts/{account_id}/protocol-probes",
-            harness.v2_base
-        ))
-        .json(&json!({
-            "model_id": "grok-4.5",
-            "protocols": ["chat_completions", "responses", "chat_completions"]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
-    let duplicate_body: Value = duplicate.json().await.unwrap();
-    assert!(
-        duplicate_body.to_string().contains("duplicate"),
-        "{duplicate_body}"
-    );
+    harness
+        .assert_v2_path_removed(
+            Method::POST,
+            &format!("/accounts/{account_id}/protocol-probes"),
+            Some(json!({
+                "model_id": "grok-4.5",
+                "protocols": ["chat_completions", "responses", "chat_completions"]
+            })),
+        )
+        .await;
+    let (status, duplicate) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "accountId": account_id,
+                "modelId": "grok-4.5",
+                "protocols": ["chat_completions", "responses", "chat_completions"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{duplicate}");
+    assert!(duplicate.to_string().contains("duplicate"), "{duplicate}");
     assert_eq!(origin.call_count(), 0);
 
-    let ceiling = harness
-        .client
-        .post(format!(
-            "{}/accounts/{account_id}/protocol-probes",
-            harness.v2_base
-        ))
-        .json(&json!({
-            "model_id": "not-a-known-model",
-            "protocols": ["chat_completions"]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(ceiling.status(), StatusCode::OK);
-    let ceiling_body: Value = ceiling.json().await.unwrap();
-    assert_eq!(ceiling_body["results"][0]["skipped"], true);
+    harness
+        .assert_v2_path_removed(
+            Method::POST,
+            &format!("/accounts/{account_id}/protocol-probes"),
+            Some(json!({
+                "model_id": "not-a-known-model",
+                "protocols": ["chat_completions"]
+            })),
+        )
+        .await;
+    let (status, ceiling) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "accountId": account_id,
+                "modelId": "not-a-known-model",
+                "protocols": ["chat_completions"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ceiling}");
+    assert_eq!(ceiling["results"][0]["skipped"], true);
     assert_eq!(origin.call_count(), 0);
 
     let (status, custom) = send_json(
@@ -1119,26 +1136,27 @@ async fn v2_duplicate_custom_and_ceiling_probes_coexist() {
     .await;
     assert_eq!(status, StatusCode::OK, "{custom}");
     let custom_id = custom["account"]["id"].as_str().unwrap().to_string();
-    let custom_probe = harness
-        .client
-        .post(format!(
-            "{}/accounts/{custom_id}/protocol-probes",
-            harness.v2_base
-        ))
-        .json(&json!({
-            "model_id": "org/model",
-            "protocols": ["chat_completions"]
-        }))
-        .send()
-        .await
+    harness
+        .assert_v2_path_removed(
+            Method::POST,
+            &format!("/accounts/{custom_id}/protocol-probes"),
+            Some(json!({
+                "model_id": "org/model",
+                "protocols": ["chat_completions"]
+            })),
+        )
+        .await;
+    assert_eq!(origin.call_count(), 0);
+    let stored = harness
+        .state
+        .db
+        .lock()
+        .get_account(&custom_id)
+        .unwrap()
         .unwrap();
-    let custom_status = custom_probe.status();
-    let custom_body: Value = custom_probe.json().await.unwrap();
-    assert_eq!(custom_status, StatusCode::OK, "{custom_body}");
-    assert_eq!(custom_body["results"][0]["success"], true);
-    let call = origin.calls.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(call.x_api_key.as_deref(), Some(CUSTOM_KEY));
-    assert!(call.authorization.is_none(), "{call:?}");
+    assert_eq!(stored.provider_id, CUSTOM_PROVIDER_ID);
+    assert_eq!(stored.offering_id, CUSTOM_API_OFFERING_ID);
+    assert!(!stored.enabled);
     assert_eq!(CURRENT_SCHEMA_VERSION, 27);
     harness.stop();
 }

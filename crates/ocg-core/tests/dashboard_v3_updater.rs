@@ -868,41 +868,36 @@ async fn dashboard_v3_updater_coexists_with_v2_status_and_install() {
     let before = snapshot_identity(&harness);
     let newer = newer_version();
 
-    let v2_status = harness
-        .client
-        .get(format!("{}/settings/update-status", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_status.status(), StatusCode::OK);
-    let v2_body: Value = v2_status.json().await.unwrap();
-    assert_eq!(v2_body["phase"], "idle");
-    assert_eq!(v2_body["current_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(v2_body["install_supported"], true);
-    assert!(v2_body.get("revision").is_none());
-    assert!(v2_body.get("currentVersion").is_none());
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/settings/update-status", None)
+        .await;
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings/install-update",
+            Some(json!({ "expected_version": newer })),
+        )
+        .await;
+    assert!(started.lock().unwrap().is_empty());
 
-    let v2_install = harness
-        .client
-        .post(format!("{}/settings/install-update", harness.v2_base))
-        .json(&json!({ "expected_version": newer }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_install.status(), StatusCode::ACCEPTED);
-    let v2_accepted: Value = v2_install.json().await.unwrap();
-    assert_eq!(v2_accepted["phase"], "checking");
+    let (status, body) = get_path(&harness, "/settings/update-status").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["phase"], "idle");
+    assert_eq!(body["revision"], before.0);
+    assert_eq!(body["processGeneration"], before.1);
+    assert!(body.get("current_version").is_none());
+
+    let (status, body) = post_json(
+        &harness,
+        &cas_patch(&harness, json!({ "expectedVersion": newer })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["phase"], "checking");
     assert_eq!(
         started.lock().unwrap().as_slice(),
         std::slice::from_ref(&newer)
     );
-
-    let (status, body) = get_path(&harness, "/settings/update-status").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["phase"], "checking");
-    assert_eq!(body["revision"], before.0);
-    assert_eq!(body["processGeneration"], before.1);
-    assert!(body.get("current_version").is_none());
 
     let (status, body) = post_json(
         &harness,

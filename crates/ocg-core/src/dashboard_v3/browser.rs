@@ -1,10 +1,11 @@
 //! Authenticated V3 browser runtime: capabilities, native/remote open, profile
 //! reset, and the dashboard-bound remote display WebSocket.
 //!
-//! V2 `/dashboard/api` browser routes stay mounted and unchanged. This module
-//! copies state-neutral helpers locally (Origin validation, session binding,
-//! WS proxy) instead of importing `dashboard`. Account JSON uses the shared
-//! accounts DTO mapper. DTOs never carry worker URLs or control tokens.
+//! The exact V2 browser WebSocket route remains available while other V2
+//! browser REST routes are retired. This module copies state-neutral helpers
+//! locally (Origin validation, session binding, WS proxy) instead of importing
+//! `dashboard`. Account JSON uses the shared accounts DTO mapper. DTOs never
+//! carry worker URLs or control tokens.
 //! Mutations serialize on `BrowserRuntime::operation`, check CAS before side
 //! effects, recheck after await, and do not hold settings/DB locks across await.
 

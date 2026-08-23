@@ -993,29 +993,16 @@ async fn dashboard_v3_routing_resets_only_for_revoked_or_rotated_credentials() {
 async fn dashboard_v3_key_mutations_coexist_with_v2() {
     let harness = start_loopback("keys-v2-coexist").await;
 
-    let v2_created = harness
-        .client
-        .post(format!("{}/settings/keys", harness.v2_base))
-        .json(&json!({
-            "name": "V2",
-            "expected_revision": harness.state.settings_revision()
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_created.status(), StatusCode::OK);
-    let v2_created: Value = v2_created.json().await.unwrap();
-    let v2_id = v2_created["id"].as_str().unwrap().to_string();
-    let v2_value = v2_created["key"].as_str().unwrap().to_string();
-    assert!(!v2_value.is_empty());
-
-    let (_, _, connection) = get_connection(&harness).await;
-    assert!(
-        connection
-            .sub_keys
-            .iter()
-            .any(|key| key.id == v2_id && key.value == v2_value)
-    );
+    harness
+        .assert_v2_path_removed(
+            Method::POST,
+            "/settings/keys",
+            Some(json!({
+                "name": "V2",
+                "expected_revision": harness.state.settings_revision()
+            })),
+        )
+        .await;
 
     let (status, created) = send_json(
         &harness,
@@ -1025,7 +1012,6 @@ async fn dashboard_v3_key_mutations_coexist_with_v2() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    assert_secret_free_ack(&created, &[&v2_value]);
     let (_, _, connection) = get_connection(&harness).await;
     let v3_key = connection
         .sub_keys
@@ -1033,23 +1019,12 @@ async fn dashboard_v3_key_mutations_coexist_with_v2() {
         .find(|key| key.name == "V3")
         .cloned()
         .expect("V3 key");
-    let v2_connection = harness
-        .client
-        .get(format!("{}/connection", harness.v2_base))
-        .send()
-        .await
-        .unwrap()
-        .json::<Value>()
-        .await
-        .unwrap();
-    assert_eq!(v2_connection["primary_key"], connection.primary_key);
-    assert!(
-        v2_connection["sub_keys"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|key| key["id"] == v3_key.id && key["value"] == v3_key.value)
-    );
+    assert_secret_free_ack(&created, &[&v3_key.value]);
+    harness
+        .assert_v2_path_removed(Method::GET, "/connection", None)
+        .await;
+    assert_eq!(connection.sub_keys.len(), 1);
+    assert_eq!(connection.sub_keys[0].id, v3_key.id);
 
     let old_primary = harness.state.config().gateway_key.clone();
     let (status, rotated) = send_json(
@@ -1060,40 +1035,28 @@ async fn dashboard_v3_key_mutations_coexist_with_v2() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{rotated}");
-    let v2_settings = harness
-        .client
-        .get(format!("{}/settings", harness.v2_base))
-        .send()
-        .await
-        .unwrap()
-        .json::<Value>()
-        .await
-        .unwrap();
-    let new_primary = v2_settings["gateway_key"].as_str().unwrap();
-    assert_ne!(new_primary, old_primary);
+    harness
+        .assert_v2_path_removed(Method::GET, "/settings", None)
+        .await;
     let (_, _, connection) = get_connection(&harness).await;
-    assert_eq!(connection.primary_key, new_primary);
+    let new_primary = connection.primary_key.clone();
+    assert_ne!(new_primary, old_primary);
     assert_secret_free_ack(
         &rotated,
-        &[old_primary.as_str(), new_primary, &v3_key.value],
+        &[old_primary.as_str(), new_primary.as_str(), &v3_key.value],
     );
 
-    let v2_rotate = harness
-        .client
-        .post(format!(
-            "{}/settings/regenerate-gateway-key",
-            harness.v2_base
-        ))
-        .json(&json!({
-            "expected_revision": harness.state.settings_revision()
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_rotate.status(), StatusCode::OK);
-    let v2_rotate: Value = v2_rotate.json().await.unwrap();
-    assert!(v2_rotate["key"].as_str().is_some());
-    assert_ne!(v2_rotate["key"], new_primary);
+    harness
+        .assert_v2_path_removed(
+            Method::POST,
+            "/settings/regenerate-gateway-key",
+            Some(json!({
+                "expected_revision": harness.state.settings_revision()
+            })),
+        )
+        .await;
+    let (_, _, after_rotate) = get_connection(&harness).await;
+    assert_eq!(after_rotate.primary_key, new_primary);
 
     harness.stop();
 }

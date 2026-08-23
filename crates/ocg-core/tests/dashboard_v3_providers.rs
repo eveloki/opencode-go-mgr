@@ -1132,21 +1132,18 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
     assert_eq!(go_after["protocols"]["messages"], false);
     assert_ne!(go_after["revision"].as_u64(), Some(scope_revision));
 
-    let v2 = harness
-        .client
-        .get(format!("{}/provider-contracts", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::OK);
-    let v2_body: Value = v2.json().await.unwrap();
-    let v2_go = v2_body["providers"]
+    harness
+        .assert_v2_path_removed(Method::GET, "/provider-contracts", None)
+        .await;
+    let (status, v3_contracts) = get_v3(&harness, "/provider-contracts").await;
+    assert_eq!(status, StatusCode::OK, "{v3_contracts}");
+    let v3_go = v3_contracts["providers"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|group| group["provider_id"] == OPENCODE_PROVIDER_ID)
+        .find(|group| group["providerId"] == OPENCODE_PROVIDER_ID)
         .unwrap();
-    assert_eq!(v2_go["protocols"]["messages"], false);
+    assert_eq!(v3_go["protocols"]["messages"], false);
 
     let custom_path = format!(
         "/provider-contracts/custom_endpoint/{ZEN_FREE_ACCOUNT_ID}/protocols/chat_completions"
@@ -1185,23 +1182,16 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
 async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     let harness = start_loopback("providers-coexist").await;
 
-    let v2_catalog = harness
-        .client
-        .get(format!("{}/providers", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_catalog.status(), StatusCode::OK);
-    let v2_body: Value = v2_catalog.json().await.unwrap();
-    assert!(v2_body.is_array(), "{v2_body}");
-    assert_eq!(v2_body.as_array().unwrap().len(), 7);
-    assert!(v2_body[0].get("provider_id").is_some());
-    assert!(v2_body[0].get("providerId").is_none());
+    harness
+        .assert_v2_path_removed(Method::GET, "/providers", None)
+        .await;
 
     let (status, v3_catalog) = get_v3(&harness, "/providers").await;
     assert_eq!(status, StatusCode::OK, "{v3_catalog}");
     assert!(v3_catalog.get("entries").is_some());
     assert_eq!(v3_catalog["entries"].as_array().unwrap().len(), 7);
+    assert!(v3_catalog["entries"][0].get("providerId").is_some());
+    assert!(v3_catalog["entries"][0].get("provider_id").is_none());
 
     for alias in [
         "/providers/catalog",
@@ -1221,33 +1211,31 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
         );
     }
 
-    let v2_catalog_alias = harness
-        .client
-        .get(format!("{}/providers/catalog", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_catalog_alias.status(), StatusCode::OK);
-
-    let v2_caps = harness
-        .client
-        .get(format!("{}/providers/model-capabilities", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_caps.status(), StatusCode::OK);
+    harness
+        .assert_v2_path_removed(Method::GET, "/providers/catalog", None)
+        .await;
+    harness
+        .assert_v2_path_removed(Method::GET, "/providers/model-capabilities", None)
+        .await;
 
     let before = harness.state.settings_revision();
-    let v2_zen = harness
-        .client
-        .patch(format!("{}/providers/zen-free", harness.v2_base))
-        .json(&json!({ "enabled": false, "expected_revision": before }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_zen.status(), StatusCode::OK);
-    let v2_zen_body: Value = v2_zen.json().await.unwrap();
-    assert!(v2_zen_body.get("account").is_some());
+    harness
+        .assert_v2_path_removed(
+            Method::PATCH,
+            "/providers/zen-free",
+            Some(json!({ "enabled": false, "expected_revision": before })),
+        )
+        .await;
+    assert_eq!(harness.state.settings_revision(), before);
+
+    let (status, _) = send_json(
+        &harness,
+        Method::PATCH,
+        "/providers/zen-free",
+        &cas(&harness, json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(harness.state.settings_revision(), before + 1);
 
     let (status, v3_zen) = get_v3(&harness, "/providers/zen-free").await;

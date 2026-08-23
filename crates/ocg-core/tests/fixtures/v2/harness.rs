@@ -161,7 +161,15 @@ impl V2Harness {
     }
 
     pub fn dashboard(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}/dashboard/api{path}", self.port)
+        format!("http://127.0.0.1:{}/dashboard/api/v3{path}", self.port)
+    }
+
+    pub fn mutation_body(&self, body: Value) -> Value {
+        keys_to_camel(with_cas_tokens(
+            body,
+            self.state.settings_revision(),
+            self.state.process_generation(),
+        ))
     }
 
     pub fn gateway(&self, path: &str) -> String {
@@ -172,37 +180,63 @@ impl V2Harness {
         let response = self.client.get(self.dashboard(path)).send().await.unwrap();
         let status = response.status();
         let body = decode_json(response).await;
-        (status, body)
+        (status, adapt_v3_response(path, status, body))
     }
 
     pub async fn post_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
         let response = self
             .client
             .post(self.dashboard(path))
-            .json(body)
+            .json(&self.mutation_body(body.clone()))
             .send()
             .await
             .unwrap();
         let status = response.status();
         let body = decode_json(response).await;
-        (status, body)
+        (status, adapt_v3_response(path, status, body))
     }
 
     pub async fn patch_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
         let response = self
             .client
             .patch(self.dashboard(path))
-            .json(body)
+            .json(&self.mutation_body(body.clone()))
             .send()
             .await
             .unwrap();
         let status = response.status();
         let body = decode_json(response).await;
-        (status, body)
+        (status, adapt_v3_response(path, status, body))
+    }
+
+    pub async fn put_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+        let response = self
+            .client
+            .put(self.dashboard(path))
+            .json(&self.mutation_body(body.clone()))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = decode_json(response).await;
+        (status, adapt_v3_response(path, status, body))
+    }
+
+    pub async fn delete_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+        let response = self
+            .client
+            .delete(self.dashboard(path))
+            .json(&self.mutation_body(body.clone()))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = decode_json(response).await;
+        (status, adapt_v3_response(path, status, body))
     }
 
     pub async fn catalog(&self) -> Value {
-        let (status, body) = self.get_json("/providers/catalog").await;
+        let (status, body) = self.get_json("/providers").await;
         assert_eq!(
             status,
             StatusCode::OK,
@@ -595,4 +629,121 @@ async fn wait_ready(client: &reqwest::Client, port: u16) {
 async fn decode_json(response: reqwest::Response) -> Value {
     let text = response.text().await.unwrap_or_default();
     serde_json::from_str(&text).unwrap_or_else(|_| json!({ "raw": text }))
+}
+
+fn with_cas_tokens(mut body: Value, revision: u64, process_generation: u64) -> Value {
+    let Some(object) = body.as_object_mut() else {
+        return body;
+    };
+    if !object.contains_key("expectedRevision") && !object.contains_key("expected_revision") {
+        object.insert("expected_revision".into(), json!(revision));
+    }
+    if !object.contains_key("processGeneration") && !object.contains_key("process_generation") {
+        object.insert("process_generation".into(), json!(process_generation));
+    }
+    body
+}
+
+fn keys_to_camel(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, child)| (snake_to_camel(&key), keys_to_camel(child)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(keys_to_camel).collect()),
+        other => other,
+    }
+}
+
+fn keys_to_snake(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, child)| (camel_to_snake(&key), keys_to_snake(child)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(keys_to_snake).collect()),
+        other => other,
+    }
+}
+
+fn snake_to_camel(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut upper = false;
+    for ch in key.chars() {
+        if ch == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(ch.to_uppercase());
+            upper = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn camel_to_snake(key: &str) -> String {
+    let mut out = String::with_capacity(key.len() + 4);
+    for (index, ch) in key.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn adapt_v3_response(path: &str, status: StatusCode, body: Value) -> Value {
+    let path = path.split('?').next().unwrap_or(path);
+    let body = keys_to_snake(body);
+    if !status.is_success() {
+        return body;
+    }
+    if path == "/providers" || path == "/providers/catalog" {
+        if let Some(entries) = body.get("entries") {
+            return entries.clone();
+        }
+    }
+    if path == "/accounts" {
+        if let Some(accounts) = body.get("accounts").and_then(Value::as_array) {
+            return Value::Array(
+                accounts
+                    .iter()
+                    .cloned()
+                    .map(|account| normalize_account(account, None))
+                    .collect(),
+            );
+        }
+    }
+    if path == "/application-models" {
+        if let Some(models) = body.get("models") {
+            return models.clone();
+        }
+    }
+    if let Some(account) = body.get("account") {
+        if !account.is_null() {
+            return normalize_account(account.clone(), body.get("revision").cloned());
+        }
+    }
+    if body.get("id").is_some() && body.get("provider_id").is_some() {
+        return normalize_account(body, None);
+    }
+    body
+}
+
+fn normalize_account(mut account: Value, revision: Option<Value>) -> Value {
+    if let Some(object) = account.as_object_mut() {
+        object.entry("key").or_insert_with(|| json!(""));
+        object.entry("password").or_insert_with(|| json!(""));
+        if let Some(revision) = revision {
+            object.entry("revision").or_insert(revision);
+        }
+    }
+    account
 }

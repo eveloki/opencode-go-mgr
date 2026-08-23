@@ -622,17 +622,9 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
             "{id} stored credit row must stay suppressed, not deleted"
         );
 
-        let v2 = harness
-            .client
-            .get(format!("{}/accounts/{id}/provider-usage", harness.v2_base))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(v2.status(), StatusCode::OK, "{id}");
-        let v2_body: Value = v2.json().await.unwrap();
-        assert_eq!(v2_body["availability"], "unavailable", "{id}");
-        assert_eq!(v2_body["credit_balances"], json!([]), "{id}");
-        assert_eq!(v2_body["quota_windows"], json!([]), "{id}");
+        harness
+            .assert_v2_path_removed(Method::GET, &format!("/accounts/{id}/provider-usage"), None)
+            .await;
     }
 
     let (status, custom_usage) = harness
@@ -841,22 +833,34 @@ async fn dashboard_v3_usage_coexists_with_v2_and_does_not_mount_legacy_aliases()
     let goat_id = create_goat(&harness).await;
     let go_id = create_go(&harness).await;
 
-    let v2_patch = harness
-        .client
-        .patch(format!("{}/accounts/{goat_id}/usage", harness.v2_base))
-        .json(&json!({
-            "window": "window_5h",
-            "percent": 50.0,
-            "resets_in_minutes": 180
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_patch.status(), StatusCode::OK);
-    let v2_body: Value = v2_patch.json().await.unwrap();
-    assert_eq!(v2_body["window_5h"], 7.0);
-    assert!(v2_body.get("window5h").is_none());
-    assert!(v2_body.get("processGeneration").is_none());
+    harness
+        .assert_v2_path_removed(
+            Method::PATCH,
+            &format!("/accounts/{goat_id}/usage"),
+            Some(json!({
+                "window": "window_5h",
+                "percent": 50.0,
+                "resets_in_minutes": 180
+            })),
+        )
+        .await;
+
+    let (status, patched) = send_json(
+        &harness,
+        Method::PATCH,
+        &format!("/accounts/{goat_id}/usage"),
+        &cas(
+            &harness,
+            json!({
+                "window": "window_5h",
+                "percent": 50.0,
+                "resetsInMinutes": 180
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["usage"]["window5h"], 7.0);
 
     let (status, v3) = harness
         .get_json(&format!("{}/accounts/{goat_id}/usage", harness.v3_base))
@@ -865,31 +869,31 @@ async fn dashboard_v3_usage_coexists_with_v2_and_does_not_mount_legacy_aliases()
     assert_eq!(v3["window5h"], 7.0);
     assert!(v3.get("window_5h").is_none());
 
-    let v2_provider = harness
-        .client
-        .get(format!(
+    harness
+        .assert_v2_path_removed(
+            Method::GET,
+            &format!("/accounts/{go_id}/provider-usage"),
+            None,
+        )
+        .await;
+    let (status, v3_provider) = harness
+        .get_json(&format!(
             "{}/accounts/{go_id}/provider-usage",
-            harness.v2_base
+            harness.v3_base
         ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_provider.status(), StatusCode::OK);
-    let v2_provider: Value = v2_provider.json().await.unwrap();
-    assert_eq!(v2_provider["availability"], "available");
-    assert!(v2_provider.get("quota_windows").is_some());
-    assert!(v2_provider.get("quotaWindows").is_none());
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v3_provider}");
+    assert_eq!(v3_provider["availability"], "available");
+    assert!(v3_provider.get("quotaWindows").is_some());
+    assert!(v3_provider.get("quota_windows").is_none());
 
-    let v2_alias = harness
-        .client
-        .get(format!(
-            "{}/providers/accounts/{go_id}/usage",
-            harness.v2_base
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_alias.status(), StatusCode::OK);
+    harness
+        .assert_v2_path_removed(
+            Method::GET,
+            &format!("/providers/accounts/{go_id}/usage"),
+            None,
+        )
+        .await;
 
     let v3_alias = harness
         .client

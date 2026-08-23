@@ -370,15 +370,11 @@ async fn overlap_keeps_go_mapping_and_undeclared_models_are_excluded() {
     // Go. Put Go first so this overlap test proves that Custom cannot steal a
     // published alias without contradicting the account-order contract.
     let mut account_ids = harness
-        .client
-        .get(harness.dashboard("/accounts"))
-        .send()
+        .accounts()
         .await
-        .unwrap()
-        .json::<Vec<Value>>()
-        .await
-        .unwrap()
+        .as_array()
         .into_iter()
+        .flatten()
         .filter_map(|account| account["id"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
     account_ids.sort_by_key(|id| {
@@ -388,22 +384,10 @@ async fn overlap_keeps_go_mapping_and_undeclared_models_are_excluded() {
             1
         }
     });
-    let response = harness
-        .client
-        .put(harness.dashboard("/accounts/order"))
-        .json(&json!({
-            "account_ids": account_ids,
-            "expected_revision": harness.settings_revision().await
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "{}",
-        decode_json_value(response).await
-    );
+    let (status, body) = harness
+        .put_json("/accounts/order", &json!({ "account_ids": account_ids }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     let _ = custom;
 
     let (status, body) = harness.chat(GO_ALIAS).await;
@@ -489,23 +473,16 @@ async fn same_custom_model_uses_account_order_and_config_change_stales() {
     let items = logs["items"].as_array().cloned().unwrap_or_default();
     assert!(items.iter().any(|item| item["account_id"] == second["id"]));
 
-    let response = harness
-        .client
-        .put(harness.dashboard(&format!(
-            "/accounts/{}/custom-config",
-            first["id"].as_str().unwrap()
-        )))
-        .json(&json!({
-            "base_url": format!("{}/v2", custom_origin(&harness)),
-            "upstream_protocol": "chat_completions",
-            "auth_scheme": "bearer",
-            "expected_revision": harness.settings_revision().await
-        }))
-        .send()
-        .await
-        .unwrap();
-    let status = response.status();
-    let updated = decode_json_value(response).await;
+    let (status, updated) = harness
+        .put_json(
+            &format!("/accounts/{}/custom-config", first["id"].as_str().unwrap()),
+            &json!({
+                "base_url": format!("{}/v2", custom_origin(&harness)),
+                "upstream_protocol": "chat_completions",
+                "auth_scheme": "bearer"
+            }),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["enabled"], false, "{updated}");
     assert_eq!(
@@ -861,17 +838,10 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
         let verify = tokio::spawn({
-            let harness_revision = harness.settings_revision().await;
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
-            async move {
-                client
-                    .post(url)
-                    .json(&json!({ "expected_revision": harness_revision }))
-                    .send()
-                    .await
-                    .unwrap()
-            }
+            let body = harness.mutation_body(json!({}));
+            async move { client.post(url).json(&body).send().await.unwrap() }
         });
         held.wait_hits(1).await;
         let (status, updated) = patch_account_key(&harness, &id, CUSTOM_KEY_2).await;
@@ -900,32 +870,23 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
         let verify = tokio::spawn({
-            let revision = harness.settings_revision().await;
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
-            async move {
-                client
-                    .post(url)
-                    .json(&json!({ "expected_revision": revision }))
-                    .send()
-                    .await
-                    .unwrap()
-            }
+            let body = harness.mutation_body(json!({}));
+            async move { client.post(url).json(&body).send().await.unwrap() }
         });
         held.wait_hits(1).await;
-        let response = harness
-            .client
-            .put(harness.dashboard(&format!("/accounts/{id}/custom-config")))
-            .json(&json!({
-                "base_url": "http://127.0.0.1:1",
-                "upstream_protocol": "chat_completions",
-                "auth_scheme": "bearer",
-                "expected_revision": harness.settings_revision().await
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        let (status, _updated) = harness
+            .put_json(
+                &format!("/accounts/{id}/custom-config"),
+                &json!({
+                    "base_url": "http://127.0.0.1:1",
+                    "upstream_protocol": "chat_completions",
+                    "auth_scheme": "bearer"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
         held.release();
         let response = verify.await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -953,33 +914,24 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
         let verify = tokio::spawn({
-            let revision = harness.settings_revision().await;
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
-            async move {
-                client
-                    .post(url)
-                    .json(&json!({ "expected_revision": revision }))
-                    .send()
-                    .await
-                    .unwrap()
-            }
+            let body = harness.mutation_body(json!({}));
+            async move { client.post(url).json(&body).send().await.unwrap() }
         });
         held.wait_hits(1).await;
-        let response = harness
-            .client
-            .put(harness.dashboard(&format!("/accounts/{id}/model-capabilities")))
-            .json(&json!({
-                "capabilities": [{
-                    "model_id": CUSTOM_MODEL_2,
-                    "protocol": "chat_completions"
-                }],
-                "expected_revision": harness.settings_revision().await
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        let (status, _updated) = harness
+            .put_json(
+                &format!("/accounts/{id}/model-capabilities"),
+                &json!({
+                    "capabilities": [{
+                        "model_id": CUSTOM_MODEL_2,
+                        "protocol": "chat_completions"
+                    }]
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
         held.release();
         let response = verify.await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -1004,29 +956,16 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
         let verify = tokio::spawn({
-            let revision = harness.settings_revision().await;
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
-            async move {
-                client
-                    .post(url)
-                    .json(&json!({ "expected_revision": revision }))
-                    .send()
-                    .await
-                    .unwrap()
-            }
+            let body = harness.mutation_body(json!({}));
+            async move { client.post(url).json(&body).send().await.unwrap() }
         });
         held.wait_hits(1).await;
-        let deleted = harness
-            .client
-            .delete(harness.dashboard(&format!("/accounts/{id}")))
-            .json(&json!({
-                "expected_revision": harness.settings_revision().await
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let (status, _deleted) = harness
+            .delete_json(&format!("/accounts/{id}"), &json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
         held.release();
         let response = verify.await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -1055,18 +994,11 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         )
         .await;
         let id = draft["id"].as_str().unwrap().to_string();
-        let revision = harness.settings_revision().await;
         let spawn_verify = || {
             let client = harness.client.clone();
             let url = harness.dashboard(&format!("/accounts/{id}/verify"));
-            async move {
-                client
-                    .post(url)
-                    .json(&json!({ "expected_revision": revision }))
-                    .send()
-                    .await
-                    .unwrap()
-            }
+            let body = harness.mutation_body(json!({}));
+            async move { client.post(url).json(&body).send().await.unwrap() }
         };
         let first = tokio::spawn(spawn_verify());
         let second = tokio::spawn(spawn_verify());

@@ -27,11 +27,14 @@ use std::time::Duration as StdDuration;
 
 #[path = "fixtures/fake_upstream.rs"]
 mod fake_upstream;
+#[path = "fixtures/legacy_dashboard.rs"]
+mod legacy_dashboard;
 
 use fake_upstream::{
     DelayedChunks, FakeCall as MockCall, FakeReply as MockReply, start_delayed_fake_upstream,
     start_fake_upstream, start_raw_disconnect_upstream,
 };
+use legacy_dashboard::LegacyDashboardHandle;
 
 const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
 const OPAQUE_ACCOUNT_KEY: &str = "opaque/account+key=42";
@@ -700,14 +703,15 @@ fn expected_local_application_models(state: &Arc<CoreStateInner>) -> Vec<String>
 async fn get_application_models(port: u16) -> (StatusCode, serde_json::Value) {
     let response = loopback_client()
         .get(format!(
-            "http://127.0.0.1:{port}/dashboard/api/application-models"
+            "http://127.0.0.1:{port}/dashboard/api/v3/application-models"
         ))
         .send()
         .await
         .unwrap();
     let status = response.status();
     let body = response.json::<serde_json::Value>().await.unwrap();
-    (status, body)
+    let models = body.get("models").cloned().unwrap_or(body);
+    (status, models)
 }
 
 fn assert_no_application_model_side_effects(
@@ -3417,11 +3421,9 @@ async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let endpoint = format!(
-        "http://127.0.0.1:{}/dashboard/api/accounts/acct-1/test",
-        port
-    );
+    let (_port, gateway_handle) = start_gateway(state.clone()).await;
+    let legacy = LegacyDashboardHandle::start(state.clone()).await;
+    let endpoint = legacy.url("/accounts/acct-1/test");
 
     let first = loopback_client().post(&endpoint).send().await.unwrap();
     assert_eq!(first.status(), StatusCode::BAD_REQUEST);
@@ -3453,10 +3455,13 @@ async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
             .auth_error
             .is_none()
     );
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert!(calls.iter().all(|call| call.key == OPAQUE_ACCOUNT_KEY));
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|call| call.key == OPAQUE_ACCOUNT_KEY));
+    }
 
+    legacy.stop().await;
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
     let _ = fs::remove_dir_all(dir);
@@ -3478,13 +3483,11 @@ async fn dashboard_ping_marks_quota_cooldown() {
         .lock()
         .set_account_auth_error("acct-1", Some("stale auth error"))
         .unwrap();
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let (_port, gateway_handle) = start_gateway(state.clone()).await;
+    let legacy = LegacyDashboardHandle::start(state.clone()).await;
 
     let response = loopback_client()
-        .post(format!(
-            "http://127.0.0.1:{}/dashboard/api/accounts/acct-1/test",
-            port
-        ))
+        .post(legacy.url("/accounts/acct-1/test"))
         .send()
         .await
         .unwrap();
@@ -3499,15 +3502,18 @@ async fn dashboard_ping_marks_quota_cooldown() {
     assert!(stored.last_error.unwrap().contains("Weekly usage limit"));
     assert!(stored.auth_error.is_none());
 
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls[0].key, "key-1");
-    let payload: serde_json::Value = serde_json::from_str(&calls[0].body).unwrap();
-    assert_eq!(
-        payload["model"],
-        ocg_core::models::DEFAULT_ACCOUNT_TEST_MODEL
-    );
-    assert_eq!(payload["messages"][0]["content"], "ping");
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[0].key, "key-1");
+        let payload: serde_json::Value = serde_json::from_str(&calls[0].body).unwrap();
+        assert_eq!(
+            payload["model"],
+            ocg_core::models::DEFAULT_ACCOUNT_TEST_MODEL
+        );
+        assert_eq!(payload["messages"][0]["content"], "ping");
+    }
 
+    legacy.stop().await;
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
     let _ = fs::remove_dir_all(dir);
@@ -3522,18 +3528,12 @@ async fn delayed_dashboard_ping_429_does_not_cool_down_replaced_key() {
     )
     .await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let (_port, gateway_handle) = start_gateway(state.clone()).await;
+    let legacy = LegacyDashboardHandle::start(state.clone()).await;
+    let endpoint = legacy.url("/accounts/acct-1/test");
 
-    let request = tokio::spawn(async move {
-        loopback_client()
-            .post(format!(
-                "http://127.0.0.1:{}/dashboard/api/accounts/acct-1/test",
-                port
-            ))
-            .send()
-            .await
-            .unwrap()
-    });
+    let request =
+        tokio::spawn(async move { loopback_client().post(endpoint).send().await.unwrap() });
     tokio::time::timeout(StdDuration::from_secs(10), async {
         while calls.load(Ordering::Relaxed) == 0 {
             tokio::time::sleep(StdDuration::from_millis(10)).await;
@@ -3570,6 +3570,7 @@ async fn delayed_dashboard_ping_429_does_not_cool_down_replaced_key() {
     assert!(stored.cooldown_until.is_none());
     assert!(stored.last_error.is_none());
 
+    legacy.stop().await;
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
     let _ = fs::remove_dir_all(dir);
@@ -3899,12 +3900,15 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     );
     let mut config = state.config();
     config.gateway_port = requested_port;
-    let mut settings_payload = serde_json::to_value(&config).unwrap();
-    settings_payload["expected_revision"] = serde_json::json!(state.settings_revision());
+    let settings_payload = serde_json::json!({
+        "expectedRevision": state.settings_revision(),
+        "processGeneration": state.process_generation(),
+        "gatewayPort": requested_port
+    });
     let client = loopback_client();
     let response = client
-        .post(format!(
-            "http://127.0.0.1:{}/dashboard/api/settings",
+        .put(format!(
+            "http://127.0.0.1:{}/dashboard/api/v3/settings",
             current_port
         ))
         .json(&settings_payload)
@@ -3927,7 +3931,7 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
 
     let status_response = client
         .get(format!(
-            "http://127.0.0.1:{}/dashboard/api/gateway/status",
+            "http://127.0.0.1:{}/dashboard/api/v3/gateway/status",
             requested_port
         ))
         .send()
@@ -3942,11 +3946,14 @@ async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     let occupied_port = occupied.local_addr().unwrap().port();
     let mut fail_config = state.config();
     fail_config.gateway_port = occupied_port;
-    let mut fail_payload = serde_json::to_value(&fail_config).unwrap();
-    fail_payload["expected_revision"] = serde_json::json!(state.settings_revision());
+    let fail_payload = serde_json::json!({
+        "expectedRevision": state.settings_revision(),
+        "processGeneration": state.process_generation(),
+        "gatewayPort": occupied_port
+    });
     let fail = client
-        .post(format!(
-            "http://127.0.0.1:{}/dashboard/api/settings",
+        .put(format!(
+            "http://127.0.0.1:{}/dashboard/api/v3/settings",
             requested_port
         ))
         .json(&fail_payload)
@@ -4681,16 +4688,20 @@ async fn reenabling_a_protocol_restores_routing_without_a_new_probe() {
 
 async fn dashboard_protocol_probe(
     port: u16,
+    state: &Arc<CoreStateInner>,
     account_id: &str,
     model_id: &str,
     protocols: &[&str],
 ) -> (StatusCode, serde_json::Value) {
     let response = loopback_client()
         .post(format!(
-            "http://127.0.0.1:{port}/dashboard/api/accounts/{account_id}/protocol-probes"
+            "http://127.0.0.1:{port}/dashboard/api/v3/providers/{OPENCODE_PROVIDER_ID}/protocol-probes"
         ))
         .json(&serde_json::json!({
-            "model_id": model_id,
+            "expectedRevision": state.settings_revision(),
+            "processGeneration": state.process_generation(),
+            "accountId": account_id,
+            "modelId": model_id,
             "protocols": protocols,
         }))
         .send()
@@ -4716,6 +4727,7 @@ async fn duplicate_protocol_probes_fail_locally_without_upstream() {
 
     let (status, body) = dashboard_protocol_probe(
         port,
+        &state,
         "acct-1",
         "glm-5.2",
         &["chat_completions", "responses", "chat_completions"],
@@ -4773,7 +4785,7 @@ async fn explicit_probe_can_add_ceiling_protocol_and_failure_does_not() {
     assert!(before.protocols.get("responses").unwrap().available);
 
     let (status, body) =
-        dashboard_protocol_probe(port, "acct-1", "grok-4.5", &["chat_completions"]).await;
+        dashboard_protocol_probe(port, &state, "acct-1", "grok-4.5", &["chat_completions"]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["results"][0]["success"], false);
     assert_eq!(body["results"][0]["skipped"], false);
@@ -4804,7 +4816,7 @@ async fn explicit_probe_can_add_ceiling_protocol_and_failure_does_not() {
     );
 
     let (status, body) =
-        dashboard_protocol_probe(port, "acct-1", "grok-4.5", &["chat_completions"]).await;
+        dashboard_protocol_probe(port, &state, "acct-1", "grok-4.5", &["chat_completions"]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["results"][0]["success"], true);
     let after_success = state

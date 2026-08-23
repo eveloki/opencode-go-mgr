@@ -752,7 +752,7 @@ async fn dashboard_json(
     let response = loopback_client()
         .request(
             method,
-            format!("http://127.0.0.1:{port}/dashboard/api{path}"),
+            format!("http://127.0.0.1:{port}/dashboard/api/v3{path}"),
         )
         .json(&body)
         .send()
@@ -775,43 +775,53 @@ async fn create_verified_custom(
         reqwest::Method::POST,
         "/accounts",
         json!({
-            "provider_id": CUSTOM_PROVIDER_ID,
-            "offering_id": CUSTOM_API_OFFERING_ID,
+            "expectedRevision": state.settings_revision(),
+            "processGeneration": state.process_generation(),
+            "providerId": CUSTOM_PROVIDER_ID,
+            "offeringId": CUSTOM_API_OFFERING_ID,
             "name": name,
             "key": key,
-            "expected_revision": state.settings_revision(),
-            "custom_config": {
-                "base_url": origin,
-                "upstream_protocol": "chat_completions",
-                "auth_scheme": "bearer"
+            "customConfig": {
+                "baseUrl": origin,
+                "upstreamProtocol": "chat_completions",
+                "authScheme": "bearer"
             },
-            "model_capabilities": [{
-                "model_id": CUSTOM_MODEL,
+            "modelCapabilities": [{
+                "modelId": CUSTOM_MODEL,
                 "protocol": "chat_completions"
             }]
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    let id = draft["id"].as_str().unwrap().to_string();
+    let id = draft["account"]["id"].as_str().unwrap().to_string();
     let (status, verified) = dashboard_json(
         port,
         reqwest::Method::POST,
         &format!("/accounts/{id}/verify"),
-        json!({ "expected_revision": state.settings_revision() }),
+        json!({
+            "expectedRevision": state.settings_revision(),
+            "processGeneration": state.process_generation()
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{verified}");
-    assert_eq!(verified["verification_status"].as_str(), Some("verified"));
+    assert_eq!(
+        verified["account"]["verificationStatus"].as_str(),
+        Some("verified")
+    );
     let (status, enabled) = dashboard_json(
         port,
         reqwest::Method::POST,
         &format!("/accounts/{id}/toggle"),
-        json!({ "expected_revision": state.settings_revision() }),
+        json!({
+            "expectedRevision": state.settings_revision(),
+            "processGeneration": state.process_generation()
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{enabled}");
-    assert_eq!(enabled["enabled"], true);
+    assert_eq!(enabled["account"]["enabled"], true);
     id
 }
 

@@ -539,35 +539,56 @@ mod tests {
             .expect("dashboard request should complete");
         assert_eq!(dashboard.status(), StatusCode::UNAUTHORIZED);
 
-        let invalid = client
+        let retired = client
             .put(format!("{root}/dashboard/api/claude-desktop/models"))
             .json(&json!({"sonnet":"","opus":"","haiku":""}))
+            .send()
+            .await
+            .expect("retired V2 dashboard update should complete");
+        assert_eq!(retired.status(), StatusCode::GONE);
+
+        let invalid = client
+            .put(format!("{root}/dashboard/api/v3/claude-desktop/models"))
+            .json(&json!({
+                "expectedRevision": state.settings_revision(),
+                "processGeneration": state.process_generation(),
+                "sonnet": "",
+                "opus": "",
+                "haiku": ""
+            }))
             .send()
             .await
             .expect("dashboard update should complete");
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
 
         let updated = client
-            .put(format!("{root}/dashboard/api/claude-desktop/models"))
-            .json(&json!({"sonnet":"","opus":"glm-5.2","haiku":""}))
+            .put(format!("{root}/dashboard/api/v3/claude-desktop/models"))
+            .json(&json!({
+                "expectedRevision": state.settings_revision(),
+                "processGeneration": state.process_generation(),
+                "sonnet": "",
+                "opus": "glm-5.2",
+                "haiku": ""
+            }))
             .send()
             .await
             .expect("dashboard update should complete");
         assert_eq!(updated.status(), StatusCode::OK);
         let updated: serde_json::Value = updated.json().await.expect("update should return JSON");
-        assert_eq!(
-            updated,
-            json!({"sonnet":"glm-5.2","opus":"glm-5.2","haiku":"glm-5.2"})
-        );
+        assert_eq!(updated["sonnet"], "glm-5.2");
+        assert_eq!(updated["opus"], "glm-5.2");
+        assert_eq!(updated["haiku"], "glm-5.2");
         let fetched: serde_json::Value = client
-            .get(format!("{root}/dashboard/api/claude-desktop/models"))
+            .get(format!("{root}/dashboard/api/v3/claude-desktop/models"))
             .send()
             .await
             .expect("dashboard models request should complete")
             .json()
             .await
             .expect("dashboard models response should be JSON");
-        assert_eq!(fetched, updated);
+        assert_eq!(fetched["sonnet"], updated["sonnet"]);
+        assert_eq!(fetched["opus"], updated["opus"]);
+        assert_eq!(fetched["haiku"], updated["haiku"]);
 
         let _ = handle.shutdown.send(());
         handle.task.await.expect("test gateway should stop");

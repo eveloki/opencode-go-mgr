@@ -1,7 +1,8 @@
 //! Dashboard V3 HTTP contract kernel.
 //!
-//! Mounted at `/dashboard/api/v3` beside the unchanged V2 `/dashboard/api`
-//! router. This module owns the shared DTO / error / CAS envelope, process
+//! Mounted at `/dashboard/api/v3` beside the retired V2 REST tombstone and the
+//! preserved V2 auth/browser-WebSocket routes. This module owns the shared DTO
+//! / error / CAS envelope, process
 //! generation, public auth/session issuance, connection/settings reads, the settings write path,
 //! access-key lifecycle, the local accounts control plane including connection
 //! verify, local account usage calibration, official Go usage refresh, and

@@ -569,32 +569,46 @@ async fn dashboard_v3_v2_write_conflicts_on_pricing_revision_without_bumping_u64
     let harness = start_loopback("pricing-v2-write").await;
     let (revision, generation, pricing_revision) = cas_tokens(&harness);
 
-    let v2 = harness
-        .client
-        .put(format!("{}/pricing/multipliers", harness.v2_base))
-        .json(&json!({
-            "expected_revision": pricing_revision,
-            "multipliers": [{ "model_id": "grok-4.5", "multiplier": 3.25 }]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::OK);
-    let v2_body: Value = v2.json().await.unwrap();
-    let v2_pricing_revision = v2_body["revision"].as_str().unwrap().to_string();
-    assert_ne!(v2_pricing_revision, pricing_revision);
+    harness
+        .assert_v2_path_removed(
+            Method::PUT,
+            "/pricing/multipliers",
+            Some(json!({
+                "expected_revision": pricing_revision,
+                "multipliers": [{ "model_id": "grok-4.5", "multiplier": 3.25 }]
+            })),
+        )
+        .await;
     assert_eq!(harness.state.settings_revision(), revision);
+    assert_eq!(harness.state.pricing_snapshot().revision, pricing_revision);
+
+    let (status, written) = send_json(
+        &harness,
+        Method::PUT,
+        "/pricing/multipliers",
+        &json!({
+            "expectedRevision": revision,
+            "processGeneration": generation,
+            "expectedPricingRevision": pricing_revision,
+            "multipliers": [{ "modelId": "grok-4.5", "multiplier": 3.25 }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    let written_pricing_revision = written["pricingRevision"].as_str().unwrap().to_string();
+    assert_ne!(written_pricing_revision, pricing_revision);
+    assert_eq!(harness.state.settings_revision(), revision + 1);
     assert_eq!(
         harness.state.pricing_snapshot().revision,
-        v2_pricing_revision
+        written_pricing_revision
     );
 
     let (status, v3) = harness
         .get_json(&format!("{}/pricing", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{v3}");
-    assert_eq!(v3["revision"], revision);
-    assert_eq!(v3["pricingRevision"], v2_pricing_revision);
+    assert_eq!(v3["revision"], revision + 1);
+    assert_eq!(v3["pricingRevision"], written_pricing_revision);
     let grok = v3["models"]
         .as_array()
         .unwrap()
@@ -617,11 +631,11 @@ async fn dashboard_v3_v2_write_conflicts_on_pricing_revision_without_bumping_u64
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_v3_error(&body, ERROR_REVISION_CONFLICT);
-    assert_eq!(body["currentRevision"], revision);
-    assert_eq!(harness.state.settings_revision(), revision);
+    assert_eq!(body["currentRevision"], revision + 1);
+    assert_eq!(harness.state.settings_revision(), revision + 1);
     assert_eq!(
         harness.state.pricing_snapshot().revision,
-        v2_pricing_revision
+        written_pricing_revision
     );
 
     harness.stop();
@@ -718,25 +732,9 @@ async fn dashboard_v3_successful_multiplier_write_bumps_both_once() {
     );
     assert_snapshot_shape(&body, &harness);
 
-    let v2 = harness
-        .client
-        .get(format!("{}/pricing", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::OK);
-    let v2_body: Value = v2.json().await.unwrap();
-    assert_eq!(v2_body["revision"], body["pricingRevision"]);
-    assert!(v2_body.get("processGeneration").is_none());
-    assert!(v2_body.get("pricingRevision").is_none());
-    assert!(
-        v2_body["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|model| model["model_id"] == "qwen3.7-plus")
-            .all(|model| model["quota_multiplier"] == 0.75)
-    );
+    harness
+        .assert_v2_path_removed(Method::GET, "/pricing", None)
+        .await;
 
     harness.stop();
 }
@@ -1024,18 +1022,13 @@ async fn dashboard_v3_provider_scoped_pricing_follows_catalog_facts() {
     assert_v3_error(&missing, ERROR_NOT_FOUND);
     assert_eq!(missing["currentRevision"], revision);
 
-    let v2_goat = harness
-        .client
-        .get(format!(
-            "{}/providers/{COMMAND_CODE_PROVIDER_ID}/{GOAT_OFFERING_ID}/pricing",
-            harness.v2_base
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_goat.status(), StatusCode::OK);
-    let v2_goat: Value = v2_goat.json().await.unwrap();
-    assert_eq!(v2_goat["availability"], "unavailable");
+    harness
+        .assert_v2_path_removed(
+            Method::GET,
+            &format!("/providers/{COMMAND_CODE_PROVIDER_ID}/{GOAT_OFFERING_ID}/pricing"),
+            None,
+        )
+        .await;
 
     harness.stop();
 }

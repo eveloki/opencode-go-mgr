@@ -682,23 +682,18 @@ async fn dashboard_v3_proxy_test_coexists_with_v2() {
     });
 
     let before = snapshot_config(&harness);
-    let v2 = harness
-        .client
-        .post(format!("{}/settings/test-proxy", harness.v2_base))
-        .json(&json!({
-            "proxy_mode": "direct",
-            "proxy_url": "",
-            "upstream_base_url": format!("http://{address}")
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::OK);
-    let v2_body: Value = v2.json().await.unwrap();
-    assert_eq!(v2_body["status"], 418);
-    assert_eq!(v2_body["proxy_mode"], "direct");
-    assert!(v2_body.get("processGeneration").is_none());
-    assert_eq!(*v2_hits.lock().unwrap(), 1);
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings/test-proxy",
+            Some(json!({
+                "proxy_mode": "direct",
+                "proxy_url": "",
+                "upstream_base_url": format!("http://{address}")
+            })),
+        )
+        .await;
+    assert_eq!(*v2_hits.lock().unwrap(), 0);
     assert_unmutated(&harness, &before);
 
     #[cfg(debug_assertions)]
@@ -719,7 +714,7 @@ async fn dashboard_v3_proxy_test_coexists_with_v2() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_v3_error(&body, ERROR_INVALID_JSON);
         assert_eq!(origin.call_count(), 0);
-        assert_eq!(*v2_hits.lock().unwrap(), 1);
+        assert_eq!(*v2_hits.lock().unwrap(), 0);
 
         let (status, body) = post_json(&harness, &json!({ "proxyMode": "direct" })).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -727,7 +722,7 @@ async fn dashboard_v3_proxy_test_coexists_with_v2() {
         assert_eq!(body["revision"], before.0);
         assert_eq!(body["processGeneration"], before.1);
         assert_eq!(origin.call_count(), 1);
-        assert_eq!(*v2_hits.lock().unwrap(), 1);
+        assert_eq!(*v2_hits.lock().unwrap(), 0);
         assert_unmutated(&harness, &before);
     }
 

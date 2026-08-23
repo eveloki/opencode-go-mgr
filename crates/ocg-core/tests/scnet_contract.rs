@@ -26,8 +26,11 @@ use std::sync::Arc;
 
 #[path = "fixtures/v2/harness.rs"]
 mod harness;
+#[path = "fixtures/legacy_dashboard.rs"]
+mod legacy_dashboard;
 
 use harness::*;
+use legacy_dashboard::LegacyDashboardHandle;
 
 const SNAPSHOT_FIXTURE: &str =
     include_str!("fixtures/scnet/token_plan_usable_models_2026-08-21.json");
@@ -201,6 +204,7 @@ async fn catalog_identifies_snapshot_with_empty_aliases() {
 #[tokio::test]
 async fn create_stays_disabled_pending_and_lifecycle_fail_closed() {
     let harness = V2Harness::start_with_chat_success(&[SCNET_ACCOUNT_KEY]).await;
+    let legacy = LegacyDashboardHandle::start(harness.state.clone()).await;
     let catalog = harness.catalog().await;
 
     for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
@@ -262,9 +266,15 @@ async fn create_stays_disabled_pending_and_lifecycle_fail_closed() {
             "verify must stay 501: {body}"
         );
 
-        let (status, body) = harness
-            .post_json(&format!("/accounts/{id}/test"), &json!({}))
-            .await;
+        let response = harness
+            .client
+            .post(legacy.url(&format!("/accounts/{id}/test")))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
         assert_eq!(
             status,
             StatusCode::CONFLICT,
@@ -272,7 +282,7 @@ async fn create_stays_disabled_pending_and_lifecycle_fail_closed() {
         );
 
         let (status, usage) = harness
-            .get_json(&format!("/providers/accounts/{id}/usage"))
+            .get_json(&format!("/accounts/{id}/provider-usage"))
             .await;
         assert_eq!(status, StatusCode::OK, "{usage}");
         assert_eq!(usage["availability"], "unavailable", "{usage}");
@@ -305,6 +315,7 @@ async fn create_stays_disabled_pending_and_lifecycle_fail_closed() {
         "Token Plan lifecycle must not call upstream: {:?}",
         harness.fake_call_keys()
     );
+    legacy.stop().await;
     harness.shutdown();
 }
 

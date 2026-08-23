@@ -1690,18 +1690,7 @@ async fn dashboard_v3_account_mutations_coexist_with_v2() {
         .send()
         .await
         .unwrap();
-    assert_eq!(v2_created.status(), StatusCode::OK);
-    let v2_created: Value = v2_created.json().await.unwrap();
-    let v2_id = v2_created["id"].as_str().unwrap().to_string();
-    assert_eq!(v2_created["key"], "");
-
-    let (status, listed) = harness
-        .get_json(&format!("{}/accounts", harness.v3_base))
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_secret_free(&listed, &["sk-v2-secret"]);
-    let listed = parse_list(&listed);
-    assert!(listed.accounts.iter().any(|account| account.id == v2_id));
+    V3Harness::assert_v2_removed(v2_created.status(), &v2_created.json().await.unwrap());
 
     let (status, created) = send_json(
         &harness,
@@ -1711,7 +1700,7 @@ async fn dashboard_v3_account_mutations_coexist_with_v2() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    assert_secret_free(&created, &["sk-v2-secret", "sk-v3-secret"]);
+    assert_secret_free(&created, &["sk-v3-secret"]);
     let v3_id = mutation_account(&created).id;
 
     let v2_list = harness
@@ -1719,18 +1708,8 @@ async fn dashboard_v3_account_mutations_coexist_with_v2() {
         .get(format!("{}/accounts", harness.v2_base))
         .send()
         .await
-        .unwrap()
-        .json::<Value>()
-        .await
         .unwrap();
-    assert!(v2_list.as_array().is_some(), "V2 list stays an array");
-    assert!(
-        v2_list
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|account| account["id"] == v3_id && account["key"] == "")
-    );
+    V3Harness::assert_v2_removed(v2_list.status(), &v2_list.json().await.unwrap());
 
     let v2_toggle = harness
         .client
@@ -1738,12 +1717,22 @@ async fn dashboard_v3_account_mutations_coexist_with_v2() {
         .send()
         .await
         .unwrap();
-    assert_eq!(v2_toggle.status(), StatusCode::OK);
+    V3Harness::assert_v2_removed(v2_toggle.status(), &v2_toggle.json().await.unwrap());
     let (status, detail) = harness
         .get_json(&format!("{}/accounts/{v3_id}", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!parse_account(&detail).enabled);
+    assert!(parse_account(&detail).enabled);
+
+    let (status, toggled) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/accounts/{v3_id}/toggle"),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{toggled}");
+    assert!(!mutation_account(&toggled).enabled);
 
     harness.stop();
 }

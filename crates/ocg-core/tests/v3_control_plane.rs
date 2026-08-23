@@ -89,17 +89,19 @@ async fn dashboard_cas_is_not_shared_with_cli_or_tauri_shaped_db_writes() {
         .await
         .unwrap();
     let client = loopback_client();
-    let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
+    let base = format!("http://127.0.0.1:{}/dashboard/api/v3", handle.port);
     let revision_after_config = state.settings_revision();
+    let generation = state.process_generation();
 
     let created: serde_json::Value = client
         .post(format!("{base}/accounts"))
         .json(&json!({
-            "provider_id": OPENCODE_PROVIDER_ID,
-            "offering_id": GO_OFFERING_ID,
+            "expectedRevision": revision_after_config,
+            "processGeneration": generation,
+            "providerId": OPENCODE_PROVIDER_ID,
+            "offeringId": GO_OFFERING_ID,
             "name": "dashboard-go",
-            "key": "sk-dashboard",
-            "expected_revision": revision_after_config
+            "key": "sk-dashboard"
         }))
         .send()
         .await
@@ -110,16 +112,17 @@ async fn dashboard_cas_is_not_shared_with_cli_or_tauri_shaped_db_writes() {
     let dashboard_revision = created["revision"].as_u64().unwrap();
     assert_eq!(dashboard_revision, revision_after_config + 1);
     assert_eq!(state.settings_revision(), dashboard_revision);
-    assert_eq!(created["enabled"], true);
+    assert_eq!(created["account"]["enabled"], true);
 
     let stale = client
         .post(format!("{base}/accounts"))
         .json(&json!({
-            "provider_id": OPENCODE_PROVIDER_ID,
-            "offering_id": GO_OFFERING_ID,
+            "expectedRevision": revision_after_config,
+            "processGeneration": generation,
+            "providerId": OPENCODE_PROVIDER_ID,
+            "offeringId": GO_OFFERING_ID,
             "name": "stale-go",
-            "key": "sk-stale",
-            "expected_revision": revision_after_config
+            "key": "sk-stale"
         }))
         .send()
         .await
@@ -142,8 +145,9 @@ async fn dashboard_cas_is_not_shared_with_cli_or_tauri_shaped_db_writes() {
     let still_current = client
         .patch(format!("{base}/accounts/cli-go"))
         .json(&json!({
-            "name": "cli-go-renamed",
-            "expected_revision": before_cli
+            "expectedRevision": before_cli,
+            "processGeneration": state.process_generation(),
+            "name": "cli-go-renamed"
         }))
         .send()
         .await
@@ -263,24 +267,25 @@ async fn dashboard_custom_create_stays_disabled_pending_unlike_tauri_shaped_db_c
         .await
         .unwrap();
     let client = loopback_client();
-    let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
+    let base = format!("http://127.0.0.1:{}/dashboard/api/v3", handle.port);
     let revision = state.settings_revision();
 
     let response = client
         .post(format!("{base}/accounts"))
         .json(&json!({
-            "provider_id": CUSTOM_PROVIDER_ID,
-            "offering_id": CUSTOM_API_OFFERING_ID,
+            "expectedRevision": revision,
+            "processGeneration": state.process_generation(),
+            "providerId": CUSTOM_PROVIDER_ID,
+            "offeringId": CUSTOM_API_OFFERING_ID,
             "name": "dash-custom",
             "key": "custom-key",
-            "expected_revision": revision,
-            "custom_config": {
-                "base_url": "http://127.0.0.1:1",
-                "upstream_protocol": "chat_completions",
-                "auth_scheme": "bearer"
+            "customConfig": {
+                "baseUrl": "http://127.0.0.1:1",
+                "upstreamProtocol": "chat_completions",
+                "authScheme": "bearer"
             },
-            "model_capabilities": [{
-                "model_id": "dash-custom-model",
+            "modelCapabilities": [{
+                "modelId": "dash-custom-model",
                 "protocol": "chat_completions"
             }]
         }))
@@ -289,8 +294,11 @@ async fn dashboard_custom_create_stays_disabled_pending_unlike_tauri_shaped_db_c
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["enabled"], false, "{body}");
-    assert_eq!(body["verification_status"].as_str(), Some("pending"));
+    assert_eq!(body["account"]["enabled"], false, "{body}");
+    assert_eq!(
+        body["account"]["verificationStatus"].as_str(),
+        Some("pending")
+    );
     assert_eq!(state.settings_revision(), revision + 1);
 
     gateway::stop_gateway(handle);

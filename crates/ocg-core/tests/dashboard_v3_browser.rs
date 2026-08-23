@@ -1546,10 +1546,7 @@ async fn dashboard_v3_browser_coexists_with_v2() {
         .send()
         .await
         .unwrap();
-    assert_eq!(v2_caps.status(), StatusCode::OK);
-    let v2_caps: Value = v2_caps.json().await.unwrap();
-    assert_eq!(v2_caps["mode"], "native");
-    assert!(v2_caps.get("processGeneration").is_none());
+    V3Harness::assert_v2_removed(v2_caps.status(), &v2_caps.json().await.unwrap());
 
     let v3_caps = harness
         .get_json(&format!("{}/browser/capabilities", harness.v3_base))
@@ -1566,11 +1563,8 @@ async fn dashboard_v3_browser_coexists_with_v2() {
         .send()
         .await
         .unwrap();
-    assert_eq!(v2_open.status(), StatusCode::OK);
-    let v2_open: Value = v2_open.json().await.unwrap();
-    assert_eq!(v2_open["mode"], "native");
-    assert!(v2_open.get("session_token").is_none() || v2_open["session_token"].is_null());
-    assert_eq!(launches.load(Ordering::SeqCst), 1);
+    V3Harness::assert_v2_removed(v2_open.status(), &v2_open.json().await.unwrap());
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
 
     let v3_open = send_json(
         &harness,
@@ -1581,7 +1575,7 @@ async fn dashboard_v3_browser_coexists_with_v2() {
     .await;
     assert_eq!(v3_open.0, StatusCode::OK, "{}", v3_open.1);
     assert_eq!(v3_open.1["sessionToken"], Value::Null);
-    assert_eq!(launches.load(Ordering::SeqCst), 2);
+    assert_eq!(launches.load(Ordering::SeqCst), 1);
 
     let profile = browser_profile_paths(&harness.state.data_dir(), &account_id).unwrap()[0].clone();
     std::fs::create_dir_all(&profile).unwrap();
@@ -1595,9 +1589,9 @@ async fn dashboard_v3_browser_coexists_with_v2() {
         .send()
         .await
         .unwrap();
-    assert_eq!(v2_reset.status(), StatusCode::OK);
-    assert!(!profile.exists());
-    assert_eq!(stops.load(Ordering::SeqCst), 1);
+    V3Harness::assert_v2_removed(v2_reset.status(), &v2_reset.json().await.unwrap());
+    assert!(profile.exists());
+    assert_eq!(stops.load(Ordering::SeqCst), 0);
 
     std::fs::create_dir_all(&profile).unwrap();
     std::fs::write(profile.join("Cookies"), b"v3 reset").unwrap();
@@ -1610,7 +1604,30 @@ async fn dashboard_v3_browser_coexists_with_v2() {
     .await;
     assert_eq!(v3_reset.0, StatusCode::OK, "{}", v3_reset.1);
     assert!(!profile.exists());
-    assert_eq!(stops.load(Ordering::SeqCst), 2);
+    assert_eq!(stops.load(Ordering::SeqCst), 1);
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::CONNECTION, "Upgrade".parse().unwrap());
+    headers.insert(reqwest::header::UPGRADE, "websocket".parse().unwrap());
+    headers.insert("Sec-WebSocket-Version", "13".parse().unwrap());
+    headers.insert(
+        "Sec-WebSocket-Key",
+        "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap(),
+    );
+    let v2_ws = harness
+        .client
+        .get(format!(
+            "{}/browser/sessions/opaque-token/ws",
+            harness.v2_base
+        ))
+        .headers(headers)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(v2_ws.status(), StatusCode::BAD_REQUEST);
+    let v2_ws_body: Value = v2_ws.json().await.unwrap();
+    assert_eq!(v2_ws_body["error"], "browser WebSocket Origin is required");
+    assert_ne!(v2_ws_body["code"], "dashboardV2Removed");
 
     harness.stop();
 }

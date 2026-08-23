@@ -42,45 +42,26 @@ fn go_success_replies(keys: &[&str]) -> HashMap<String, VecDeque<FakeReply>> {
 
 async fn reorder_account_first(harness: &V2Harness, account_id: &str) {
     let mut account_ids = harness
-        .client
-        .get(harness.dashboard("/accounts"))
-        .send()
+        .accounts()
         .await
-        .unwrap()
-        .json::<Vec<Value>>()
-        .await
-        .unwrap()
+        .as_array()
         .into_iter()
+        .flatten()
         .filter_map(|account| account["id"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
     account_ids.sort_by_key(|id| if id == account_id { 0 } else { 1 });
-    let response = harness
-        .client
-        .put(harness.dashboard("/accounts/order"))
-        .json(&json!({
-            "account_ids": account_ids,
-            "expected_revision": harness.settings_revision().await
-        }))
-        .send()
-        .await
-        .unwrap();
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let (status, body) = harness
+        .put_json("/accounts/order", &json!({ "account_ids": account_ids }))
+        .await;
     assert_eq!(status, StatusCode::OK, "account reorder failed: {body}");
 }
 
-/// Catalog is the one Plan source. `/providers` must not diverge.
+/// Catalog is the one Plan source. Dashboard V3 `GET /providers` is that list.
 #[tokio::test]
 async fn providers_catalog_is_the_only_plan_source() {
     let harness = V2Harness::start().await;
-    let (catalog_status, catalog) = harness.get_json("/providers/catalog").await;
-    let (compat_status, compat) = harness.get_json("/providers").await;
+    let (catalog_status, catalog) = harness.get_json("/providers").await;
     assert_eq!(catalog_status, StatusCode::OK, "{catalog}");
-    assert_eq!(compat_status, StatusCode::OK, "{compat}");
-    assert_eq!(
-        catalog, compat,
-        "GET /providers must be the same Plan catalog as /providers/catalog"
-    );
     let entries = catalog
         .as_array()
         .expect("catalog must be a JSON array of Plan entries");

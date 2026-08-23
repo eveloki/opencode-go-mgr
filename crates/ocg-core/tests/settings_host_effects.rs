@@ -621,24 +621,16 @@ async fn v2_and_v3_map_unsupported_and_sync_errors_without_shape_drift() {
 
     let mut unsupported = harness.state.config();
     unsupported.auto_start = true;
-    let v2 = harness
-        .client
-        .post(format!("{}/settings", harness.v2_base))
-        .json(&v2_payload(
-            &unsupported,
-            Some(harness.state.settings_revision()),
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::BAD_REQUEST);
-    let v2_body: Value = v2.json().await.unwrap();
-    assert_eq!(
-        v2_body["error"].as_str(),
-        Some(HostSettingsError::AUTO_START_UNAVAILABLE)
-    );
-    assert!(v2_body.get("code").is_none());
-    assert!(v2_body.get("currentRevision").is_none());
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings",
+            Some(v2_payload(
+                &unsupported,
+                Some(harness.state.settings_revision()),
+            )),
+        )
+        .await;
     assert_eq!(harness.state.settings_revision(), before);
     assert!(!harness.state.config().auto_start);
 
@@ -657,19 +649,13 @@ async fn v2_and_v3_map_unsupported_and_sync_errors_without_shape_drift() {
 
     let mut unsupported_dock = harness.state.config();
     unsupported_dock.show_dock_icon = false;
-    let v2 = harness
-        .client
-        .post(format!("{}/settings", harness.v2_base))
-        .json(&v2_payload(&unsupported_dock, None))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::BAD_REQUEST);
-    let v2_body: Value = v2.json().await.unwrap();
-    assert_eq!(
-        v2_body["error"].as_str(),
-        Some(HostSettingsError::DOCK_VISIBILITY_UNAVAILABLE)
-    );
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings",
+            Some(v2_payload(&unsupported_dock, None)),
+        )
+        .await;
     assert_eq!(harness.state.settings_revision(), before);
     assert!(harness.state.config().show_dock_icon);
 
@@ -689,24 +675,18 @@ async fn v2_and_v3_map_unsupported_and_sync_errors_without_shape_drift() {
     harness.state.set_auto_start_sync(fail_enable_auto_start);
     let mut failing = harness.state.config();
     failing.auto_start = true;
-    let v2 = harness
-        .client
-        .post(format!("{}/settings", harness.v2_base))
-        .json(&v2_payload(
-            &failing,
-            Some(harness.state.settings_revision()),
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let v2_body: Value = v2.json().await.unwrap();
-    assert_eq!(
-        v2_body["error"],
-        "failed to synchronize desktop settings: auto-start hook failed"
-    );
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings",
+            Some(v2_payload(
+                &failing,
+                Some(harness.state.settings_revision()),
+            )),
+        )
+        .await;
     assert!(!harness.state.config().auto_start);
-    assert_ne!(harness.state.settings_revision(), before);
+    assert_eq!(harness.state.settings_revision(), before);
     assert_eq!(harness.state.config().gateway_key, primary);
 
     let after_v2_fail = harness.state.settings_revision();
@@ -740,38 +720,36 @@ async fn v2_and_v3_successful_host_writes_preserve_cas_and_primary_key() {
 
     let mut v2_config = harness.state.config();
     v2_config.auto_start = true;
-    let v2 = harness
-        .client
-        .post(format!("{}/settings", harness.v2_base))
-        .json(&v2_payload(&v2_config, None))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::OK);
-    let v2_body: Value = v2.json().await.unwrap();
-    assert_eq!(v2_body["revision"], before + 1);
-    assert!(v2_body.get("processGeneration").is_none());
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings",
+            Some(v2_payload(&v2_config, None)),
+        )
+        .await;
+    assert!(!harness.state.config().auto_start);
+    assert_eq!(harness.state.settings_revision(), before);
+
+    let (status, body) =
+        put_json(&harness, &cas_patch(&harness, json!({ "autoStart": true }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["revision"], before + 1);
+    assert_eq!(body["processGeneration"], generation);
     assert!(harness.state.config().auto_start);
     assert_eq!(harness.state.config().gateway_key, primary);
     assert_eq!(
         dock.calls(),
         vec![true],
-        "V2 auto-start save must reassert the unchanged Dock hook"
+        "auto-start save must reassert the unchanged Dock hook"
     );
 
-    let stale = harness
-        .client
-        .post(format!("{}/settings", harness.v2_base))
-        .json(&v2_payload(&v2_config, Some(before)))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stale.status(), StatusCode::CONFLICT);
-    let stale_body: Value = stale.json().await.unwrap();
-    assert_eq!(
-        stale_body["error"],
-        "settings changed since they were loaded; reload and try again"
-    );
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings",
+            Some(v2_payload(&v2_config, Some(before))),
+        )
+        .await;
     assert_eq!(harness.state.settings_revision(), before + 1);
 
     let (status, body) = put_json(
@@ -830,16 +808,22 @@ async fn v2_and_v3_reassert_unchanged_supported_hooks_and_rollback_on_drift() {
 
     let mut v2_config = harness.state.config();
     v2_config.connect_timeout_secs = 12;
-    let v2 = harness
-        .client
-        .post(format!("{}/settings", harness.v2_base))
-        .json(&v2_payload(&v2_config, None))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::OK);
-    let v2_body: Value = v2.json().await.unwrap();
-    assert_eq!(v2_body["revision"], before + 1);
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings",
+            Some(v2_payload(&v2_config, None)),
+        )
+        .await;
+    assert_eq!(harness.state.settings_revision(), before);
+
+    let (status, body) = put_json(
+        &harness,
+        &cas_patch(&harness, json!({ "connectTimeoutSecs": 12 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["revision"], before + 1);
     assert_eq!(harness.state.config().connect_timeout_secs, 12);
     assert!(!harness.state.config().auto_start);
     assert!(harness.state.config().show_dock_icon);
@@ -863,20 +847,28 @@ async fn v2_and_v3_reassert_unchanged_supported_hooks_and_rollback_on_drift() {
     let after_success = harness.state.settings_revision();
     let mut failing = harness.state.config();
     failing.connect_timeout_secs = 14;
-    let v2 = harness
-        .client
-        .post(format!("{}/settings", harness.v2_base))
-        .json(&v2_payload(
-            &failing,
-            Some(harness.state.settings_revision()),
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let v2_body: Value = v2.json().await.unwrap();
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings",
+            Some(v2_payload(
+                &failing,
+                Some(harness.state.settings_revision()),
+            )),
+        )
+        .await;
+    assert_eq!(harness.state.config().connect_timeout_secs, 13);
+    assert_eq!(harness.state.settings_revision(), after_success);
+
+    let (status, body) = put_json(
+        &harness,
+        &cas_patch(&harness, json!({ "connectTimeoutSecs": 14 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["code"], ERROR_INTERNAL);
     assert_eq!(
-        v2_body["error"],
+        body["message"],
         "failed to synchronize desktop settings: auto-start hook failed"
     );
     assert_eq!(harness.state.config().connect_timeout_secs, 13);
@@ -1312,14 +1304,16 @@ async fn http_v2_and_v3_concurrent_port_changes_agree_on_configured_and_active_p
     let a_start = start.clone();
     let a = tokio::spawn(async move {
         a_start.wait().await;
-        let mut body = a_state.config();
-        body.gateway_port = first_port;
         a_client
-            .post(format!(
-                "http://127.0.0.1:{old_port}/dashboard/api/settings"
+            .put(format!(
+                "http://127.0.0.1:{old_port}/dashboard/api/v3/settings"
             ))
             .timeout(Duration::from_secs(5))
-            .json(&v2_payload(&body, None))
+            .json(&json!({
+                "expectedRevision": a_state.settings_revision(),
+                "processGeneration": a_state.process_generation(),
+                "gatewayPort": first_port,
+            }))
             .send()
             .await
             .unwrap()

@@ -182,17 +182,22 @@ async fn dashboard_v3_connection_exposes_primary_key_and_settings_does_not() {
     let harness = start_loopback("settings-secrets").await;
     let created = harness
         .client
-        .post(format!("{}/settings/keys", harness.v2_base))
-        .json(&json!({
-            "name": "Laptop",
-            "expected_revision": harness.state.settings_revision()
-        }))
+        .post(format!("{}/keys", harness.v3_base))
+        .json(&cas_patch(&harness, json!({ "name": "Laptop" })))
         .send()
         .await
         .unwrap();
     assert_eq!(created.status(), StatusCode::OK);
     let created: Value = created.json().await.unwrap();
-    let sub_value = created["key"].as_str().unwrap().to_string();
+    assert_eq!(created["revision"], harness.state.settings_revision());
+    let (status, connection_for_secret) = harness
+        .get_json(&format!("{}/connection", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{connection_for_secret}");
+    let sub_value = connection_for_secret["subKeys"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let primary = harness.state.config().gateway_key.clone();
     assert!(!primary.is_empty());
     assert!(!sub_value.is_empty());
@@ -490,18 +495,11 @@ async fn dashboard_v3_list_proxy_write_validates_then_dedupes_known_ids() {
 async fn dashboard_v3_settings_write_coexists_with_v2_wire() {
     let harness = start_loopback("settings-v2-coexist").await;
 
-    let v2_before = harness
-        .client
-        .get(format!("{}/settings", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_before.status(), StatusCode::OK);
-    let v2_before: Value = v2_before.json().await.unwrap();
-    let primary = v2_before["gateway_key"].as_str().unwrap().to_string();
+    let primary = harness.state.config().gateway_key.clone();
     assert!(!primary.is_empty());
-    assert!(v2_before.get("connect_timeout_secs").is_some());
-    assert!(v2_before.get("connectTimeoutSecs").is_none());
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/settings", None)
+        .await;
 
     let (status, _) = put_json(
         &harness,
@@ -510,31 +508,30 @@ async fn dashboard_v3_settings_write_coexists_with_v2_wire() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let v3_revision = harness.state.settings_revision();
+    assert_eq!(harness.state.config().connect_timeout_secs, 21);
 
-    let v2_after = harness
-        .client
-        .get(format!("{}/settings", harness.v2_base))
-        .send()
-        .await
-        .unwrap()
-        .json::<Value>()
-        .await
-        .unwrap();
-    assert_eq!(v2_after["connect_timeout_secs"], 21);
-    assert_eq!(v2_after["revision"], v3_revision);
-    assert_eq!(v2_after["gateway_key"], primary);
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/settings", None)
+        .await;
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::POST,
+            "/settings",
+            Some(json!({
+                "connect_timeout_secs": 22,
+                "expected_revision": v3_revision
+            })),
+        )
+        .await;
+    assert_eq!(harness.state.config().connect_timeout_secs, 21);
+    assert_eq!(harness.state.settings_revision(), v3_revision);
 
-    let mut v2_payload = v2_after.clone();
-    v2_payload["connect_timeout_secs"] = json!(22);
-    v2_payload["expected_revision"] = json!(v3_revision);
-    let v2_write = harness
-        .client
-        .post(format!("{}/settings", harness.v2_base))
-        .json(&v2_payload)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_write.status(), StatusCode::OK);
+    let (status, _) = put_json(
+        &harness,
+        &cas_patch(&harness, json!({ "connectTimeoutSecs": 22 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(harness.state.config().connect_timeout_secs, 22);
     assert_eq!(harness.state.settings_revision(), v3_revision + 1);
 

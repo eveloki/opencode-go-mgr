@@ -358,7 +358,7 @@ async fn first_register_issues_cookie_and_authorizes_protected_v3() {
         .send()
         .await
         .unwrap();
-    assert_eq!(v2.status(), StatusCode::OK);
+    V3Harness::assert_v2_removed(v2.status(), &v2.json().await.unwrap());
 
     harness.stop();
 }

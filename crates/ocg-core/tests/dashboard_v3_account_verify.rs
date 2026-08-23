@@ -1142,13 +1142,7 @@ async fn v2_account_verify_coexists_and_keeps_its_shape() {
         .send()
         .await
         .unwrap();
-    assert_eq!(v2_goat.status(), StatusCode::NOT_IMPLEMENTED);
-    let v2_goat_body = v2_goat.text().await.unwrap();
-    assert!(
-        v2_goat_body.contains("error"),
-        "V2 501 must keep the V2 error shape: {v2_goat_body}"
-    );
-    assert!(!v2_goat_body.contains("processGeneration"));
+    V3Harness::assert_v2_removed(v2_goat.status(), &v2_goat.json().await.unwrap());
 
     let (status, v3_goat) = send_json(
         &harness,
@@ -1167,13 +1161,20 @@ async fn v2_account_verify_coexists_and_keeps_its_shape() {
         .send()
         .await
         .unwrap();
-    assert_eq!(v2_custom.status(), StatusCode::OK);
-    let v2_custom: Value = v2_custom.json().await.unwrap();
-    assert_eq!(v2_custom["verification_status"], "verified");
-    assert_eq!(v2_custom["enabled"], false);
-    assert!(v2_custom.get("processGeneration").is_none());
-    assert!(v2_custom.as_object().unwrap().contains_key("key"));
-    assert_eq!(v2_custom["key"], "");
+    V3Harness::assert_v2_removed(v2_custom.status(), &v2_custom.json().await.unwrap());
+    let (status, v3_custom) = send_json(
+        &harness,
+        Method::POST,
+        &verify_path(&custom_id),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v3_custom}");
+    assert_eq!(
+        mutation_account(&v3_custom).verification_status,
+        ocg_core::dashboard_v3::AccountVerificationStatus::Verified
+    );
+    assert!(!mutation_account(&v3_custom).enabled);
     harness.stop();
 }
 

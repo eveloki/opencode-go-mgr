@@ -5,9 +5,10 @@
 use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
 use ocg_core::db::Database;
 use ocg_core::gateway;
+use ocg_core::host_router::{DASHBOARD_V2_REMOVED_CODE, DASHBOARD_V2_REMOVED_MESSAGE};
 use ocg_core::state::{CoreStateInner, GatewayHandle};
 use reqwest::StatusCode;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -78,6 +79,35 @@ impl V3Harness {
         let status = response.status();
         let body = response.json().await.unwrap_or(Value::Null);
         (status, body)
+    }
+
+    pub fn assert_v2_removed(status: StatusCode, body: &Value) {
+        assert_eq!(status, StatusCode::GONE, "{body}");
+        assert_eq!(
+            body,
+            &json!({
+                "code": DASHBOARD_V2_REMOVED_CODE,
+                "message": DASHBOARD_V2_REMOVED_MESSAGE,
+            })
+        );
+    }
+
+    pub async fn assert_v2_path_removed(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) {
+        let mut request = self
+            .client
+            .request(method, format!("{}{path}", self.v2_base));
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.unwrap();
+        let status = response.status();
+        let body = response.json().await.unwrap_or(Value::Null);
+        Self::assert_v2_removed(status, &body);
     }
 
     pub fn stop(self) {

@@ -408,66 +408,49 @@ async fn dashboard_v3_and_v2_observability_coexist_with_stable_v2_shapes() {
         .log_forward(&forward_log("acct-go", "glm-5.2", Some(1.25), "priced"))
         .unwrap();
 
-    let (v2_status, v2_models) = harness
-        .get_json(&format!("{}/application-models", harness.v2_base))
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/application-models", None)
         .await;
     let (v3_status, v3_models) = harness
         .get_json(&format!("{}/application-models", harness.v3_base))
         .await;
-    assert_eq!(v2_status, StatusCode::OK);
     assert_eq!(v3_status, StatusCode::OK);
-    assert!(
-        v2_models.as_array().is_some(),
-        "V2 must stay a JSON array: {v2_models}"
-    );
-    assert_eq!(v3_models["models"], v2_models);
+    assert!(v3_models["models"].as_array().is_some(), "{v3_models}");
     assert_snapshot_tokens(&v3_models, &harness);
 
-    let (v2_status, v2_gateway) = harness
-        .get_json(&format!("{}/gateway/status", harness.v2_base))
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/gateway/status", None)
         .await;
     let (v3_status, v3_gateway) = harness
         .get_json(&format!("{}/gateway/status", harness.v3_base))
         .await;
-    assert_eq!(v2_status, StatusCode::OK);
     assert_eq!(v3_status, StatusCode::OK);
-    assert_eq!(v2_gateway["key"], harness.state.config().gateway_key);
     assert_eq!(
-        v2_gateway["upstream_base_url"],
-        v3_gateway["upstreamBaseUrl"]
+        v3_gateway["upstreamBaseUrl"],
+        harness.state.config().upstream_base_url
     );
-    assert_eq!(v2_gateway["running"], v3_gateway["running"]);
-    assert_eq!(v2_gateway["port"], v3_gateway["port"]);
     assert!(v3_gateway.get("key").is_none());
     assert!(v3_gateway.get("upstream_base_url").is_none());
 
-    let (v2_status, v2_summary) = harness
-        .get_json(&format!("{}/dashboard/summary", harness.v2_base))
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/dashboard/summary", None)
         .await;
     let (v3_status, v3_summary) = harness
         .get_json(&format!("{}/dashboard/summary", harness.v3_base))
         .await;
-    assert_eq!(v2_status, StatusCode::OK);
     assert_eq!(v3_status, StatusCode::OK);
-    assert_eq!(v2_summary["total_accounts"], v3_summary["totalAccounts"]);
-    assert_eq!(
-        v2_summary["available_accounts"],
-        v3_summary["availableAccounts"]
-    );
-    assert_eq!(v2_summary["today_cost"], v3_summary["todayCost"]);
-    assert_eq!(v2_summary["week_cost"], v3_summary["weekCost"]);
-    assert_eq!(v2_summary["month_cost"], v3_summary["monthCost"]);
     assert!(v3_summary.get("total_accounts").is_none());
     let parsed: DashboardSummary = serde_json::from_value(v3_summary).unwrap();
     assert!(parsed.total_accounts >= 2);
     assert!(parsed.available_accounts >= 2);
     assert!((parsed.today_cost - 1.25).abs() < 1e-9);
 
-    let (v2_status, v2_daily) = harness
-        .get_json(&format!(
-            "{}/dashboard/daily-cost-by-model?days=30",
-            harness.v2_base
-        ))
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::GET,
+            "/dashboard/daily-cost-by-model?days=30",
+            None,
+        )
         .await;
     let (v3_status, v3_daily) = harness
         .get_json(&format!(
@@ -475,9 +458,7 @@ async fn dashboard_v3_and_v2_observability_coexist_with_stable_v2_shapes() {
             harness.v3_base
         ))
         .await;
-    assert_eq!(v2_status, StatusCode::OK);
     assert_eq!(v3_status, StatusCode::OK);
-    assert_eq!(v3_daily["items"], v2_daily);
     let daily: DailyCostByModel = serde_json::from_value(v3_daily).unwrap();
     assert_eq!(daily.items.len(), 1);
     assert_eq!(daily.items[0].model, "glm-5.2");
@@ -525,11 +506,9 @@ async fn dashboard_v3_application_models_empty_intersection_and_highspeed() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["models"], json!([]));
 
-    let (v2_status, v2_body) = harness
-        .get_json(&format!("{}/application-models", harness.v2_base))
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/application-models", None)
         .await;
-    assert_eq!(v2_status, StatusCode::OK);
-    assert_eq!(v2_body, json!([]));
 
     harness.stop();
 }
@@ -558,16 +537,13 @@ async fn dashboard_v3_summary_and_daily_cost_match_seeded_logs() {
         db.log_forward(&skipped).unwrap();
     }
 
-    let (v2_status, v2_summary) = harness
-        .get_json(&format!("{}/dashboard/summary", harness.v2_base))
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/dashboard/summary", None)
         .await;
     let (v3_status, v3_summary) = harness
         .get_json(&format!("{}/dashboard/summary", harness.v3_base))
         .await;
-    assert_eq!(v2_status, StatusCode::OK);
     assert_eq!(v3_status, StatusCode::OK, "{v3_summary}");
-    assert_eq!(v2_summary["today_cost"], v3_summary["todayCost"]);
-    assert_eq!(v2_summary["week_cost"], v3_summary["weekCost"]);
     assert!((v3_summary["todayCost"].as_f64().unwrap() - 3.0).abs() < 1e-9);
     assert!((v3_summary["weekCost"].as_f64().unwrap() - 6.0).abs() < 1e-9);
 
@@ -677,11 +653,12 @@ async fn dashboard_v3_gateway_and_forward_logs_paginate_filter_and_redact() {
             .contains(ACCOUNT_SECRET)
     );
 
-    let (v2_status, v2_page) = harness
-        .get_json(&format!(
-            "{}/logs/forward?limit=1&offset=0&status=success&account_id=selected",
-            harness.v2_base
-        ))
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::GET,
+            "/logs/forward?limit=1&offset=0&status=success&account_id=selected",
+            None,
+        )
         .await;
     let (v3_status, v3_page) = harness
         .get_json(&format!(
@@ -689,10 +666,7 @@ async fn dashboard_v3_gateway_and_forward_logs_paginate_filter_and_redact() {
             harness.v3_base
         ))
         .await;
-    assert_eq!(v2_status, StatusCode::OK);
     assert_eq!(v3_status, StatusCode::OK, "{v3_page}");
-    assert_eq!(v2_page["items"].as_array().unwrap().len(), 1);
-    assert_eq!(v2_page["summary"]["total_requests"], 1);
     assert_eq!(v3_page["items"].as_array().unwrap().len(), 1);
     assert_eq!(v3_page["summary"]["totalRequests"], 1);
     assert_eq!(v3_page["items"][0]["accountId"], "selected");
@@ -701,7 +675,6 @@ async fn dashboard_v3_gateway_and_forward_logs_paginate_filter_and_redact() {
     assert_eq!(v3_page["items"][0]["upstreamModel"], "glm-5.2-upstream");
     assert!(v3_page.get("requestedAlias").is_none());
     assert!(v3_page["items"][0].get("requestedAlias").is_none());
-    assert_eq!(v2_page["items"][0]["requested_model"], "GLM-5.2");
     assert_secret_free(&v3_page, &[ACCOUNT_SECRET]);
     let parsed: ForwardLogs = serde_json::from_value(v3_page).unwrap();
     assert_eq!(parsed.items[0].route, "proxy");
@@ -787,13 +760,12 @@ async fn dashboard_v3_forward_key_filters_keep_disabled_deleted_and_dangling_ide
         db.log_forward(&unattributed).unwrap();
     }
 
-    let (v2_status, v2_keys) = harness
-        .get_json(&format!("{}/logs/forward/keys", harness.v2_base))
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/logs/forward/keys", None)
         .await;
     let (v3_status, v3_keys) = harness
         .get_json(&format!("{}/logs/forward/keys", harness.v3_base))
         .await;
-    assert_eq!(v2_status, StatusCode::OK);
     assert_eq!(v3_status, StatusCode::OK, "{v3_keys}");
     let parsed: ForwardLogKeys = serde_json::from_value(v3_keys.clone()).unwrap();
     let ids: Vec<&str> = parsed.keys.iter().map(|key| key.id.as_str()).collect();
@@ -824,10 +796,7 @@ async fn dashboard_v3_forward_key_filters_keep_disabled_deleted_and_dangling_ide
             .name,
         "Ghost"
     );
-    assert_eq!(
-        v3_keys["keys"].as_array().unwrap().len(),
-        v2_keys.as_array().unwrap().len()
-    );
+    assert!(v3_keys["keys"].as_array().unwrap().len() >= 5);
     assert_secret_free(&v3_keys, &["ocg-enabled", "ocg-disabled"]);
 
     let (status, models) = harness

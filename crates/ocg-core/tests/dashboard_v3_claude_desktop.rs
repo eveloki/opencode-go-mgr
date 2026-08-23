@@ -775,20 +775,9 @@ async fn dashboard_v3_claude_desktop_coexists_with_v2() {
     let harness = start_loopback("claude-desktop-v2-coexist").await;
     let primary = harness.state.config().gateway_key.clone();
 
-    let v2_before = harness
-        .client
-        .get(format!("{}/claude-desktop/models", harness.v2_base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_before.status(), StatusCode::OK);
-    let v2_before: Value = v2_before.json().await.unwrap();
-    assert_eq!(
-        v2_before,
-        json!({"sonnet":"minimax-m3","opus":"minimax-m3","haiku":"minimax-m3"})
-    );
-    assert!(v2_before.get("revision").is_none());
-    assert!(v2_before.get("processGeneration").is_none());
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/claude-desktop/models", None)
+        .await;
 
     let (status, _) = put_json(
         &harness,
@@ -805,33 +794,31 @@ async fn dashboard_v3_claude_desktop_coexists_with_v2() {
     assert_eq!(status, StatusCode::OK);
     let v3_revision = harness.state.settings_revision();
 
-    let v2_after = harness
-        .client
-        .get(format!("{}/claude-desktop/models", harness.v2_base))
-        .send()
-        .await
-        .unwrap()
-        .json::<Value>()
-        .await
-        .unwrap();
-    assert_eq!(
-        v2_after,
-        json!({"sonnet":"glm-5.2","opus":"glm-5.2","haiku":"mimo-v2.5"})
-    );
+    harness
+        .assert_v2_path_removed(reqwest::Method::GET, "/claude-desktop/models", None)
+        .await;
+    harness
+        .assert_v2_path_removed(
+            reqwest::Method::PUT,
+            "/claude-desktop/models",
+            Some(json!({"sonnet":"","opus":"grok-4.5","haiku":""})),
+        )
+        .await;
+    assert_eq!(harness.state.settings_revision(), v3_revision);
 
-    let v2_put = harness
-        .client
-        .put(format!("{}/claude-desktop/models", harness.v2_base))
-        .json(&json!({"sonnet":"","opus":"grok-4.5","haiku":""}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(v2_put.status(), StatusCode::OK);
-    let v2_put: Value = v2_put.json().await.unwrap();
-    assert_eq!(
-        v2_put,
-        json!({"sonnet":"grok-4.5","opus":"grok-4.5","haiku":"grok-4.5"})
-    );
+    let (status, _) = put_json(
+        &harness,
+        &cas(
+            &harness,
+            json!({
+                "sonnet": "",
+                "opus": "grok-4.5",
+                "haiku": ""
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(harness.state.settings_revision(), v3_revision + 1);
 
     let (status, v3) = get_models(&harness).await;
