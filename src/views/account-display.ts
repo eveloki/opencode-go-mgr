@@ -1,4 +1,4 @@
-import type { Account, AccountSetupStep } from "../api/tauri";
+import type { Account, AccountSetupStep } from "../api/dashboard";
 import { isCooling, isFreeCooling, isWindowCooling } from "./accounts-usage.ts";
 import type { UsageKey } from "./accounts-usage.ts";
 import { daysUntilDate, expiryTagType } from "./account-lifecycle.ts";

@@ -1,4 +1,4 @@
-import type { Account } from "../api/tauri.ts";
+import type { Account } from "../api/dashboard.ts";
 import { isCooling, isFreeCooling } from "./accounts-usage.ts";
 import { daysUntilDate } from "./account-lifecycle.ts";
 import { isZenFreeAccount } from "./account-providers.ts";

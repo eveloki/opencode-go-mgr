@@ -1,0 +1,282 @@
+/**
+ * Explicit presentation client for the frozen Dashboard V3 contract.
+ *
+ * Every request is made by `dashboardV3`; each endpoint below projects only
+ * the fields the existing page needs. There is no V2 import, route fallback,
+ * recursive case conversion, or compatibility cast.
+ */
+export type * from "./dashboard-presenters.ts";
+
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
+import { isVersionAtLeast } from "../utils/version.ts";
+import type {
+  AccountCustomConfigUpdate,
+  AccountManagedCreate,
+  AccountModelCapabilitiesUpdate,
+  AccountSetupStep,
+  AccountUsageUpdate,
+  ClaudeDesktopModelsUpdate,
+  ForwardLogQuery as V3ForwardLogQuery,
+  ProxyTestRequest,
+} from "./generated/dashboard-v3.ts";
+import {
+  DASHBOARD_AUTH_REQUIRED_EVENT,
+  DASHBOARD_GONE_EVENT,
+  DashboardAuthError,
+  DashboardConflictError,
+  DashboardGoneError,
+  DashboardRequestError,
+  DashboardThrottledError,
+  PRIMARY_KEY_ID,
+  UNATTRIBUTED_KEY_FILTER,
+  browserSessionWebSocketUrl,
+  dashboardV3,
+  type WithoutExpectation,
+} from "./dashboard-v3.ts";
+import {
+  accountCreateInput,
+  accountUpdateInput,
+  presentAccount,
+  presentBrowserCapabilities,
+  presentBrowserOpen,
+  presentDailyModelCost,
+  presentDashboardSummary,
+  presentForwardLogs,
+  presentGatewayLog,
+  presentPricing,
+  presentPricingRefresh,
+  presentProxyTest,
+  presentSettings,
+  settingsUpdateInput,
+  presentUpdateCheck,
+  presentUpdateStatus,
+  presentUsage,
+  presentUsageRefresh,
+  type Account,
+  type AccountInput,
+  type AccountModelCapabilityInput,
+  type AccountProtocol,
+  type AccountUpdate,
+  type AppConfig,
+  type BrowserTarget,
+  type CustomModelDiscoveryInput,
+  type ForwardLogQuery,
+  type ManagedAccountInput,
+  type PricingMultiplierUpdate,
+  type PricingRefreshRequest,
+} from "./dashboard-presenters.ts";
+
+export {
+  DASHBOARD_AUTH_REQUIRED_EVENT,
+  DASHBOARD_GONE_EVENT,
+  DashboardAuthError,
+  DashboardConflictError,
+  DashboardGoneError,
+  DashboardRequestError,
+  DashboardThrottledError,
+  PRIMARY_KEY_ID,
+  UNATTRIBUTED_KEY_FILTER,
+  browserSessionWebSocketUrl,
+  isVersionAtLeast,
+};
+
+async function withCas<T>(
+  run: (expectation: { expectedRevision: number; processGeneration: number }) => Promise<T>,
+): Promise<T> {
+  const controlPlane = useControlPlaneStore();
+  if (!controlPlane.hasTokens()) await controlPlane.refresh();
+  return controlPlane.runMutation(run);
+}
+
+async function mutatedAccount(result: Promise<{ account: Parameters<typeof presentAccount>[0] | null }>): Promise<Account> {
+  const mutation = await result;
+  if (mutation.account === null) throw new Error("account mutation returned no account");
+  return presentAccount(mutation.account);
+}
+
+function forwardLogQuery(value: ForwardLogQuery): V3ForwardLogQuery {
+  return {
+    limit: value.limit,
+    offset: value.offset,
+    status: value.status,
+    accountId: value.account_id,
+    model: value.model,
+    requestId: value.request_id,
+    keyId: value.key_id,
+    providerId: value.provider_id,
+    offeringId: value.offering_id,
+    routeAccountId: value.route_account_id,
+    credentialAccountId: value.credential_account_id,
+    startTime: value.start_time,
+    endTime: value.end_time,
+    sortBy: value.sort_by,
+    sortOrder: value.sort_order,
+  };
+}
+
+export const dashboardApi = {
+  getAccounts: async (): Promise<Account[]> =>
+    (await dashboardV3.listAccounts()).accounts.map(presentAccount),
+
+  createAccount: (input: AccountInput): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.createAccount(accountCreateInput(input), expectation))),
+
+  createManagedAccount: (input: ManagedAccountInput): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.createManagedAccount({
+      name: input.name,
+      username: input.username,
+      notes: input.notes,
+    } satisfies WithoutExpectation<AccountManagedCreate>, expectation))),
+
+  updateAccount: (id: string, update: AccountUpdate): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.updateAccount(id, accountUpdateInput(update), expectation))),
+
+  reorderAccounts: async (accountIds: string[], _ignoredRevision?: number): Promise<Account[]> =>
+    (await withCas((expectation) => dashboardV3.reorderAccounts(accountIds, expectation))).accounts.map(presentAccount),
+
+  deleteAccount: async (id: string, _ignoredRevision?: number): Promise<void> => {
+    await withCas((expectation) => dashboardV3.deleteAccount(id, expectation));
+  },
+
+  toggleAccount: (id: string, _ignoredRevision?: number): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.toggleAccount(id, expectation))),
+
+  resetAccountCooldown: (id: string, _ignoredRevision?: number): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.resetAccountCooldown(id, expectation))),
+
+  advanceAccountSetup: (id: string, setupStep: AccountSetupStep, _ignoredRevision?: number): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.advanceAccountSetup(id, setupStep, expectation))),
+
+  verifyManagedAccountKey: (id: string, key: string, _ignoredRevision?: number): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.verifyManagedAccountKey(id, key, expectation))),
+
+  verifyAccountConnection: (id: string, _ignoredRevision?: number): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.verifyAccount(id, expectation))),
+
+  updateAccountCustomConfig: (
+    id: string,
+    config: { base_url: string; upstream_protocol: AccountProtocol; auth_scheme: "bearer" | "x-api-key" },
+    _ignoredRevision?: number,
+  ): Promise<Account> => mutatedAccount(withCas((expectation) => dashboardV3.putAccountCustomConfig(id, {
+    baseUrl: config.base_url,
+    upstreamProtocol: config.upstream_protocol,
+    authScheme: config.auth_scheme,
+  } satisfies WithoutExpectation<AccountCustomConfigUpdate>, expectation))),
+
+  updateAccountModelCapabilities: (
+    id: string,
+    capabilities: AccountModelCapabilityInput[],
+    _ignoredRevision?: number,
+  ): Promise<Account> => mutatedAccount(withCas((expectation) => dashboardV3.putAccountModelCapabilities(id, {
+    capabilities: capabilities.map((capability) => ({
+      modelId: capability.model_id,
+      protocol: capability.protocol,
+      source: capability.source,
+    })),
+  } satisfies WithoutExpectation<AccountModelCapabilitiesUpdate>, expectation))),
+
+  discoverCustomModels: async (input: CustomModelDiscoveryInput) => {
+    const result = await dashboardV3.discoverCustomModels({
+      baseUrl: input.base_url,
+      upstreamProtocol: input.upstream_protocol,
+      authScheme: input.auth_scheme,
+      apiKey: input.api_key,
+      accountId: input.account_id,
+    });
+    return { models: result.models, truncated: result.truncated };
+  },
+
+  getBrowserCapabilities: async () => presentBrowserCapabilities(await dashboardV3.getBrowserCapabilities()),
+  openAccountBrowser: async (id: string, target: BrowserTarget) =>
+    presentBrowserOpen(await withCas((expectation) => dashboardV3.openAccountBrowser(id, target, expectation))),
+  resetAccountBrowserProfile: (id: string, _ignoredRevision?: number): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.resetAccountBrowserProfile(id, expectation))),
+
+  getAccountUsage: async (id: string) => presentUsage(await dashboardV3.getAccountUsage(id)),
+  updateAccountUsage: async (
+    id: string,
+    window: "window_5h" | "window_week" | "window_month",
+    percent: number,
+    resetsInMinutes?: number | null,
+  ) => presentUsage((await withCas((expectation) => dashboardV3.patchAccountUsage(id, {
+    window,
+    percent,
+    resetsInMinutes: resetsInMinutes ?? null,
+  } satisfies WithoutExpectation<AccountUsageUpdate>, expectation))).usage),
+  refreshAccountUsage: async (id: string) =>
+    presentUsageRefresh(await withCas((expectation) => dashboardV3.refreshAccountUsage(id, expectation))),
+
+  getSettings: async () => presentSettings(await dashboardV3.getSettings()),
+  updateSettings: async (settings: AppConfig) => {
+    await withCas((expectation) => dashboardV3.putSettings(settingsUpdateInput(settings), expectation));
+    return presentSettings(await dashboardV3.getSettings());
+  },
+  testProxy: async (input: {
+    proxy_mode: AppConfig["proxy_mode"];
+    proxy_url?: string;
+    proxy_list_direction?: AppConfig["proxy_list_direction"];
+  }) => presentProxyTest(await dashboardV3.testProxy({
+    proxyMode: input.proxy_mode,
+    proxyUrl: input.proxy_url,
+    proxyListDirection: input.proxy_list_direction,
+  } satisfies ProxyTestRequest)),
+
+  getPricing: async () => presentPricing(await dashboardV3.getPricing()),
+  refreshPricing: async (refresh: PricingRefreshRequest = {}) => {
+    const controlPlane = useControlPlaneStore();
+    if (!controlPlane.hasTokens() || !controlPlane.pricingRevision) await controlPlane.refresh();
+    const expectedPricingRevision = refresh.expected_revision ?? controlPlane.pricingRevision;
+    if (!expectedPricingRevision) throw new Error("pricing revision is not loaded yet");
+    const result = await controlPlane.runMutation((expectation) => dashboardV3.refreshPricing({
+      expectedPricingRevision,
+      policy: refresh.policy,
+      expectedOfficialContentHash: refresh.expected_official_content_hash,
+    }, expectation));
+    // PricingRefresh carries the next control/pricing tokens in its typed
+    // nested snapshot rather than at the response root. Publish that exact
+    // snapshot explicitly; requestV3 intentionally does not recursively walk
+    // arbitrary response bodies for token-shaped objects.
+    controlPlane.sync(result.snapshot);
+    return presentPricingRefresh(result);
+  },
+  updatePricingMultipliers: async (expectedPricingRevision: string, multipliers: PricingMultiplierUpdate[]) => {
+    const controlPlane = useControlPlaneStore();
+    if (!controlPlane.hasTokens()) await controlPlane.refresh();
+    return presentPricing(await controlPlane.runMutation((expectation) => dashboardV3.putPricingMultipliers({
+      expectedPricingRevision,
+      multipliers: multipliers.map((multiplier) => ({
+        modelId: multiplier.model_id,
+        multiplier: multiplier.multiplier,
+      })),
+    }, expectation)));
+  },
+
+  getApplicationModels: async () => (await dashboardV3.getApplicationModels()).models,
+  getClaudeDesktopModels: async () => {
+    const value = await dashboardV3.getClaudeDesktopModels();
+    return { sonnet: value.sonnet, opus: value.opus, haiku: value.haiku };
+  },
+  updateClaudeDesktopModels: async (models: { sonnet: string; opus: string; haiku: string }) => {
+    const result = await withCas((expectation) => dashboardV3.putClaudeDesktopModels({
+      sonnet: models.sonnet,
+      opus: models.opus,
+      haiku: models.haiku,
+    } satisfies WithoutExpectation<ClaudeDesktopModelsUpdate>, expectation));
+    return { sonnet: result.sonnet, opus: result.opus, haiku: result.haiku };
+  },
+
+  checkForUpdate: async () => presentUpdateCheck(await dashboardV3.checkForUpdate()),
+  getUpdateStatus: async () => presentUpdateStatus(await dashboardV3.getUpdateStatus()),
+  installUpdate: async (expectedVersion: string) =>
+    presentUpdateStatus(await withCas((expectation) => dashboardV3.installUpdate(expectedVersion, expectation))),
+
+  getGatewayLogs: async (limit?: number, requestId?: string | null) =>
+    (await dashboardV3.getGatewayLogs({ limit, requestId: requestId ?? null })).items.map(presentGatewayLog),
+  getForwardLogs: async (query: ForwardLogQuery = {}) =>
+    presentForwardLogs(await dashboardV3.getForwardLogs(forwardLogQuery(query))),
+  getForwardLogModels: async () => (await dashboardV3.getForwardLogModels()).models,
+  getForwardLogKeys: async () => (await dashboardV3.getForwardLogKeys()).keys,
+  getDashboardSummary: async () => presentDashboardSummary(await dashboardV3.getDashboardSummary()),
+  getDailyCostByModel: async (days?: number) =>
+    (await dashboardV3.getDailyCostByModel(days)).items.map(presentDailyModelCost),
+};

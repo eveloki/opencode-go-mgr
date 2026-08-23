@@ -251,8 +251,9 @@ import {
   useMessage,
 } from "naive-ui";
 import { PlusOutlined } from "@vicons/antd";
-import { DashboardRequestError, tauriApi } from "../api/tauri";
+import { DashboardRequestError, dashboardApi } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
+import { useAccountsStore } from "../stores/accounts.ts";
 import type {
   ProviderCatalogEntry,
   ProviderContractsResponse,
@@ -264,7 +265,7 @@ import type {
   AccountUpdate,
   BrowserCapabilities,
   BrowserTarget,
-} from "../api/tauri";
+} from "../api/dashboard";
 import { isCooling } from "./accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "./account-display.ts";
 import {
@@ -314,6 +315,7 @@ const emit = defineEmits<{
 
 const dialog = useDialog();
 const message = useMessage();
+const accountsStore = useAccountsStore();
 const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
@@ -524,9 +526,9 @@ function normalizeManagedInviteDraft(): void {
 
 async function ensureInviteUrlSaved(inviteUrl: string): Promise<void> {
   if (inviteUrl === opencodeInviteUrl.value) return;
-  const settings = await tauriApi.getSettings();
+  const settings = await dashboardApi.getSettings();
   settingsRevision.value = settings.revision;
-  const result = await tauriApi.updateSettings({
+  const result = await dashboardApi.updateSettings({
     ...settings,
     opencode_invite_url: inviteUrl,
   });
@@ -582,7 +584,7 @@ async function createManagedAccount(): Promise<void> {
   try {
     await ensureInviteUrlSaved(inviteUrl);
     const username = managedDraft.value.username.trim();
-    const created = await runWithFreshSettingsRevision((revision) => tauriApi.createManagedAccount({
+    const created = await runWithFreshSettingsRevision((revision) => dashboardApi.createManagedAccount({
       name,
       ...(username ? { username } : {}),
       expected_revision: revision,
@@ -605,7 +607,7 @@ async function advanceManagedSetup(accountId: string, setupStep: AccountSetupSte
   busy.value = true;
   try {
     const updated = await runWithFreshSettingsRevision((revision) => (
-      tauriApi.advanceAccountSetup(accountId, setupStep, revision)
+      dashboardApi.advanceAccountSetup(accountId, setupStep, revision)
     ));
     replaceAccount(updated);
     message.success(t("注册进度已保存"));
@@ -623,7 +625,7 @@ async function verifyManagedKey(accountId: string, key: string): Promise<void> {
   busy.value = true;
   try {
     const updated = await runWithFreshSettingsRevision((revision) => (
-      tauriApi.verifyManagedAccountKey(accountId, key, revision)
+      dashboardApi.verifyManagedAccountKey(accountId, key, revision)
     ));
     replaceAccount(updated);
     if (accountIsReady(updated)) {
@@ -659,7 +661,7 @@ async function openAccountBrowser(accountId: string, target: BrowserTarget): Pro
   }
   openingBrowserTarget.value = target;
   try {
-    const result = await tauriApi.openAccountBrowser(accountId, target);
+    const result = await dashboardApi.openAccountBrowser(accountId, target);
     if (result.mode === "remote") {
       if (!result.session_token) throw new Error(t("服务未返回远程浏览器会话令牌"));
       if (!remoteTab) throw new Error(t("浏览器模式已变化，请重试"));
@@ -680,7 +682,7 @@ async function openAccountBrowser(accountId: string, target: BrowserTarget): Pro
 async function resetBrowserProfile(accountId: string): Promise<void> {
   try {
     const updated = await runWithFreshSettingsRevision((revision) => (
-      tauriApi.resetAccountBrowserProfile(accountId, revision)
+      dashboardApi.resetAccountBrowserProfile(accountId, revision)
     ));
     replaceAccount(updated);
     if (!accountIsReady(updated)) {
@@ -721,7 +723,7 @@ function accountHasUsageDisplay(account: Account): boolean {
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
-  const loaded = await tauriApi.getAccounts();
+  const loaded = await accountsStore.loadPresented();
   accounts.value = loaded;
   settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
   const account = loaded.find((item) => item.id === id);
@@ -756,7 +758,7 @@ async function loadAccounts() {
   accountListLoading.value = true;
   accountListError.value = "";
   try {
-    const loaded = await tauriApi.getAccounts();
+    const loaded = await accountsStore.loadPresented();
     accounts.value = loaded;
     settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
     // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
@@ -787,8 +789,8 @@ async function loadAccounts() {
 
 async function loadRegistrationOptions(): Promise<void> {
   const [settingsResult, browserResult] = await Promise.allSettled([
-    tauriApi.getSettings(),
-    tauriApi.getBrowserCapabilities(),
+    dashboardApi.getSettings(),
+    dashboardApi.getBrowserCapabilities(),
   ]);
   if (settingsResult.status === "fulfilled") {
     opencodeInviteUrl.value = settingsResult.value.opencode_invite_url || "";
@@ -865,7 +867,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
     if (payload.key !== undefined) update.key = payload.key;
     busy.value = true;
     try {
-      const saved = await runWithFreshSettingsRevision((revision) => tauriApi.updateAccount(editing.id, {
+      const saved = await runWithFreshSettingsRevision((revision) => dashboardApi.updateAccount(editing.id, {
         ...update,
         expected_revision: revision,
       }));
@@ -888,7 +890,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
     const input: AccountInput = { ...payload, key: payload.key || "" };
     busy.value = true;
     try {
-      const created = await runWithFreshSettingsRevision((revision) => tauriApi.createAccount({
+      const created = await runWithFreshSettingsRevision((revision) => dashboardApi.createAccount({
         ...input,
         expected_revision: revision,
       }));
@@ -921,7 +923,7 @@ async function verifyCustomAccount(id: string) {
   verifying.value[id] = true;
   try {
     const updated = await runWithFreshSettingsRevision((revision) => (
-      tauriApi.verifyAccountConnection(id, revision)
+      dashboardApi.verifyAccountConnection(id, revision)
     ));
     replaceAccount(updated);
     message.success(t("连接验证成功，账号保持禁用，可手动启用。"));
@@ -952,13 +954,13 @@ async function saveCustomAccountEdit(
   try {
     await executeCustomAccountEdit(editing, payload, {
       account: async (update) => {
-        replaceAccount(await runWithFreshSettingsRevision((revision) => tauriApi.updateAccount(editing.id, {
+        replaceAccount(await runWithFreshSettingsRevision((revision) => dashboardApi.updateAccount(editing.id, {
           ...update,
           expected_revision: revision,
         })));
       },
       customConfig: async (config) => {
-        replaceAccount(await runWithFreshSettingsRevision((revision) => tauriApi.updateAccountCustomConfig(
+        replaceAccount(await runWithFreshSettingsRevision((revision) => dashboardApi.updateAccountCustomConfig(
           editing.id,
           config,
           revision,
@@ -966,7 +968,7 @@ async function saveCustomAccountEdit(
       },
       capabilities: async (capabilities) => {
         replaceAccount(await runWithFreshSettingsRevision((revision) => (
-          tauriApi.updateAccountModelCapabilities(editing.id, capabilities, revision)
+          dashboardApi.updateAccountModelCapabilities(editing.id, capabilities, revision)
         )));
       },
     });
@@ -995,7 +997,7 @@ async function toggleAccount(id: string) {
     return;
   }
   try {
-    const updated = await runWithFreshSettingsRevision((revision) => tauriApi.toggleAccount(id, revision));
+    const updated = await runWithFreshSettingsRevision((revision) => dashboardApi.toggleAccount(id, revision));
     replaceAccount(updated);
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
@@ -1008,7 +1010,7 @@ async function runWithFreshSettingsRevision<T>(
 ): Promise<T> {
   return withFreshAccountRevision(async () => {
     try {
-      const settings = await tauriApi.getSettings();
+      const settings = await dashboardApi.getSettings();
       settingsRevision.value = settings.revision;
       return settings.revision;
     } catch {
@@ -1021,8 +1023,8 @@ async function runWithFreshSettingsRevision<T>(
 async function reloadAfterControlPlaneConflict(): Promise<void> {
   const knownIds = new Set(accounts.value.map(({ id }) => id));
   const [settingsResult, accountsResult] = await Promise.allSettled([
-    tauriApi.getSettings(),
-    tauriApi.getAccounts(),
+    dashboardApi.getSettings(),
+    accountsStore.loadPresented(),
   ]);
   settingsRevision.value = settingsResult.status === "fulfilled"
     ? settingsResult.value.revision
@@ -1087,7 +1089,7 @@ async function saveZenProviderSettings(
 
 async function deleteAccount(id: string) {
   try {
-    await runWithFreshSettingsRevision((revision) => tauriApi.deleteAccount(id, revision));
+    await runWithFreshSettingsRevision((revision) => dashboardApi.deleteAccount(id, revision));
     // DELETE returns the new revision in a response header; the shared JSON
     // transport intentionally stays body-only, so reload it before the next
     // mutation instead of guessing the counter.
@@ -1103,7 +1105,7 @@ async function deleteAccount(id: string) {
 async function resetCooldown(id: string) {
   try {
     const updated = await runWithFreshSettingsRevision((revision) => (
-      tauriApi.resetAccountCooldown(id, revision)
+      dashboardApi.resetAccountCooldown(id, revision)
     ));
     replaceAccount(updated);
     message.success(t("已重置冷却"));

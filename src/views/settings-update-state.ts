@@ -1,5 +1,5 @@
-import { isVersionAtLeast } from "../api/tauri.ts";
-import type { UpdatePhase, UpdateStatus } from "../api/tauri.ts";
+import { isVersionAtLeast } from "../api/dashboard.ts";
+import type { UpdatePhase, UpdateStatus } from "../api/dashboard.ts";
 
 export const UPDATE_TARGET_STORAGE_KEY = "ocg-update-target-version";
 

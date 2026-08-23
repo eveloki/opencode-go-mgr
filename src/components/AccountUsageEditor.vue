@@ -123,7 +123,7 @@
 
 <script setup lang="ts">
 import { NInputNumber, NSlider } from "naive-ui";
-import type { Account, UsageWindow } from "../api/tauri";
+import type { Account, UsageWindow } from "../api/dashboard";
 import {
   isUsageLimitReached,
   resetsFirstFieldMax,

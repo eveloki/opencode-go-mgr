@@ -30,15 +30,16 @@ test("the keys page owns lifecycle CRUD and does not render plaintext values", a
 test("the keys page uses ConnectionInfo and resets the primary key instead of editing it", async () => {
   const source = await readFile(new URL("./Keys.vue", import.meta.url), "utf8");
 
-  assert.match(source, /ref<ConnectionInfo>/);
+  assert.match(source, /useConnectionStore\(\)/);
+  assert.match(source, /computed\(\(\) => connectionStore\.info \?\? EMPTY_CONNECTION\)/);
   assert.doesNotMatch(source, /ref<AppConfig>/);
-  assert.match(source, /tauriApi\.getConnection\(\)/);
-  assert.match(source, /tauriApi\.createGatewayKey\(name, connection\.value\.revision\)/);
-  assert.match(source, /tauriApi\.updateGatewayKey\(entry\.id, \{ enabled \}, connection\.value\.revision\)/);
-  assert.match(source, /tauriApi\.deleteGatewayKey\(entry\.id, connection\.value\.revision\)/);
-  assert.match(source, /tauriApi\.regenerateGatewayKey\(\)/);
-  assert.match(source, /tauriApi\.regenerateGatewayKeyEntry\(entry\.id, connection\.value\.revision\)/);
-  assert.doesNotMatch(source, /tauriApi\.getSettings\(\)|tauriApi\.updateSettings\(/);
+  assert.match(source, /connectionStore\.load\(\)/);
+  assert.match(source, /connectionStore\.createKey\(name\)/);
+  assert.match(source, /connectionStore\.updateKey\(entry\.id, \{ enabled \}\)/);
+  assert.match(source, /connectionStore\.deleteKey\(entry\.id\)/);
+  assert.match(source, /connectionStore\.regeneratePrimaryKey\(\)/);
+  assert.match(source, /connectionStore\.regenerateKey\(entry\.id\)/);
+  assert.doesNotMatch(source, /dashboardApi\.getSettings\(\)|dashboardApi\.updateSettings\(/);
   assert.match(source, /onActivated\(\(\) => \{\s*if \(!loading\.value\) void loadConnection\(\);/);
   assert.doesNotMatch(source, /validatePrimaryKey\(\)|savePrimaryKey|primaryKeyDraft/);
 });

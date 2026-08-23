@@ -147,7 +147,7 @@ import type {
   AccountSetupStep,
   BrowserCapabilities,
   BrowserTarget,
-} from "../api/tauri";
+} from "../api/dashboard";
 import { t } from "../i18n/index.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import { MANAGED_SETUP_STEPS, setupStepIndex } from "../views/managed-account";

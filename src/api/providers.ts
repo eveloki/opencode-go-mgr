@@ -1,13 +1,20 @@
-import { jsonBody, request } from "./http.ts";
+import { dashboardV3, isRevisionConflict } from "./dashboard-v3.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
-  Account,
   AccountCredentialKind,
   AccountQuotaScope,
-} from "./tauri.ts";
+  ProviderCatalogEntry as V3ProviderCatalogEntry,
+  ProviderContracts as V3ProviderContracts,
+  ProviderPricing as V3ProviderPricing,
+  ProviderUsage as V3ProviderUsage,
+  ProtocolProbeResponse as V3ProtocolProbeResponse,
+  ZenFreeModels as V3ZenFreeModels,
+} from "./generated/dashboard-v3.ts";
+import { presentAccount, presentPricing, type Account, type PricingSnapshot } from "./dashboard-presenters.ts";
 
 /**
  * Typed wrappers for the provider-scoped dashboard endpoints. These live
- * outside `tauri.ts` so provider catalog/pricing/usage/settings calls share
+ * outside the page layer so provider catalog/pricing/usage/settings calls share
  * the `http.ts` transport without growing the legacy account surface; Zen
  * provider settings must go through `updateProviderSettings`, never the
  * generic account PATCH.
@@ -65,7 +72,7 @@ export interface ProviderModelCapability {
   supported_protocols: ProviderProtocol[];
 }
 
-export interface StoredProviderPricingSnapshot {
+export type StoredProviderPricingSnapshot = PricingSnapshot | {
   provider_id: string;
   offering_id: string;
   revision: string;
@@ -74,7 +81,7 @@ export interface StoredProviderPricingSnapshot {
   source_url: string;
   content_hash: string;
   snapshot_json: string;
-}
+};
 
 export interface ProviderPricingResponse {
   provider_id: string;
@@ -295,43 +302,343 @@ export function isCustomCatalogRefreshResponse(
   return "scope_kind" in value && "truncated" in value;
 }
 
+function creationAvailability(value: string): ProviderCatalogEntry["creation_availability"] {
+  return value === "available" ? "available" : "unavailable";
+}
+
+function verificationPolicy(value: string): ProviderCatalogEntry["verification_policy"] {
+  return value === "required" ? "required" : "not_required";
+}
+
+function verificationRuntime(value: string): ProviderCatalogEntry["verification_runtime_availability"] {
+  if (value === "available" || value === "unavailable" || value === "optional") return value;
+  return "not_applicable";
+}
+
+function pricingAvailability(value: string): ProviderCatalogEntry["pricing_availability"] {
+  if (value === "available" || value === "unavailable" || value === "unpriced") return value;
+  return "not_applicable";
+}
+
+function usageAvailability(value: string): ProviderCatalogEntry["usage_availability"] {
+  if (value === "available" || value === "local_state") return value;
+  return "unavailable";
+}
+
+function formFieldKind(value: string): ProviderCatalogFormField["kind"] {
+  if (value === "secret" || value === "date" || value === "acknowledgement"
+    || value === "url" || value === "select" || value === "models") return value;
+  return "text";
+}
+
+export function presentCatalogEntry(value: V3ProviderCatalogEntry): ProviderCatalogEntry {
+  return {
+    provider_id: value.providerId,
+    offering_id: value.offeringId,
+    display_name: value.displayName,
+    display_family: value.displayFamily,
+    credential_kind: value.credentialKind,
+    quota_scope: value.quotaScope,
+    singleton: value.singleton,
+    creation_availability: creationAvailability(value.creationAvailability),
+    creation_unavailable_reason: value.creationUnavailableReason,
+    verification_policy: verificationPolicy(value.verificationPolicy),
+    verification_runtime_availability: verificationRuntime(value.verificationRuntimeAvailability),
+    routable: value.routable,
+    managed_registration: value.managedRegistration,
+    pricing_availability: pricingAvailability(value.pricingAvailability),
+    usage_availability: usageAvailability(value.usageAvailability),
+    manual_usage_calibration: value.manualUsageCalibration,
+    quota_unit: value.quotaUnit,
+    model_source: value.modelSource,
+    key_prefix: value.keyPrefix,
+    auth_schemes: [...value.authSchemes],
+    upstream_protocols: [...value.upstreamProtocols],
+    form_fields: value.formFields.map((field) => ({
+      id: field.id,
+      kind: formFieldKind(field.kind),
+      required: field.required,
+      immutable_after_create: field.immutableAfterCreate,
+    })),
+    risk_notice: value.riskNotice === null ? null : {
+      acknowledgement_id: value.riskNotice.acknowledgementId,
+      version: value.riskNotice.version,
+      source_url: value.riskNotice.sourceUrl,
+      body: value.riskNotice.body,
+      content_hash: value.riskNotice.contentHash,
+    },
+    model_aliases: [...value.modelAliases],
+  };
+}
+
+function presentEvidence(value: V3ProviderContracts["providers"][number]["models"][number]["protocols"]["chat_completions"]): EffectiveProtocolEvidence | undefined {
+  if (value === null) return undefined;
+  return {
+    protocol: value.protocol,
+    available: value.available,
+    enabled: value.enabled,
+    source: value.source,
+    verified_at: value.verifiedAt,
+    observed_at: value.observedAt,
+    last_probe_result: value.lastProbeResult,
+    last_probe_at: value.lastProbeAt,
+    last_probe_error: value.lastProbeError,
+  };
+}
+
+function presentModel(value: V3ProviderContracts["providers"][number]["models"][number]): EffectiveModelContract {
+  const protocols: Record<string, EffectiveProtocolEvidence> = {};
+  const chat = presentEvidence(value.protocols.chat_completions);
+  const responses = presentEvidence(value.protocols.responses);
+  const messages = presentEvidence(value.protocols.messages);
+  if (chat) protocols.chat_completions = chat;
+  if (responses) protocols.responses = responses;
+  if (messages) protocols.messages = messages;
+  return {
+    model_id: value.modelId,
+    preferred_protocol: value.preferredProtocol,
+    protocols,
+    routable: value.routable,
+    disabled_reasons: [...value.disabledReasons],
+  };
+}
+
+function presentCard(value: V3ProviderContracts["providers"][number]["card"]): CardCapabilitySummary {
+  return {
+    fetch_zen_models: value.fetchZenModels,
+    discover_models: value.discoverModels,
+    protocol_probe: value.protocolProbe,
+    catalog_refresh: value.catalogRefresh,
+  };
+}
+
+function presentCatalog(value: V3ProviderContracts["providers"][number]["catalog"]): EffectiveCatalog {
+  return {
+    source: value.source,
+    source_url: value.sourceUrl,
+    refreshed_at: value.refreshedAt,
+    models: [...value.models],
+    refresh_supported: value.refreshSupported,
+  };
+}
+
+function presentAccountChoice(value: V3ProviderContracts["providers"][number]["offerings"][number]["accounts"][number]): ProviderAccountChoice {
+  return {
+    id: value.id,
+    name: value.name,
+    enabled: value.enabled,
+    verification_status: value.verificationStatus,
+  };
+}
+
+export function presentContracts(value: V3ProviderContracts): ProviderContractsResponse {
+  return {
+    revision: value.revision,
+    providers: value.providers.map((scope) => ({
+      scope_kind: scope.scopeKind,
+      scope_id: scope.scopeId,
+      provider_id: scope.providerId,
+      offerings: scope.offerings.map((offering) => ({
+        offering_id: offering.offeringId,
+        display_name: offering.displayName,
+        routable: offering.routable,
+        accounts: offering.accounts.map(presentAccountChoice),
+      })),
+      catalog: presentCatalog(scope.catalog),
+      models: scope.models.map(presentModel),
+      protocols: { ...scope.protocols },
+      pricing: { availability: scope.pricing.availability },
+      usage: { availability: scope.usage.availability },
+      card: presentCard(scope.card),
+      catalog_routable: scope.catalogRoutable,
+      production_inference: scope.productionInference,
+      disabled_reasons: [...scope.disabledReasons],
+      revision: scope.revision,
+    })),
+    custom_endpoints: value.customEndpoints.map((scope) => ({
+      scope_kind: scope.scopeKind,
+      scope_id: scope.scopeId,
+      provider_id: scope.providerId,
+      account: presentAccountChoice(scope.account),
+      catalog: presentCatalog(scope.catalog),
+      models: scope.models.map(presentModel),
+      protocols: { ...scope.protocols },
+      pricing: { availability: scope.pricing.availability },
+      usage: { availability: scope.usage.availability },
+      card: {
+        ...presentCard(scope.card),
+        // V3 currently exposes only the provider-scoped switch/probe routes.
+        // Keep Custom endpoint protocol controls visible as read-only facts.
+        protocol_probe: false,
+      },
+      catalog_routable: scope.catalogRoutable,
+      production_inference: scope.productionInference,
+      disabled_reasons: [...scope.disabledReasons],
+      revision: scope.revision,
+    })),
+  };
+}
+
+function presentProviderPricing(value: V3ProviderPricing): ProviderPricingResponse {
+  return {
+    provider_id: value.providerId,
+    offering_id: value.offeringId,
+    availability: value.availability,
+    snapshot: value.snapshot === null ? undefined : presentPricing(value.snapshot),
+  };
+}
+
+function presentProviderUsage(value: V3ProviderUsage): ProviderUsageResponse {
+  return {
+    account_id: value.accountId,
+    provider_id: value.providerId,
+    offering_id: value.offeringId,
+    availability: value.availability,
+    quota_windows: value.quotaWindows.map((window) => ({
+      account_id: window.accountId,
+      window_kind: window.windowKind,
+      used: window.used,
+      limit_value: window.limitValue,
+      started_at: window.startedAt,
+      resets_at: window.resetsAt,
+      calibration_offset: window.calibrationOffset,
+      unit: window.unit,
+      source: window.source,
+      observed_at: window.observedAt,
+      updated_at: window.updatedAt,
+    })),
+    credit_balances: value.creditBalances.map((balance) => ({
+      account_id: balance.accountId,
+      balance_kind: balance.balanceKind,
+      amount: balance.amount,
+      unit: balance.unit,
+      source: balance.source,
+      observed_at: balance.observedAt,
+      updated_at: balance.updatedAt,
+    })),
+    sync_state: value.syncState === null ? null : {
+      last_success_at: value.syncState.lastSuccessAt,
+      last_attempt_at: value.syncState.lastAttemptAt,
+      next_eligible_at: value.syncState.nextEligibleAt,
+      failure_streak: value.syncState.failureStreak,
+      last_expedited_at: value.syncState.lastExpeditedAt,
+    },
+  };
+}
+
+function presentZenModels(value: V3ZenFreeModels): ZenFreeModelsResponse {
+  return {
+    account_id: value.accountId,
+    models: value.models.map((model) => ({ model_id: model.modelId, alias: model.alias })),
+    refreshed_at: value.refreshedAt,
+    source_url: value.sourceUrl,
+  };
+}
+
+function presentProbe(value: V3ProtocolProbeResponse): ProtocolProbeResponse {
+  return {
+    account_id: value.accountId,
+    model_id: value.modelId,
+    results: value.results.map((result) => ({
+      protocol: result.protocol,
+      success: result.success,
+      skipped: result.skipped,
+      error: result.error,
+    })),
+    contract: value.contract === null ? null : presentModel(value.contract),
+  };
+}
+
 export const providerApi = {
-  getProviderCatalog: () => request<ProviderCatalogEntry[]>("/providers/catalog"),
-  getProviderModelCapabilities: () =>
-    request<ProviderModelCapability[]>("/providers/model-capabilities"),
-  getProviderPricing: (providerId: string, offeringId: string) =>
-    request<ProviderPricingResponse>(
-      `/providers/${encodeURIComponent(providerId)}/${encodeURIComponent(offeringId)}/pricing`,
-    ),
-  getProviderUsage: (accountId: string) =>
-    request<ProviderUsageResponse>(`/accounts/${encodeURIComponent(accountId)}/provider-usage`),
-  updateProviderSettings: (accountId: string, update: ProviderSettingsUpdate) =>
-    request<ProviderSettingsResponse>(`/accounts/${encodeURIComponent(accountId)}/provider-settings`, {
-      method: "PATCH",
-      body: jsonBody(update),
-    }),
-  getProviderModels: (accountId: string) =>
-    request<ZenFreeModelsResponse>(
-      `/accounts/${encodeURIComponent(accountId)}/provider-models`,
-    ),
-  refreshProviderModels: (accountId: string) =>
-    request<ProviderModelsRefreshResponse>(
-      `/accounts/${encodeURIComponent(accountId)}/provider-models/refresh`,
-      { method: "POST" },
-    ),
-  getProviderContracts: () => request<ProviderContractsResponse>("/provider-contracts"),
-  updateProviderContractProtocol: (
-    scopeKind: ContractScopeKind,
+  getProviderCatalog: async () => (await dashboardV3.getProviders()).entries.map(presentCatalogEntry),
+  getProviderModelCapabilities: async (): Promise<ProviderModelCapability[]> =>
+    (await dashboardV3.getProviderModelCapabilities()).map((model) => ({
+      model_id: model.modelId,
+      provider_id: model.providerId,
+      offering_id: model.offeringId,
+      preferred_protocol: model.preferredProtocol,
+      supported_protocols: [...model.supportedProtocols],
+    })),
+  getProviderPricing: async (providerId: string, offeringId: string) =>
+    presentProviderPricing(await dashboardV3.getProviderPricing(providerId, offeringId)),
+  getProviderUsage: async (accountId: string) =>
+    presentProviderUsage(await dashboardV3.getProviderUsage(accountId)),
+  updateProviderSettings: async (accountId: string, update: ProviderSettingsUpdate) => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    const account = await dashboardV3.getAccount(accountId);
+    if (account.providerId !== "zen-free") throw new Error("only Zen Free has provider settings");
+    try {
+      await control.runMutation((expectation) => dashboardV3.patchZenFreeSettings(update.enabled, expectation));
+    } catch (cause) {
+      if (isRevisionConflict(cause)) await dashboardV3.getZenFreeSettings();
+      throw cause;
+    }
+    const refreshed = await dashboardV3.getAccount(accountId);
+    return { account: presentAccount(refreshed), revision: refreshed.revision };
+  },
+  getProviderModels: async (accountId: string) => {
+    const account = await dashboardV3.getAccount(accountId);
+    if (account.providerId !== "custom") return presentZenModels(await dashboardV3.getZenFreeModels());
+    const config = account.customConfig;
+    if (!config) throw new Error("Custom account has no configured destination");
+    const discovered = await dashboardV3.discoverCustomModels({
+      accountId,
+      baseUrl: config.baseUrl,
+      authScheme: config.authScheme,
+      upstreamProtocol: config.upstreamProtocol,
+    });
+    return {
+      scope_kind: "custom_endpoint",
+      scope_id: accountId,
+      models: discovered.models,
+      truncated: discovered.truncated,
+      refreshed_at: "",
+      source: "discovered",
+      declared_capabilities_unchanged: true,
+    } satisfies CustomCatalogRefreshResponse;
+  },
+  refreshProviderModels: async (accountId: string) => {
+    const account = await dashboardV3.getAccount(accountId);
+    if (account.providerId === "custom") {
+      return providerApi.getProviderModels(accountId);
+    }
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    return presentZenModels(await control.runMutation((expectation) => dashboardV3.refreshZenFreeModels(expectation)));
+  },
+  getProviderContracts: async () => presentContracts(await dashboardV3.getProviderContracts()),
+  updateProviderContractProtocol: async (
+    _scopeKind: ContractScopeKind,
     scopeId: string,
     protocol: ProviderProtocol,
     update: ProtocolSwitchUpdate,
-  ) => request<ProviderContractsResponse>(
-    `/provider-contracts/${encodeURIComponent(scopeKind)}/${encodeURIComponent(scopeId)}/protocols/${encodeURIComponent(protocol)}`,
-    { method: "PUT", body: jsonBody(update) },
-  ),
-  runProtocolProbes: (accountId: string, input: ProtocolProbeRequest) =>
-    request<ProtocolProbeResponse>(
-      `/accounts/${encodeURIComponent(accountId)}/protocol-probes`,
-      { method: "POST", body: jsonBody(input) },
-    ),
+  ) => {
+    if (_scopeKind === "custom_endpoint") {
+      throw new Error("Custom API 协议变更尚未纳入 Dashboard V3 合同");
+    }
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    try {
+      return presentContracts(await control.runMutation((expectation) =>
+        dashboardV3.putProviderProtocolSwitch(scopeId, protocol, update.enabled, expectation)));
+    } catch (cause) {
+      if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
+      throw cause;
+    }
+  },
+  runProtocolProbes: async (accountId: string, input: ProtocolProbeRequest) => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    const account = await dashboardV3.getAccount(accountId);
+    if (account.providerId === "custom") {
+      throw new Error("Custom API 协议探测尚未纳入 Dashboard V3 合同");
+    }
+    return presentProbe(await control.runMutation((expectation) =>
+      dashboardV3.runProviderProtocolProbes(account.providerId, {
+        accountId,
+        modelId: input.model_id,
+        protocols: input.protocols,
+      }, expectation)));
+  },
 };

@@ -390,7 +390,9 @@ import {
   WalletOutlined,
 } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
-import { PRIMARY_KEY_ID, tauriApi } from "../api/tauri";
+import { PRIMARY_KEY_ID, dashboardApi } from "../api/dashboard";
+import { useAccountsStore } from "../stores/accounts.ts";
+import { useConnectionStore } from "../stores/connection.ts";
 import { providerApi } from "../api/providers.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
@@ -399,7 +401,7 @@ import type {
   DailyModelCost,
   DashboardSummary,
   UsageWindow,
-} from "../api/tauri";
+} from "../api/dashboard";
 import { CHART_PALETTE } from "../theme";
 import { t } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
@@ -433,6 +435,8 @@ const emit = defineEmits<{
 }>();
 
 const message = useMessage();
+const accountsStore = useAccountsStore();
+const connectionStore = useConnectionStore();
 const { copiedTarget, copy, cleanup } = useClipboard();
 const characterImage = new URL("../../assets/opencode-mascot.png", import.meta.url).href;
 const accounts = ref<Account[]>([]);
@@ -451,14 +455,15 @@ const refreshingKey = ref(false);
 const lifecycleNow = ref(Date.now());
 
 // ponytail: keep this pre-load fallback in sync with ConnectionInfo.
-const serviceConfig = ref<ConnectionInfo>({
+const EMPTY_CONNECTION: ConnectionInfo = {
   gateway_port: 9042,
   client_root_url: "",
   upstream_base_url: "",
   primary_key: "",
   sub_keys: [],
   revision: 0,
-});
+};
+const serviceConfig = computed(() => connectionStore.info ?? EMPTY_CONNECTION);
 const selectedKeyId = ref("");
 const summary = ref<DashboardSummary>({
   total_accounts: 0,
@@ -683,64 +688,18 @@ async function copyConnection(target: ConnectionTarget, value: string, label: st
 async function regenerateKey() {
   const target = selectedKey.value;
   if (refreshingKey.value || dashboardRequestActive || !target) return;
-  const previousValue = target.value;
   const isPrimary = target.id === PRIMARY_KEY_ID;
   refreshingKey.value = true;
-  let mutationFailed = false;
-  let mutationError: unknown = null;
-  let newValue = "";
   try {
-    try {
-      if (isPrimary) {
-        // Primary rotation uses the legacy endpoint; sub keys rotate in place.
-        const result = await tauriApi.regenerateGatewayKey();
-        newValue = result.key;
-      } else {
-        const result = await tauriApi.regenerateGatewayKeyEntry(
-          target.id,
-          serviceConfig.value.revision,
-        );
-        newValue = result.key;
-      }
-    } catch (error) {
-      mutationFailed = true;
-      mutationError = error;
-    }
-
-    try {
-      const latest = await tauriApi.getConnection();
-      serviceConfig.value = latest;
-      const refreshed = latest.primary_key === newValue
-        ? newValue
-        : latest.sub_keys.find((entry) => entry.id === target.id)?.value;
-      if (!mutationFailed || refreshed !== previousValue) {
-        selectedKeyId.value = target.id;
-        message.success(t("Key 已刷新"));
-      } else {
-        message.error(t("刷新 Key 失败: {error}", {
-          error: userFacingError(mutationError, t("无法连接到本地服务，请确认程序正在运行后重试")),
-        }));
-      }
-    } catch {
-      if (newValue) {
-        // Connection refresh failed; apply the regenerated value locally so
-        // the panel never shows or copies the now-invalid old key.
-        if (isPrimary) {
-          serviceConfig.value.primary_key = newValue;
-        } else {
-          serviceConfig.value.sub_keys = serviceConfig.value.sub_keys.map((entry) =>
-            entry.id === target.id ? { ...entry, value: newValue } : entry,
-          );
-        }
-        selectedKeyId.value = target.id;
-        message.success(t("Key 已刷新"));
-      } else {
-        dashboardError.value = true;
-        message.error(t("刷新 Key 失败: {error}", {
-          error: userFacingError(mutationError, t("无法连接到本地服务，请确认程序正在运行后重试")),
-        }));
-      }
-    }
+    if (isPrimary) await connectionStore.regeneratePrimaryKey();
+    else await connectionStore.regenerateKey(target.id);
+    selectedKeyId.value = target.id;
+    message.success(t("Key 已刷新"));
+  } catch (error) {
+    dashboardError.value = true;
+    message.error(t("刷新 Key 失败: {error}", {
+      error: userFacingError(error, t("无法连接到本地服务，请确认程序正在运行后重试")),
+    }));
   } finally {
     refreshingKey.value = false;
   }
@@ -772,10 +731,10 @@ async function loadDashboard() {
   providerCatalog.value = [];
   providerCosts.value = {};
   const [loadedAccounts, connection, loadedSummary, costs, catalog] = await Promise.allSettled([
-    tauriApi.getAccounts(),
-    tauriApi.getConnection(),
-    tauriApi.getDashboardSummary(),
-    tauriApi.getDailyCostByModel(30),
+    accountsStore.loadPresented(),
+    connectionStore.load(),
+    dashboardApi.getDashboardSummary(),
+    dashboardApi.getDailyCostByModel(30),
     providerApi.getProviderCatalog(),
   ]);
   if (loadedAccounts.status === "fulfilled") {
@@ -790,7 +749,7 @@ async function loadDashboard() {
     const settled = await mapWithConcurrency(
       readyAccounts,
       4,
-      async (account) => [account.id, await tauriApi.getAccountUsage(account.id)] as const,
+      async (account) => [account.id, await accountsStore.loadPresentedUsage(account.id)] as const,
     );
     usageMap.value = Object.fromEntries(
       settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
@@ -801,7 +760,6 @@ async function loadDashboard() {
         : []
     )));
   }
-  if (connection.status === "fulfilled") serviceConfig.value = connection.value;
   if (loadedSummary.status === "fulfilled") {
     summary.value = loadedSummary.value;
     summaryLoaded.value = true;
@@ -816,7 +774,7 @@ async function loadDashboard() {
     const go = catalog.value.find((entry) => entry.provider_id === "opencode" && entry.offering_id === "go");
     if (go) {
       try {
-        const page = await tauriApi.getForwardLogs({
+        const page = await dashboardApi.getForwardLogs({
           provider_id: go.provider_id,
           offering_id: go.offering_id,
           limit: 1,

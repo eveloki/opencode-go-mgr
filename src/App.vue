@@ -170,6 +170,15 @@
             >
               {{ logoutError }}
             </n-alert>
+            <n-alert
+              v-if="upgradeGuidance"
+              class="app-error"
+              type="warning"
+              closable
+              @close="upgradeGuidance = ''"
+            >
+              {{ upgradeGuidance }}
+            </n-alert>
             <!-- All views are kept alive so switching tabs preserves state
                  (scroll, filters, drafts); each view refreshes stale data in
                  its own onActivated hook. -->
@@ -234,7 +243,12 @@ import {
 import LocaleSwitcher from "./components/LocaleSwitcher.vue";
 import { locale, naiveDateLocale, naiveLocale, t } from "./i18n/index.ts";
 import type { MessageKey } from "./i18n/index.ts";
-import { DASHBOARD_AUTH_REQUIRED_EVENT, DashboardRequestError, tauriApi } from "./api/tauri";
+import {
+  DASHBOARD_AUTH_REQUIRED_EVENT,
+  DASHBOARD_GONE_EVENT,
+  DashboardRequestError,
+} from "./api/dashboard";
+import { useSessionStore } from "./stores/session.ts";
 import {
   applyTheme,
   getThemeStorage,
@@ -292,6 +306,8 @@ const authState = ref<"checking" | "login" | "register" | "ready">("checking");
 const localMode = ref(false);
 const loggingOut = ref(false);
 const logoutError = ref("");
+const upgradeGuidance = ref("");
+const session = useSessionStore();
 const browserSessionToken = ref(new URLSearchParams(window.location.hash.slice(1)).get("session") ?? "");
 if (browserSessionToken.value) {
   const sanitizedBrowserUrl = new URL(window.location.href);
@@ -472,6 +488,7 @@ function handleThemeMenuKeydown(event: KeyboardEvent, current: ThemeName) {
 
 function onAuthRequired(event: Event) {
   if (suppressAuthRequired) return;
+  session.handleAuthRequired();
   logoutError.value = "";
   authState.value = "login";
   authPassword.value = "";
@@ -479,10 +496,15 @@ function onAuthRequired(event: Event) {
   authError.value = (event as CustomEvent<string>).detail || t("请重新登录");
 }
 
+function onDashboardGone(event: Event) {
+  const detail = (event as CustomEvent<{ guidance?: string }>).detail;
+  upgradeGuidance.value = detail?.guidance || "页面版本与服务不匹配，请刷新页面后重试；若仍失败请升级到最新版本";
+}
+
 async function loadAuthStatus() {
   authState.value = "checking";
   try {
-    const status = await tauriApi.getAuthStatus();
+    const status = await session.loadStatus();
     localMode.value = status.local;
     authError.value = "";
     logoutError.value = "";
@@ -515,8 +537,8 @@ async function submitAuth() {
   }
   authState.value = "checking";
   try {
-    if (mode === "register") await tauriApi.registerAdmin(username, authPassword.value);
-    else await tauriApi.loginAdmin(username, authPassword.value);
+    if (mode === "register") await session.register(username, authPassword.value);
+    else await session.login(username, authPassword.value);
     authPassword.value = "";
     authPasswordConfirm.value = "";
     authError.value = "";
@@ -532,7 +554,7 @@ async function submitAuth() {
       if (mode === "register" && e.status === 409) error = t("管理员已经创建，请直接登录");
     }
     if (mode === "login" && e instanceof DashboardRequestError && e.status === 401) {
-      const status = await tauriApi.getAuthStatus().catch(() => null);
+      const status = await session.loadStatus().catch(() => null);
       if (status) {
         localMode.value = status.local;
         if (status.authenticated) {
@@ -550,7 +572,7 @@ async function submitAuth() {
       }
     }
     if (mode === "register") {
-      const status = await tauriApi.getAuthStatus().catch(() => null);
+      const status = await session.loadStatus().catch(() => null);
       if (status?.initialized) {
         localMode.value = status.local;
         authError.value = error;
@@ -569,7 +591,7 @@ async function logout() {
   logoutError.value = "";
   suppressAuthRequired = true;
   try {
-    await tauriApi.logoutAdmin();
+    await session.logout();
     authPassword.value = "";
     authPasswordConfirm.value = "";
     authError.value = "";
@@ -592,6 +614,7 @@ watch([resolvedTheme, themeTokens], ([resolved, tokens]) => {
 
 onMounted(() => {
   window.addEventListener(DASHBOARD_AUTH_REQUIRED_EVENT, onAuthRequired);
+  window.addEventListener(DASHBOARD_GONE_EVENT, onDashboardGone);
   window.addEventListener("popstate", onPopState);
   document.addEventListener("keydown", closeOpenThemeMenuOnEscape);
   void loadAuthStatus();
@@ -599,6 +622,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener(DASHBOARD_AUTH_REQUIRED_EVENT, onAuthRequired);
+  window.removeEventListener(DASHBOARD_GONE_EVENT, onDashboardGone);
   window.removeEventListener("popstate", onPopState);
   document.removeEventListener("keydown", closeOpenThemeMenuOnEscape);
 });

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
-const api = readFileSync(new URL("../api/tauri.ts", import.meta.url), "utf8");
+const api = readFileSync(new URL("../api/dashboard.ts", import.meta.url), "utf8");
 
 test("zen card has one enabled switch backed by the dedicated provider-settings write", () => {
   assert.match(accounts, /providerApi\.updateProviderSettings\(account\.id, \{/);
@@ -17,7 +17,7 @@ test("zen provider settings send the settings revision guard and reload on 409",
   assert.match(accounts, /error\.status !== 409/);
   assert.match(accounts, /recoverAccountMutationConflict\(error\)/);
   assert.match(accounts, /message\.warning\(t\("账号设置已被其他操作修改，已重新加载最新状态，请重试"\)\)/);
-  assert.match(accounts, /async function reloadAfterControlPlaneConflict[\s\S]*?tauriApi\.getSettings\([\s\S]*?tauriApi\.getAccounts\(/);
+  assert.match(accounts, /async function reloadAfterControlPlaneConflict[\s\S]*?dashboardApi\.getSettings\([\s\S]*?accountsStore\.loadPresented\(/);
 });
 
 test("Accounts keeps account-owned writes and no longer hosts supplier catalog or protocol tests", () => {
@@ -26,11 +26,11 @@ test("Accounts keeps account-owned writes and no longer hosts supplier catalog o
   assert.doesNotMatch(accounts, /getProviderModels/);
   assert.doesNotMatch(accounts, /getProviderModelCapabilities/);
   assert.doesNotMatch(accounts, /runProtocolProbes/);
-  assert.doesNotMatch(accounts, /tauriApi\.testAccount/);
+  assert.doesNotMatch(accounts, /dashboardApi\.testAccount/);
   assert.doesNotMatch(card, /emit\('refresh-models'\)/);
   assert.doesNotMatch(card, /<AccountTestPopover/);
   assert.match(accounts, /providerApi\.updateProviderSettings/);
-  assert.match(accounts, /tauriApi\.toggleAccount/);
+  assert.match(accounts, /dashboardApi\.toggleAccount/);
   assert.match(card, /emit\('refresh-usage'\)/);
   assert.match(card, /emit\('open-provider'\)/);
   assert.match(accounts, /accountProviderScope\(account\)/);
@@ -47,9 +47,5 @@ test("Accounts omits a protocol summary until a contract snapshot exists and kee
 test("the generic account patch no longer carries the zen free alias", () => {
   assert.doesNotMatch(accounts, /setAccountFreeAlias/);
   assert.doesNotMatch(api, /setAccountFreeAlias/);
-  const accountUpdate = api.slice(
-    api.indexOf("export interface AccountUpdate"),
-    api.indexOf("export type RoutingMode"),
-  );
-  assert.doesNotMatch(accountUpdate, /free_alias_enabled/);
+  assert.doesNotMatch(api, /setAccountFreeAlias|free_alias_enabled/);
 });

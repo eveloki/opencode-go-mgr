@@ -1,4 +1,4 @@
-import type { Account, UsageWindow } from "../api/tauri";
+import type { Account, UsageWindow } from "../api/dashboard";
 
 export type UsageKey = "window_5h" | "window_week" | "window_month";
 

@@ -259,7 +259,7 @@ import {
   NTag,
 } from "naive-ui";
 import { MinusCircleOutlined, PlusOutlined } from "@vicons/antd";
-import { tauriApi, type Account, type AccountInput } from "../api/tauri";
+import { dashboardApi, type Account, type AccountInput } from "../api/dashboard";
 import type { ProviderCatalogEntry, ProviderCatalogFormField } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
@@ -673,7 +673,7 @@ async function discoverModels() {
   discoveryError.value = "";
   discoverySuccess.value = "";
   try {
-    const result = await tauriApi.discoverCustomModels({
+    const result = await dashboardApi.discoverCustomModels({
       base_url: form.value.baseUrl.trim(),
       upstream_protocol: form.value.upstreamProtocol,
       auth_scheme: form.value.authScheme,

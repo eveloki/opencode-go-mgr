@@ -1,4 +1,4 @@
-import type { AppConfig } from "../api/tauri";
+import type { AppConfig } from "../api/dashboard";
 
 export const EDITABLE_SETTING_KEYS = [
   "gateway_port",

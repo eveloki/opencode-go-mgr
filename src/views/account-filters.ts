@@ -1,4 +1,4 @@
-import type { Account } from "../api/tauri.ts";
+import type { Account } from "../api/dashboard.ts";
 import type { PlanDefinition } from "./plans.ts";
 import { planForAccount } from "./plans.ts";
 import { isCooling, isFreeCooling } from "./accounts-usage.ts";

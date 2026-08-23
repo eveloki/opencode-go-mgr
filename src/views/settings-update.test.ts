@@ -95,7 +95,7 @@ test("update API sends the expected version and exposes polling status", () => {
 test("settings restores and observes updates with bounded, lifecycle-safe polling", () => {
   const settings = readFileSync(new URL("./Settings.vue", import.meta.url), "utf8");
   assert.match(settings, /@positive-click="installAvailableUpdate"/);
-  assert.match(settings, /tauriApi\.installUpdate\(result\.latest_version\)/);
+  assert.match(settings, /dashboardApi\.installUpdate\(result\.latest_version\)/);
   assert.match(settings, /UPDATE_INSTALL_TIMEOUT_MS = 15 \* 60_000/);
   assert.match(settings, /void restoreUpdateState\(\)/);
   assert.match(settings, /readUpdateTarget\(sessionUpdateStorage\(\)\)/);

@@ -285,14 +285,14 @@ import {
   useMessage,
 } from "naive-ui";
 import { ArrowDownOutlined, ArrowUpOutlined, CalendarOutlined, CheckOutlined, ClearOutlined, CopyOutlined, ReloadOutlined } from "@vicons/antd";
-import { UNATTRIBUTED_KEY_FILTER, tauriApi } from "../api/tauri";
+import { UNATTRIBUTED_KEY_FILTER, dashboardApi } from "../api/dashboard";
 import type {
   Account,
   ForwardLog,
   ForwardLogClientKey,
   ForwardLogSummary,
   GatewayLog,
-} from "../api/tauri";
+} from "../api/dashboard";
 import { t } from "../i18n/index.ts";
 import { locale } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
@@ -855,7 +855,7 @@ async function loadGatewayLogs() {
   gatewayLoading.value = true;
   gatewayError.value = "";
   try {
-    const logs = await tauriApi.getGatewayLogs(200, requestIdFilter.value);
+    const logs = await dashboardApi.getGatewayLogs(200, requestIdFilter.value);
     if (request !== gatewayRequest) return;
     gatewayLogs.value = logs;
     gatewayPage.value = 1;
@@ -879,7 +879,7 @@ async function loadForwardLogs() {
   forwardTotals.value = emptySummary();
   try {
     const requestRange = resolveTimeRange(activePreset.value, timeRange.value);
-    const result = await tauriApi.getForwardLogs({
+    const result = await dashboardApi.getForwardLogs({
       limit: pageSize,
       offset: (forwardPage.value - 1) * pageSize,
       status: statusFilter.value,
@@ -913,7 +913,7 @@ async function loadForwardLogs() {
 
 async function loadAccounts() {
   try {
-    accounts.value = await tauriApi.getAccounts();
+    accounts.value = await dashboardApi.getAccounts();
   } catch (e) {
     message.error(t("加载账号筛选失败: {error}", { error: String(e) }));
   }
@@ -921,7 +921,7 @@ async function loadAccounts() {
 
 async function loadForwardLogModels() {
   try {
-    models.value = await tauriApi.getForwardLogModels();
+    models.value = await dashboardApi.getForwardLogModels();
   } catch (e) {
     message.error(t("加载模型筛选失败: {error}", { error: String(e) }));
   }
@@ -929,7 +929,7 @@ async function loadForwardLogModels() {
 
 async function loadForwardLogKeys() {
   try {
-    clientKeys.value = await tauriApi.getForwardLogKeys();
+    clientKeys.value = await dashboardApi.getForwardLogKeys();
   } catch (e) {
     message.error(t("加载 Key 筛选失败: {error}", { error: String(e) }));
   }

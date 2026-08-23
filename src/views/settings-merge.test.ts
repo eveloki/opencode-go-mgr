@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AppConfig } from "../api/tauri.ts";
+import type { AppConfig } from "../api/dashboard.ts";
 import { EDITABLE_SETTING_KEYS, mergeUnsavedSettings } from "./settings-merge.ts";
 
 test("the primary key value is not an editable settings field", () => {
@@ -11,7 +11,6 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     revision: 1,
     gateway_port: 9042,
-    gateway_key: "server-key-1",
     upstream_base_url: "https://opencode.ai/zen/go",
     proxy_mode: "auto",
     proxy_url: "",
@@ -59,9 +58,9 @@ test("settings conflict merge preserves local edits and accepts unrelated remote
   assert.equal(merged.non_stream_timeout_secs, 1_200);
 });
 
-test("settings conflict merge adopts the server primary key and keeps other local edits", () => {
+test("settings conflict merge keeps local edits and adopts server capability flags", () => {
   const saved = config();
-  const current = config({ gateway_key: "unpersisted-key", auto_start: true });
+  const current = config({ auto_start: true });
   const latest = config({
     revision: 3,
     auto_start_supported: false,
@@ -70,21 +69,7 @@ test("settings conflict merge adopts the server primary key and keeps other loca
 
   const merged = mergeUnsavedSettings(latest, current, saved);
 
-  // gateway_key is no longer a settings-form field: an unsaved local
-  // edit is discarded so a rotation on the Keys page wins. Capability
-  // flags still come from the server; other editable fields stay local.
-  assert.equal(merged.gateway_key, "server-key-1");
   assert.equal(merged.auto_start, true);
   assert.equal(merged.auto_start_supported, false);
   assert.equal(merged.client_root_url_from_env, true);
-});
-
-test("an untouched primary key value follows the server snapshot", () => {
-  const saved = config();
-  const current = config();
-  const latest = config({ revision: 2, gateway_key: "server-key-2" });
-
-  const merged = mergeUnsavedSettings(latest, current, saved);
-
-  assert.equal(merged.gateway_key, "server-key-2");
 });

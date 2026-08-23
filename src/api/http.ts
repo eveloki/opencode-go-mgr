@@ -3,8 +3,8 @@ import { t } from "../i18n/index.ts";
 /**
  * Domain-neutral HTTP transport for the dashboard API: base-URL resolution,
  * JSON body encoding, and the shared error types every endpoint wrapper in
- * `tauri.ts` builds on. Keeping this layer free of endpoint DTOs lets future
- * provider-specific API modules reuse it without touching `tauri.ts`.
+ * the Dashboard clients build on. Keeping this layer free of endpoint DTOs
+ * lets provider-specific API modules reuse it without coupling their contracts.
  */
 
 export const DASHBOARD_AUTH_REQUIRED_EVENT = "ocg-dashboard-auth-required";

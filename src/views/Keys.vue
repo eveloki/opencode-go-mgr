@@ -204,7 +204,7 @@
 </template>
 
 <script setup lang="ts">
-import { onActivated, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onMounted, onUnmounted, ref } from "vue";
 import {
   NAlert,
   NButton,
@@ -222,13 +222,15 @@ import {
   EditOutlined,
   ReloadOutlined,
 } from "@vicons/antd";
-import { DashboardRequestError, tauriApi } from "../api/tauri";
-import type { ConnectionInfo, ConnectionSubKey } from "../api/tauri";
+import { DashboardRequestError } from "../api/dashboard";
+import type { ConnectionInfo, ConnectionSubKey } from "../api/dashboard";
+import { useConnectionStore } from "../stores/connection.ts";
 import { t } from "../i18n/index.ts";
 import { useClipboard } from "../utils/format.ts";
 import { maskConnectionKey } from "./dashboard-connection";
 
 const message = useMessage();
+const connectionStore = useConnectionStore();
 const { copiedTarget: keyCopied, copy, cleanup } = useClipboard();
 const loaded = ref(false);
 const loading = ref(false);
@@ -240,17 +242,17 @@ const renameDraft = ref("");
 const keyMutation = ref("");
 let loadGeneration = 0;
 
-const connection = ref<ConnectionInfo>({
+const EMPTY_CONNECTION: ConnectionInfo = {
   gateway_port: 9042,
   client_root_url: "",
   upstream_base_url: "",
   primary_key: "",
   sub_keys: [],
   revision: 0,
-});
+};
+const connection = computed(() => connectionStore.info ?? EMPTY_CONNECTION);
 
 function applyConnection(next: ConnectionInfo): void {
-  connection.value = next;
   if (renamingKeyId.value && !next.sub_keys.some((entry) => entry.id === renamingKeyId.value)) {
     cancelRename();
   }
@@ -263,7 +265,7 @@ async function loadConnection(): Promise<boolean> {
   loading.value = true;
   loadError.value = "";
   try {
-    const next = await tauriApi.getConnection();
+    const next = await connectionStore.load();
     if (generation !== loadGeneration) return false;
     applyConnection(next);
     return true;
@@ -298,7 +300,7 @@ async function runKeyMutation(
       mutationError = error;
     }
     try {
-      const latest = await tauriApi.getConnection();
+      const latest = await connectionStore.load();
       if (generation !== loadGeneration) return false;
       applyConnection(latest);
       if (mutationError === null) {
@@ -336,8 +338,7 @@ async function rotatePrimaryKey(): Promise<void> {
   const ok = await runKeyMutation(
     "rotate-primary",
     async () => {
-      const result = await tauriApi.regenerateGatewayKey();
-      nextValue = result.key;
+      nextValue = await connectionStore.regeneratePrimaryKey();
     },
     () => t("Key 已刷新"),
   );
@@ -368,8 +369,7 @@ async function createKey(): Promise<void> {
   const ok = await runKeyMutation(
     "create",
     async () => {
-      const result = await tauriApi.createGatewayKey(name, connection.value.revision);
-      createdValue = result.key;
+      createdValue = (await connectionStore.createKey(name)).value;
     },
     () => t("Key 已创建"),
   );
@@ -402,7 +402,7 @@ async function commitRename(entry: ConnectionSubKey): Promise<void> {
   }
   await runKeyMutation(
     `rename:${entry.id}`,
-    () => tauriApi.updateGatewayKey(entry.id, { name }, connection.value.revision),
+    () => connectionStore.updateKey(entry.id, { name }),
     () => t("Key 名称已保存"),
   );
   cancelRename();
@@ -411,7 +411,7 @@ async function commitRename(entry: ConnectionSubKey): Promise<void> {
 async function toggleKey(entry: ConnectionSubKey, enabled: boolean): Promise<void> {
   await runKeyMutation(
     `toggle:${entry.id}`,
-    () => tauriApi.updateGatewayKey(entry.id, { enabled }, connection.value.revision),
+    () => connectionStore.updateKey(entry.id, { enabled }),
     () => (enabled ? t("Key 已启用") : t("Key 已停用")),
   );
 }
@@ -431,8 +431,7 @@ async function regenerateEntryKey(entry: ConnectionSubKey): Promise<void> {
   const ok = await runKeyMutation(
     `regenerate:${entry.id}`,
     async () => {
-      const result = await tauriApi.regenerateGatewayKeyEntry(entry.id, connection.value.revision);
-      nextValue = result.key;
+      nextValue = (await connectionStore.regenerateKey(entry.id)).value;
     },
     () => t("Key 已重新生成"),
   );
@@ -449,7 +448,7 @@ async function regenerateEntryKey(entry: ConnectionSubKey): Promise<void> {
 async function deleteEntryKey(entry: ConnectionSubKey): Promise<void> {
   await runKeyMutation(
     `delete:${entry.id}`,
-    () => tauriApi.deleteGatewayKey(entry.id, connection.value.revision),
+    () => connectionStore.deleteKey(entry.id),
     () => t("Key 已删除"),
   );
 }

@@ -205,7 +205,7 @@ test("keeps account cards compact with metadata tags and popover calibration", a
     /accountIsReady\(account\) && account\.account_type === 'managed'/,
   );
   assert.match(usage, /async function refreshAccountUsage/);
-  assert.match(usage, /tauriApi\.refreshAccountUsage/);
+  assert.match(usage, /dashboardApi\.refreshAccountUsage/);
   assert.match(usage, /额度已从 OpenCode 官方用量刷新/);
   assert.doesNotMatch(usage, /refreshManagedUsage|refreshManagedAccountUsage|额度已从 OpenCode 控制台刷新/);
   assert.match(card, /:aria-label="t\('校准用量'\)"/);

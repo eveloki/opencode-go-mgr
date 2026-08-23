@@ -1,4 +1,4 @@
-import type { Account } from "../api/tauri.ts";
+import type { Account } from "../api/dashboard.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { MessageKey } from "../i18n/index.ts";
 

@@ -4,7 +4,7 @@ import type {
   AccountModelCapability,
   AccountModelCapabilityInput,
   AccountUpdate,
-} from "../api/tauri.ts";
+} from "../api/dashboard.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
 /**

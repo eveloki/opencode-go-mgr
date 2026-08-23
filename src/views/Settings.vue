@@ -467,14 +467,15 @@ import {
   BgColorsOutlined,
   CloudSyncOutlined,
 } from "@vicons/antd";
-import { DashboardRequestError, tauriApi } from "../api/tauri";
+import { DashboardRequestError, dashboardApi } from "../api/dashboard";
+import { useSettingsStore } from "../stores/settings.ts";
 import type {
   AppConfig,
   ProxyMode,
   RoutingMode,
   UpdateCheckResult,
   UpdateStatus,
-} from "../api/tauri";
+} from "../api/dashboard";
 import { THEME_OPTIONS } from "../theme";
 import type { ResolvedTheme, ThemeName } from "../theme";
 import { t } from "../i18n/index.ts";
@@ -502,6 +503,7 @@ const { themeName, resolvedTheme } = defineProps<{
 const emit = defineEmits<{ "update:themeName": [value: ThemeName] }>();
 
 const message = useMessage();
+const settingsStore = useSettingsStore();
 const saving = ref(false);
 const testingProxy = ref(false);
 const proxyTestResult = ref<{
@@ -535,7 +537,6 @@ let pendingSettingsMerge: { current: AppConfig; saved: AppConfig } | null = null
 const config = ref<AppConfig>({
   revision: 0,
   gateway_port: 9042,
-  gateway_key: "",
   upstream_base_url: "https://opencode.ai/zen/go",
   proxy_mode: "auto",
   proxy_url: "",
@@ -806,7 +807,7 @@ async function loadSettings(): Promise<boolean> {
   const generation = ++settingsLoadGeneration;
   settingsLoadError.value = "";
   try {
-    const nextConfig = await tauriApi.getSettings();
+    const nextConfig = await settingsStore.loadPresented();
     if (generation !== settingsLoadGeneration) return false;
     acceptSettingsSnapshot(nextConfig);
     return true;
@@ -849,7 +850,7 @@ async function saveSettings() {
     || savedConfig.value.conversation_sticky !== payload.conversation_sticky
   );
   try {
-    const result = await tauriApi.updateSettings(payload);
+    const result = await settingsStore.putPresented(payload);
     payload.revision = result.revision;
     config.value.revision = result.revision;
     savedConfig.value = { ...payload };
@@ -901,7 +902,7 @@ async function testProxyConnection() {
   testingProxy.value = true;
   proxyTestResult.value = null;
   try {
-    const result = await tauriApi.testProxy(request);
+    const result = await dashboardApi.testProxy(request);
     if (
       config.value.proxy_mode !== request.proxy_mode
       || config.value.proxy_url !== request.proxy_url
@@ -944,7 +945,7 @@ async function handleAutoStartToggle(newValue: boolean) {
   const next = { ...saved, auto_start: newValue };
   saving.value = true;
   try {
-    const result = await tauriApi.updateSettings(next);
+    const result = await settingsStore.putPresented(next);
     next.revision = result.revision;
     savedConfig.value = { ...next };
     config.value.auto_start = newValue;
@@ -967,7 +968,7 @@ async function handleDockVisibilityToggle(newValue: boolean) {
   const next = { ...saved, show_dock_icon: newValue };
   saving.value = true;
   try {
-    const result = await tauriApi.updateSettings(next);
+    const result = await settingsStore.putPresented(next);
     next.revision = result.revision;
     savedConfig.value = { ...next };
     config.value.show_dock_icon = newValue;
@@ -1039,7 +1040,7 @@ async function checkForUpdate() {
   updateResult.value = null;
   updateError.value = "";
   try {
-    const result = await tauriApi.checkForUpdate();
+    const result = await dashboardApi.checkForUpdate();
     if (!updateDisposed) updateResult.value = result;
   } catch (error) {
     if (!updateDisposed) {
@@ -1177,7 +1178,7 @@ async function pollUpdateStatus(generation: number) {
     return;
   }
   try {
-    const status = await tauriApi.getUpdateStatus();
+    const status = await dashboardApi.getUpdateStatus();
     if (!isActiveUpdateGeneration(generation)) return;
     if (acceptObservedUpdateStatus(status)) return;
   } catch {
@@ -1195,7 +1196,7 @@ async function restoreUpdateState() {
   const generation = updatePollGeneration;
   updateTargetVersion.value = readUpdateTarget(sessionUpdateStorage());
   try {
-    const status = await tauriApi.getUpdateStatus();
+    const status = await dashboardApi.getUpdateStatus();
     if (!isActiveUpdateGeneration(generation)) return;
     recoveringUpdate.value = false;
     if (acceptObservedUpdateStatus(status)) return;
@@ -1219,7 +1220,7 @@ async function installAvailableUpdate() {
   let pollingStarted = false;
 
   try {
-    const currentStatus = await tauriApi.getUpdateStatus();
+    const currentStatus = await dashboardApi.getUpdateStatus();
     if (updateDisposed) return;
     if (isUpdatePhaseBusy(currentStatus.phase)) {
       rememberUpdateTarget(result.latest_version);
@@ -1238,7 +1239,7 @@ async function installAvailableUpdate() {
     const generation = startUpdatePolling();
     pollingStarted = true;
 
-    const status = await tauriApi.installUpdate(result.latest_version);
+    const status = await dashboardApi.installUpdate(result.latest_version);
     if (!isActiveUpdateGeneration(generation)) return;
     startingUpdate.value = false;
     acceptObservedUpdateStatus(status);

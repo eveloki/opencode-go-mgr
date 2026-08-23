@@ -76,7 +76,7 @@ test("the verify flow is revision-guarded and never claims enablement", () => {
     accounts.indexOf("async function verifyCustomAccount"),
     accounts.indexOf("async function saveCustomAccountEdit"),
   );
-  assert.match(body, /runWithFreshSettingsRevision\(\(revision\) => \(\s*tauriApi\.verifyAccountConnection\(id, revision\)/);
+  assert.match(body, /runWithFreshSettingsRevision\(\(revision\) => \(\s*dashboardApi\.verifyAccountConnection\(id, revision\)/);
   assert.match(body, /message\.success\(t\("连接验证成功，账号保持禁用，可手动启用。"\)\)/);
   assert.doesNotMatch(body, /toggleAccount|已启用/);
   // Failures refresh server state so the failed verification status renders.

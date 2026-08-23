@@ -191,11 +191,11 @@ import {
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
 import { CheckOutlined, CloseOutlined, RightOutlined } from "@vicons/antd";
-import { DashboardRequestError, tauriApi } from "../api/tauri";
+import { DashboardRequestError, dashboardApi } from "../api/dashboard";
 import type {
   PricingMultiplierChange,
   PricingSnapshot,
-} from "../api/tauri";
+} from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import ProviderPricingReference from "./ProviderPricingReference.vue";
@@ -439,7 +439,7 @@ function discardMultiplierDraft(modelId: string) {
 
 async function reloadPricingAfterRevisionChange(): Promise<string | null> {
   try {
-    snapshot.value = await tauriApi.getPricing();
+    snapshot.value = await dashboardApi.getPricing();
     message.warning(t("价格表已在其他位置更新，已重新加载"));
     return null;
   } catch (error) {
@@ -453,7 +453,7 @@ async function saveMultiplier(modelId: string) {
   if (!active || !hasMultiplierDraft(modelId) || !validMultiplier(multiplier) || savingModelId.value) return;
   savingModelId.value = modelId;
   try {
-    snapshot.value = await tauriApi.updatePricingMultipliers(active.revision, [{ model_id: modelId, multiplier }]);
+    snapshot.value = await dashboardApi.updatePricingMultipliers(active.revision, [{ model_id: modelId, multiplier }]);
     discardMultiplierDraft(modelId);
     message.success(t("官方倍率已保存"));
   } catch (error) {
@@ -586,7 +586,7 @@ async function loadPricing() {
   loading.value = true;
   loadError.value = "";
   try {
-    snapshot.value = await tauriApi.getPricing();
+    snapshot.value = await dashboardApi.getPricing();
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -670,7 +670,7 @@ async function performPricingRefresh(
   refreshing.value = true;
   refreshError.value = "";
   try {
-    const result = await tauriApi.refreshPricing({
+    const result = await dashboardApi.refreshPricing({
       policy,
       expected_revision: expectedRevision,
       expected_official_content_hash: expectedOfficialContentHash,

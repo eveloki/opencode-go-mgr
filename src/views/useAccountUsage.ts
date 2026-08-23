@@ -1,8 +1,8 @@
 import { computed, nextTick, ref } from "vue";
 import type { Ref } from "vue";
 import { useMessage } from "naive-ui";
-import { DashboardRequestError, tauriApi } from "../api/tauri";
-import type { Account, PricingLimits, UsageWindow } from "../api/tauri";
+import { DashboardRequestError, dashboardApi } from "../api/dashboard";
+import type { Account, PricingLimits, UsageWindow } from "../api/dashboard";
 import {
   defaultResetsInMinutes,
   isUsageLimitReached,
@@ -197,7 +197,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     edit.error = null;
     const resetsInMin = resetsInMinutesForSave(edit, key);
     try {
-      const usage = await tauriApi.updateAccountUsage(
+      const usage = await dashboardApi.updateAccountUsage(
         accountId,
         key,
         percent,
@@ -245,7 +245,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     }
     usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: true };
     try {
-      const result = await tauriApi.refreshAccountUsage(accountId);
+      const result = await dashboardApi.refreshAccountUsage(accountId);
       usageMap.value[accountId] = result.usage;
       syncUsageEdits(accountId, result.usage);
       patchAccountUsageSync(accountId, {
@@ -277,7 +277,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     quotaLimitsLoading.value = true;
     quotaLimitsError.value = "";
     try {
-      quotaLimits.value = (await tauriApi.getPricing()).limits;
+      quotaLimits.value = (await dashboardApi.getPricing()).limits;
       return true;
     } catch (error) {
       quotaLimits.value = null;
@@ -292,7 +292,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     usageLoading.value[accountId] = true;
     usageLoadErrors.value[accountId] = null;
     try {
-      const usage = await tauriApi.getAccountUsage(accountId);
+      const usage = await dashboardApi.getAccountUsage(accountId);
       usageMap.value[accountId] = usage;
       syncUsageEdits(accountId, usage);
     } catch (error) {

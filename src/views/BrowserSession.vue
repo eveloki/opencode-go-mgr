@@ -76,7 +76,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { NAlert, NButton, NInput, NSpace, NSpin, NTag, useMessage } from "naive-ui";
 import RFB from "@novnc/novnc";
 import type { RFBClipboardEvent } from "@novnc/novnc";
-import { browserSessionWebSocketUrl } from "../api/tauri";
+import { browserSessionWebSocketUrl } from "../api/dashboard";
 import { t } from "../i18n/index.ts";
 
 const props = defineProps<{ sessionToken: string }>();

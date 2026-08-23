@@ -333,7 +333,9 @@ import {
 import type { MenuOption, SelectGroupOption, SelectOption } from "naive-ui";
 import { CheckOutlined, CopyOutlined, ExportOutlined } from "@vicons/antd";
 import logoUrl from "../../assets/logo/ocg_logo_final_transparent.png";
-import { PRIMARY_KEY_ID, tauriApi, type ClaudeDesktopModels, type ConnectionSubKey } from "../api/tauri";
+import { PRIMARY_KEY_ID, dashboardApi, type ClaudeDesktopModels, type ConnectionSubKey } from "../api/dashboard";
+import { useConnectionStore } from "../stores/connection.ts";
+import { useSettingsStore } from "../stores/settings.ts";
 import { selectedApplicationAlias } from "./application-alias.ts";
 import { useClipboard } from "../utils/format.ts";
 import {
@@ -356,6 +358,8 @@ const DEFAULT_APPLICATION: ApplicationId = "claude-code";
 const CLAUDE_DESKTOP_FIELDS = ["sonnet", "opus", "haiku"] as const;
 const allowedImportProtocols = new Set(["chatbox:"]);
 const message = useMessage();
+const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { copiedTarget, copy, cleanup } = useClipboard();
 const currentApplication = ref<ApplicationId>(readApplication());
 const settingsLoading = ref(true);
@@ -407,11 +411,21 @@ interface SwitcherKey {
   value: string;
 }
 
-const serviceConfig = ref({
+const EMPTY_SERVICE_CONFIG = {
   gateway_port: 9042,
   client_root_url: "",
   primary_key: "",
   sub_keys: [] as ConnectionSubKey[],
+};
+const serviceConfig = computed(() => {
+  const connection = connectionStore.info;
+  if (!connection) return EMPTY_SERVICE_CONFIG;
+  return {
+    gateway_port: connection.gateway_port,
+    client_root_url: connection.client_root_url,
+    primary_key: connection.primary_key,
+    sub_keys: connection.sub_keys,
+  };
 });
 const selectedKeyId = ref(PRIMARY_KEY_ID);
 const enabledGatewayKeys = computed<SwitcherKey[]>(() => [
@@ -621,8 +635,8 @@ async function loadModels() {
   const errors: string[] = [];
   try {
     const [modelsResult, desktopResult] = await Promise.allSettled([
-      tauriApi.getApplicationModels(),
-      tauriApi.getClaudeDesktopModels(),
+      dashboardApi.getApplicationModels(),
+      settingsStore.loadClaudeDesktop(),
     ]);
     const modelIds = modelsResult.status === "fulfilled"
       ? modelsResult.value
@@ -633,7 +647,11 @@ async function loadModels() {
       applicationModelIds.value = modelIds;
       if (!modelIds.length) errors.push(t("未返回可用模型"));
     }
-    const claudeDesktopModels = desktopResult.status === "fulfilled" ? desktopResult.value : undefined;
+    const claudeDesktopModels = desktopResult.status === "fulfilled" ? {
+      sonnet: desktopResult.value.sonnet,
+      opus: desktopResult.value.opus,
+      haiku: desktopResult.value.haiku,
+    } : undefined;
     if (desktopResult.status === "rejected") {
       errors.push(desktopResult.reason instanceof Error ? desktopResult.reason.message : String(desktopResult.reason));
     }
@@ -713,7 +731,8 @@ async function loadSettings(loadApplicationModels = true) {
   try {
     // The view only needs connection fields; the lightweight payload keeps
     // it off the full settings shape.
-    const connection = await tauriApi.getConnection();
+    const previousServiceConfig = serviceConfig.value;
+    const connection = await connectionStore.load();
     const nextServiceConfig = {
       gateway_port: connection.gateway_port,
       client_root_url: connection.client_root_url,
@@ -722,9 +741,9 @@ async function loadSettings(loadApplicationModels = true) {
     };
     snippetDrafts.value = reconcileConnectionDrafts(
       {
-        gateway_port: serviceConfig.value.gateway_port,
+        gateway_port: previousServiceConfig.gateway_port,
         gateway_key: selectedKey.value?.value ?? "",
-        client_root_url: serviceConfig.value.client_root_url,
+        client_root_url: previousServiceConfig.client_root_url,
         upstream_base_url: "",
       },
       {
@@ -740,7 +759,6 @@ async function loadSettings(loadApplicationModels = true) {
       },
       snippetDrafts.value,
     );
-    serviceConfig.value = nextServiceConfig;
     settingsLoaded.value = true;
     if (loadApplicationModels) await loadModels();
   } catch (error) {
@@ -803,9 +821,10 @@ async function saveClaudeDesktopModels(): Promise<boolean> {
   if (claudeDesktopModelsSaving.value) return false;
   claudeDesktopModelsSaving.value = true;
   try {
-    const persisted = await tauriApi.updateClaudeDesktopModels(currentClaudeDesktopModels());
+    const result = await settingsStore.putClaudeDesktop(currentClaudeDesktopModels());
+    const persisted = { sonnet: result.sonnet, opus: result.opus, haiku: result.haiku };
     Object.assign(modelValues.value, persisted);
-    claudeDesktopDefaults.value = { ...persisted };
+    claudeDesktopDefaults.value = persisted;
     message.success(t("设置已保存"));
     return true;
   } catch (error) {

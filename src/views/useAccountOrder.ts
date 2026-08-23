@@ -1,8 +1,8 @@
 import { ref } from "vue";
 import type { Ref } from "vue";
 import { useMessage } from "naive-ui";
-import { DashboardRequestError, tauriApi } from "../api/tauri";
-import type { Account } from "../api/tauri";
+import { DashboardRequestError, dashboardApi } from "../api/dashboard";
+import type { Account } from "../api/dashboard";
 import { moveItem } from "./account-lifecycle.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
@@ -62,7 +62,7 @@ export function useAccountOrder(options: {
     try {
       const saved = await runWithFreshRevision((freshRevision) => {
         revision.value = freshRevision;
-        return tauriApi.reorderAccounts(accounts.value.map(({ id }) => id), freshRevision);
+        return dashboardApi.reorderAccounts(accounts.value.map(({ id }) => id), freshRevision);
       });
       accounts.value = saved;
       revision.value = saved[0]?.revision ?? revision.value;

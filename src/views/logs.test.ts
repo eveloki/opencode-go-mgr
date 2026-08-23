@@ -336,8 +336,8 @@ test("logs view wires filters, race cancellation, debounce, and empty or error s
     source.indexOf("async function loadForwardLogs"),
     source.indexOf("async function loadAccounts"),
   );
-  assert.ok(forwardLoad.indexOf("forwardLogs.value = []") < forwardLoad.indexOf("await tauriApi.getForwardLogs"));
-  assert.ok(forwardLoad.indexOf("forwardTotals.value = emptySummary()") < forwardLoad.indexOf("await tauriApi.getForwardLogs"));
+  assert.ok(forwardLoad.indexOf("forwardLogs.value = []") < forwardLoad.indexOf("await dashboardApi.getForwardLogs"));
+  assert.ok(forwardLoad.indexOf("forwardTotals.value = emptySummary()") < forwardLoad.indexOf("await dashboardApi.getForwardLogs"));
   assert.match(forwardLoad, /catch \(e\)[\s\S]*request === forwardRequest[\s\S]*forwardLogs\.value = \[\]/);
   assert.match(source, /Promise\.all\(\[loadForwardLogs\(\), loadForwardLogModels\(\), loadForwardLogKeys\(\)\]\)/);
   assert.match(source, /row\.cost_state === "legacy_estimate"/);
@@ -425,7 +425,7 @@ test("forward logs can be filtered by client key including the unattributed opti
 
   // Selector data comes from the log table so deleted/dangling ids stay listed.
   assert.match(template, /v-model:value="keyFilter"/);
-  assert.match(source, /clientKeys\.value = await tauriApi\.getForwardLogKeys\(\)/);
+  assert.match(source, /clientKeys\.value = await dashboardApi\.getForwardLogKeys\(\)/);
   assert.match(source, /label: t\("未归因"\), value: UNATTRIBUTED_KEY_FILTER/);
   assert.match(source, /key_id: keyFilter\.value/);
   // Filter changes participate in pagination reset + query state sync.

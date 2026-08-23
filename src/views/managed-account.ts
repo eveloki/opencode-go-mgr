@@ -1,4 +1,4 @@
-import type { AccountSetupStep, BrowserTarget } from "../api/tauri";
+import type { AccountSetupStep, BrowserTarget } from "../api/dashboard";
 
 export const DEFAULT_OPENCODE_INVITE_URL =
   "https://opencode.ai/go?ref=68XPB6NP8V";

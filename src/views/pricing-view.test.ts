@@ -197,7 +197,7 @@ test("pricing catalog keeps refresh explicit and exposes accessible grouped mult
   assert.match(catalog, /refresh_status === "needs_confirmation"/);
   assert.match(catalog, /expected_official_content_hash: expectedOfficialContentHash/);
   assert.match(catalog, /result\.official_content_hash/);
-  assert.match(catalog, /async function reloadPricingAfterRevisionChange[\s\S]*?tauriApi\.getPricing\(\)/);
+  assert.match(catalog, /async function reloadPricingAfterRevisionChange[\s\S]*?dashboardApi\.getPricing\(\)/);
   assert.match(catalog, /detail\.includes\("pricing revision changed"\)[\s\S]*?reloadPricingAfterRevisionChange\(\)/);
   assert.match(catalog, /async function saveMultiplier[\s\S]*?reloadPricingAfterRevisionChange\(\)/);
   assert.match(catalog, /performPricingRefresh\("keep_current"|apply\("keep_current"\)/);

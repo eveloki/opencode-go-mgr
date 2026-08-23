@@ -336,7 +336,7 @@ import {
   MoreOutlined,
   ReloadOutlined,
 } from "@vicons/antd";
-import type { Account, UsageWindow } from "../api/tauri";
+import type { Account, UsageWindow } from "../api/dashboard";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
   protocolDisplayName,

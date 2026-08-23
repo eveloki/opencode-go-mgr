@@ -3,7 +3,7 @@ import type {
   AccountCredentialKind,
   AccountQuotaScope,
   PricingLimits,
-} from "../api/tauri";
+} from "../api/dashboard";
 
 /**
  * Built-in provider/offering registry. The backend owns the DTO fields

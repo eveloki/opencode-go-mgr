@@ -1,4 +1,4 @@
-import type { ProxyMode } from "../api/tauri";
+import type { ProxyMode } from "../api/dashboard";
 
 export function normalizeProxyUrl(mode: ProxyMode, value: string): string {
   const trimmed = value.trim();

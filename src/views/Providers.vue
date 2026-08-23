@@ -169,9 +169,16 @@
           <ProviderProtocolSwitches
             :switches="activeScope.protocols"
             :loading-protocol="switchLoading"
-            :disabled="actionLocked && switchLoading === null"
+            :disabled="customProtocolReadOnly || (actionLocked && switchLoading === null)"
             @change="updateProtocol"
           />
+          <n-alert
+            v-if="customProtocolReadOnly"
+            type="info"
+            :title="t('自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。')"
+          >
+            {{ t("该方案暂不支持协议探测") }}
+          </n-alert>
           <n-alert
             v-if="protocolError"
             type="error"
@@ -230,8 +237,14 @@ import {
   useMessage,
 } from "naive-ui";
 import type { MenuOption, SelectOption } from "naive-ui";
-import { DashboardRequestError } from "../api/tauri";
-import { isCustomCatalogRefreshResponse, providerApi } from "../api/providers.ts";
+import { DashboardRequestError } from "../api/dashboard";
+import {
+  isCustomCatalogRefreshResponse,
+  presentCatalogEntry,
+  presentContracts,
+  providerApi,
+} from "../api/providers.ts";
+import { useProvidersStore } from "../stores/providers.ts";
 import type {
   ProtocolProbeResult,
   ProviderCatalogEntry,
@@ -264,6 +277,7 @@ import {
 } from "./provider-contracts.ts";
 
 const message = useMessage();
+const providersStore = useProvidersStore();
 const contracts = ref<ProviderContractsResponse | null>(null);
 const catalog = ref<ProviderCatalogEntry[] | null>(null);
 const loading = ref(false);
@@ -296,6 +310,7 @@ const activeSelection = computed(() => {
   return selectProviderScope(scopes.value, scopeKind, scopeId);
 });
 const activeScope = computed(() => activeSelection.value.scope);
+const customProtocolReadOnly = computed(() => activeScope.value?.scope_kind === "custom_endpoint");
 const initialLoading = computed(() => loading.value && !contracts.value);
 const actionLocked = computed(() => (
   switchLoading.value !== null || catalogRefreshing.value || probeInFlight.value
@@ -404,8 +419,8 @@ async function loadContracts(options: { retain?: boolean } = {}): Promise<{ ok: 
   if (!options.retain) loadError.value = "";
   try {
     const [contractsResult, catalogResult] = await Promise.allSettled([
-      providerApi.getProviderContracts(),
-      providerApi.getProviderCatalog(),
+      providersStore.loadContracts().then(presentContracts),
+      providersStore.loadCatalog().then((result) => result.entries.map(presentCatalogEntry)),
     ]);
     if (catalogResult.status === "fulfilled") catalog.value = catalogResult.value;
     if (contractsResult.status === "fulfilled") {
@@ -425,17 +440,12 @@ async function loadContracts(options: { retain?: boolean } = {}): Promise<{ ok: 
 async function updateProtocol(protocol: ProviderProtocol, enabled: boolean) {
   const current = contracts.value;
   const scope = activeScope.value;
-  if (!current || !scope || switchLoading.value) return;
+  if (!current || !scope || scope.scope_kind === "custom_endpoint" || switchLoading.value) return;
   switchLoading.value = protocol;
   protocolError.value = "";
   try {
-    const response = await providerApi.updateProviderContractProtocol(
-      scope.scope_kind,
-      scope.scope_id,
-      protocol,
-      { enabled, expected_revision: current.revision },
-    );
-    contracts.value = normalizeProviderContractsResponse(response);
+    const response = await providersStore.putProtocolSwitch(scope.scope_id, protocol, enabled);
+    contracts.value = normalizeProviderContractsResponse(presentContracts(response));
     actionLive.value = t("协议设置已保存");
     message.success(t("协议设置已保存"));
   } catch (error) {

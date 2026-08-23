@@ -44,7 +44,7 @@
 // list in Accounts.vue.
 import { onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
 import { NProgress } from "naive-ui";
-import type { Account, UsageWindow } from "../api/tauri";
+import type { Account, UsageWindow } from "../api/dashboard";
 import {
   isUsageLimitReached,
   resetTimeForWindow,

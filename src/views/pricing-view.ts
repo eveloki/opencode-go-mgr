@@ -1,4 +1,4 @@
-import type { PricingAdjustment, PricingModel } from "../api/tauri";
+import type { PricingAdjustment, PricingModel } from "../api/dashboard";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
   DEFAULT_OFFERING_ID,

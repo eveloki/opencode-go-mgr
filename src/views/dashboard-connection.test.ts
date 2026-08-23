@@ -937,23 +937,13 @@ test("dashboard reports gateway health and serializes key regeneration", async (
   assert.match(source, /async function loadDashboard\(\) \{\s*if \(dashboardRequestActive \|\| refreshingKey\.value\) return;/);
   assert.match(source, /emit\("navigate", "keys"\)/);
   assert.match(source, /function goToKeys\(\) \{\s*emit\("navigate", "keys"\);/);
-  // Primary rotation goes through the legacy endpoint; sub keys rotate via
-  // the key lifecycle API.
+  // Both primary and sub-key rotations go through the sole in-memory secret
+  // owner so the page never keeps a second plaintext copy.
   assert.match(source, /const isPrimary = target\.id === PRIMARY_KEY_ID;/);
-  assert.match(source, /tauriApi\.regenerateGatewayKey\(\)/);
-  assert.match(source, /tauriApi\.regenerateGatewayKeyEntry\(/);
-  assert.match(source, /mutationFailed = true;[\s\S]*?tauriApi\.getConnection\(\)/);
-  // When regeneration succeeds but the follow-up refresh fails, the panel
-  // applies the new value locally instead of showing the invalidated one.
-  assert.match(
-    source,
-    /if \(newValue\) \{\s*\/\/ Connection refresh failed; apply the regenerated value locally/,
-  );
-  assert.match(source, /serviceConfig\.value\.primary_key = newValue;/);
-  assert.match(
-    source,
-    /serviceConfig\.value\.sub_keys = serviceConfig\.value\.sub_keys\.map\(\(entry\) =>\s*entry\.id === target\.id \? \{ \.\.\.entry, value: newValue \} : entry,/,
-  );
+  assert.match(source, /connectionStore\.regeneratePrimaryKey\(\)/);
+  assert.match(source, /connectionStore\.regenerateKey\(target\.id\)/);
+  assert.match(source, /const serviceConfig = computed\(\(\) => connectionStore\.info \?\? EMPTY_CONNECTION\)/);
+  assert.doesNotMatch(source, /serviceConfig\.value\.(?:primary_key|sub_keys)\s*=/);
 });
 
 test("app recovers first-run auth and contains intentional logout failures", async () => {
@@ -972,9 +962,9 @@ test("app recovers first-run auth and contains intentional logout failures", asy
   );
 
   assert.match(onAuthRequired, /if \(suppressAuthRequired\) return;/);
-  assert.match(submitAuth, /mode === "login" && e instanceof DashboardRequestError && e\.status === 401[\s\S]*getAuthStatus\(\)[\s\S]*!status\.initialized[\s\S]*authState\.value = "register"/);
+  assert.match(submitAuth, /mode === "login" && e instanceof DashboardRequestError && e\.status === 401[\s\S]*session\.loadStatus\(\)[\s\S]*!status\.initialized[\s\S]*authState\.value = "register"/);
   assert.match(logout, /^async function logout\(\) \{\s*if \(loggingOut\.value\) return;/);
-  assert.match(logout, /suppressAuthRequired = true;[\s\S]*await tauriApi\.logoutAdmin\(\)/);
+  assert.match(logout, /suppressAuthRequired = true;[\s\S]*await session\.logout\(\)/);
   assert.match(logout, /catch \(e\) \{[\s\S]*logoutError\.value = t\("退出登录失败: \{error\}"/);
   assert.match(app, /v-if="logoutError"[\s\S]*\{\{ logoutError \}\}/);
 });
@@ -991,7 +981,7 @@ test("dashboard and settings keep partial data safe", async () => {
   assert.doesNotMatch(settings, /class="settings-subsection gateway-keys"/);
   assert.doesNotMatch(settings, /v-model:value="config\.gateway_key"/);
   assert.doesNotMatch(settings, /maskConnectionKey/);
-  assert.match(app, /mode === "register"[\s\S]*getAuthStatus\(\)[\s\S]*status\?\.initialized/);
+  assert.match(app, /mode === "register"[\s\S]*session\.loadStatus\(\)[\s\S]*status\?\.initialized/);
 });
 
 test("applications view uses deep-linked subpages and a responsive second navigation", async () => {
@@ -1014,11 +1004,13 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   assert.match(applications, /<n-select/);
   assert.match(applications, /v-if="activeGuide\.popular"[\s\S]*?t\("常用"\)/);
   assert.match(applications, /function guideOptionLabel[\s\S]*?guide\.popular[\s\S]*?t\("常用"\)/);
-  assert.match(applications, /tauriApi\.getApplicationModels\(\)/);
-  assert.match(applications, /tauriApi\.getClaudeDesktopModels\(\)/);
+  assert.match(applications, /dashboardApi\.getApplicationModels\(\)/);
+  assert.match(applications, /settingsStore\.loadClaudeDesktop\(\)/);
   // Connection fields come from the lightweight payload, not full settings.
-  assert.match(applications, /tauriApi\.getConnection\(\)/);
-  assert.doesNotMatch(applications, /tauriApi\.getSettings\(\)/);
+  assert.match(applications, /connectionStore\.load\(\)/);
+  assert.match(applications, /useConnectionStore\(\)/);
+  assert.match(applications, /useSettingsStore\(\)/);
+  assert.doesNotMatch(applications, /dashboardApi\.getSettings\(\)/);
   assert.doesNotMatch(applications, /t\("节点信息"\)|t\("服务地址"\)|t\("上游地址"\)/);
   assert.doesNotMatch(applications, /class="connection-track"|class="connection-stage"/);
   assert.match(applications, /class="access-fields"/);
@@ -1067,11 +1059,12 @@ test("applications view uses deep-linked subpages and a responsive second naviga
   );
   assert.match(settingsLoad, /reconcileConnectionDrafts\(/);
   assert.ok(
-    settingsLoad.indexOf("snippetDrafts.value = reconcileConnectionDrafts")
-      < settingsLoad.indexOf("serviceConfig.value = nextServiceConfig"),
+    settingsLoad.indexOf("const connection = await connectionStore.load()")
+      < settingsLoad.indexOf("snippetDrafts.value = reconcileConnectionDrafts"),
   );
-  assert.doesNotMatch(restoreDefaults, /loadModels|tauriApi\./);
-  assert.match(applications, /tauriApi\.updateClaudeDesktopModels/);
+  assert.doesNotMatch(settingsLoad, /serviceConfig\.value\s*=/);
+  assert.doesNotMatch(restoreDefaults, /loadModels|dashboardApi\./);
+  assert.match(applications, /settingsStore\.putClaudeDesktop\(/);
   assert.match(applications, /const claudeDesktopModelsDirty = computed/);
   assert.match(applications, /async function saveClaudeDesktopModels\(\): Promise<boolean>/);
   assert.match(applications, /if \(!\(await saveClaudeDesktopModels\(\)\)\) return;/);
@@ -1096,7 +1089,7 @@ test("applications view uses deep-linked subpages and a responsive second naviga
 
 test("settings expose the downstream display root and bounded request timeouts", async () => {
   const settings = await readFile(new URL("./Settings.vue", import.meta.url), "utf8");
-  const api = await readFile(new URL("../api/tauri.ts", import.meta.url), "utf8");
+  const api = `${await readFile(new URL("../api/dashboard.ts", import.meta.url), "utf8")}\n${await readFile(new URL("../api/dashboard-presenters.ts", import.meta.url), "utf8")}`;
   const dashboard = await readFile(new URL("./Dashboard.vue", import.meta.url), "utf8");
   const settingsMerge = await readFile(new URL("./settings-merge.ts", import.meta.url), "utf8");
 
@@ -1116,8 +1109,8 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(settings, /v-model:value="config\.proxy_url"/);
   assert.match(settings, /\{\{ proxyIntro \}\}/);
   assert.match(settings, /\{\{ proxyTestHelp \}\}/);
-  assert.match(settings, /tauriApi\.testProxy/);
-  assert.match(api, /request<ProxyTestResult>\("\/settings\/test-proxy"/);
+  assert.match(settings, /dashboardApi\.testProxy/);
+  assert.match(api, /dashboardV3\.testProxy\(/);
   assert.match(settingsMerge, /"proxy_mode"[\s\S]*"proxy_url"/);
   assert.match(settings, /get: \(\) => config\.value\.client_root_url,/);
   assert.match(settings, /:placeholder="config\.client_root_url_from_env \? '' : automaticClientRootUrls\.rootUrl"/);
@@ -1148,9 +1141,10 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(settingsMerge, /"conversation_sticky"/);
   assert.match(settingsMerge, /if \(current\[key\] !== saved\[key\]\)/);
   assert.match(settings, /const routingChanged = !!savedConfig\.value/);
-  assert.match(settings, /tauriApi\.updateSettings\(payload\)/);
-  assert.match(api, /const \{ revision, \.\.\.settings \} = config/);
-  assert.match(api, /expected_revision: revision/);
+  assert.match(settings, /settingsStore\.putPresented\(payload\)/);
+  assert.match(settings, /useSettingsStore\(\)/);
+  assert.match(api, /settingsUpdateInput\(settings\)/);
+  assert.match(api, /controlPlane\.runMutation\(run\)/);
   assert.match(settings, /if \(!validateTimeouts\(\)\) return/);
   assert.match(settings, /\{field\}必须为 \{min\}–\{max\} 秒的整数/);
   // Key lifecycle lives on the dedicated Keys view, not the settings form.
@@ -1167,22 +1161,23 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(api, /export type RoutingMode = "strict-priority" \| "sticky-global" \| "round-robin"/);
   // The connection panel consumes the lightweight ConnectionInfo payload,
   // never the full settings shape.
-  assert.match(dashboard, /ref<ConnectionInfo>/);
+  assert.match(dashboard, /useConnectionStore\(\)/);
+  assert.match(dashboard, /computed\(\(\) => connectionStore\.info \?\? EMPTY_CONNECTION\)/);
   assert.doesNotMatch(dashboard, /ref<AppConfig>/);
   assert.doesNotMatch(settings, /PricingCatalog/);
-  assert.match(api, /getPricing: \(\) => request<PricingSnapshot>\("\/pricing"\)/);
-  assert.match(api, /refreshPricing: \(refresh: PricingRefreshRequest = \{\}\) => request<PricingRefreshResult>/);
-  assert.match(api, /body: jsonBody\(refresh\)/);
+  assert.match(api, /getPricing: async \(\) => presentPricing\(await dashboardV3\.getPricing\(\)\)/);
+  assert.match(api, /refreshPricing: async \(refresh: PricingRefreshRequest = \{\}\)/);
+  assert.match(api, /expectedPricingRevision/);
   assert.match(api, /official_content_hash\?: string/);
   assert.match(api, /expected_official_content_hash\?: string/);
-  assert.match(api, /updatePricingMultipliers:[\s\S]*request<PricingSnapshot>\("\/pricing\/multipliers"/);
-  assert.match(api, /body: jsonBody\(\{ expected_revision: expectedRevision, multipliers \}\)/);
+  assert.match(api, /updatePricingMultipliers: async \(expectedPricingRevision: string/);
+  assert.match(api, /dashboardV3\.putPricingMultipliers\(\{[\s\S]*expectedPricingRevision/);
 });
 
 test("accounts derive quota limits from the active pricing snapshot", async () => {
   const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
   assert.match(usage, /quotaLimits = ref<PricingLimits \| null>\(null\)/);
-  assert.match(usage, /quotaLimits\.value = \(await tauriApi\.getPricing\(\)\)\.limits/);
+  assert.match(usage, /quotaLimits\.value = \(await dashboardApi\.getPricing\(\)\)\.limits/);
   assert.doesNotMatch(usage, /window_5h:\s*12|window_week:\s*30|window_month:\s*60/);
 });
 
@@ -1248,7 +1243,7 @@ test("new account names remain explicit while the catalog controls optional logi
 
 test("settings expose supported Windows auto-start safely", async () => {
   const settings = await readFile(new URL("./Settings.vue", import.meta.url), "utf8");
-  const api = await readFile(new URL("../api/tauri.ts", import.meta.url), "utf8");
+  const api = `${await readFile(new URL("../api/dashboard.ts", import.meta.url), "utf8")}\n${await readFile(new URL("../api/dashboard-presenters.ts", import.meta.url), "utf8")}`;
 
   assert.match(settings, /v-if="config\.auto_start_supported"/);
   assert.match(settings, /v-if="config\.dock_visibility_supported"/);
@@ -1260,8 +1255,8 @@ test("settings expose supported Windows auto-start safely", async () => {
   assert.match(settings, /async function handleAutoStartToggle\(newValue: boolean\)/);
   assert.match(settings, /savedConfig\.value/);
   assert.match(settings, /if \(!loaded\.value \|\| !savedConfig\.value\) return;/);
-  assert.match(settings, /const nextConfig = await tauriApi\.getSettings\(\);/);
-  assert.doesNotMatch(settings, /tauriApi\.getConnection\(\)/);
+  assert.match(settings, /const nextConfig = await settingsStore\.loadPresented\(\);/);
+  assert.doesNotMatch(settings, /dashboardApi\.getConnection\(\)/);
   assert.match(settings, /savedConfig\.value = \{ \.\.\.latest \}/);
   assert.match(settings, /pendingSettingsMerge = saved \? \{ current, saved \} : null;/);
   assert.match(settings, /mergeUnsavedSettings\(latest, pending\.current, pending\.saved\)/);
@@ -1286,5 +1281,5 @@ test("settings expose supported Windows auto-start safely", async () => {
   );
   assert.match(api, /auto_start_supported: boolean/);
   assert.match(api, /dock_visibility_supported: boolean/);
-  assert.match(api, /expected_revision: revision/);
+  assert.match(api, /controlPlane\.runMutation\(run\)/);
 });

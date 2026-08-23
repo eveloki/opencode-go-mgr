@@ -9,19 +9,21 @@ import {
 
 const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
 const ordering = readFileSync(new URL("./useAccountOrder.ts", import.meta.url), "utf8");
-const api = readFileSync(new URL("../api/tauri.ts", import.meta.url), "utf8");
+const api = readFileSync(new URL("../api/dashboard.ts", import.meta.url), "utf8");
 const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
 
 test("account mutations require a freshly loaded shared revision", () => {
   assert.match(accounts, /expected_revision: revision/);
-  assert.match(accounts, /runWithFreshSettingsRevision\(\(revision\) => tauriApi\.toggleAccount\(id, revision\)\)/);
-  assert.match(accounts, /runWithFreshSettingsRevision\(\(revision\) => tauriApi\.deleteAccount\(id, revision\)\)/);
-  assert.match(accounts, /async function runWithFreshSettingsRevision[\s\S]*?tauriApi\.getSettings\(\)/);
-  assert.match(accounts, /async function reloadAfterControlPlaneConflict[\s\S]*?tauriApi\.getSettings\(\)[\s\S]*?tauriApi\.getAccounts\(\)/);
+  assert.match(accounts, /runWithFreshSettingsRevision\(\(revision\) => dashboardApi\.toggleAccount\(id, revision\)\)/);
+  assert.match(accounts, /runWithFreshSettingsRevision\(\(revision\) => dashboardApi\.deleteAccount\(id, revision\)\)/);
+  assert.match(accounts, /async function runWithFreshSettingsRevision[\s\S]*?dashboardApi\.getSettings\(\)/);
+  assert.match(accounts, /async function reloadAfterControlPlaneConflict[\s\S]*?dashboardApi\.getSettings\(\)[\s\S]*?accountsStore\.loadPresented\(\)/);
+  assert.match(accounts, /useAccountsStore\(\)/);
   assert.match(accounts, /settingsRevision\.value = account\.revision/);
-  assert.match(ordering, /runWithFreshRevision\(\(freshRevision\)[\s\S]*?tauriApi\.reorderAccounts\([^]*freshRevision/);
+  assert.match(ordering, /runWithFreshRevision\(\(freshRevision\)[\s\S]*?dashboardApi\.reorderAccounts\([^]*freshRevision/);
   assert.match(ordering, /revision\.value = saved\[0\]\?\.revision/);
-  assert.match(api, /body: jsonBody\(\{ expected_revision: expectedRevision \}\)/);
+  assert.match(api, /return controlPlane\.runMutation\(run\)/);
+  assert.match(api, /dashboardV3\.deleteAccount\(id, expectation\)/);
 });
 
 test("a missing fresh revision aborts the mutation before it can send a request", async () => {

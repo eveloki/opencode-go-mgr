@@ -1,4 +1,4 @@
-import type { PricingSnapshot } from "../api/tauri";
+import type { PricingSnapshot } from "../api/dashboard";
 import type { MessageKey } from "../i18n/index.ts";
 import type {
   ProviderCatalogEntry,

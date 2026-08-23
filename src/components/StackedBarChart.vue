@@ -138,7 +138,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, useId } from "vue";
-import type { DailyModelCost } from "../api/tauri";
+import type { DailyModelCost } from "../api/dashboard";
 import { CHART_PALETTE } from "../theme";
 import { locale, t } from "../i18n/index.ts";
 import { formatCost } from "../utils/format.ts";

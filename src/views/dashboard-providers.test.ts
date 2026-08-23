@@ -149,7 +149,7 @@ test("provider health honors provider-specific cooldowns and ignores expired or 
 test("dashboard loads provider-filtered remote summaries and skips legacy usage for non-Go cards", () => {
   const source = readFileSync(new URL("./Dashboard.vue", import.meta.url), "utf8");
   assert.match(source, /providerApi\.getProviderCatalog\(\)/);
-  assert.match(source, /tauriApi\.getForwardLogs\(\{/);
+  assert.match(source, /dashboardApi\.getForwardLogs\(\{/);
   assert.match(source, /provider_id: go\.provider_id/);
   assert.match(source, /account\.provider_id === "opencode"/);
   assert.match(source, /account\.offering_id === "go"/);

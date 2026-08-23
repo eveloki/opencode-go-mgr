@@ -8,16 +8,18 @@ const probePanel = readFileSync(new URL("../components/ProviderProbePanel.vue", 
 const modelList = readFileSync(new URL("../components/ProviderModelList.vue", import.meta.url), "utf8");
 const catalog = readFileSync(new URL("../components/PricingCatalog.vue", import.meta.url), "utf8");
 
-test("Providers wires the four canonical contract APIs and never auto-probes or auto-refreshes", () => {
-  assert.match(providers, /providerApi\.getProviderContracts\(\)/);
-  assert.match(providers, /providerApi\.updateProviderContractProtocol\(/);
+test("Providers reads and mutates contracts through its store while explicit actions stay page-local", () => {
+  assert.match(providers, /useProvidersStore\(\)/);
+  assert.match(providers, /providersStore\.loadContracts\(\)/);
+  assert.match(providers, /providersStore\.loadCatalog\(\)/);
+  assert.match(providers, /providersStore\.putProtocolSwitch\(/);
   assert.match(providers, /providerApi\.refreshProviderModels\(/);
   assert.match(providers, /providerApi\.runProtocolProbes\(/);
-  assert.match(providers, /expected_revision: current\.revision/);
   assert.match(providers, /error\.status === 409/);
+  assert.match(providers, /scope\.scope_kind === "custom_endpoint"/);
   assert.doesNotMatch(providers, /getProviderModels\(/);
   assert.doesNotMatch(providers, /getProviderModelCapabilities/);
-  assert.doesNotMatch(providers, /tauriApi\.testAccount/);
+  assert.doesNotMatch(providers, /dashboardApi\.testAccount/);
   assert.doesNotMatch(providers, /\/accounts\/\$\{.*\}\/test/);
   assert.match(providers, /onMounted\(\(\) => \{\s*window\.addEventListener\("popstate", onPopState\);\s*void loadContracts\(\);/);
   assert.doesNotMatch(providers, /onMounted\([\s\S]*runProbe/);
