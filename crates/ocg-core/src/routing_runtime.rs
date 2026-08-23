@@ -1,8 +1,9 @@
-//! Sticky / round-robin routing runtime.
+//! Host adapter around [`ocg_gateway::selector::SelectorState`].
 //!
 //! Owned outside `gateway` so `state` can hold the process slot without a
-//! `state -> gateway` edge. Conversation-key parsing stays in
-//! `gateway::routing` and is re-exported from there.
+//! `state -> gateway` edge. Account eligibility, wall-clock cooling, Free dual
+//! gates, and provider fail-closed stay in Core. Conversation-key parsing stays
+//! in `gateway::routing` and is re-exported from there.
 
 use crate::kernel::catalog::CredentialKind;
 use crate::kernel::ids::{
@@ -12,125 +13,16 @@ use crate::kernel::ids::{
 };
 use crate::models::{Account, RoutingMode, UpstreamChannel};
 use chrono::{DateTime, Utc};
+use ocg_gateway::selector::{BaseAvailability, Candidate as GatewayCandidate, SelectionPolicy};
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-pub const CONVERSATION_TTL: Duration = Duration::from_secs(30 * 60);
-pub const MAX_CONVERSATIONS: usize = 4096;
-
-#[derive(Debug, Clone)]
-struct ConversationBinding {
-    account_id: String,
-    channel: UpstreamChannel,
-    resolved_model: String,
-    last_seen: Instant,
-}
-
-#[derive(Debug, Default)]
-struct RoutingRuntimeState {
-    global_account_id: Option<String>,
-    round_robin_after: Option<String>,
-    conversations: ConversationMap,
-}
-
-#[derive(Debug, Default)]
-struct ConversationMap {
-    entries: HashMap<String, ConversationBinding>,
-    order: VecDeque<String>,
-}
-
-impl ConversationMap {
-    fn get_fresh(&mut self, key: &str, now: Instant) -> Option<&ConversationBinding> {
-        self.purge_expired(now);
-        let expired = self
-            .entries
-            .get(key)
-            .is_some_and(|binding| now.duration_since(binding.last_seen) >= CONVERSATION_TTL);
-        if expired {
-            self.remove(key);
-            return None;
-        }
-        if let Some(binding) = self.entries.get_mut(key) {
-            binding.last_seen = now;
-            self.touch_order(key);
-            self.entries.get(key)
-        } else {
-            None
-        }
-    }
-
-    fn insert(
-        &mut self,
-        key: String,
-        account_id: String,
-        channel: UpstreamChannel,
-        resolved_model: String,
-        now: Instant,
-    ) {
-        self.purge_expired(now);
-        if let Some(existing) = self.entries.get_mut(&key) {
-            existing.account_id = account_id;
-            existing.channel = channel;
-            existing.resolved_model = resolved_model;
-            existing.last_seen = now;
-            self.touch_order(&key);
-            return;
-        }
-        while self.entries.len() >= MAX_CONVERSATIONS {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            } else {
-                break;
-            }
-        }
-        self.entries.insert(
-            key.clone(),
-            ConversationBinding {
-                account_id,
-                channel,
-                resolved_model,
-                last_seen: now,
-            },
-        );
-        self.order.push_back(key);
-    }
-
-    fn remove(&mut self, key: &str) {
-        self.entries.remove(key);
-        if let Some(index) = self.order.iter().position(|item| item == key) {
-            self.order.remove(index);
-        }
-    }
-
-    fn touch_order(&mut self, key: &str) {
-        if let Some(index) = self.order.iter().position(|item| item == key) {
-            self.order.remove(index);
-        }
-        self.order.push_back(key.to_string());
-    }
-
-    fn purge_expired(&mut self, now: Instant) {
-        let expired = self
-            .entries
-            .iter()
-            .filter(|(_, binding)| now.duration_since(binding.last_seen) >= CONVERSATION_TTL)
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for key in expired {
-            self.remove(&key);
-        }
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
+pub const CONVERSATION_TTL: Duration = ocg_gateway::selector::CONVERSATION_TTL;
+pub const MAX_CONVERSATIONS: usize = ocg_gateway::selector::MAX_CONVERSATIONS;
 
 #[derive(Debug, Default)]
 pub struct RoutingRuntime {
-    inner: Mutex<RoutingRuntimeState>,
+    inner: Mutex<ocg_gateway::selector::SelectorState>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,8 +38,7 @@ impl RoutingRuntime {
     }
 
     pub fn reset(&self) {
-        let mut state = self.inner.lock();
-        *state = RoutingRuntimeState::default();
+        self.inner.lock().reset();
     }
 
     /// Select an account for Go channel requests (test and legacy callers).
@@ -279,6 +170,9 @@ impl RoutingRuntime {
 
     /// Select one capability-filtered route target against an explicit wall/mono pair.
     /// Wall drives cooldown/availability; mono drives conversation TTL.
+    ///
+    /// Duplicate account ids fail closed to `None` and leave sticky / round-robin
+    /// / conversation state unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn select_candidate_at(
         &self,
@@ -290,46 +184,54 @@ impl RoutingRuntime {
         wall: DateTime<Utc>,
         mono: Instant,
     ) -> Option<RoutingCandidate> {
+        match self.try_select_candidate_index_at(
+            candidates,
+            mode,
+            conversation_sticky,
+            conversation_key,
+            exclude_ids,
+            true,
+            wall,
+            mono,
+        ) {
+            Ok(Some(index)) => candidates.get(index).cloned(),
+            Ok(None) | Err(_) => None,
+        }
+    }
+
+    /// Typed production selection. Returns a slice index into `candidates`.
+    ///
+    /// Base availability is computed with no transient excludes. Free candidates
+    /// are closed when `free_channel_available` is false (durable SQLite gate and
+    /// disabled-Zen-row exhaustion combined by the caller). Duplicate account
+    /// ids error before any state mutation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_select_candidate_index_at(
+        &self,
+        candidates: &[RoutingCandidate],
+        mode: RoutingMode,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        exclude_ids: &[&str],
+        free_channel_available: bool,
+        wall: DateTime<Utc>,
+        mono: Instant,
+    ) -> Result<Option<usize>, ocg_gateway::selector::SelectionError> {
+        let gateway_candidates = candidates
+            .iter()
+            .map(|candidate| gateway_candidate(candidate, free_channel_available, wall))
+            .collect::<Vec<_>>();
         let mut state = self.inner.lock();
-
-        if conversation_sticky
-            && let Some(key) = conversation_key
-            && let Some(binding) = state.conversations.get_fresh(key, mono)
-        {
-            // Sticky locks account + provider channel + resolved model for the session.
-            if let Some(candidate) = find_available_candidate(
-                candidates,
-                &binding.account_id,
-                binding.channel,
-                &binding.resolved_model,
+        Ok(state
+            .select_at(
+                &gateway_candidates,
+                selection_policy(mode),
+                conversation_sticky,
+                conversation_key,
                 exclude_ids,
-                wall,
-            ) {
-                return Some(candidate);
-            }
-        }
-
-        let selected = match mode {
-            RoutingMode::StrictPriority => first_available_candidate(candidates, exclude_ids, wall),
-            RoutingMode::StickyGlobal => {
-                select_sticky_global_candidate(&mut state, candidates, exclude_ids, wall)
-            }
-            RoutingMode::RoundRobin => {
-                select_round_robin_candidate(&mut state, candidates, exclude_ids, wall)
-            }
-        }?;
-
-        if conversation_sticky && let Some(key) = conversation_key {
-            state.conversations.insert(
-                key.to_string(),
-                selected.account.id.clone(),
-                selected.channel,
-                selected.resolved_model.clone(),
                 mono,
-            );
-        }
-
-        Some(selected)
+            )?
+            .map(|selection| selection.candidate_index()))
     }
 
     /// Read sticky binding for a conversation if still fresh.
@@ -347,50 +249,13 @@ impl RoutingRuntime {
         now: Instant,
     ) -> Option<(String, UpstreamChannel, String)> {
         let mut state = self.inner.lock();
-        state
-            .conversations
-            .get_fresh(conversation_key, now)
-            .map(|binding| {
-                (
-                    binding.account_id.clone(),
-                    binding.channel,
-                    binding.resolved_model.clone(),
-                )
-            })
-    }
-
-    #[cfg(test)]
-    fn snapshot(&self) -> (Option<String>, Option<String>, usize, Option<String>) {
-        let state = self.inner.lock();
-        let first_binding = state
-            .conversations
-            .order
-            .front()
-            .and_then(|key| state.conversations.entries.get(key))
-            .map(|binding| binding.account_id.clone());
-        (
-            state.global_account_id.clone(),
-            state.round_robin_after.clone(),
-            state.conversations.len(),
-            first_binding,
-        )
-    }
-
-    #[cfg(test)]
-    fn force_bind_age(&self, key: &str, account_id: &str, last_seen: Instant) {
-        let mut state = self.inner.lock();
-        state.conversations.entries.insert(
-            key.to_string(),
-            ConversationBinding {
-                account_id: account_id.to_string(),
-                channel: UpstreamChannel::Go,
-                resolved_model: "test-model".to_string(),
-                last_seen,
-            },
-        );
-        if !state.conversations.order.iter().any(|item| item == key) {
-            state.conversations.order.push_back(key.to_string());
-        }
+        state.binding_at(conversation_key, now).map(|binding| {
+            (
+                binding.account_id().to_string(),
+                binding.channel(),
+                binding.resolved_model().to_string(),
+            )
+        })
     }
 }
 
@@ -435,105 +300,40 @@ fn account_matches_channel(account: &Account, channel: UpstreamChannel) -> bool 
     }
 }
 
-fn candidate_is_available(
-    candidate: &RoutingCandidate,
-    exclude_ids: &[&str],
-    now: DateTime<Utc>,
-) -> bool {
-    account_is_available_for_at(&candidate.account, candidate.channel, exclude_ids, now)
-}
-
-fn first_available_candidate(
-    candidates: &[RoutingCandidate],
-    exclude_ids: &[&str],
-    now: DateTime<Utc>,
-) -> Option<RoutingCandidate> {
-    candidates
-        .iter()
-        .find(|candidate| candidate_is_available(candidate, exclude_ids, now))
-        .cloned()
-}
-
-fn find_available_candidate(
-    candidates: &[RoutingCandidate],
-    account_id: &str,
-    channel: UpstreamChannel,
-    resolved_model: &str,
-    exclude_ids: &[&str],
-    now: DateTime<Utc>,
-) -> Option<RoutingCandidate> {
-    candidates
-        .iter()
-        .find(|candidate| {
-            candidate.account.id == account_id
-                && candidate.channel == channel
-                && candidate.resolved_model == resolved_model
-                && candidate_is_available(candidate, exclude_ids, now)
-        })
-        .cloned()
-}
-
-fn select_sticky_global_candidate(
-    state: &mut RoutingRuntimeState,
-    candidates: &[RoutingCandidate],
-    exclude_ids: &[&str],
-    now: DateTime<Utc>,
-) -> Option<RoutingCandidate> {
-    if let Some(current_id) = state.global_account_id.clone() {
-        if let Some(candidate) = candidates.iter().find(|candidate| {
-            candidate.account.id == current_id
-                && candidate_is_available(candidate, exclude_ids, now)
-        }) {
-            return Some(candidate.clone());
-        }
-        let persistently_available = candidates.iter().any(|candidate| {
-            candidate.account.id == current_id && candidate_is_available(candidate, &[], now)
-        });
-        let selected = first_available_candidate(candidates, exclude_ids, now)?;
-        if !persistently_available {
-            state.global_account_id = Some(selected.account.id.clone());
-        }
-        return Some(selected);
+fn selection_policy(mode: RoutingMode) -> SelectionPolicy {
+    match mode {
+        RoutingMode::StrictPriority => SelectionPolicy::StrictPriority,
+        RoutingMode::StickyGlobal => SelectionPolicy::StickyGlobal,
+        RoutingMode::RoundRobin => SelectionPolicy::RoundRobin,
     }
-    let selected = first_available_candidate(candidates, exclude_ids, now)?;
-    state.global_account_id = Some(selected.account.id.clone());
-    Some(selected)
 }
 
-fn select_round_robin_candidate(
-    state: &mut RoutingRuntimeState,
-    candidates: &[RoutingCandidate],
-    exclude_ids: &[&str],
-    now: DateTime<Utc>,
-) -> Option<RoutingCandidate> {
-    if candidates.is_empty() {
-        return None;
-    }
-    let start = state
-        .round_robin_after
-        .as_ref()
-        .and_then(|after| {
-            candidates
-                .iter()
-                .position(|candidate| candidate.account.id == *after)
-        })
-        .map(|index| (index + 1) % candidates.len())
-        .unwrap_or(0);
-    for offset in 0..candidates.len() {
-        let index = (start + offset) % candidates.len();
-        let candidate = &candidates[index];
-        if candidate_is_available(candidate, exclude_ids, now) {
-            state.round_robin_after = Some(candidate.account.id.clone());
-            return Some(candidate.clone());
-        }
-    }
-    None
+fn gateway_candidate<'a>(
+    candidate: &'a RoutingCandidate,
+    free_channel_available: bool,
+    wall: DateTime<Utc>,
+) -> GatewayCandidate<'a> {
+    let available = account_is_available_for_at(&candidate.account, candidate.channel, &[], wall)
+        && (candidate.channel != UpstreamChannel::Free || free_channel_available);
+    GatewayCandidate::new(
+        candidate.account.id.as_str(),
+        candidate.channel,
+        candidate.resolved_model.as_str(),
+        if available {
+            BaseAvailability::Available
+        } else {
+            BaseAvailability::Unavailable
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::{KeyCipher, StaticKeyCipher};
+    use crate::kernel::catalog::QuotaScope;
+    use crate::kernel::ids::ZEN_FREE_ACCOUNT_ID;
+    use ocg_gateway::selector::SelectionError;
     use std::sync::Arc;
 
     fn account(id: &str, enabled: bool) -> Account {
@@ -592,6 +392,58 @@ mod tests {
         item
     }
 
+    fn zen_account(enabled: bool) -> Account {
+        let mut item = account(ZEN_FREE_ACCOUNT_ID, enabled);
+        item.provider_id = OPENCODE_ZEN_FREE_PROVIDER_ID.into();
+        item.offering_id = ANONYMOUS_FREE_OFFERING_ID.into();
+        item.credential_kind = CredentialKind::None;
+        item.quota_scope = QuotaScope::EgressIp;
+        item.key_cipher.clear();
+        item
+    }
+
+    fn routing_candidate(
+        account: Account,
+        channel: UpstreamChannel,
+        resolved_model: &str,
+    ) -> RoutingCandidate {
+        RoutingCandidate {
+            account,
+            channel,
+            resolved_model: resolved_model.to_string(),
+        }
+    }
+
+    fn go_candidate(item: Account) -> RoutingCandidate {
+        routing_candidate(item, UpstreamChannel::Go, "test-model")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pick_index(
+        runtime: &RoutingRuntime,
+        candidates: &[RoutingCandidate],
+        mode: RoutingMode,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        exclude_ids: &[&str],
+        free_channel_available: bool,
+        wall: DateTime<Utc>,
+        mono: Instant,
+    ) -> Option<usize> {
+        runtime
+            .try_select_candidate_index_at(
+                candidates,
+                mode,
+                conversation_sticky,
+                conversation_key,
+                exclude_ids,
+                free_channel_available,
+                wall,
+                mono,
+            )
+            .expect("candidates must not contain duplicate account ids")
+    }
+
     #[test]
     fn strict_priority_picks_first_available() {
         let runtime = RoutingRuntime::new();
@@ -643,8 +495,6 @@ mod tests {
                 .id,
             "b"
         );
-        let (global, _, _, _) = runtime.snapshot();
-        assert_eq!(global.as_deref(), Some("a"));
         assert_eq!(
             runtime
                 .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &[])
@@ -673,8 +523,13 @@ mod tests {
                 .id,
             "b"
         );
-        let (global, _, _, _) = runtime.snapshot();
-        assert_eq!(global.as_deref(), Some("b"));
+        assert_eq!(
+            runtime
+                .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &[])
+                .unwrap()
+                .id,
+            "b"
+        );
 
         let runtime = RoutingRuntime::new();
         assert_eq!(
@@ -692,8 +547,13 @@ mod tests {
                 .id,
             "b"
         );
-        let (global, _, _, _) = runtime.snapshot();
-        assert_eq!(global.as_deref(), Some("b"));
+        assert_eq!(
+            runtime
+                .select_account(&accounts, RoutingMode::StickyGlobal, false, None, &[])
+                .unwrap()
+                .id,
+            "b"
+        );
     }
 
     #[test]
@@ -776,8 +636,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(selected.iter().filter(|id| id.as_str() == "a").count(), 50);
         assert_eq!(selected.iter().filter(|id| id.as_str() == "b").count(), 50);
-        let (_, after, _, _) = runtime.snapshot();
-        assert_eq!(after.as_deref(), Some("b"));
+        assert_eq!(
+            runtime
+                .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
+                .unwrap()
+                .id,
+            "a"
+        );
     }
 
     #[test]
@@ -792,8 +657,6 @@ mod tests {
                 .id,
             "a"
         );
-        let (_, after_first, _, _) = runtime.snapshot();
-        assert_eq!(after_first.as_deref(), Some("a"));
         assert_eq!(
             runtime
                 .select_account(&accounts, RoutingMode::RoundRobin, true, Some(key), &[],)
@@ -801,8 +664,14 @@ mod tests {
                 .id,
             "a"
         );
-        let (_, after_second, _, _) = runtime.snapshot();
-        assert_eq!(after_second.as_deref(), Some("a"));
+        assert_eq!(
+            runtime
+                .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
+                .unwrap()
+                .id,
+            "b",
+            "conversation hits must not advance the round-robin cursor"
+        );
     }
 
     #[test]
@@ -843,19 +712,33 @@ mod tests {
     fn conversation_ttl_expires_bindings() {
         let runtime = RoutingRuntime::new();
         let accounts = vec![account("a", true), account("b", true)];
-        runtime.force_bind_age(
-            "old",
-            "b",
-            Instant::now() - CONVERSATION_TTL - Duration::from_secs(1),
+        let wall = frozen_wall();
+        let t0 = Instant::now();
+        assert_eq!(
+            runtime
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    true,
+                    Some("old"),
+                    &["a"],
+                    wall,
+                    t0,
+                )
+                .unwrap()
+                .id,
+            "b"
         );
         assert_eq!(
             runtime
-                .select_account(
+                .select_account_at(
                     &accounts,
                     RoutingMode::StrictPriority,
                     true,
                     Some("old"),
                     &[],
+                    wall,
+                    t0 + CONVERSATION_TTL + Duration::from_secs(1),
                 )
                 .unwrap()
                 .id,
@@ -879,8 +762,13 @@ mod tests {
                 )
                 .unwrap();
         }
-        let (_, _, len, _) = runtime.snapshot();
-        assert_eq!(len, MAX_CONVERSATIONS);
+        let now = Instant::now();
+        assert!(runtime.sticky_binding_at("k0", now).is_none());
+        assert!(
+            runtime
+                .sticky_binding_at(&format!("k{MAX_CONVERSATIONS}"), now)
+                .is_some()
+        );
     }
 
     #[test]
@@ -918,11 +806,10 @@ mod tests {
             )
             .unwrap();
 
-        let state = runtime.inner.lock();
-        assert!(state.conversations.entries.contains_key("k0"));
-        assert!(!state.conversations.entries.contains_key("k1"));
-        assert!(state.conversations.entries.contains_key("new"));
-        assert_eq!(state.conversations.entries.len(), MAX_CONVERSATIONS);
+        let now = Instant::now();
+        assert!(runtime.sticky_binding_at("k0", now).is_some());
+        assert!(runtime.sticky_binding_at("k1", now).is_none());
+        assert!(runtime.sticky_binding_at("new", now).is_some());
     }
 
     #[test]
@@ -933,10 +820,7 @@ mod tests {
             .select_account(&accounts, RoutingMode::RoundRobin, true, Some("c1"), &[])
             .unwrap();
         runtime.reset();
-        let (global, after, len, _) = runtime.snapshot();
-        assert!(global.is_none());
-        assert!(after.is_none());
-        assert_eq!(len, 0);
+        assert!(runtime.sticky_binding("c1").is_none());
         assert_eq!(
             runtime
                 .select_account(&accounts, RoutingMode::RoundRobin, false, None, &[])
@@ -982,8 +866,14 @@ mod tests {
         assert!(production.contains("Instant::now()"));
         assert!(production.contains("fn select_candidate("));
         assert!(production.contains("fn select_candidate_at("));
+        assert!(production.contains("fn try_select_candidate_index_at("));
         assert!(production.contains("fn sticky_binding("));
         assert!(production.contains("fn sticky_binding_at("));
+        assert!(production.contains("ocg_gateway::selector::SelectorState"));
+        assert!(production.contains("fn selection_policy("));
+        assert!(!production.contains("struct ConversationBinding"));
+        assert!(!production.contains("struct ConversationMap"));
+        assert!(!production.contains("struct RoutingRuntimeState"));
         assert!(
             !production.contains("crate::gateway_clock"),
             "routing_runtime must take explicit time arguments instead of owning GatewayClock"
@@ -1116,6 +1006,514 @@ mod tests {
                 .id,
             "a",
             "conversation TTL must expire from injected mono"
+        );
+    }
+
+    #[test]
+    fn selection_policy_maps_every_routing_mode() {
+        assert_eq!(
+            selection_policy(RoutingMode::StrictPriority),
+            SelectionPolicy::StrictPriority
+        );
+        assert_eq!(
+            selection_policy(RoutingMode::StickyGlobal),
+            SelectionPolicy::StickyGlobal
+        );
+        assert_eq!(
+            selection_policy(RoutingMode::RoundRobin),
+            SelectionPolicy::RoundRobin
+        );
+    }
+
+    #[test]
+    fn typed_index_follows_card_order_for_all_three_modes() {
+        let runtime = RoutingRuntime::new();
+        let wall = frozen_wall();
+        let mono = Instant::now();
+        let candidates = vec![
+            go_candidate(account("a", false)),
+            go_candidate(account("b", true)),
+            go_candidate(account("c", true)),
+        ];
+
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::StrictPriority,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(1)
+        );
+
+        let runtime = RoutingRuntime::new();
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::StickyGlobal,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::StickyGlobal,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(1)
+        );
+
+        let runtime = RoutingRuntime::new();
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::RoundRobin,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::RoundRobin,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::RoundRobin,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn typed_transient_excludes_do_not_rewrite_sticky_global() {
+        let runtime = RoutingRuntime::new();
+        let wall = frozen_wall();
+        let mono = Instant::now();
+        let candidates = vec![
+            go_candidate(account("a", true)),
+            go_candidate(account("b", true)),
+        ];
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::StickyGlobal,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::StickyGlobal,
+                false,
+                None,
+                &["a"],
+                true,
+                wall,
+                mono,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &candidates,
+                RoutingMode::StickyGlobal,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn typed_duplicate_ids_error_before_state_mutation() {
+        let runtime = RoutingRuntime::new();
+        let wall = frozen_wall();
+        let mono = Instant::now();
+        let unique = vec![
+            go_candidate(account("a", true)),
+            go_candidate(account("b", true)),
+        ];
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &unique,
+                RoutingMode::StickyGlobal,
+                true,
+                Some("dup-conv"),
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(0)
+        );
+        let duplicates = vec![
+            go_candidate(account("a", true)),
+            go_candidate(account("a", true)),
+        ];
+        let error = runtime
+            .try_select_candidate_index_at(
+                &duplicates,
+                RoutingMode::StickyGlobal,
+                true,
+                Some("dup-conv"),
+                &[],
+                true,
+                wall,
+                mono,
+            )
+            .expect_err("duplicate account ids must be a typed error");
+        assert_eq!(
+            error,
+            SelectionError::DuplicateAccountId {
+                first: 0,
+                duplicate: 1
+            }
+        );
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &unique,
+                RoutingMode::StickyGlobal,
+                true,
+                Some("dup-conv"),
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(0),
+            "duplicate rejection must not rewrite sticky or conversation state"
+        );
+        assert_eq!(
+            runtime
+                .sticky_binding_at("dup-conv", mono)
+                .map(|(id, _, _)| id)
+                .as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn legacy_option_wrappers_fail_closed_on_duplicates_and_preserve_state() {
+        let runtime = RoutingRuntime::new();
+        let wall = frozen_wall();
+        let mono = Instant::now();
+        let unique = vec![
+            go_candidate(account("a", true)),
+            go_candidate(account("b", true)),
+        ];
+        assert_eq!(
+            runtime
+                .select_candidate_at(
+                    &unique,
+                    RoutingMode::RoundRobin,
+                    false,
+                    None,
+                    &[],
+                    wall,
+                    mono,
+                )
+                .unwrap()
+                .account
+                .id,
+            "a"
+        );
+        let duplicates = vec![
+            go_candidate(account("b", true)),
+            go_candidate(account("b", true)),
+        ];
+        assert!(
+            runtime
+                .select_candidate_at(
+                    &duplicates,
+                    RoutingMode::RoundRobin,
+                    false,
+                    None,
+                    &[],
+                    wall,
+                    mono,
+                )
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .select_candidate_at(
+                    &unique,
+                    RoutingMode::RoundRobin,
+                    false,
+                    None,
+                    &[],
+                    wall,
+                    mono,
+                )
+                .unwrap()
+                .account
+                .id,
+            "b",
+            "legacy fail-closed must leave the round-robin cursor on the last successful pick"
+        );
+    }
+
+    #[test]
+    fn free_channel_gate_closes_only_free_candidates() {
+        let runtime = RoutingRuntime::new();
+        let wall = frozen_wall();
+        let mono = Instant::now();
+        let mixed = vec![
+            routing_candidate(zen_account(true), UpstreamChannel::Free, "m-free"),
+            go_candidate(account("go", true)),
+        ];
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &mixed,
+                RoutingMode::StrictPriority,
+                false,
+                None,
+                &[],
+                false,
+                wall,
+                mono,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &mixed,
+                RoutingMode::StrictPriority,
+                false,
+                None,
+                &[],
+                true,
+                wall,
+                mono,
+            ),
+            Some(0)
+        );
+
+        let only_free = vec![routing_candidate(
+            zen_account(true),
+            UpstreamChannel::Free,
+            "m-free",
+        )];
+        assert!(
+            pick_index(
+                &runtime,
+                &only_free,
+                RoutingMode::StrictPriority,
+                false,
+                None,
+                &[],
+                false,
+                wall,
+                mono,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn conversation_ttl_expires_at_inclusive_boundary() {
+        let wall = frozen_wall();
+        let t0 = Instant::now();
+        let accounts = vec![account("a", true), account("b", true)];
+
+        let still = RoutingRuntime::new();
+        assert_eq!(
+            still
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    true,
+                    Some("old"),
+                    &["a"],
+                    wall,
+                    t0,
+                )
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(
+            still
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    true,
+                    Some("old"),
+                    &[],
+                    wall,
+                    t0 + CONVERSATION_TTL - Duration::from_secs(1),
+                )
+                .unwrap()
+                .id,
+            "b"
+        );
+
+        let expired = RoutingRuntime::new();
+        assert_eq!(
+            expired
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    true,
+                    Some("old"),
+                    &["a"],
+                    wall,
+                    t0,
+                )
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(
+            expired
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    true,
+                    Some("old"),
+                    &[],
+                    wall,
+                    t0 + CONVERSATION_TTL,
+                )
+                .unwrap()
+                .id,
+            "a",
+            "duration_since == CONVERSATION_TTL must expire the binding"
+        );
+    }
+
+    #[test]
+    fn conversation_sticky_requires_account_channel_and_resolved_model() {
+        let runtime = RoutingRuntime::new();
+        let wall = frozen_wall();
+        let t0 = Instant::now();
+        let first = vec![
+            routing_candidate(zen_account(true), UpstreamChannel::Free, "m1"),
+            go_candidate(account("b", true)),
+        ];
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &first,
+                RoutingMode::StrictPriority,
+                true,
+                Some("conv"),
+                &[],
+                true,
+                wall,
+                t0,
+            ),
+            Some(0)
+        );
+
+        let wrong_model = vec![
+            routing_candidate(zen_account(true), UpstreamChannel::Free, "m2"),
+            go_candidate(account("b", true)),
+        ];
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &wrong_model,
+                RoutingMode::StrictPriority,
+                true,
+                Some("conv"),
+                &[],
+                true,
+                wall,
+                t0,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            runtime
+                .sticky_binding_at("conv", t0)
+                .map(|(_, _, model)| model)
+                .as_deref(),
+            Some("m2")
+        );
+
+        let missing_triple = vec![go_candidate(account("b", true))];
+        assert_eq!(
+            pick_index(
+                &runtime,
+                &missing_triple,
+                RoutingMode::StrictPriority,
+                true,
+                Some("conv"),
+                &[],
+                true,
+                wall,
+                t0,
+            ),
+            Some(0),
+            "a conversation hit requires the bound account, channel, and resolved model"
+        );
+        assert_eq!(
+            runtime.sticky_binding_at("conv", t0),
+            Some((
+                "b".to_string(),
+                UpstreamChannel::Go,
+                "test-model".to_string()
+            ))
         );
     }
 }

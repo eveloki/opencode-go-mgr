@@ -13,8 +13,9 @@ use ocg_core::db::Database;
 use ocg_core::gateway;
 use ocg_core::models::{Account, ProxyMode, RoutingMode, UsageWindowKind};
 use ocg_core::provider::{
-    CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID, UpstreamProtocolKind,
-    ZEN_FREE_ACCOUNT_ID,
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
+    CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, SCNET_PROVIDER_ID,
+    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
 };
 use ocg_core::provider_contracts::ContractScope;
 use ocg_core::state::CoreStateInner;
@@ -812,4 +813,286 @@ async fn create_verified_custom(
     assert_eq!(status, StatusCode::OK, "{enabled}");
     assert_eq!(enabled["enabled"], true);
     id
+}
+
+fn insert_disabled_offering(
+    state: &Arc<CoreStateInner>,
+    source_id: &str,
+    account_id: &str,
+    provider_id: &str,
+    offering_id: &str,
+    key: &str,
+) {
+    let mut account = state
+        .db
+        .lock()
+        .get_account(source_id)
+        .unwrap()
+        .expect("source account");
+    account.id = account_id.to_string();
+    account.provider_id = provider_id.to_string();
+    account.offering_id = offering_id.to_string();
+    account.name = account_id.to_string();
+    account.key_cipher = state.encrypt_key(key).unwrap();
+    account.enabled = false;
+    account.auth_error = None;
+    account.cooldown_until = None;
+    account.cooldown_generic_until = None;
+    account.cooldown_5h_until = None;
+    account.cooldown_week_until = None;
+    account.cooldown_month_until = None;
+    account.cooldown_free_until = None;
+    account.created_at = Utc::now();
+    account.updated_at = account.created_at;
+    state.db.lock().create_account(&account).unwrap();
+}
+
+#[tokio::test]
+async fn strict_priority_keeps_first_available_card_across_requests() {
+    let (base_url, calls, stop) = start_scripted_upstream(
+        vec![
+            ScriptedReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            ScriptedReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+        ],
+        Arc::new(|_| {}),
+    )
+    .await;
+    let (state, dir) = build_go_state(base_url, &["key-1", "key-2"]);
+    let mut config = state.config();
+    config.routing_mode = RoutingMode::StrictPriority;
+    state.set_config(config).unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = chat(port, GO_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = chat(port, GO_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
+    logs.sort_by_key(|log| log.id);
+    assert_eq!(logs.len(), 2, "{logs:?}");
+    assert!(
+        logs.iter().all(|log| log.account_id == "acct-1"),
+        "strict priority must keep card 0: {logs:?}"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop.send(());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn round_robin_cycles_exact_card_order() {
+    let (base_url, calls, stop) = start_scripted_upstream(
+        vec![
+            ScriptedReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            ScriptedReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+        ],
+        Arc::new(|_| {}),
+    )
+    .await;
+    let (state, dir) = build_go_state(base_url, &["key-1", "key-2"]);
+    let mut config = state.config();
+    config.routing_mode = RoutingMode::RoundRobin;
+    state.set_config(config).unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = chat(port, GO_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = chat(port, GO_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
+    logs.sort_by_key(|log| log.id);
+    assert_eq!(
+        logs.iter()
+            .map(|log| log.account_id.as_str())
+            .collect::<Vec<_>>(),
+        ["acct-1", "acct-2"],
+        "{logs:?}"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop.send(());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn sticky_global_transient_exclude_does_not_rewrite_next_request() {
+    let (base_url, calls, stop) = start_scripted_upstream(
+        vec![
+            ScriptedReply {
+                status: 403,
+                body: FORBIDDEN_BODY,
+            },
+            ScriptedReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+            ScriptedReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+        ],
+        Arc::new(|_| {}),
+    )
+    .await;
+    let (state, dir) = build_go_state(base_url, &["key-1", "key-2"]);
+    let mut config = state.config();
+    config.routing_mode = RoutingMode::StickyGlobal;
+    state.set_config(config).unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = chat(port, GO_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = chat(port, GO_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
+    logs.sort_by_key(|log| log.id);
+    assert_eq!(
+        logs.iter()
+            .map(|log| log.account_id.as_str())
+            .collect::<Vec<_>>(),
+        ["acct-1", "acct-2", "acct-1"],
+        "transient 403 must not rewrite global sticky: {logs:?}"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop.send(());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn free_gates_close_only_free_candidates_on_shared_alias() {
+    let (base_url, calls, stop) = start_scripted_upstream(
+        vec![ScriptedReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }],
+        Arc::new(|_| {}),
+    )
+    .await;
+    let (state, dir) = build_go_state(base_url.clone(), &["key-1"]);
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[ZEN_FREE_ACCOUNT_ID.into(), "acct-1".into()])
+        .unwrap();
+    let until = Utc::now() + ChronoDuration::minutes(30);
+    state
+        .db
+        .lock()
+        .set_account_rate_limit(
+            ZEN_FREE_ACCOUNT_ID,
+            until,
+            "durable free cooldown",
+            Some(UsageWindowKind::Free),
+        )
+        .unwrap();
+    let mut config = state.config();
+    config.upstream_base_url = format!("{base_url}/zen/go");
+    state.set_config(config).unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = chat(port, SHARED_ALIAS).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let logs = state.db.lock().list_forward_logs(10).unwrap();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    assert_eq!(logs[0].account_id, "acct-1");
+    assert!(
+        logs.iter().all(|log| log.account_id != ZEN_FREE_ACCOUNT_ID),
+        "Free gates must close Zen without closing Go: {logs:?}"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop.send(());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn goat_and_scnet_drafts_are_absent_and_goat_raw_has_no_route() {
+    let (base_url, calls, stop) = start_scripted_upstream(
+        vec![ScriptedReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }],
+        Arc::new(|_| {}),
+    )
+    .await;
+    let (state, dir) = build_go_state(base_url, &["key-1"]);
+    insert_disabled_offering(
+        &state,
+        "acct-1",
+        "goat-draft",
+        COMMAND_CODE_PROVIDER_ID,
+        GOAT_OFFERING_ID,
+        "goat-key",
+    );
+    insert_disabled_offering(
+        &state,
+        "acct-1",
+        "scnet-draft",
+        SCNET_PROVIDER_ID,
+        SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+        "sk-tp-basic",
+    );
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[
+            "goat-draft".into(),
+            "scnet-draft".into(),
+            "acct-1".into(),
+            ZEN_FREE_ACCOUNT_ID.into(),
+        ])
+        .unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = chat(port, GO_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let logs = state.db.lock().list_forward_logs(10).unwrap();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    assert_eq!(logs[0].account_id, "acct-1");
+    assert!(
+        logs.iter()
+            .all(|log| log.account_id != "goat-draft" && log.account_id != "scnet-draft"),
+        "GOAT/SCNet drafts must stay off the production route set: {logs:?}"
+    );
+
+    let (status, body) = chat(port, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "unroutable GOAT must not reach upstream"
+    );
+    let (status, body) = chat(port, "scnet/token-plan-basic").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "SCNet catalog ids are not client aliases: {body}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop.send(());
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -27,6 +27,7 @@ use crate::state::CoreState;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
+use ocg_gateway::selector::SelectionError;
 use std::sync::Arc;
 
 /// Process-state values frozen at request entry. Each fallback iteration still
@@ -254,45 +255,21 @@ impl GatewayExecutor {
                 .iter()
                 .map(|route| route.routing.clone())
                 .collect::<Vec<_>>();
-            let selected = state.routing.select_candidate_at(
+            let selected_index = match state.routing.try_select_candidate_index_at(
                 &routing_candidates,
                 snapshots.config.routing_mode,
                 snapshots.config.conversation_sticky,
                 conversation_key.as_deref(),
                 &excluded,
+                free_available,
                 decision_wall,
                 decision_mono,
-            );
-            let Some(selected) = selected else {
-                if route_set.free_only
-                    && let Some(until) = free_cooldown
-                {
-                    record_plan_failure(
-                        &state,
-                        &trace,
-                        &client_body,
-                        loop_state.attempt.max(1),
-                        client_format,
-                        &requested_plan,
-                        "gateway",
-                        "account_selection",
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "free channel is rate-limited",
-                    );
-                    return rate_limited_response(client_format, until);
-                }
-                let soonest = route_set
-                    .routes
-                    .iter()
-                    .filter_map(|route| {
-                        route
-                            .routing
-                            .account
-                            .cooldown_ends_at_for(route.routing.channel, decision_wall)
-                    })
-                    .min();
-                return match soonest {
-                    Some(until) => {
+            ) {
+                Ok(Some(index)) => index,
+                Ok(None) => {
+                    if route_set.free_only
+                        && let Some(until) = free_cooldown
+                    {
                         record_plan_failure(
                             &state,
                             &trace,
@@ -303,46 +280,103 @@ impl GatewayExecutor {
                             "gateway",
                             "account_selection",
                             StatusCode::TOO_MANY_REQUESTS,
-                            "all compatible accounts are rate-limited",
+                            "free channel is rate-limited",
                         );
-                        rate_limited_response(client_format, until)
+                        return rate_limited_response(client_format, until);
                     }
-                    None => {
-                        let msg = loop_state.last_error.clone().unwrap_or_else(|| {
-                            route_set.incompatibility.unwrap_or_else(|| {
-                                "no compatible provider accounts are available".to_string()
-                            })
-                        });
-                        record_plan_failure(
-                            &state,
-                            &trace,
-                            &client_body,
-                            loop_state.attempt.max(1),
-                            client_format,
-                            &requested_plan,
-                            "gateway",
-                            "account_selection",
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            &msg,
-                        );
-                        protocol_error_response(
-                            client_format,
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            &msg,
-                            None,
-                        )
-                    }
-                };
+                    let soonest = route_set
+                        .routes
+                        .iter()
+                        .filter_map(|route| {
+                            route
+                                .routing
+                                .account
+                                .cooldown_ends_at_for(route.routing.channel, decision_wall)
+                        })
+                        .min();
+                    return match soonest {
+                        Some(until) => {
+                            record_plan_failure(
+                                &state,
+                                &trace,
+                                &client_body,
+                                loop_state.attempt.max(1),
+                                client_format,
+                                &requested_plan,
+                                "gateway",
+                                "account_selection",
+                                StatusCode::TOO_MANY_REQUESTS,
+                                "all compatible accounts are rate-limited",
+                            );
+                            rate_limited_response(client_format, until)
+                        }
+                        None => {
+                            let msg = loop_state.last_error.clone().unwrap_or_else(|| {
+                                route_set.incompatibility.unwrap_or_else(|| {
+                                    "no compatible provider accounts are available".to_string()
+                                })
+                            });
+                            record_plan_failure(
+                                &state,
+                                &trace,
+                                &client_body,
+                                loop_state.attempt.max(1),
+                                client_format,
+                                &requested_plan,
+                                "gateway",
+                                "account_selection",
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                &msg,
+                            );
+                            protocol_error_response(
+                                client_format,
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                &msg,
+                                None,
+                            )
+                        }
+                    };
+                }
+                Err(error) => {
+                    let (status, message) =
+                        routing_selector_invariant(SelectorInvariant::Duplicate(error));
+                    record_plan_failure(
+                        &state,
+                        &trace,
+                        &client_body,
+                        loop_state.attempt.max(1),
+                        client_format,
+                        &requested_plan,
+                        "gateway",
+                        "account_selection",
+                        status,
+                        &message,
+                    );
+                    return protocol_error_response(client_format, status, &message, None);
+                }
             };
-            let route = route_set
-                .routes
-                .into_iter()
-                .find(|route| {
-                    route.routing.account.id == selected.account.id
-                        && route.routing.channel == selected.channel
-                        && route.routing.resolved_model == selected.resolved_model
-                })
-                .expect("selected routing candidate must retain its request plan");
+            let route = match route_set.routes.into_iter().nth(selected_index) {
+                Some(route) => route,
+                None => {
+                    let (status, message) =
+                        routing_selector_invariant(SelectorInvariant::CandidateIndexOutOfRange {
+                            selected_index,
+                        });
+                    record_plan_failure(
+                        &state,
+                        &trace,
+                        &client_body,
+                        loop_state.attempt.max(1),
+                        client_format,
+                        &requested_plan,
+                        "gateway",
+                        "account_selection",
+                        status,
+                        &message,
+                    );
+                    return protocol_error_response(client_format, status, &message, None);
+                }
+            };
             let account = route.routing.account;
             let active_plan = route.plan;
 
@@ -499,6 +533,26 @@ fn record_plan_failure(
     emit_failure(&encoded);
 }
 
+enum SelectorInvariant {
+    Duplicate(SelectionError),
+    CandidateIndexOutOfRange { selected_index: usize },
+}
+
+/// Status/message pair for selector invariant failures. Callers pass the same
+/// values to both `record_plan_failure` and `protocol_error_response`.
+fn routing_selector_invariant(failure: SelectorInvariant) -> (StatusCode, String) {
+    let detail = match failure {
+        SelectorInvariant::Duplicate(error) => error.to_string(),
+        SelectorInvariant::CandidateIndexOutOfRange { selected_index } => {
+            format!("candidate index {selected_index} is out of range")
+        }
+    };
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("routing selector invariant: {detail}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -545,7 +599,14 @@ mod tests {
         assert!(production.contains("struct LoopState"));
         assert!(production.contains("struct GatewayExecutor"));
         assert!(production.contains("fn run("));
-        assert!(production.contains("select_candidate_at"));
+        assert!(production.contains("try_select_candidate_index_at"));
+        assert!(production.contains("free_available"));
+        assert!(production.contains("routing selector invariant"));
+        assert!(
+            !production
+                .contains("expect(\"selected routing candidate must retain its request plan\")")
+        );
+        assert!(!production.contains("route.routing.account.id == selected.account.id"));
         assert!(production.contains("materialize_account_routes"));
         assert!(production.contains("list_accounts"));
         assert!(production.contains("list_custom_account_runtimes"));
@@ -671,5 +732,33 @@ mod tests {
         }
         assert!(inner.contains("forward_request"));
         assert!(inner.contains("RetrySameAccount"));
+    }
+
+    #[test]
+    fn duplicate_selection_error_maps_to_internal_selector_invariant() {
+        let error = ocg_gateway::selector::SelectionError::DuplicateAccountId {
+            first: 0,
+            duplicate: 2,
+        };
+        let (status, message) =
+            super::routing_selector_invariant(super::SelectorInvariant::Duplicate(error));
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            message,
+            "routing selector invariant: duplicate account id at candidate index 2 (first seen at 0)"
+        );
+    }
+
+    #[test]
+    fn out_of_range_selected_index_maps_to_internal_selector_invariant() {
+        let (status, message) =
+            super::routing_selector_invariant(super::SelectorInvariant::CandidateIndexOutOfRange {
+                selected_index: 9,
+            });
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            message,
+            "routing selector invariant: candidate index 9 is out of range"
+        );
     }
 }
