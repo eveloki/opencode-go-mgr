@@ -28,6 +28,14 @@ pub mod classify;
 #[doc(hidden)]
 pub mod selector;
 
+/// Whole-document JSON protocol conversion.
+///
+/// Public only as the cross-crate bridge; the host crate's `gateway::protocol`
+/// facade keeps parse, usage, stream, and route-identity paths crate-owned.
+/// Do not glob-reexport.
+#[doc(hidden)]
+pub mod protocol;
+
 #[cfg(test)]
 mod source_boundary {
     use std::collections::{BTreeMap, BTreeSet};
@@ -41,7 +49,7 @@ mod source_boundary {
         Token,
     };
 
-    const ALLOWED_DEPENDENCIES: &[&str] = &["anyhow", "ocg-domain"];
+    const ALLOWED_DEPENDENCIES: &[&str] = &["anyhow", "base64", "ocg-domain", "serde_json"];
     const ALLOWED_DEV_DEPENDENCIES: &[&str] = &["syn", "toml"];
     const FORBIDDEN_IDENTIFIERS: &[&str] = &[
         "CoreState",
@@ -62,6 +70,28 @@ mod source_boundary {
         "Mutex",
     ];
     const SELECTOR_FORBIDDEN_IDENTIFIERS: &[&str] = &["Account", "anyhow"];
+    const PROTOCOL_FORBIDDEN_IDENTIFIERS: &[&str] = &[
+        "Account",
+        "Bytes",
+        "CredentialSnapshot",
+        "CustomRouteSpec",
+        "ForwardLog",
+        "GatewayLog",
+        "Instant",
+        "MaterializeSpec",
+        "ParsedClientRequest",
+        "PricingSnapshot",
+        "ProtocolError",
+        "RequestPlan",
+        "StatusCode",
+        "StreamConverter",
+        "SystemTime",
+        "UNIX_EPOCH",
+        "UsageCounts",
+        "Uuid",
+        "anyhow",
+        "redact_known_secret",
+    ];
     const FORBIDDEN_STD_MODULES: &[&str] = &["env", "fs", "net", "process"];
     const FORBIDDEN_COMPILE_TIME_MACROS: &[&str] = &[
         "include",
@@ -96,6 +126,7 @@ mod source_boundary {
         "credentials",
         "Mutex",
     ];
+    const CLOCK_IDENTIFIERS: &[&str] = &["Instant", "SystemTime", "UNIX_EPOCH"];
 
     #[test]
     fn ocg_gateway_dependencies_stay_inside_the_slice_boundary() {
@@ -121,6 +152,7 @@ mod source_boundary {
             "attempt.rs",
             "classify.rs",
             "lib.rs",
+            "protocol.rs",
             "selector.rs",
         ] {
             assert!(
@@ -159,14 +191,21 @@ mod source_boundary {
             lib_production.contains("pub mod selector"),
             "lib.rs must declare the selector module bridge"
         );
+        assert!(
+            lib_production.contains("pub mod protocol"),
+            "lib.rs must declare the protocol module bridge"
+        );
         for forbidden in [
             "pub use crate::selector",
             "pub use selector::",
             "selector::*",
+            "pub use crate::protocol",
+            "pub use protocol::",
+            "protocol::*",
         ] {
             assert!(
                 !lib_production.contains(forbidden),
-                "lib.rs must not glob or root-reexport selector via `{forbidden}`"
+                "lib.rs must not glob or root-reexport selector/protocol via `{forbidden}`"
             );
         }
         assert_selector_contract_types(&src_root.join("selector.rs"));
@@ -233,6 +272,60 @@ mod source_boundary {
             Path::new("fixture.rs"),
             r#"fn production() { let _ = Account; }"#,
         );
+    }
+
+    #[test]
+    fn protocol_source_guard_rejects_host_identities_and_clock_types() {
+        for source in [
+            r#"fn production() { let _ = RequestPlan; }"#,
+            r#"fn production() { let _ = StatusCode::OK; }"#,
+            r#"fn production() { let _ = Uuid::nil(); }"#,
+            r#"fn production() { let _ = SystemTime::now(); }"#,
+            r#"fn production() { let _ = UNIX_EPOCH; }"#,
+            r#"fn production() { let _ = std::time::Instant::now(); }"#,
+            r#"fn production() { let _ = Instant::now(); }"#,
+            r#"fn production() { let _ = Account; }"#,
+            r#"fn production() { let _ = ProtocolError; }"#,
+            r#"fn production() { let _ = UsageCounts; }"#,
+            r#"fn production() { let _ = Bytes::new(); }"#,
+            r#"fn production() { let _ = r#Instant::now(); }"#,
+            r#"fn production() { let _ = std::time::r#Instant::now(); }"#,
+            r#"fn production() { let _ = r#Uuid::nil(); }"#,
+        ] {
+            assert_source_rejects_path(Path::new("protocol.rs"), source);
+        }
+        assert_production_source_boundary(
+            Path::new("fixture.rs"),
+            r#"fn production() { let _ = RequestPlan; }"#,
+        );
+        assert_production_source_boundary(
+            Path::new("fixture.rs"),
+            r#"fn production() { let _ = std::time::Instant::now(); }"#,
+        );
+        for source in [
+            r#"macro_rules! direct_clock { () => { Instant::now() }; }"#,
+            r#"macro_rules! qualified_clock { () => {{ std::time::SystemTime::now() }}; }"#,
+            r#"macro_rules! nested_epoch { () => {{{ UNIX_EPOCH }}}; }"#,
+            r#"macro_rules! uuid { () => { Uuid::nil() }; }"#,
+            r#"macro_rules! raw_clock { () => { r#Instant::now() }; }"#,
+            r#"macro_rules! raw_qualified_clock { () => {{ std::time::r#Instant::now() }}; }"#,
+            r#"macro_rules! raw_uuid { () => { r#Uuid::nil() }; }"#,
+        ] {
+            assert_source_rejects_path(Path::new("protocol.rs"), source);
+        }
+        for source in [
+            r#"macro_rules! clock_text { () => { "std::time::Instant::now()" }; }"#,
+            r#"macro_rules! passthrough { ($value:expr) => { ($value) }; }"#,
+            r#"macro_rules! raw_passthrough { () => { r#type }; }"#,
+        ] {
+            assert_production_source_boundary(Path::new("protocol.rs"), source);
+        }
+        let protocol_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("protocol.rs");
+        let protocol_source = fs::read_to_string(&protocol_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", protocol_path.display()));
+        assert_production_source_boundary(&protocol_path, &protocol_source);
     }
 
     #[test]
@@ -413,7 +506,9 @@ mod source_boundary {
 
             [dependencies]
             anyhow = "1"
+            base64 = "0.22"
             ocg-domain = { path = "../ocg-domain" }
+            serde_json = "1"
 
             [dev-dependencies]
             syn = { version = "2", features = ["full", "visit"] }
@@ -527,10 +622,10 @@ mod source_boundary {
     }
 
     fn extra_forbidden_identifiers(path: &Path) -> &'static [&'static str] {
-        if path.file_name().and_then(|name| name.to_str()) == Some("selector.rs") {
-            SELECTOR_FORBIDDEN_IDENTIFIERS
-        } else {
-            &[]
+        match path.file_name().and_then(|name| name.to_str()) {
+            Some("selector.rs") => SELECTOR_FORBIDDEN_IDENTIFIERS,
+            Some("protocol.rs") => PROTOCOL_FORBIDDEN_IDENTIFIERS,
+            _ => &[],
         }
     }
 
@@ -1430,6 +1525,15 @@ pub struct SelectorState {
         forbidden_macro_aliases: BTreeSet<String>,
     }
 
+    fn normalized_identifier(ident: &syn::Ident) -> String {
+        let rendered = ident.to_string();
+        rendered.strip_prefix("r#").unwrap_or(&rendered).to_string()
+    }
+
+    fn forbidden_source_identifier(name: &str, extra_forbidden: &[&str]) -> bool {
+        FORBIDDEN_IDENTIFIERS.contains(&name) || extra_forbidden.contains(&name)
+    }
+
     impl<'ast> Visit<'ast> for BoundaryVisitor {
         fn visit_file(&mut self, file: &'ast syn::File) {
             for item in &file.items {
@@ -1454,11 +1558,9 @@ pub struct SelectorState {
         }
 
         fn visit_ident(&mut self, ident: &'ast syn::Ident) {
-            let name = ident.to_string();
-            if FORBIDDEN_IDENTIFIERS.contains(&name.as_str())
-                || self.extra_forbidden.contains(&name.as_str())
-            {
-                self.violations.push(name);
+            let name = normalized_identifier(ident);
+            if forbidden_source_identifier(&name, self.extra_forbidden) {
+                self.violations.push(ident.to_string());
             }
         }
 
@@ -1466,7 +1568,7 @@ pub struct SelectorState {
             let segments = path
                 .segments
                 .iter()
-                .map(|segment| segment.ident.to_string())
+                .map(|segment| normalized_identifier(&segment.ident))
                 .collect::<Vec<_>>();
             if let Some(violation) = forbidden_std_path(&segments) {
                 self.violations.push(violation);
@@ -1489,7 +1591,7 @@ pub struct SelectorState {
         }
 
         fn visit_item_extern_crate(&mut self, item: &'ast ItemExternCrate) {
-            if item.ident == "std" {
+            if normalized_identifier(&item.ident) == "std" {
                 self.violations.push("extern crate std".to_string());
             }
             visit::visit_item_extern_crate(self, item);
@@ -1501,7 +1603,7 @@ pub struct SelectorState {
                     .path
                     .segments
                     .last()
-                    .is_some_and(|segment| segment.ident == "encrypt")
+                    .is_some_and(|segment| normalized_identifier(&segment.ident) == "encrypt")
                 {
                     self.violations.push("encrypt(...)".to_string());
                 }
@@ -1510,7 +1612,7 @@ pub struct SelectorState {
         }
 
         fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
-            if call.method == "encrypt" {
+            if normalized_identifier(&call.method) == "encrypt" {
                 self.violations.push(".encrypt(...)".to_string());
             }
             visit::visit_expr_method_call(self, call);
@@ -1539,7 +1641,83 @@ pub struct SelectorState {
                     self.violations.push(format!("macro token `{forbidden}`"));
                 }
             }
+            inspect_macro_tokens(
+                syn::buffer::TokenBuffer::new2(mac.tokens.clone()).begin(),
+                self.extra_forbidden,
+                &mut self.violations,
+            );
             visit::visit_macro(self, mac);
+        }
+    }
+
+    fn inspect_macro_tokens(
+        mut cursor: syn::buffer::Cursor<'_>,
+        extra_forbidden: &[&str],
+        violations: &mut Vec<String>,
+    ) {
+        let mut path_segments = Vec::new();
+        let mut colon_count = 0;
+
+        while !cursor.eof() {
+            if let Some((inside, _, _, after_group)) = cursor.any_group() {
+                inspect_macro_tokens(inside, extra_forbidden, violations);
+                cursor = after_group;
+                path_segments.clear();
+                colon_count = 0;
+                continue;
+            }
+            if let Some((ident, rest)) = cursor.ident() {
+                let rendered = ident.to_string();
+                let name = normalized_identifier(&ident);
+                if forbidden_source_identifier(&name, extra_forbidden) {
+                    violations.push(format!("macro identifier `{rendered}`"));
+                }
+                if colon_count == 2 {
+                    path_segments.push(name.clone());
+                } else {
+                    path_segments.clear();
+                    path_segments.push(name.clone());
+                }
+                if matches!(path_segments.as_slice(), [std, time, clock]
+                    if std == "std"
+                        && time == "time"
+                        && CLOCK_IDENTIFIERS.contains(&clock.as_str())
+                        && extra_forbidden.contains(&clock.as_str()))
+                {
+                    violations.push(format!("macro clock path {}", path_segments.join("::")));
+                }
+                colon_count = 0;
+                cursor = rest;
+                continue;
+            }
+            if let Some((punct, rest)) = cursor.punct() {
+                if punct.as_char() == ':' {
+                    colon_count += 1;
+                } else {
+                    path_segments.clear();
+                    colon_count = 0;
+                }
+                cursor = rest;
+                continue;
+            }
+            if let Some((_, rest)) = cursor.literal() {
+                path_segments.clear();
+                colon_count = 0;
+                cursor = rest;
+                continue;
+            }
+            if let Some((_, rest)) = cursor.lifetime() {
+                path_segments.clear();
+                colon_count = 0;
+                cursor = rest;
+                continue;
+            }
+            let (_, rest) = cursor
+                .token_tree()
+                .expect("non-EOF cursor must contain a token tree");
+            path_segments.clear();
+            colon_count = 0;
+            cursor = rest;
         }
     }
 
@@ -1557,8 +1735,8 @@ pub struct SelectorState {
 
     fn use_tree_aliases_std(tree: &syn::UseTree) -> bool {
         match tree {
-            syn::UseTree::Rename(rename) => rename.ident == "std",
-            syn::UseTree::Path(path) if path.ident == "std" => {
+            syn::UseTree::Rename(rename) => normalized_identifier(&rename.ident) == "std",
+            syn::UseTree::Path(path) if normalized_identifier(&path.ident) == "std" => {
                 use_tree_aliases_std_after_root(&path.tree)
             }
             syn::UseTree::Group(group) => group.items.iter().any(use_tree_aliases_std),
@@ -1568,7 +1746,7 @@ pub struct SelectorState {
 
     fn use_tree_aliases_std_after_root(tree: &syn::UseTree) -> bool {
         match tree {
-            syn::UseTree::Rename(rename) => rename.ident == "self",
+            syn::UseTree::Rename(rename) => normalized_identifier(&rename.ident) == "self",
             syn::UseTree::Group(group) => group.items.iter().any(use_tree_aliases_std_after_root),
             _ => false,
         }
@@ -1581,7 +1759,7 @@ pub struct SelectorState {
         let segments = path
             .segments
             .iter()
-            .map(|segment| segment.ident.to_string())
+            .map(|segment| normalized_identifier(&segment.ident))
             .collect::<Vec<_>>();
         match segments.as_slice() {
             [name] if FORBIDDEN_COMPILE_TIME_MACROS.contains(&name.as_str()) => {
@@ -1605,19 +1783,19 @@ pub struct SelectorState {
     ) {
         match tree {
             syn::UseTree::Path(path) => {
-                prefix.push(path.ident.to_string());
+                prefix.push(normalized_identifier(&path.ident));
                 collect_forbidden_macro_aliases(prefix, &path.tree, aliases);
             }
             syn::UseTree::Name(name) => {
-                prefix.push(name.ident.to_string());
+                prefix.push(normalized_identifier(&name.ident));
                 if is_forbidden_compile_time_macro_import(&prefix) {
-                    aliases.insert(name.ident.to_string());
+                    aliases.insert(normalized_identifier(&name.ident));
                 }
             }
             syn::UseTree::Rename(rename) => {
-                prefix.push(rename.ident.to_string());
+                prefix.push(normalized_identifier(&rename.ident));
                 if is_forbidden_compile_time_macro_import(&prefix) {
-                    aliases.insert(rename.rename.to_string());
+                    aliases.insert(normalized_identifier(&rename.rename));
                 }
             }
             syn::UseTree::Glob(_) => {}
@@ -1642,15 +1820,15 @@ pub struct SelectorState {
     ) {
         match tree {
             syn::UseTree::Path(path) => {
-                prefix.push(path.ident.to_string());
+                prefix.push(normalized_identifier(&path.ident));
                 flatten_use_tree(prefix, &path.tree, output);
             }
             syn::UseTree::Name(name) => {
-                prefix.push(name.ident.to_string());
+                prefix.push(normalized_identifier(&name.ident));
                 output.push(prefix);
             }
             syn::UseTree::Rename(rename) => {
-                prefix.push(rename.ident.to_string());
+                prefix.push(normalized_identifier(&rename.ident));
                 output.push(prefix);
             }
             syn::UseTree::Glob(_) => {
