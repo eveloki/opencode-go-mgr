@@ -861,6 +861,27 @@
       ],
       "type": "string"
     },
+    "AccountVerify": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/verify` body. CAS tokens are required. Unknown\nfields, including any Key material, are rejected.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "ApplicationModels": {
       "additionalProperties": false,
       "description": "Local Applications picker: Go routable Alias ∩ current pricing snapshot.",
@@ -4633,6 +4654,9 @@
     },
     {
       "$ref": "#/$defs/ClaudeDesktopModelsUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountVerify"
     }
   ],
   "title": "DashboardApiV3"

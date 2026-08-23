@@ -106,7 +106,8 @@ export type DashboardApiV3 =
   | CustomModelDiscoveryRequest
   | CustomModelDiscoveryResponse
   | ClaudeDesktopModels
-  | ClaudeDesktopModelsUpdate;
+  | ClaudeDesktopModelsUpdate
+  | AccountVerify;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -1345,4 +1346,12 @@ export interface ClaudeDesktopModelsUpdate {
   opus: string;
   processGeneration: number;
   sonnet: string;
+}
+/**
+ * POST `/accounts/{id}/verify` body. CAS tokens are required. Unknown
+ * fields, including any Key material, are rejected.
+ */
+export interface AccountVerify {
+  expectedRevision: number;
+  processGeneration: number;
 }
