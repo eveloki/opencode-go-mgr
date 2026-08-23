@@ -1,26 +1,32 @@
+//! Compatibility facade for process-wide outbound proxy routing.
+//!
+//! Catalog-stripped client construction lives in [`ocg_infra::http`]. This
+//! module maps [`AppConfig`] onto that spec, filters list membership through
+//! the supported-model and Zen catalogs, and folds lookup keys with
+//! [`normalize_model_name`] before infra exact-match.
+
 use crate::kernel::ids::{is_free_model, normalize_model_name};
 use crate::kernel::protocol::supported_model_ids;
 use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::{AppConfig, ProxyListDirection, ProxyMode};
-use reqwest::redirect::Policy;
 use std::time::Duration;
 
-/// Closed-set route leg label recorded on every forward log row. Carries no
-/// URL or credential material by construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RouteLabel {
-    Auto,
-    Proxy,
-    Direct,
-}
+pub(crate) use ocg_infra::http::{RouteLabel, no_redirect_policy};
 
-impl RouteLabel {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            RouteLabel::Auto => "auto",
-            RouteLabel::Proxy => "proxy",
-            RouteLabel::Direct => "direct",
-        }
+fn outbound_proxy_spec(config: &AppConfig) -> ocg_infra::http::OutboundProxySpec {
+    ocg_infra::http::OutboundProxySpec {
+        mode: match config.proxy_mode {
+            ProxyMode::Auto => ocg_infra::http::ProxyMode::Auto,
+            ProxyMode::Manual => ocg_infra::http::ProxyMode::Manual,
+            ProxyMode::Direct => ocg_infra::http::ProxyMode::Direct,
+            ProxyMode::List => ocg_infra::http::ProxyMode::List,
+        },
+        proxy_url: config.proxy_url.clone(),
+        connect_timeout: Duration::from_secs(config.connect_timeout_secs),
+        list_direction: match config.proxy_list_direction {
+            ProxyListDirection::Whitelist => ocg_infra::http::ProxyListDirection::Whitelist,
+            ProxyListDirection::Blacklist => ocg_infra::http::ProxyListDirection::Blacklist,
+        },
     }
 }
 
@@ -28,35 +34,21 @@ impl RouteLabel {
 /// generated from the same `AppConfig` generation, so a snapshot held by an
 /// in-flight request can never mix new metadata with old clients. Non-list
 /// modes keep `exception_client` unset and always resolve to the default leg.
-pub(crate) struct ForwardRouteSet {
-    /// Registry ids normalized once at build time; empty or stale entries
-    /// simply never match (total function over any persisted shape).
-    list: Vec<String>,
-    default_client: reqwest::Client,
-    exception_client: Option<reqwest::Client>,
-    default_label: RouteLabel,
-    exception_label: RouteLabel,
-}
+///
+/// Lookup keys are normalized before infra exact-match so historical
+/// `client_for` semantics stay unchanged.
+pub(crate) struct ForwardRouteSet(ocg_infra::http::ForwardRouteSet);
 
 impl ForwardRouteSet {
     /// Pure, lock-free route resolution for one forwarding attempt.
     pub(crate) fn client_for(&self, model: &str) -> (&reqwest::Client, RouteLabel) {
-        match &self.exception_client {
-            None => (&self.default_client, self.default_label),
-            Some(exception) => {
-                if is_listed(&self.list, model) {
-                    (exception, self.exception_label)
-                } else {
-                    (&self.default_client, self.default_label)
-                }
-            }
-        }
+        self.0.client_for(&normalize_model_name(model))
     }
 
     /// The default leg client used by non-model-scoped outbound callers
     /// (`upstream_context` and friends).
     pub(crate) fn default_client(&self) -> &reqwest::Client {
-        &self.default_client
+        self.0.default_client()
     }
 }
 
@@ -87,49 +79,11 @@ fn normalized_known_list(models: &[String], zen_catalog: &ZenFreeModelCatalog) -
         .collect()
 }
 
-fn is_listed(list: &[String], model: &str) -> bool {
-    list.contains(&normalize_model_name(model))
-}
-
-fn tuned(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    // Drop idle pooled connections earlier than the default so a stale connection
-    // closed by the upstream/CDN isn't reused. Keep-alive probes further reduce
-    // silent drops for long-lived gateways.
-    builder
-        .pool_idle_timeout(Duration::from_secs(30))
-        .tcp_keepalive(Duration::from_secs(30))
-}
-
-fn direct_leg_builder() -> reqwest::ClientBuilder {
-    tuned(reqwest::Client::builder().no_proxy())
-}
-
-fn proxy_leg_builder(url: &str) -> crate::Result<reqwest::ClientBuilder> {
-    Ok(tuned(
-        reqwest::Client::builder().proxy(reqwest::Proxy::all(url)?),
-    ))
-}
-
-fn leg_client(
-    builder: reqwest::ClientBuilder,
-    config: &AppConfig,
-) -> crate::Result<reqwest::Client> {
-    Ok(builder
-        .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
-        .build()?)
-}
-
-pub(crate) fn no_redirect_policy() -> Policy {
-    Policy::none()
-}
-
-/// Same global proxy policy as [`build`], with redirects disabled. Command Code
-/// GOAT inference uses this seam; it must not follow Location hop-off.
+/// Same global proxy policy as [`ocg_infra::http::build`], with redirects
+/// disabled. Command Code GOAT inference uses this seam; it must not follow
+/// Location hop-off.
 pub(crate) fn build_no_redirect(config: &AppConfig) -> crate::Result<reqwest::Client> {
-    Ok(configured_builder(config)?
-        .redirect(no_redirect_policy())
-        .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
-        .build()?)
+    ocg_infra::http::build_no_redirect(&outbound_proxy_spec(config))
 }
 
 /// Applies the process-wide outbound proxy policy while leaving callers free to
@@ -137,66 +91,31 @@ pub(crate) fn build_no_redirect(config: &AppConfig) -> crate::Result<reqwest::Cl
 /// list mode this builds the direction's default leg: whitelist default is
 /// direct, blacklist default is the manual proxy URL.
 pub(crate) fn configured_builder(config: &AppConfig) -> crate::Result<reqwest::ClientBuilder> {
-    let builder = match config.proxy_mode {
-        ProxyMode::Auto => tuned(reqwest::Client::builder()),
-        ProxyMode::Manual => proxy_leg_builder(&config.proxy_url)?,
-        ProxyMode::Direct => direct_leg_builder(),
-        ProxyMode::List => match config.proxy_list_direction {
-            ProxyListDirection::Whitelist => direct_leg_builder(),
-            ProxyListDirection::Blacklist => proxy_leg_builder(&config.proxy_url)?,
-        },
-    };
-    Ok(builder)
+    ocg_infra::http::configured_builder(&outbound_proxy_spec(config))
 }
 
+#[cfg(test)]
 pub(crate) fn build(config: &AppConfig) -> crate::Result<reqwest::Client> {
-    leg_client(configured_builder(config)?, config)
+    ocg_infra::http::build(&outbound_proxy_spec(config))
 }
 
 /// Builds the full route set from one config generation. List mode builds both
-/// legs; every other mode builds exactly the process-wide client.
+/// legs against the catalog-filtered membership list; every other mode builds
+/// exactly the process-wide client. All modes go through
+/// [`ocg_infra::http::build_route_set`] so the reqwest client and audit label
+/// are generated atomically from one [`ocg_infra::http::OutboundProxySpec`].
 pub(crate) fn build_route_set(
     config: &AppConfig,
     zen_catalog: &ZenFreeModelCatalog,
 ) -> crate::Result<ForwardRouteSet> {
-    match config.proxy_mode {
-        ProxyMode::List => {
-            let (default_builder, exception_builder, default_label, exception_label) =
-                match config.proxy_list_direction {
-                    ProxyListDirection::Whitelist => (
-                        direct_leg_builder(),
-                        proxy_leg_builder(&config.proxy_url)?,
-                        RouteLabel::Direct,
-                        RouteLabel::Proxy,
-                    ),
-                    ProxyListDirection::Blacklist => (
-                        proxy_leg_builder(&config.proxy_url)?,
-                        direct_leg_builder(),
-                        RouteLabel::Proxy,
-                        RouteLabel::Direct,
-                    ),
-                };
-            Ok(ForwardRouteSet {
-                list: normalized_known_list(&config.proxy_list_models, zen_catalog),
-                default_client: leg_client(default_builder, config)?,
-                exception_client: Some(leg_client(exception_builder, config)?),
-                default_label,
-                exception_label,
-            })
-        }
-        mode => Ok(ForwardRouteSet {
-            list: Vec::new(),
-            default_client: build(config)?,
-            exception_client: None,
-            default_label: match mode {
-                ProxyMode::Auto => RouteLabel::Auto,
-                ProxyMode::Manual => RouteLabel::Proxy,
-                ProxyMode::Direct => RouteLabel::Direct,
-                ProxyMode::List => unreachable!("list handled above"),
-            },
-            exception_label: RouteLabel::Direct,
-        }),
-    }
+    let list = match config.proxy_mode {
+        ProxyMode::List => normalized_known_list(&config.proxy_list_models, zen_catalog),
+        ProxyMode::Auto | ProxyMode::Manual | ProxyMode::Direct => Vec::new(),
+    };
+    Ok(ForwardRouteSet(ocg_infra::http::build_route_set(
+        &outbound_proxy_spec(config),
+        list,
+    )?))
 }
 
 #[cfg(test)]
@@ -210,6 +129,13 @@ mod tests {
 
     fn zen_catalog() -> ZenFreeModelCatalog {
         ZenFreeModelCatalog::default()
+    }
+
+    fn assert_same_type<T>(_: &T, _: &T) {}
+
+    #[test]
+    fn facade_reexports_infra_route_label() {
+        assert_same_type(&RouteLabel::Auto, &ocg_infra::http::RouteLabel::Auto);
     }
 
     #[test]
@@ -315,8 +241,13 @@ mod tests {
             empty_blacklist.client_for("gpt-5.6-luna").1,
             RouteLabel::Proxy
         );
+    }
 
-        // Non-list modes always resolve to the process-wide leg.
+    #[test]
+    fn non_list_modes_use_infra_spec_derived_route_labels() {
+        // Auto/Manual/Direct go through ocg_infra::http::build_route_set, so
+        // the audit label is bound to the spec rather than a public
+        // (client, label) pairing. List membership on the config is ignored.
         for (mode, label) in [
             (ProxyMode::Auto, RouteLabel::Auto),
             (ProxyMode::Manual, RouteLabel::Proxy),
@@ -326,10 +257,19 @@ mod tests {
                 gateway_key: "k".to_string(),
                 proxy_mode: mode,
                 proxy_url: "http://127.0.0.1:7890".to_string(),
+                proxy_list_direction: ProxyListDirection::Whitelist,
+                proxy_list_models: vec!["gpt-5.6-luna".to_string()],
                 ..AppConfig::default()
             };
             let route_set = build_route_set(&config, &zen_catalog()).unwrap();
             assert_eq!(route_set.client_for("gpt-5.6-luna").1, label);
+            assert_eq!(route_set.client_for("glm-5.3").1, label);
+            let (client, resolved) = route_set.client_for("gpt-5.6-luna");
+            assert!(
+                std::ptr::eq(client, route_set.default_client()),
+                "non-list modes must resolve only the default leg"
+            );
+            assert_eq!(resolved, label);
         }
     }
 

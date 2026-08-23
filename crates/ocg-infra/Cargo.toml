@@ -11,4 +11,15 @@ description = "Infrastructure implementations for OCG Manager"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls-webpki-roots",
+] }
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "system-proxy",
+] }
