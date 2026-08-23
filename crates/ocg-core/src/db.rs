@@ -9,6 +9,9 @@ use crate::provider_contracts::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
+use ocg_infra::sqlite_logs::{
+    ForwardLogIdentityPatch, ForwardLogInsertRow, ForwardLogUpdateRow, GatewayLogInsertRow,
+};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, params, params_from_iter,
     types::{Type, Value},
@@ -3246,24 +3249,17 @@ impl Database {
         id: i64,
         attribution: &ForwardLogNativeAttribution,
     ) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE forward_logs SET
-                requested_model = ?2,
-                resolved_alias = ?3,
-                upstream_model = ?4,
-                native_cost_value = ?5,
-                native_cost_unit = ?6,
-                native_cost_currency = ?7
-             WHERE id = ?1",
-            params![
+        let changed = ocg_infra::sqlite_logs::patch_forward_log_identity(
+            &self.conn,
+            &ForwardLogIdentityPatch {
                 id,
-                attribution.requested_model,
-                attribution.resolved_alias,
-                attribution.upstream_model,
-                attribution.native_cost_value,
-                attribution.native_cost_unit,
-                attribution.native_cost_currency,
-            ],
+                requested_model: attribution.requested_model.as_deref(),
+                resolved_alias: attribution.resolved_alias.as_deref(),
+                upstream_model: attribution.upstream_model.as_deref(),
+                native_cost_value: attribution.native_cost_value,
+                native_cost_unit: attribution.native_cost_unit.as_deref(),
+                native_cost_currency: attribution.native_cost_currency.as_deref(),
+            },
         )?;
         Ok(changed == 1)
     }
@@ -3723,10 +3719,21 @@ impl Database {
                     )?;
                     anyhow::ensure!(completed == 1, "managed verification row disappeared");
                 }
-                tx.execute(
-                    "INSERT INTO gateway_logs (level, category, message, created_at)
-                     VALUES ('info', 'account', ?1, ?2)",
-                    params![format!("verified managed account {account_name}"), now_rfc],
+                let message = format!("verified managed account {account_name}");
+                ocg_infra::sqlite_logs::insert_gateway_log(
+                    &tx,
+                    &GatewayLogInsertRow {
+                        level: "info",
+                        category: "account",
+                        message: &message,
+                        created_at: &now_rfc,
+                        request_id: None,
+                        attempt: None,
+                        error_source: None,
+                        error_stage: None,
+                        duration_ms: None,
+                        diagnostic_json: None,
+                    },
                 )?;
             }
             ManagedKeyVerificationWrite::AuthFailed { auth_error } => {
@@ -3876,23 +3883,21 @@ impl Database {
         duration_ms: Option<i64>,
         diagnostic_json: Option<&str>,
     ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO gateway_logs
-             (level, category, message, created_at, request_id, attempt,
-              error_source, error_stage, duration_ms, diagnostic_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
+        let created_at = Utc::now().to_rfc3339();
+        ocg_infra::sqlite_logs::insert_gateway_log(
+            &self.conn,
+            &GatewayLogInsertRow {
                 level,
                 category,
                 message,
-                Utc::now().to_rfc3339(),
+                created_at: &created_at,
                 request_id,
                 attempt,
                 error_source,
                 error_stage,
                 duration_ms,
                 diagnostic_json,
-            ],
+            },
         )?;
         Ok(())
     }
@@ -3942,64 +3947,51 @@ impl Database {
             .map(serde_json::to_string)
             .transpose()?;
         let attribution = ForwardLogNativeAttribution::inferred_from_forward_log(log);
-        self.conn.execute(
-            "INSERT INTO forward_logs
-             (timestamp, model, account_id, account_name, client_key_id, client_key_name,
-              route_account_id, provider_id, offering_id, credential_account_id,
-              status, http_status, route,
-              prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, cost,
-              raw_cost_usd, quota_debit, effective_paid_cost_usd,
-              pricing_revision_id, quota_multiplier, local_adjustment_multiplier,
-              service_tier, cost_state, error_message, request_id, attempt,
-              error_source, error_stage, duration_ms, diagnostic_json,
-              requested_model, resolved_alias, upstream_model,
-              native_cost_value, native_cost_unit, native_cost_currency)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)",
-            params![
-                log.timestamp.to_rfc3339(),
-                log.model,
-                log.account_id,
-                log.account_name,
-                log.client_key_id,
-                log.client_key_name,
-                log.route_account_id,
-                log.provider_id,
-                log.offering_id,
-                log.credential_account_id,
-                log.status,
-                log.http_status,
-                log.route,
-                log.prompt_tokens,
-                log.completion_tokens,
-                log.cached_tokens,
-                log.cache_creation_tokens,
-                log.cost.unwrap_or(0.0),
-                log.raw_cost_usd,
-                log.quota_debit,
-                log.effective_paid_cost_usd,
-                log.pricing_revision_id,
-                log.quota_multiplier,
-                log.local_adjustment_multiplier,
-                log.service_tier,
-                log.cost_state,
-                log.error_message,
-                log.request_id,
-                log.attempt,
-                log.error_source,
-                log.error_stage,
-                log.duration_ms,
-                diagnostic_json,
-                attribution.requested_model,
-                attribution.resolved_alias,
-                attribution.upstream_model,
-                attribution.native_cost_value,
-                attribution.native_cost_unit,
-                attribution.native_cost_currency,
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        let timestamp = log.timestamp.to_rfc3339();
+        Ok(ocg_infra::sqlite_logs::insert_forward_log(
+            &self.conn,
+            &ForwardLogInsertRow {
+                timestamp: &timestamp,
+                model: &log.model,
+                account_id: &log.account_id,
+                account_name: &log.account_name,
+                client_key_id: log.client_key_id.as_deref(),
+                client_key_name: log.client_key_name.as_deref(),
+                route_account_id: log.route_account_id.as_deref(),
+                provider_id: log.provider_id.as_deref(),
+                offering_id: log.offering_id.as_deref(),
+                credential_account_id: log.credential_account_id.as_deref(),
+                status: &log.status,
+                http_status: log.http_status,
+                route: &log.route,
+                prompt_tokens: log.prompt_tokens,
+                completion_tokens: log.completion_tokens,
+                cached_tokens: log.cached_tokens,
+                cache_creation_tokens: log.cache_creation_tokens,
+                cost: log.cost.unwrap_or(0.0),
+                raw_cost_usd: log.raw_cost_usd,
+                quota_debit: log.quota_debit,
+                effective_paid_cost_usd: log.effective_paid_cost_usd,
+                pricing_revision_id: log.pricing_revision_id.as_deref(),
+                quota_multiplier: log.quota_multiplier,
+                local_adjustment_multiplier: log.local_adjustment_multiplier,
+                service_tier: log.service_tier.as_deref(),
+                cost_state: &log.cost_state,
+                error_message: log.error_message.as_deref(),
+                request_id: log.request_id.as_deref(),
+                attempt: log.attempt,
+                error_source: log.error_source.as_deref(),
+                error_stage: log.error_stage.as_deref(),
+                duration_ms: log.duration_ms,
+                diagnostic_json: diagnostic_json.as_deref(),
+                requested_model: attribution.requested_model.as_deref(),
+                resolved_alias: attribution.resolved_alias.as_deref(),
+                upstream_model: attribution.upstream_model.as_deref(),
+                native_cost_value: attribution.native_cost_value,
+                native_cost_unit: attribution.native_cost_unit.as_deref(),
+                native_cost_currency: attribution.native_cost_currency.as_deref(),
+            },
+        )?)
     }
 
     /// Finalize a forward_logs row once the upstream response ends. `http_status` and
@@ -4063,58 +4055,34 @@ impl Database {
                 (cost_state == "priced").then_some(metrics.cost),
                 cost_state,
             );
-        self.conn.execute(
-            "UPDATE forward_logs
-             SET status = ?2,
-                 http_status = COALESCE(?3, http_status),
-                 prompt_tokens = ?4,
-                 completion_tokens = ?5,
-                 cached_tokens = ?6,
-                 cache_creation_tokens = ?7,
-                 cost = ?8,
-                 raw_cost_usd = ?9,
-                 quota_debit = ?10,
-                 effective_paid_cost_usd = ?11,
-                 pricing_revision_id = ?12,
-                 quota_multiplier = ?13,
-                 local_adjustment_multiplier = ?14,
-                 service_tier = ?15,
-                 cost_state = ?16,
-                 error_message = COALESCE(?17, error_message),
-                 error_source = COALESCE(?18, error_source),
-                 error_stage = COALESCE(?19, error_stage),
-                 duration_ms = COALESCE(?20, duration_ms),
-                 diagnostic_json = COALESCE(?21, diagnostic_json),
-                 native_cost_value = ?22,
-                 native_cost_unit = ?23,
-                 native_cost_currency = ?24
-             WHERE id = ?1",
-            params![
+        ocg_infra::sqlite_logs::update_forward_log(
+            &self.conn,
+            &ForwardLogUpdateRow {
                 id,
-                stored_status,
+                status: stored_status,
                 http_status,
-                metrics.prompt_tokens,
-                metrics.completion_tokens,
-                metrics.cached_tokens,
-                metrics.cache_creation_tokens,
-                stored_cost,
-                metrics.raw_cost_usd,
-                metrics.quota_debit,
-                metrics.effective_paid_cost_usd,
-                metrics.pricing_revision_id,
-                metrics.quota_multiplier,
-                metrics.local_adjustment_multiplier,
-                metrics.service_tier,
+                prompt_tokens: metrics.prompt_tokens,
+                completion_tokens: metrics.completion_tokens,
+                cached_tokens: metrics.cached_tokens,
+                cache_creation_tokens: metrics.cache_creation_tokens,
+                cost: stored_cost,
+                raw_cost_usd: metrics.raw_cost_usd,
+                quota_debit: metrics.quota_debit,
+                effective_paid_cost_usd: metrics.effective_paid_cost_usd,
+                pricing_revision_id: metrics.pricing_revision_id.as_deref(),
+                quota_multiplier: metrics.quota_multiplier,
+                local_adjustment_multiplier: metrics.local_adjustment_multiplier,
+                service_tier: metrics.service_tier.as_deref(),
                 cost_state,
                 error_message,
-                diagnostic.map(|diagnostic| diagnostic.error_source),
-                diagnostic.map(|diagnostic| diagnostic.error_stage),
-                diagnostic.map(|diagnostic| diagnostic.duration_ms),
-                diagnostic.map(|diagnostic| diagnostic.diagnostic_json),
+                error_source: diagnostic.map(|diagnostic| diagnostic.error_source),
+                error_stage: diagnostic.map(|diagnostic| diagnostic.error_stage),
+                duration_ms: diagnostic.map(|diagnostic| diagnostic.duration_ms),
+                diagnostic_json: diagnostic.map(|diagnostic| diagnostic.diagnostic_json),
                 native_cost_value,
-                native_cost_unit,
-                native_cost_currency,
-            ],
+                native_cost_unit: native_cost_unit.as_deref(),
+                native_cost_currency: native_cost_currency.as_deref(),
+            },
         )?;
         Ok(())
     }
@@ -6407,6 +6375,70 @@ mod tests {
                 .iter()
                 .all(|log| !log.message.contains("managed-atomic")),
             "success log must roll back with the account writes"
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn managed_key_verification_transaction_rolls_back_if_gateway_audit_insert_aborts() {
+        let dir = temp_data_dir("managed-key-audit-rollback");
+        let db = Database::open(dir.clone()).expect("db should open");
+        let mut managed = account("managed-audit-atomic");
+        managed.account_type = AccountType::Managed;
+        managed.setup_step = AccountSetupStep::KeyVerification;
+        managed.key_cipher = "original-cipher".into();
+        managed.enabled = false;
+        db.create_account(&managed).expect("draft should save");
+        let before = db.get_account(&managed.id).unwrap().unwrap();
+        let before_verification = db.account_verification_state(&managed.id).unwrap().unwrap();
+
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_managed_verification_audit
+                 BEFORE INSERT ON gateway_logs
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected managed verification audit failure');
+                 END;",
+            )
+            .expect("fault trigger should install");
+
+        let error = db
+            .commit_managed_key_verification(
+                &managed.id,
+                &ManagedKeyVerificationCas::from_account(&before),
+                "candidate-cipher",
+                &ManagedKeyVerificationWrite::Verified {
+                    rate_limit: None,
+                    account_name: managed.name.clone(),
+                },
+            )
+            .expect_err("gateway audit insert should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected managed verification audit failure"),
+            "{error:#}"
+        );
+
+        let after = db.get_account(&managed.id).unwrap().unwrap();
+        let after_verification = db.account_verification_state(&managed.id).unwrap().unwrap();
+        assert_eq!(after.key_cipher, before.key_cipher);
+        assert_eq!(after.enabled, before.enabled);
+        assert_eq!(after.setup_step, before.setup_step);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after_verification.status, before_verification.status);
+        assert_eq!(
+            after_verification.connection_verified_at,
+            before_verification.connection_verified_at
+        );
+        assert!(
+            db.list_gateway_logs(10)
+                .unwrap()
+                .iter()
+                .all(|log| !log.message.contains("managed-audit-atomic")),
+            "aborted audit insert must not persist a success log"
         );
 
         drop(db);
