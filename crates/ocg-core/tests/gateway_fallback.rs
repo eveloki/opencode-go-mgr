@@ -9,7 +9,7 @@ use ocg_core::db::{Database, ForwardLogQueryOptions};
 use ocg_core::gateway;
 use ocg_core::gateway::provider_adapter::install_goat_loopback_route_for_test;
 use ocg_core::models::{
-    Account, AccountUpdate, ForwardLog, ProxyListDirection, ProxyMode, RoutingMode,
+    Account, AccountUpdate, AppConfig, ForwardLog, ProxyListDirection, ProxyMode, RoutingMode,
 };
 use ocg_core::provider::{
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
@@ -3878,16 +3878,25 @@ async fn concurrent_round_robin_requests_are_evenly_distributed() {
 }
 
 #[tokio::test]
-async fn dashboard_port_change_is_saved_for_next_restart() {
+async fn dashboard_port_change_rebinds_and_persists_across_restart() {
     let (state, dir) = build_state("http://127.0.0.1:1".into(), &[]);
-    let current_port = free_port();
-    let handle = gateway::start_gateway(state.clone(), current_port)
+    let handle = gateway::start_gateway(state.clone(), free_port())
         .await
         .unwrap();
+    let current_port = handle.port;
     *state.gateway.lock() = Some(handle);
+    {
+        let mut config = state.config();
+        config.gateway_port = current_port;
+        state.set_config(config).unwrap();
+    }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let requested_port = free_port();
+    assert_ne!(
+        requested_port, current_port,
+        "the settings write must request a different port than the live listener"
+    );
     let mut config = state.config();
     config.gateway_port = requested_port;
     let mut settings_payload = serde_json::to_value(&config).unwrap();
@@ -3907,19 +3916,69 @@ async fn dashboard_port_change_is_saved_for_next_restart() {
     let result: serde_json::Value = response.json().await.unwrap();
     assert_eq!(result["revision"].as_u64(), Some(state.settings_revision()));
     assert_eq!(state.config().gateway_port, requested_port);
-    assert_eq!(state.active_gateway_port(), current_port);
+    assert_eq!(
+        state.active_gateway_port(),
+        requested_port,
+        "successful HTTP port mutation rebinds the managed listener"
+    );
+    let stored = state.db.lock().get_setting("config").unwrap().unwrap();
+    let stored: AppConfig = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored.gateway_port, requested_port);
 
     let status_response = client
         .get(format!(
             "http://127.0.0.1:{}/dashboard/api/gateway/status",
-            current_port
+            requested_port
         ))
         .send()
         .await
         .unwrap();
     assert_eq!(status_response.status(), StatusCode::OK);
+    let status: serde_json::Value = status_response.json().await.unwrap();
+    assert_eq!(status["running"], true);
+    assert_eq!(status["port"].as_u64(), Some(u64::from(requested_port)));
 
-    gateway::stop_gateway(state.gateway.lock().take().unwrap());
+    let occupied = StdTcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+    let mut fail_config = state.config();
+    fail_config.gateway_port = occupied_port;
+    let mut fail_payload = serde_json::to_value(&fail_config).unwrap();
+    fail_payload["expected_revision"] = serde_json::json!(state.settings_revision());
+    let fail = client
+        .post(format!(
+            "http://127.0.0.1:{}/dashboard/api/settings",
+            requested_port
+        ))
+        .json(&fail_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fail.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        state.active_gateway_port(),
+        requested_port,
+        "failed rebind must keep the live listener"
+    );
+    assert_eq!(
+        state.config().gateway_port,
+        requested_port,
+        "failed rebind compensation must restore the last successful port"
+    );
+
+    let handle = state.gateway.lock().take().unwrap();
+    gateway::stop_gateway_and_wait(handle).await;
+    drop(state);
+
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("test"));
+    let restarted =
+        CoreStateInner::new(Database::open(dir.clone()).unwrap(), dir.clone(), cipher).unwrap();
+    assert_eq!(
+        restarted.config().gateway_port,
+        requested_port,
+        "the last successful port must load on the next process start"
+    );
+    drop(occupied);
+    drop(restarted);
     let _ = fs::remove_dir_all(dir);
 }
 
