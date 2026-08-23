@@ -296,7 +296,11 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[browser_end..updater_end],
         UPDATER_CATALOG_TYPES
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), updater_end);
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[updater_end..],
+        ["AccountManagedKeyVerify"]
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), updater_end + 1);
 }
 
 #[test]

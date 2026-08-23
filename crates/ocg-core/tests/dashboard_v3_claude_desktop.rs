@@ -195,11 +195,16 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "BrowserOpen",
         ]
     );
+    let managed_start = updater_start + 3;
     assert_eq!(
-        &CATALOG_TYPE_NAMES[updater_start..],
+        &CATALOG_TYPE_NAMES[updater_start..managed_start],
         ["UpdateCheck", "DesktopUpdate", "InstallUpdate"]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), updater_start + 3);
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[managed_start..],
+        ["AccountManagedKeyVerify"]
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), managed_start + 1);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");

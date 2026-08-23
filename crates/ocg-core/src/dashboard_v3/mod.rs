@@ -8,8 +8,9 @@
 //! contracts, Zen Free control plane, pricing, the settings proxy diagnostic,
 //! session-protected desktop update check/status/install, read-only
 //! observability, Go/Zen protocol probes, the Claude Desktop three-role model
-//! mapping, and the local/native/remote browser runtime. Custom model discovery
-//! is an authenticated operational probe (no `expectedRevision`, no revision bump).
+//! mapping, the local/native/remote browser runtime, and managed-account Key
+//! verification. Custom model discovery is an authenticated operational probe
+//! (no `expectedRevision`, no revision bump).
 //! `GET /settings/check-update` and `GET /settings/update-status` are reads
 //! that capture revision/generation and never bump them.
 //! `POST /settings/install-update` requires CAS under `settings_update`, starts
@@ -24,6 +25,7 @@ mod claude_desktop;
 mod connection;
 mod custom_discovery;
 mod keys;
+mod managed_key_verify;
 mod observability;
 mod pricing;
 mod providers;
@@ -47,6 +49,10 @@ use crate::dashboard_session;
 use crate::state::CoreState;
 
 #[cfg(debug_assertions)]
+pub use managed_key_verify::{
+    ManagedKeyVerifyTargetGuard, install_managed_key_verify_target_for_tests,
+};
+#[cfg(debug_assertions)]
 pub use providers::set_zen_models_source_url_override_for_tests;
 pub use proxy_test::PROXY_TEST_TARGET;
 #[cfg(debug_assertions)]
@@ -55,14 +61,14 @@ pub use types::{
     Account, AccountAcknowledgement, AccountAcknowledgementCreate, AccountAcknowledgementWrite,
     AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
     AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountList, AccountManagedCreate,
-    AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
-    AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
-    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
-    AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin, AuthLogout,
-    AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen, BrowserOpenRequest,
-    BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
-    ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
+    AccountManagedKeyVerify, AccountModelCapabilitiesUpdate, AccountModelCapability,
+    AccountModelCapabilityWrite, AccountMutation, AccountOrder, AccountQuotaScope,
+    AccountSetupStep, AccountSetupUpdate, AccountType, AccountUpdate, AccountUpstreamProtocol,
+    AccountUsageUpdate, AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin,
+    AuthLogout, AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen,
+    BrowserOpenRequest, BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary,
+    CardCapabilitySummary, ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo,
+    ConnectionSubKey, ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
     CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyCostByModel, DailyCostQuery,
     DailyModelCost, DashboardSummary, DesktopUpdate, DesktopUpdatePhase, ERROR_CONFLICT,
     ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE, ERROR_INTERNAL, ERROR_INVALID_JSON,
@@ -160,6 +166,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/accounts/{id}/setup",
             patch(accounts::advance_account_setup),
+        )
+        .route(
+            "/accounts/{id}/setup/verify-key",
+            post(managed_key_verify::verify_managed_account_key),
         )
         .route(
             "/accounts/{id}/reset-cooldown",
