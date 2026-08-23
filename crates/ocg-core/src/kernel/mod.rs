@@ -111,6 +111,39 @@ mod dependency_guard {
     }
 
     #[test]
+    fn alias_does_not_import_custom_module() {
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let alias = production_source(&read_to_string(&src_root.join("alias.rs")));
+        assert!(
+            !alias_imports_custom(&alias),
+            "alias.rs must not import or reach crate::custom; use kernel::ids for the shared matcher"
+        );
+        assert!(
+            alias.contains("kernel::ids") && alias.contains("custom_model_id_matches"),
+            "alias.rs must use the shared matcher from kernel::ids"
+        );
+    }
+
+    #[test]
+    fn alias_custom_import_guard_catches_supported_forms() {
+        for source in [
+            "use crate::custom::custom_model_id_matches;",
+            "use crate::{kernel::ids::looks_raw_shaped, custom::custom_model_id_matches};",
+            "use super::custom::custom_model_id_matches;",
+            "use super::{kernel::ids::looks_raw_shaped, custom::custom_model_id_matches};",
+        ] {
+            assert!(
+                alias_imports_custom(source),
+                "alias->custom guard must catch supported import form: {source}"
+            );
+        }
+        assert!(
+            !alias_imports_custom("use crate::kernel::ids::custom_model_id_matches;"),
+            "the narrow guard must allow the kernel matcher import"
+        );
+    }
+
+    #[test]
     fn contract_and_v3_account_sources_do_not_import_gateway_utilities() {
         let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         for relative in ["provider_contracts.rs", "dashboard_v3/accounts.rs"] {
@@ -820,6 +853,28 @@ mod dependency_guard {
             i += 1;
         }
         roots
+    }
+
+    // This is intentionally a narrow source guard, not Rust module resolution.
+    // `production_source` removes comments, strings, and cfg(test) fixtures first.
+    fn alias_imports_custom(source: &str) -> bool {
+        source.split(';').any(|statement| {
+            let compact: String = statement.chars().filter(|ch| !ch.is_whitespace()).collect();
+            compact.contains("crate::custom")
+                || compact.contains("super::custom")
+                || grouped_import_contains_custom(&compact, "usecrate::{")
+                || grouped_import_contains_custom(&compact, "usesuper::{")
+        })
+    }
+
+    fn grouped_import_contains_custom(statement: &str, prefix: &str) -> bool {
+        let Some(items) = statement.strip_prefix(prefix) else {
+            return false;
+        };
+        items.split(',').any(|item| {
+            let item = item.trim_end_matches('}');
+            item == "custom" || item.starts_with("custom::")
+        })
     }
 
     fn tarjan(graph: &BTreeMap<String, BTreeSet<String>>) -> Vec<BTreeSet<String>> {

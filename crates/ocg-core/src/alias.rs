@@ -20,12 +20,11 @@
 //! not probe a billable inference path to discover protocol support. The
 //! OpenCode `MODEL_PROTOCOLS` table stays Go-specific.
 
-use crate::custom::custom_model_id_matches;
 use crate::kernel::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
     CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, is_free_model,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, custom_model_id_matches, is_free_model, looks_raw_shaped,
 };
 use crate::kernel::protocol::supported_model_ids;
 use crate::provider::is_custom_api;
@@ -303,13 +302,6 @@ fn insert_mapping(registry: &mut Registry, alias: &str, mapping: ProviderMapping
             mappings.push(mapping.clone());
         }
     }
-}
-
-/// Slash, underscore, or whitespace means "treat as a raw ID": never fold those
-/// characters into `-` and then hit a kebab alias (`glm/5.2` ≠ `glm-5.2`).
-fn looks_raw_shaped(name: &str) -> bool {
-    name.chars()
-        .any(|ch| ch == '/' || ch == '_' || ch.is_whitespace())
 }
 
 fn pin_or_ambiguous(

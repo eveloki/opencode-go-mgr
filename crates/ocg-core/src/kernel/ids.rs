@@ -1,7 +1,8 @@
 //! Stable provider, offering, account, key, and model identity constants.
 //!
 //! These values are the first crate-split seam: they do not depend on
-//! persistence, HTTP, or gateway execution.
+//! persistence, HTTP, or gateway execution. Custom capability matching lives
+//! here so alias overlay and provider contracts can stay I/O-free.
 
 /// Default model for dashboard account ping and CLI `ping`.
 pub const DEFAULT_ACCOUNT_TEST_MODEL: &str = "mimo-v2.5";
@@ -67,6 +68,32 @@ pub fn is_free_model(model: &str) -> bool {
     normalized.ends_with("-free") && normalized != "ox-alpha-free"
 }
 
+/// Slash, underscore, or whitespace means "treat as a raw ID": never fold those
+/// characters into `-` and then hit a kebab alias (`glm/5.2` ≠ `glm-5.2`).
+pub(crate) fn looks_raw_shaped(name: &str) -> bool {
+    name.chars()
+        .any(|ch| ch == '/' || ch == '_' || ch.is_whitespace())
+}
+
+/// Match a client-requested name against a declared Custom capability ID.
+///
+/// Raw-shaped IDs (`/`, `_`, whitespace) never fold separators onto kebab
+/// aliases. Otherwise matching is case-insensitive like published aliases.
+pub fn custom_model_id_matches(declared: &str, requested: &str) -> bool {
+    let declared = declared.trim();
+    let requested = requested.trim();
+    if declared.is_empty() || requested.is_empty() {
+        return false;
+    }
+    if declared == requested {
+        return true;
+    }
+    if looks_raw_shaped(declared) || looks_raw_shaped(requested) {
+        return declared.eq_ignore_ascii_case(requested);
+    }
+    declared.eq_ignore_ascii_case(requested)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +112,32 @@ mod tests {
         assert!(!is_free_model("ox-alpha-free"));
         assert!(!is_free_model("deepseek-v4-flash"));
         assert!(!is_free_model("big-pickle"));
+    }
+
+    #[test]
+    fn looks_raw_shaped_detects_slash_underscore_and_whitespace() {
+        assert!(looks_raw_shaped("glm/5.2"));
+        assert!(looks_raw_shaped("GLM_5.2"));
+        assert!(looks_raw_shaped("Grok 4.5"));
+        assert!(!looks_raw_shaped("glm-5.2"));
+        assert!(!looks_raw_shaped("my-local"));
+    }
+
+    #[test]
+    fn custom_model_id_matching_is_exact_or_case_folded_without_separator_folding() {
+        assert!(custom_model_id_matches("glm-5.2", "GLM-5.2"));
+        assert!(custom_model_id_matches("my-local", "my-local"));
+        assert!(custom_model_id_matches(" glm-5.2 ", "GLM-5.2"));
+        assert!(!custom_model_id_matches("glm-5.2", "glm/5.2"));
+        assert!(custom_model_id_matches(
+            "deepseek/deepseek-v4-flash",
+            "DeepSeek/deepseek-v4-flash"
+        ));
+        assert!(!custom_model_id_matches(
+            "deepseek/deepseek-v4-flash",
+            "deepseek-v4-flash"
+        ));
+        assert!(!custom_model_id_matches("", "glm-5.2"));
+        assert!(!custom_model_id_matches("glm-5.2", "   "));
     }
 }

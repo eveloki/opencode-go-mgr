@@ -28,6 +28,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
+/// Canonical definition: [`crate::kernel::ids::custom_model_id_matches`].
+pub use crate::kernel::ids::custom_model_id_matches;
+
 /// Upper bound for a Custom verification response. The probe only needs a 2xx
 /// JSON object; anything larger is rejected without certifying the account.
 pub const MAX_CUSTOM_VERIFICATION_BODY_BYTES: usize = 64 * 1024;
@@ -104,30 +107,6 @@ pub fn any_eligible_custom_model(runtimes: &[CustomAccountRuntime], requested: &
     runtimes
         .iter()
         .any(|runtime| runtime.eligible() && runtime.capability_matching(requested).is_some())
-}
-
-/// Match a client-requested name against a declared Custom capability ID.
-///
-/// Raw-shaped IDs (`/`, `_`, whitespace) never fold separators onto kebab
-/// aliases. Otherwise matching is case-insensitive like published aliases.
-pub fn custom_model_id_matches(declared: &str, requested: &str) -> bool {
-    let declared = declared.trim();
-    let requested = requested.trim();
-    if declared.is_empty() || requested.is_empty() {
-        return false;
-    }
-    if declared == requested {
-        return true;
-    }
-    if looks_raw_shaped(declared) || looks_raw_shaped(requested) {
-        return declared.eq_ignore_ascii_case(requested);
-    }
-    declared.eq_ignore_ascii_case(requested)
-}
-
-fn looks_raw_shaped(name: &str) -> bool {
-    name.chars()
-        .any(|ch| ch == '/' || ch == '_' || ch.is_whitespace())
 }
 
 pub fn api_format_for_custom_protocol(protocol: UpstreamProtocolKind) -> ApiFormat {

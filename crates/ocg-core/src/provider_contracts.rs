@@ -8,7 +8,8 @@ use crate::alias::ProviderMapping;
 use crate::custom::CustomAccountRuntime;
 use crate::kernel::ids::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, normalize_model_name,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, custom_model_id_matches,
+    normalize_model_name,
 };
 use crate::kernel::protocol::{
     ApiFormat, command_code_protocol_profiles, is_known_model, supported_model_protocol_profiles,
@@ -546,7 +547,7 @@ pub fn safety_ceiling_protocols(
         }
         StructuralProbeCeiling::AccountDeclared => declared
             .iter()
-            .filter(|(id, _)| crate::custom::custom_model_id_matches(id, model_id))
+            .filter(|(id, _)| custom_model_id_matches(id, model_id))
             .map(|(_, protocol)| *protocol)
             .collect(),
     }
@@ -594,7 +595,7 @@ pub fn static_verified_protocols(
         }
         ProviderAdapterKind::ConfigurableHttp => declared
             .iter()
-            .filter(|(id, _)| crate::custom::custom_model_id_matches(id, model_id))
+            .filter(|(id, _)| custom_model_id_matches(id, model_id))
             .map(|(_, protocol)| *protocol)
             .collect(),
     }
@@ -1005,7 +1006,7 @@ fn preferred_protocol(
         ProviderAdapterKind::Scnet => UpstreamProtocolKind::ChatCompletions,
         ProviderAdapterKind::ConfigurableHttp => declared
             .iter()
-            .find(|(id, _)| crate::custom::custom_model_id_matches(id, model_id))
+            .find(|(id, _)| custom_model_id_matches(id, model_id))
             .map(|(_, protocol)| *protocol)
             .unwrap_or(UpstreamProtocolKind::ChatCompletions),
     }
@@ -1134,7 +1135,7 @@ fn overlay_probe_confirmed_models(
 }
 
 fn custom_or_case_match(left: &str, right: &str) -> bool {
-    crate::custom::custom_model_id_matches(left, right) || left.eq_ignore_ascii_case(right)
+    custom_model_id_matches(left, right) || left.eq_ignore_ascii_case(right)
 }
 
 #[cfg(test)]
