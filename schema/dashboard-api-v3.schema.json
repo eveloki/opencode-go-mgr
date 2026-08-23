@@ -1663,6 +1663,72 @@
       ],
       "type": "object"
     },
+    "DesktopUpdate": {
+      "additionalProperties": false,
+      "description": "Desktop signed-update status machine as exposed by GET `/settings/update-status`\nand POST `/settings/install-update`. `total` and `error` stay required `T | null`.\nIdentity tokens are the live CAS pair and are not bumped by polling or install.",
+      "properties": {
+        "currentVersion": {
+          "type": "string"
+        },
+        "downloaded": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "installSupported": {
+          "type": "boolean"
+        },
+        "phase": {
+          "$ref": "#/$defs/DesktopUpdatePhase"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "phase",
+        "downloaded",
+        "total",
+        "error",
+        "currentVersion",
+        "installSupported",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "DesktopUpdatePhase": {
+      "description": "Update-status phase. Wire values stay lowercase, matching V2.",
+      "enum": [
+        "idle",
+        "checking",
+        "downloading",
+        "installing",
+        "failed"
+      ],
+      "type": "string"
+    },
     "EffectiveCatalog": {
       "additionalProperties": false,
       "description": "Merged model-id catalog for one contract scope.",
@@ -2514,6 +2580,31 @@
         "revision",
         "processGeneration",
         "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "InstallUpdate": {
+      "additionalProperties": false,
+      "description": "POST `/settings/install-update` body. CAS tokens and `expectedVersion` are\nrequired. Unknown fields are rejected. This mutation does not bump revision.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expectedVersion": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedVersion"
       ],
       "type": "object"
     },
@@ -4151,6 +4242,47 @@
       ],
       "type": "object"
     },
+    "UpdateCheck": {
+      "additionalProperties": false,
+      "description": "GET `/settings/check-update` result. Identity tokens are captured before\nthe GitHub await and are not bumped. `releaseUrl` is the fixed public\nGitHub latest-release page, never the outbound API URL or a loopback seam.",
+      "properties": {
+        "currentVersion": {
+          "type": "string"
+        },
+        "installSupported": {
+          "type": "boolean"
+        },
+        "latestVersion": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "releaseUrl": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updateAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "currentVersion",
+        "latestVersion",
+        "updateAvailable",
+        "releaseUrl",
+        "installSupported",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "UsageAvailability": {
       "description": "Registry usage availability. Wire values stay snake_case.",
       "enum": [
@@ -4782,6 +4914,15 @@
     },
     {
       "$ref": "#/$defs/BrowserOpen"
+    },
+    {
+      "$ref": "#/$defs/UpdateCheck"
+    },
+    {
+      "$ref": "#/$defs/DesktopUpdate"
+    },
+    {
+      "$ref": "#/$defs/InstallUpdate"
     }
   ],
   "title": "DashboardApiV3"

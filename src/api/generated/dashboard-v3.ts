@@ -112,7 +112,10 @@ export type DashboardApiV3 =
   | BrowserTarget
   | BrowserCapabilities
   | BrowserOpenRequest
-  | BrowserOpen;
+  | BrowserOpen
+  | UpdateCheck
+  | DesktopUpdate
+  | InstallUpdate;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -195,6 +198,10 @@ export type BrowserMode = "native" | "remote" | "unsupported";
  * Managed-browser launch target. Wire values match V2 snake_case.
  */
 export type BrowserTarget = "google_signup" | "google_login" | "github_signup" | "github_login" | "invite" | "console";
+/**
+ * Update-status phase. Wire values stay lowercase, matching V2.
+ */
+export type DesktopUpdatePhase = "idle" | "checking" | "downloading" | "installing" | "failed";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -1398,4 +1405,42 @@ export interface BrowserOpen {
   processGeneration: number;
   revision: number;
   sessionToken: string | null;
+}
+/**
+ * GET `/settings/check-update` result. Identity tokens are captured before
+ * the GitHub await and are not bumped. `releaseUrl` is the fixed public
+ * GitHub latest-release page, never the outbound API URL or a loopback seam.
+ */
+export interface UpdateCheck {
+  currentVersion: string;
+  installSupported: boolean;
+  latestVersion: string;
+  processGeneration: number;
+  releaseUrl: string;
+  revision: number;
+  updateAvailable: boolean;
+}
+/**
+ * Desktop signed-update status machine as exposed by GET `/settings/update-status`
+ * and POST `/settings/install-update`. `total` and `error` stay required `T | null`.
+ * Identity tokens are the live CAS pair and are not bumped by polling or install.
+ */
+export interface DesktopUpdate {
+  currentVersion: string;
+  downloaded: number;
+  error: string | null;
+  installSupported: boolean;
+  phase: DesktopUpdatePhase;
+  processGeneration: number;
+  revision: number;
+  total: number | null;
+}
+/**
+ * POST `/settings/install-update` body. CAS tokens and `expectedVersion` are
+ * required. Unknown fields are rejected. This mutation does not bump revision.
+ */
+export interface InstallUpdate {
+  expectedRevision: number;
+  expectedVersion: string;
+  processGeneration: number;
 }
