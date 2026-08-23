@@ -272,8 +272,24 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[custom_discovery_end..claude_end],
         ["ClaudeDesktopModels", "ClaudeDesktopModelsUpdate"]
     );
-    assert_eq!(&CATALOG_TYPE_NAMES[claude_end..], ["AccountVerify"]);
-    assert_eq!(CATALOG_TYPE_NAMES.len(), claude_end + 1);
+    const BROWSER_CATALOG_TYPES: &[&str] = &[
+        "BrowserMode",
+        "BrowserTarget",
+        "BrowserCapabilities",
+        "BrowserOpenRequest",
+        "BrowserOpen",
+    ];
+    let account_verify_end = claude_end + 1;
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[claude_end..account_verify_end],
+        ["AccountVerify"]
+    );
+    let browser_end = account_verify_end + BROWSER_CATALOG_TYPES.len();
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[account_verify_end..browser_end],
+        BROWSER_CATALOG_TYPES
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), browser_end);
 }
 
 #[test]

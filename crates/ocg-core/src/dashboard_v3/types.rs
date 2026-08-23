@@ -12,7 +12,8 @@
 //! stay `chat_completions`, `responses`, and `messages`. Pricing wire DTOs are
 //! distinct from `kernel::pricing` and from stored provider pricing blobs. Usage
 //! wire DTOs are distinct from `models::UsageWindow` and from stored quota/sync
-//! rows.
+//! rows. Browser wire DTOs are distinct from `browser` runtime structs and never
+//! carry worker URLs or control tokens.
 
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -138,6 +139,11 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ClaudeDesktopModels",
     "ClaudeDesktopModelsUpdate",
     "AccountVerify",
+    "BrowserMode",
+    "BrowserTarget",
+    "BrowserCapabilities",
+    "BrowserOpenRequest",
+    "BrowserOpen",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -152,6 +158,9 @@ pub const ERROR_PRECONDITION_FAILED: &str = "preconditionFailed";
 pub const ERROR_SERVICE_UNAVAILABLE: &str = "serviceUnavailable";
 pub const ERROR_NOT_IMPLEMENTED: &str = "notImplemented";
 pub const ERROR_OUTBOUND_FAILED: &str = "outboundFailed";
+pub const ERROR_FORBIDDEN: &str = "forbidden";
+pub const ERROR_GONE: &str = "gone";
+pub const ERROR_GATEWAY_TIMEOUT: &str = "gatewayTimeout";
 
 /// Live CAS token, process generation, and pricing snapshot id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -388,6 +397,45 @@ impl V3Error {
     ) -> Self {
         Self {
             code: ERROR_NOT_IMPLEMENTED.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
+        }
+    }
+
+    pub fn forbidden(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_FORBIDDEN.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
+        }
+    }
+
+    pub fn gone(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_GONE.to_string(),
+            message: message.into(),
+            current_revision: Some(current_revision),
+            process_generation: Some(process_generation),
+        }
+    }
+
+    pub fn gateway_timeout(
+        message: impl Into<String>,
+        current_revision: u64,
+        process_generation: u64,
+    ) -> Self {
+        Self {
+            code: ERROR_GATEWAY_TIMEOUT.to_string(),
             message: message.into(),
             current_revision: Some(current_revision),
             process_generation: Some(process_generation),
@@ -2044,6 +2092,66 @@ pub enum UsageAvailability {
     LocalState,
 }
 
+/// Browser runtime mode. Wire values match V2 lowercase `native` / `remote` /
+/// `unsupported`. Distinct from `browser::BrowserMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(rename_all = "lowercase")]
+pub enum BrowserMode {
+    Native,
+    Remote,
+    Unsupported,
+}
+
+/// Managed-browser launch target. Wire values match V2 snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum BrowserTarget {
+    GoogleSignup,
+    GoogleLogin,
+    GithubSignup,
+    GithubLogin,
+    Invite,
+    Console,
+}
+
+/// GET `/browser/capabilities` body. Read-only; no `expectedRevision`.
+/// Distinct from `browser::BrowserCapabilities`. `reason` is required `T | null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserCapabilities {
+    pub mode: BrowserMode,
+    pub reason: Option<String>,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// POST `/accounts/{id}/browser` body. CAS tokens and `target` are required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserOpenRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub target: BrowserTarget,
+}
+
+/// POST `/accounts/{id}/browser` result. Distinct from `browser::BrowserOpenResult`.
+///
+/// Native mode always emits `sessionToken: null`. Remote mode emits only the
+/// opaque dashboard-bound display token — never a worker URL or control token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserOpen {
+    pub mode: BrowserMode,
+    pub session_token: Option<String>,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.
 ///
 /// Response types are generated with the serialize contract so `Option` fields
@@ -2124,6 +2232,9 @@ pub fn contract_schema() -> Value {
     include_type::<ProxyTestResponse>(&mut serialize);
     include_type::<CustomModelDiscoveryResponse>(&mut serialize);
     include_type::<ClaudeDesktopModels>(&mut serialize);
+    include_type::<BrowserMode>(&mut serialize);
+    include_type::<BrowserCapabilities>(&mut serialize);
+    include_type::<BrowserOpen>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -2160,6 +2271,8 @@ pub fn contract_schema() -> Value {
     include_type::<ProxyTestRequest>(&mut deserialize);
     include_type::<CustomModelDiscoveryRequest>(&mut deserialize);
     include_type::<ClaudeDesktopModelsUpdate>(&mut deserialize);
+    include_type::<BrowserOpenRequest>(&mut deserialize);
+    include_type::<BrowserTarget>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2739,6 +2852,66 @@ mod tests {
         assert_eq!(
             defs["V3Error"]["properties"]["code"]["type"], "string",
             "new error codes must not reshape the V3Error catalog definition"
+        );
+    }
+
+    #[test]
+    fn browser_dtos_are_distinct_secret_free_and_emit_required_nulls() {
+        let capabilities = BrowserCapabilities {
+            mode: BrowserMode::Unsupported,
+            reason: None,
+            revision: 11,
+            process_generation: 9,
+        };
+        let capabilities_value = serde_json::to_value(&capabilities).unwrap();
+        assert_eq!(capabilities_value["mode"], "unsupported");
+        assert_eq!(capabilities_value["reason"], Value::Null);
+        assert_eq!(capabilities_value["revision"], 11);
+        assert_eq!(capabilities_value["processGeneration"], 9);
+        assert!(capabilities_value.get("workerUrl").is_none());
+        assert!(capabilities_value.get("controlToken").is_none());
+
+        let native = BrowserOpen {
+            mode: BrowserMode::Native,
+            session_token: None,
+            revision: 4,
+            process_generation: 9,
+        };
+        let native_value = serde_json::to_value(&native).unwrap();
+        assert_eq!(native_value["mode"], "native");
+        assert_eq!(native_value["sessionToken"], Value::Null);
+        assert_eq!(native_value.as_object().unwrap().len(), 4);
+
+        let remote = BrowserOpen {
+            mode: BrowserMode::Remote,
+            session_token: Some("opaque-session".into()),
+            revision: 4,
+            process_generation: 9,
+        };
+        let remote_value = serde_json::to_value(&remote).unwrap();
+        assert_eq!(remote_value["mode"], "remote");
+        assert_eq!(remote_value["sessionToken"], "opaque-session");
+        assert!(remote_value.get("workerUrl").is_none());
+        assert!(remote_value.get("vncWsUrl").is_none());
+        assert!(remote_value.get("controlToken").is_none());
+        assert_eq!(remote_value.as_object().unwrap().len(), 4);
+
+        let parsed: BrowserOpenRequest = serde_json::from_value(json!({
+            "expectedRevision": 3,
+            "processGeneration": 9,
+            "target": "google_signup",
+        }))
+        .unwrap();
+        assert_eq!(parsed.expectation.expected_revision, 3);
+        assert_eq!(parsed.target, BrowserTarget::GoogleSignup);
+        assert!(
+            serde_json::from_value::<BrowserOpenRequest>(json!({
+                "expectedRevision": 3,
+                "processGeneration": 9,
+                "target": "console",
+                "workerUrl": "http://browser/session"
+            }))
+            .is_err()
         );
     }
 
@@ -3625,6 +3798,14 @@ mod tests {
     ];
     const AUTH_CATALOG_TYPES: &[&str] = &["AuthStatus", "AuthRegister", "AuthLogin", "AuthLogout"];
 
+    const BROWSER_CATALOG_TYPES: &[&str] = &[
+        "BrowserMode",
+        "BrowserTarget",
+        "BrowserCapabilities",
+        "BrowserOpenRequest",
+        "BrowserOpen",
+    ];
+
     fn sample_pricing_snapshot() -> PricingSnapshot {
         PricingSnapshot {
             revision: 11,
@@ -3732,8 +3913,17 @@ mod tests {
             &CATALOG_TYPE_NAMES[custom_discovery_end..claude_end],
             CLAUDE_DESKTOP_CATALOG_TYPES
         );
-        assert_eq!(&CATALOG_TYPE_NAMES[claude_end..], ["AccountVerify"]);
-        assert_eq!(CATALOG_TYPE_NAMES.len(), claude_end + 1);
+        let account_verify_end = claude_end + 1;
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[claude_end..account_verify_end],
+            ["AccountVerify"]
+        );
+        let browser_end = account_verify_end + BROWSER_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[account_verify_end..browser_end],
+            BROWSER_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), browser_end);
     }
 
     #[test]

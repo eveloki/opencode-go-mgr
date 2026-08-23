@@ -183,11 +183,18 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
         &CATALOG_TYPE_NAMES[claude_start..account_verify_start],
         CLAUDE_DESKTOP_CATALOG_TYPES
     );
+    assert_eq!(CATALOG_TYPE_NAMES[account_verify_start], "AccountVerify");
     assert_eq!(
-        &CATALOG_TYPE_NAMES[account_verify_start..],
-        ["AccountVerify"]
+        &CATALOG_TYPE_NAMES[account_verify_start + 1..],
+        [
+            "BrowserMode",
+            "BrowserTarget",
+            "BrowserCapabilities",
+            "BrowserOpenRequest",
+            "BrowserOpen",
+        ]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), account_verify_start + 1);
+    assert_eq!(CATALOG_TYPE_NAMES.len(), account_verify_start + 6);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");
