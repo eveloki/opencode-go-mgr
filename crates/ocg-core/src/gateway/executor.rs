@@ -165,6 +165,7 @@ impl GatewayExecutor {
         };
 
         loop {
+            let (decision_wall, decision_mono) = state.sample_gateway_clock();
             let (accounts, free_cooldown) = {
                 let db = state.db.lock();
                 let accounts = match db.list_accounts() {
@@ -191,7 +192,7 @@ impl GatewayExecutor {
                         );
                     }
                 };
-                let free_cooldown = match db.free_channel_cooldown_until() {
+                let free_cooldown = match db.free_channel_cooldown_until_at(decision_wall) {
                     Ok(cooldown) => cooldown,
                     Err(error) => {
                         let message = format!("failed to read free-channel cooldown: {error}");
@@ -205,8 +206,8 @@ impl GatewayExecutor {
                 };
                 (accounts, free_cooldown)
             };
-            let free_available =
-                free_cooldown.is_none() && !AccountSelector::free_channel_exhausted(&accounts);
+            let free_available = free_cooldown.is_none()
+                && !AccountSelector::free_channel_exhausted_at(&accounts, decision_wall);
             let custom_runtimes = match state.db.lock().list_custom_account_runtimes() {
                 Ok(runtimes) => crate::custom::custom_runtimes_by_account(&runtimes),
                 Err(error) => {
@@ -253,12 +254,14 @@ impl GatewayExecutor {
                 .iter()
                 .map(|route| route.routing.clone())
                 .collect::<Vec<_>>();
-            let selected = state.routing.select_candidate(
+            let selected = state.routing.select_candidate_at(
                 &routing_candidates,
                 snapshots.config.routing_mode,
                 snapshots.config.conversation_sticky,
                 conversation_key.as_deref(),
                 &excluded,
+                decision_wall,
+                decision_mono,
             );
             let Some(selected) = selected else {
                 if route_set.free_only
@@ -278,7 +281,6 @@ impl GatewayExecutor {
                     );
                     return rate_limited_response(client_format, until);
                 }
-                let now = chrono::Utc::now();
                 let soonest = route_set
                     .routes
                     .iter()
@@ -286,7 +288,7 @@ impl GatewayExecutor {
                         route
                             .routing
                             .account
-                            .cooldown_ends_at_for(route.routing.channel, now)
+                            .cooldown_ends_at_for(route.routing.channel, decision_wall)
                     })
                     .min();
                 return match soonest {
@@ -543,12 +545,30 @@ mod tests {
         assert!(production.contains("struct LoopState"));
         assert!(production.contains("struct GatewayExecutor"));
         assert!(production.contains("fn run("));
-        assert!(production.contains("select_candidate"));
+        assert!(production.contains("select_candidate_at"));
         assert!(production.contains("materialize_account_routes"));
         assert!(production.contains("list_accounts"));
         assert!(production.contains("list_custom_account_runtimes"));
-        assert!(production.contains("free_channel_cooldown_until"));
+        assert!(production.contains("free_channel_cooldown_until_at"));
+        assert!(production.contains("free_channel_exhausted_at"));
         assert!(production.contains("forward_request"));
+        assert!(
+            production
+                .contains("let (decision_wall, decision_mono) = state.sample_gateway_clock();")
+        );
+        assert_eq!(
+            production.matches("sample_gateway_clock()").count(),
+            1,
+            "each outer fallback iteration must sample wall+mono once"
+        );
+        assert!(
+            !production.contains("now_wall") && !production.contains("now_mono"),
+            "executor must sample through CoreState, not a public clock field"
+        );
+        assert!(
+            !production.contains("Utc::now") && !production.contains("Instant::now"),
+            "executor decision time must come from GatewayClock, not system clocks"
+        );
         assert!(
             production.contains("allow_same_account_retry")
                 || production.contains("!retried_same_account")
@@ -577,5 +597,79 @@ mod tests {
         let _ = std::any::type_name::<super::RequestSnapshots>();
         let _ = std::any::type_name::<super::LoopState>();
         let _ = std::any::type_name::<super::GatewayExecutor>();
+    }
+
+    #[test]
+    fn request_snapshots_remain_clock_free() {
+        let source = include_str!("executor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        let snapshots = production
+            .split("struct RequestSnapshots {")
+            .nth(1)
+            .expect("RequestSnapshots struct")
+            .split('}')
+            .next()
+            .expect("RequestSnapshots fields");
+        for forbidden in [
+            "gateway_clock",
+            "decision_wall",
+            "decision_mono",
+            "Instant",
+            "DateTime",
+            "Utc",
+            "now_wall",
+            "now_mono",
+        ] {
+            assert!(
+                !snapshots.contains(forbidden),
+                "RequestSnapshots must stay clock-free, found `{forbidden}`"
+            );
+        }
+        assert!(snapshots.contains("config: AppConfig"));
+        assert!(snapshots.contains("pricing: Arc<PricingSnapshot>"));
+        assert!(snapshots.contains("routes: Arc<ForwardRouteSet>"));
+        assert!(snapshots.contains("contracts: Arc<EffectiveContractSet>"));
+        assert!(snapshots.contains("resolved: alias::ResolvedModel"));
+    }
+
+    #[test]
+    fn inner_same_account_retry_does_not_resample_or_reselect() {
+        let source = include_str!("executor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        let inner = production
+            .split("let mut retried_same_account = false;")
+            .nth(1)
+            .expect("inner retry loop")
+            .split("fn record_plan_failure")
+            .next()
+            .expect("inner retry precedes helpers");
+        for forbidden in [
+            "now_wall",
+            "now_mono",
+            "sample_gateway_clock",
+            "decision_wall",
+            "decision_mono",
+            "select_candidate",
+            "free_channel_cooldown",
+            "free_channel_exhausted",
+            "list_accounts",
+            "list_custom_account_runtimes",
+            "materialize_account_routes",
+            "Utc::now",
+            "Instant::now",
+        ] {
+            assert!(
+                !inner.contains(forbidden),
+                "same-account retry must not enter selection or resample clocks (`{forbidden}`)"
+            );
+        }
+        assert!(inner.contains("forward_request"));
+        assert!(inner.contains("RetrySameAccount"));
     }
 }

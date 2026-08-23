@@ -7,20 +7,24 @@
 //! gaps a GatewayExecutor refactor can otherwise redefine.
 
 use axum::http::StatusCode;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use ocg_core::crypto::{KeyCipher, StaticKeyCipher};
+use ocg_core::db::Database;
 use ocg_core::gateway;
-use ocg_core::models::UsageWindowKind;
+use ocg_core::models::{Account, ProxyMode, RoutingMode, UsageWindowKind};
 use ocg_core::provider::{
     CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID, UpstreamProtocolKind,
     ZEN_FREE_ACCOUNT_ID,
 };
 use ocg_core::provider_contracts::ContractScope;
+use ocg_core::state::CoreStateInner;
 use ocg_core::usage_sync::INFERENCE_429_DELAY_MIN;
 use ocg_core::zen_models::{ZEN_MODELS_SOURCE_URL, ZenFreeModelCatalog};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 #[path = "fixtures/v3/harness.rs"]
 mod harness;
@@ -74,6 +78,71 @@ fn inflate_active_pricing(state: &Arc<ocg_core::state::CoreStateInner>, model_id
 
 fn go_state_with_keys(keys: &[&str]) -> (Arc<ocg_core::state::CoreStateInner>, std::path::PathBuf) {
     build_go_state("http://127.0.0.1:1".into(), keys)
+}
+
+fn go_state_with_keys_and_clock(
+    keys: &[&str],
+    wall: impl Fn() -> DateTime<Utc> + Send + Sync + 'static,
+    mono: impl Fn() -> Instant + Send + Sync + 'static,
+) -> (Arc<CoreStateInner>, std::path::PathBuf) {
+    let dir = temp_data_dir("state");
+    let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("v3-tests"));
+    let db = Database::open(dir.clone()).unwrap();
+    let state = Arc::new(
+        CoreStateInner::new_with_test_gateway_clock(db, dir.clone(), cipher, wall, mono).unwrap(),
+    );
+    let mut config = state.config();
+    config.gateway_key = GATEWAY_KEY.into();
+    config.upstream_base_url = "http://127.0.0.1:1".into();
+    config.proxy_mode = ProxyMode::Direct;
+    config.routing_mode = RoutingMode::StrictPriority;
+    state.set_config(config).unwrap();
+
+    let now = Utc::now();
+    for (idx, key) in keys.iter().enumerate() {
+        let account = Account {
+            id: format!("acct-{}", idx + 1),
+            provider_id: ocg_core::provider::default_provider_id(),
+            offering_id: ocg_core::provider::default_offering_id(),
+            credential_kind: ocg_core::provider::default_credential_kind(),
+            quota_scope: ocg_core::provider::default_quota_scope(),
+            name: format!("acct-{}", idx + 1),
+            username: None,
+            password_cipher: None,
+            key_cipher: state.encrypt_key(key).unwrap(),
+            enabled: true,
+            account_type: ocg_core::models::AccountType::Key,
+            setup_step: ocg_core::models::AccountSetupStep::Ready,
+            referral_code: None,
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            cooldown_until: None,
+            cooldown_generic_until: None,
+            cooldown_5h_until: None,
+            cooldown_week_until: None,
+            cooldown_month_until: None,
+            cooldown_free_until: None,
+            last_error: None,
+            auth_error: None,
+            notes: None,
+            created_at: now + ChronoDuration::seconds(idx as i64),
+            updated_at: now + ChronoDuration::seconds(idx as i64),
+        };
+        state.db.lock().create_account(&account).unwrap();
+    }
+    (state, dir)
+}
+
+fn closed_upstream_url() -> String {
+    for _ in 0..8 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_err() {
+            return format!("http://{addr}");
+        }
+    }
+    "http://127.0.0.1:1".into()
 }
 
 #[tokio::test]
@@ -530,6 +599,146 @@ async fn custom_401_rotates_persists_auth_error_and_skips_a_runtime_disabled_mid
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop.send(());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn outer_fallback_resamples_injected_wall_for_cooldown() {
+    let until = Utc::now() + ChronoDuration::hours(1);
+    let wall = Arc::new(std::sync::Mutex::new(until - ChronoDuration::seconds(1)));
+    let wall_calls = Arc::new(AtomicUsize::new(0));
+    let mono_calls = Arc::new(AtomicUsize::new(0));
+    let t0 = Instant::now();
+    let (state, dir) = go_state_with_keys_and_clock(
+        &["key-1", "key-2"],
+        {
+            let wall = wall.clone();
+            let wall_calls = wall_calls.clone();
+            move || {
+                wall_calls.fetch_add(1, Ordering::SeqCst);
+                *wall.lock().unwrap()
+            }
+        },
+        {
+            let mono_calls = mono_calls.clone();
+            move || {
+                mono_calls.fetch_add(1, Ordering::SeqCst);
+                t0
+            }
+        },
+    );
+    state
+        .db
+        .lock()
+        .set_account_rate_limit("acct-2", until, "cooled under injected wall", None)
+        .unwrap();
+
+    let wall_for_cb = wall.clone();
+    let (base_url, calls, stop) = start_scripted_upstream(
+        vec![
+            ScriptedReply {
+                status: 403,
+                body: FORBIDDEN_BODY,
+            },
+            ScriptedReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            },
+        ],
+        Arc::new(move |index| {
+            if index == 0 {
+                *wall_for_cb.lock().unwrap() = until + ChronoDuration::seconds(1);
+            }
+        }),
+    )
+    .await;
+    let mut config = state.config();
+    config.upstream_base_url = base_url;
+    state.set_config(config).unwrap();
+
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let (status, body) = chat(port, GO_MODEL).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the next outer iteration must resample wall and select the recovered card: {body}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        wall_calls.load(Ordering::SeqCst),
+        2,
+        "each outer fallback iteration must sample wall once"
+    );
+    assert_eq!(
+        mono_calls.load(Ordering::SeqCst),
+        2,
+        "each outer fallback iteration must sample mono once"
+    );
+
+    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
+    logs.sort_by_key(|log| log.attempt);
+    assert_eq!(logs.len(), 2, "{logs:?}");
+    assert_eq!(logs[0].account_id, "acct-1");
+    assert_eq!(logs[1].account_id, "acct-2");
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop.send(());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn same_account_retry_does_not_resample_or_reselect() {
+    let wall_calls = Arc::new(AtomicUsize::new(0));
+    let mono_calls = Arc::new(AtomicUsize::new(0));
+    let frozen = Utc::now();
+    let t0 = Instant::now();
+    let (state, dir) = go_state_with_keys_and_clock(
+        &["key-1", "key-2"],
+        {
+            let wall_calls = wall_calls.clone();
+            move || {
+                wall_calls.fetch_add(1, Ordering::SeqCst);
+                frozen
+            }
+        },
+        {
+            let mono_calls = mono_calls.clone();
+            move || {
+                mono_calls.fetch_add(1, Ordering::SeqCst);
+                t0
+            }
+        },
+    );
+
+    let mut config = state.config();
+    config.upstream_base_url = closed_upstream_url();
+    config.connect_timeout_secs = 1;
+    config.routing_mode = RoutingMode::RoundRobin;
+    state.set_config(config).unwrap();
+
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let (status, _body) = chat(port, GO_MODEL).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let mut logs = state.db.lock().list_forward_logs(10).unwrap();
+    logs.sort_by_key(|log| log.attempt);
+    assert_eq!(logs.len(), 2, "{logs:?}");
+    assert!(
+        logs.iter().all(|log| log.account_id == "acct-1"),
+        "same-account retry must not re-enter selection: {logs:?}"
+    );
+    assert_eq!(
+        wall_calls.load(Ordering::SeqCst),
+        1,
+        "same-account retry must not resample wall"
+    );
+    assert_eq!(
+        mono_calls.load(Ordering::SeqCst),
+        1,
+        "same-account retry must not resample mono"
+    );
+
+    gateway::stop_gateway(gateway_handle);
     let _ = std::fs::remove_dir_all(dir);
 }
 

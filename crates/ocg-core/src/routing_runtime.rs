@@ -11,7 +11,7 @@ use crate::kernel::ids::{
     OPENCODE_ZEN_FREE_PROVIDER_ID,
 };
 use crate::models::{Account, RoutingMode, UpstreamChannel};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -159,7 +159,30 @@ impl RoutingRuntime {
         conversation_key: Option<&str>,
         exclude_ids: &[&str],
     ) -> Option<Account> {
-        self.select_account_for(
+        self.select_account_at(
+            accounts,
+            mode,
+            conversation_sticky,
+            conversation_key,
+            exclude_ids,
+            Utc::now(),
+            Instant::now(),
+        )
+    }
+
+    /// Select an account for Go channel requests against an explicit wall/mono pair.
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_account_at(
+        &self,
+        accounts: &[Account],
+        mode: RoutingMode,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        exclude_ids: &[&str],
+        wall: DateTime<Utc>,
+        mono: Instant,
+    ) -> Option<Account> {
+        self.select_account_for_at(
             accounts,
             mode,
             conversation_sticky,
@@ -167,6 +190,8 @@ impl RoutingRuntime {
             UpstreamChannel::Go,
             "",
             exclude_ids,
+            wall,
+            mono,
         )
     }
 
@@ -182,6 +207,33 @@ impl RoutingRuntime {
         resolved_model: &str,
         exclude_ids: &[&str],
     ) -> Option<Account> {
+        self.select_account_for_at(
+            accounts,
+            mode,
+            conversation_sticky,
+            conversation_key,
+            channel,
+            resolved_model,
+            exclude_ids,
+            Utc::now(),
+            Instant::now(),
+        )
+    }
+
+    /// Select an account against an explicit wall/mono pair.
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_account_for_at(
+        &self,
+        accounts: &[Account],
+        mode: RoutingMode,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        channel: UpstreamChannel,
+        resolved_model: &str,
+        exclude_ids: &[&str],
+        wall: DateTime<Utc>,
+        mono: Instant,
+    ) -> Option<Account> {
         let candidates = accounts
             .iter()
             .cloned()
@@ -191,12 +243,14 @@ impl RoutingRuntime {
                 resolved_model: resolved_model.to_string(),
             })
             .collect::<Vec<_>>();
-        self.select_candidate(
+        self.select_candidate_at(
             &candidates,
             mode,
             conversation_sticky,
             conversation_key,
             exclude_ids,
+            wall,
+            mono,
         )
         .map(|candidate| candidate.account)
     }
@@ -212,12 +266,35 @@ impl RoutingRuntime {
         conversation_key: Option<&str>,
         exclude_ids: &[&str],
     ) -> Option<RoutingCandidate> {
-        let now = Instant::now();
+        self.select_candidate_at(
+            candidates,
+            mode,
+            conversation_sticky,
+            conversation_key,
+            exclude_ids,
+            Utc::now(),
+            Instant::now(),
+        )
+    }
+
+    /// Select one capability-filtered route target against an explicit wall/mono pair.
+    /// Wall drives cooldown/availability; mono drives conversation TTL.
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_candidate_at(
+        &self,
+        candidates: &[RoutingCandidate],
+        mode: RoutingMode,
+        conversation_sticky: bool,
+        conversation_key: Option<&str>,
+        exclude_ids: &[&str],
+        wall: DateTime<Utc>,
+        mono: Instant,
+    ) -> Option<RoutingCandidate> {
         let mut state = self.inner.lock();
 
         if conversation_sticky
             && let Some(key) = conversation_key
-            && let Some(binding) = state.conversations.get_fresh(key, now)
+            && let Some(binding) = state.conversations.get_fresh(key, mono)
         {
             // Sticky locks account + provider channel + resolved model for the session.
             if let Some(candidate) = find_available_candidate(
@@ -226,18 +303,19 @@ impl RoutingRuntime {
                 binding.channel,
                 &binding.resolved_model,
                 exclude_ids,
+                wall,
             ) {
                 return Some(candidate);
             }
         }
 
         let selected = match mode {
-            RoutingMode::StrictPriority => first_available_candidate(candidates, exclude_ids),
+            RoutingMode::StrictPriority => first_available_candidate(candidates, exclude_ids, wall),
             RoutingMode::StickyGlobal => {
-                select_sticky_global_candidate(&mut state, candidates, exclude_ids)
+                select_sticky_global_candidate(&mut state, candidates, exclude_ids, wall)
             }
             RoutingMode::RoundRobin => {
-                select_round_robin_candidate(&mut state, candidates, exclude_ids)
+                select_round_robin_candidate(&mut state, candidates, exclude_ids, wall)
             }
         }?;
 
@@ -247,7 +325,7 @@ impl RoutingRuntime {
                 selected.account.id.clone(),
                 selected.channel,
                 selected.resolved_model.clone(),
-                now,
+                mono,
             );
         }
 
@@ -259,7 +337,15 @@ impl RoutingRuntime {
         &self,
         conversation_key: &str,
     ) -> Option<(String, UpstreamChannel, String)> {
-        let now = Instant::now();
+        self.sticky_binding_at(conversation_key, Instant::now())
+    }
+
+    /// Read sticky binding against an explicit monotonic instant.
+    pub fn sticky_binding_at(
+        &self,
+        conversation_key: &str,
+        now: Instant,
+    ) -> Option<(String, UpstreamChannel, String)> {
         let mut state = self.inner.lock();
         state
             .conversations
@@ -313,7 +399,15 @@ pub(crate) fn account_is_available_for(
     channel: UpstreamChannel,
     exclude_ids: &[&str],
 ) -> bool {
-    let now = Utc::now();
+    account_is_available_for_at(account, channel, exclude_ids, Utc::now())
+}
+
+pub(crate) fn account_is_available_for_at(
+    account: &Account,
+    channel: UpstreamChannel,
+    exclude_ids: &[&str],
+    now: DateTime<Utc>,
+) -> bool {
     account.enabled
         && account.setup_step.is_ready()
         && account_matches_channel(account, channel)
@@ -341,17 +435,22 @@ fn account_matches_channel(account: &Account, channel: UpstreamChannel) -> bool 
     }
 }
 
-fn candidate_is_available(candidate: &RoutingCandidate, exclude_ids: &[&str]) -> bool {
-    account_is_available_for(&candidate.account, candidate.channel, exclude_ids)
+fn candidate_is_available(
+    candidate: &RoutingCandidate,
+    exclude_ids: &[&str],
+    now: DateTime<Utc>,
+) -> bool {
+    account_is_available_for_at(&candidate.account, candidate.channel, exclude_ids, now)
 }
 
 fn first_available_candidate(
     candidates: &[RoutingCandidate],
     exclude_ids: &[&str],
+    now: DateTime<Utc>,
 ) -> Option<RoutingCandidate> {
     candidates
         .iter()
-        .find(|candidate| candidate_is_available(candidate, exclude_ids))
+        .find(|candidate| candidate_is_available(candidate, exclude_ids, now))
         .cloned()
 }
 
@@ -361,6 +460,7 @@ fn find_available_candidate(
     channel: UpstreamChannel,
     resolved_model: &str,
     exclude_ids: &[&str],
+    now: DateTime<Utc>,
 ) -> Option<RoutingCandidate> {
     candidates
         .iter()
@@ -368,7 +468,7 @@ fn find_available_candidate(
             candidate.account.id == account_id
                 && candidate.channel == channel
                 && candidate.resolved_model == resolved_model
-                && candidate_is_available(candidate, exclude_ids)
+                && candidate_is_available(candidate, exclude_ids, now)
         })
         .cloned()
 }
@@ -377,23 +477,25 @@ fn select_sticky_global_candidate(
     state: &mut RoutingRuntimeState,
     candidates: &[RoutingCandidate],
     exclude_ids: &[&str],
+    now: DateTime<Utc>,
 ) -> Option<RoutingCandidate> {
     if let Some(current_id) = state.global_account_id.clone() {
         if let Some(candidate) = candidates.iter().find(|candidate| {
-            candidate.account.id == current_id && candidate_is_available(candidate, exclude_ids)
+            candidate.account.id == current_id
+                && candidate_is_available(candidate, exclude_ids, now)
         }) {
             return Some(candidate.clone());
         }
         let persistently_available = candidates.iter().any(|candidate| {
-            candidate.account.id == current_id && candidate_is_available(candidate, &[])
+            candidate.account.id == current_id && candidate_is_available(candidate, &[], now)
         });
-        let selected = first_available_candidate(candidates, exclude_ids)?;
+        let selected = first_available_candidate(candidates, exclude_ids, now)?;
         if !persistently_available {
             state.global_account_id = Some(selected.account.id.clone());
         }
         return Some(selected);
     }
-    let selected = first_available_candidate(candidates, exclude_ids)?;
+    let selected = first_available_candidate(candidates, exclude_ids, now)?;
     state.global_account_id = Some(selected.account.id.clone());
     Some(selected)
 }
@@ -402,6 +504,7 @@ fn select_round_robin_candidate(
     state: &mut RoutingRuntimeState,
     candidates: &[RoutingCandidate],
     exclude_ids: &[&str],
+    now: DateTime<Utc>,
 ) -> Option<RoutingCandidate> {
     if candidates.is_empty() {
         return None;
@@ -419,7 +522,7 @@ fn select_round_robin_candidate(
     for offset in 0..candidates.len() {
         let index = (start + offset) % candidates.len();
         let candidate = &candidates[index];
-        if candidate_is_available(candidate, exclude_ids) {
+        if candidate_is_available(candidate, exclude_ids, now) {
             state.round_robin_after = Some(candidate.account.id.clone());
             return Some(candidate.clone());
         }
@@ -469,6 +572,23 @@ mod tests {
         let mut item = account(id, true);
         item.cooldown_generic_until = Some(Utc::now() + chrono::Duration::hours(1));
         item.cooldown_until = item.cooldown_generic_until;
+        item
+    }
+
+    fn frozen_wall() -> DateTime<Utc> {
+        DateTime::from_naive_utc_and_offset(
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(3, 4, 5)
+                .unwrap(),
+            Utc,
+        )
+    }
+
+    fn cooling_at(id: &str, until: DateTime<Utc>) -> Account {
+        let mut item = account(id, true);
+        item.cooldown_generic_until = Some(until);
+        item.cooldown_until = Some(until);
         item
     }
 
@@ -849,6 +969,153 @@ mod tests {
                 .unwrap()
                 .id,
             "b"
+        );
+    }
+
+    #[test]
+    fn compatibility_select_helpers_still_sample_system_time() {
+        let production = include_str!("routing_runtime.rs")
+            .split("mod tests {")
+            .next()
+            .expect("production source precedes tests");
+        assert!(production.contains("Utc::now()"));
+        assert!(production.contains("Instant::now()"));
+        assert!(production.contains("fn select_candidate("));
+        assert!(production.contains("fn select_candidate_at("));
+        assert!(production.contains("fn sticky_binding("));
+        assert!(production.contains("fn sticky_binding_at("));
+        assert!(
+            !production.contains("crate::gateway_clock"),
+            "routing_runtime must take explicit time arguments instead of owning GatewayClock"
+        );
+    }
+
+    #[test]
+    fn selection_cooldown_uses_injected_wall() {
+        let runtime = RoutingRuntime::new();
+        let wall = frozen_wall();
+        let until = wall + chrono::Duration::hours(1);
+        let accounts = vec![cooling_at("a", until), account("b", true)];
+        let mono = Instant::now();
+        assert_eq!(
+            runtime
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    false,
+                    None,
+                    &[],
+                    wall,
+                    mono,
+                )
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(
+            runtime
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    false,
+                    None,
+                    &[],
+                    until + chrono::Duration::seconds(1),
+                    mono,
+                )
+                .unwrap()
+                .id,
+            "a"
+        );
+        assert_eq!(
+            runtime
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    false,
+                    None,
+                    &[],
+                    until,
+                    mono,
+                )
+                .unwrap()
+                .id,
+            "a",
+            "until == now must treat the cooled candidate as available"
+        );
+        let still_cooling = vec![cooling_at("a", until), account("b", true)];
+        assert_eq!(
+            runtime
+                .select_account_at(
+                    &still_cooling,
+                    RoutingMode::StrictPriority,
+                    false,
+                    None,
+                    &[],
+                    until - chrono::Duration::seconds(1),
+                    mono,
+                )
+                .unwrap()
+                .id,
+            "b",
+            "until > now must keep the candidate cooling"
+        );
+    }
+
+    #[test]
+    fn conversation_ttl_uses_injected_mono_and_not_wall() {
+        let runtime = RoutingRuntime::new();
+        let wall = frozen_wall();
+        let far_wall = wall + chrono::Duration::hours(24);
+        let t0 = Instant::now();
+        let accounts = vec![account("a", true), account("b", true)];
+        let key = "ttl-mono";
+        assert_eq!(
+            runtime
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    true,
+                    Some(key),
+                    &["a"],
+                    wall,
+                    t0,
+                )
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(
+            runtime
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    true,
+                    Some(key),
+                    &[],
+                    far_wall,
+                    t0 + Duration::from_secs(60),
+                )
+                .unwrap()
+                .id,
+            "b",
+            "a large wall jump must not expire conversation TTL"
+        );
+        assert_eq!(
+            runtime
+                .select_account_at(
+                    &accounts,
+                    RoutingMode::StrictPriority,
+                    true,
+                    Some(key),
+                    &[],
+                    far_wall,
+                    t0 + Duration::from_secs(60) + CONVERSATION_TTL + Duration::from_secs(1),
+                )
+                .unwrap()
+                .id,
+            "a",
+            "conversation TTL must expire from injected mono"
         );
     }
 }

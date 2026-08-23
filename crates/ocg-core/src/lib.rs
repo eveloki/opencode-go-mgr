@@ -13,6 +13,7 @@ pub mod dashboard_v3;
 pub mod db;
 pub mod desktop;
 pub mod gateway;
+pub(crate) mod gateway_clock;
 pub mod gateway_keys;
 pub(crate) mod gateway_runtime;
 pub mod go_usage;

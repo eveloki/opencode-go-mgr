@@ -4,7 +4,7 @@ use crate::kernel::ids::{
 };
 use crate::models::{Account, UpstreamChannel};
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 #[derive(Default)]
 pub struct AccountSelector;
@@ -15,12 +15,30 @@ impl AccountSelector {
     }
 
     pub fn select(&self, db: &Database, exclude_id: Option<&str>) -> Result<Option<Account>> {
+        self.select_at(db, exclude_id, Utc::now())
+    }
+
+    pub fn select_at(
+        &self,
+        db: &Database,
+        exclude_id: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Account>> {
         let excluded = exclude_id.into_iter().collect::<Vec<_>>();
-        self.select_excluding(db, &excluded)
+        self.select_excluding_at(db, &excluded, now)
     }
 
     pub fn select_excluding(&self, db: &Database, exclude_ids: &[&str]) -> Result<Option<Account>> {
-        self.select_excluding_for(db, UpstreamChannel::Go, exclude_ids)
+        self.select_excluding_at(db, exclude_ids, Utc::now())
+    }
+
+    pub fn select_excluding_at(
+        &self,
+        db: &Database,
+        exclude_ids: &[&str],
+        now: DateTime<Utc>,
+    ) -> Result<Option<Account>> {
+        self.select_excluding_for_at(db, UpstreamChannel::Go, exclude_ids, now)
     }
 
     pub fn select_excluding_for(
@@ -29,12 +47,31 @@ impl AccountSelector {
         channel: UpstreamChannel,
         exclude_ids: &[&str],
     ) -> Result<Option<Account>> {
+        self.select_excluding_for_at(db, channel, exclude_ids, Utc::now())
+    }
+
+    pub fn select_excluding_for_at(
+        &self,
+        db: &Database,
+        channel: UpstreamChannel,
+        exclude_ids: &[&str],
+        now: DateTime<Utc>,
+    ) -> Result<Option<Account>> {
         let accounts = db.list_accounts()?;
-        Ok(Self::first_available_for(&accounts, channel, exclude_ids))
+        Ok(Self::first_available_for_at(
+            &accounts,
+            channel,
+            exclude_ids,
+            now,
+        ))
     }
 
     pub fn is_available(account: &Account, exclude_ids: &[&str]) -> bool {
-        Self::is_available_for(account, UpstreamChannel::Go, exclude_ids)
+        Self::is_available_at(account, exclude_ids, Utc::now())
+    }
+
+    pub fn is_available_at(account: &Account, exclude_ids: &[&str], now: DateTime<Utc>) -> bool {
+        Self::is_available_for_at(account, UpstreamChannel::Go, exclude_ids, now)
     }
 
     pub fn is_available_for(
@@ -45,8 +82,25 @@ impl AccountSelector {
         crate::routing_runtime::account_is_available_for(account, channel, exclude_ids)
     }
 
+    pub fn is_available_for_at(
+        account: &Account,
+        channel: UpstreamChannel,
+        exclude_ids: &[&str],
+        now: DateTime<Utc>,
+    ) -> bool {
+        crate::routing_runtime::account_is_available_for_at(account, channel, exclude_ids, now)
+    }
+
     pub fn first_available(accounts: &[Account], exclude_ids: &[&str]) -> Option<Account> {
-        Self::first_available_for(accounts, UpstreamChannel::Go, exclude_ids)
+        Self::first_available_at(accounts, exclude_ids, Utc::now())
+    }
+
+    pub fn first_available_at(
+        accounts: &[Account],
+        exclude_ids: &[&str],
+        now: DateTime<Utc>,
+    ) -> Option<Account> {
+        Self::first_available_for_at(accounts, UpstreamChannel::Go, exclude_ids, now)
     }
 
     /// Account-row compatibility guard for the IP-shared Zen free cooldown.
@@ -54,7 +108,10 @@ impl AccountSelector {
     /// disabled or unfinished rows here because changing account lifecycle state
     /// cannot restore an egress-IP quota.
     pub fn free_channel_exhausted(accounts: &[Account]) -> bool {
-        let now = Utc::now();
+        Self::free_channel_exhausted_at(accounts, Utc::now())
+    }
+
+    pub fn free_channel_exhausted_at(accounts: &[Account], now: DateTime<Utc>) -> bool {
         accounts
             .iter()
             .filter(|account| {
@@ -70,12 +127,21 @@ impl AccountSelector {
         channel: UpstreamChannel,
         exclude_ids: &[&str],
     ) -> Option<Account> {
-        if channel == UpstreamChannel::Free && Self::free_channel_exhausted(accounts) {
+        Self::first_available_for_at(accounts, channel, exclude_ids, Utc::now())
+    }
+
+    pub fn first_available_for_at(
+        accounts: &[Account],
+        channel: UpstreamChannel,
+        exclude_ids: &[&str],
+        now: DateTime<Utc>,
+    ) -> Option<Account> {
+        if channel == UpstreamChannel::Free && Self::free_channel_exhausted_at(accounts, now) {
             return None;
         }
         accounts
             .iter()
-            .find(|account| Self::is_available_for(account, channel, exclude_ids))
+            .find(|account| Self::is_available_for_at(account, channel, exclude_ids, now))
             .cloned()
     }
 
@@ -84,7 +150,16 @@ impl AccountSelector {
         account_id: &str,
         exclude_ids: &[&str],
     ) -> Option<Account> {
-        Self::find_available_for(accounts, UpstreamChannel::Go, account_id, exclude_ids)
+        Self::find_available_at(accounts, account_id, exclude_ids, Utc::now())
+    }
+
+    pub fn find_available_at(
+        accounts: &[Account],
+        account_id: &str,
+        exclude_ids: &[&str],
+        now: DateTime<Utc>,
+    ) -> Option<Account> {
+        Self::find_available_for_at(accounts, UpstreamChannel::Go, account_id, exclude_ids, now)
     }
 
     pub fn find_available_for(
@@ -93,13 +168,24 @@ impl AccountSelector {
         account_id: &str,
         exclude_ids: &[&str],
     ) -> Option<Account> {
-        if channel == UpstreamChannel::Free && Self::free_channel_exhausted(accounts) {
+        Self::find_available_for_at(accounts, channel, account_id, exclude_ids, Utc::now())
+    }
+
+    pub fn find_available_for_at(
+        accounts: &[Account],
+        channel: UpstreamChannel,
+        account_id: &str,
+        exclude_ids: &[&str],
+        now: DateTime<Utc>,
+    ) -> Option<Account> {
+        if channel == UpstreamChannel::Free && Self::free_channel_exhausted_at(accounts, now) {
             return None;
         }
         accounts
             .iter()
             .find(|account| {
-                account.id == account_id && Self::is_available_for(account, channel, exclude_ids)
+                account.id == account_id
+                    && Self::is_available_for_at(account, channel, exclude_ids, now)
             })
             .cloned()
     }
@@ -156,6 +242,23 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn compatibility_wrappers_keep_system_time_and_explicit_at_variants() {
+        let production = include_str!("selector.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        assert!(production.contains("Utc::now()"));
+        assert!(production.contains("fn free_channel_exhausted("));
+        assert!(production.contains("fn free_channel_exhausted_at("));
+        assert!(production.contains("fn is_available_for_at("));
+        assert!(production.contains("fn first_available_for_at("));
+        assert!(
+            !production.contains("crate::gateway_clock"),
+            "AccountSelector must take explicit wall time instead of owning GatewayClock"
+        );
     }
 
     #[test]
@@ -324,6 +427,104 @@ mod tests {
                 .unwrap()
                 .id,
             "next"
+        );
+    }
+
+    fn frozen_wall() -> chrono::DateTime<Utc> {
+        chrono::DateTime::from_naive_utc_and_offset(
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(3, 4, 5)
+                .unwrap(),
+            Utc,
+        )
+    }
+
+    #[test]
+    fn selection_cooldown_uses_injected_wall() {
+        let wall = frozen_wall();
+        let mut cooled = account("cooled", true, Some(wall + Duration::hours(1)));
+        cooled.cooldown_generic_until = Some(wall + Duration::hours(1));
+        let next = account("next", true, None);
+        let accounts = vec![cooled, next];
+
+        assert!(
+            AccountSelector::first_available_at(&accounts, &[], wall)
+                .is_some_and(|account| account.id == "next")
+        );
+        assert!(
+            AccountSelector::first_available_at(
+                &accounts,
+                &[],
+                wall + Duration::hours(1) + Duration::seconds(1),
+            )
+            .is_some_and(|account| account.id == "cooled")
+        );
+    }
+
+    #[test]
+    fn free_channel_exhaustion_uses_injected_wall() {
+        let wall = frozen_wall();
+        let mut cooled = account(crate::provider::ZEN_FREE_ACCOUNT_ID, false, None);
+        cooled.provider_id = crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID.to_string();
+        cooled.offering_id = crate::provider::ANONYMOUS_FREE_OFFERING_ID.to_string();
+        cooled.credential_kind = crate::provider::CredentialKind::None;
+        cooled.quota_scope = crate::provider::QuotaScope::EgressIp;
+        cooled.key_cipher.clear();
+        cooled.cooldown_free_until = Some(wall + Duration::hours(1));
+        let accounts = vec![cooled, account("next", true, None)];
+
+        assert!(AccountSelector::free_channel_exhausted_at(&accounts, wall));
+        assert!(
+            AccountSelector::first_available_for_at(&accounts, UpstreamChannel::Free, &[], wall)
+                .is_none()
+        );
+        assert!(!AccountSelector::free_channel_exhausted_at(
+            &accounts,
+            wall + Duration::hours(1) + Duration::seconds(1),
+        ));
+    }
+
+    #[test]
+    fn candidate_cooldown_at_exact_deadline_is_available() {
+        let wall = frozen_wall();
+        let mut cooled = account("cooled", true, Some(wall));
+        cooled.cooldown_generic_until = Some(wall);
+        let next = account("next", true, None);
+
+        assert!(
+            AccountSelector::is_available_at(&cooled, &[], wall),
+            "until == now must be expired/available"
+        );
+        assert!(
+            !AccountSelector::is_available_at(&cooled, &[], wall - Duration::seconds(1)),
+            "until > now must remain cooling"
+        );
+        assert!(
+            AccountSelector::first_available_at(&[cooled, next], &[], wall)
+                .is_some_and(|account| account.id == "cooled")
+        );
+    }
+
+    #[test]
+    fn disabled_zen_free_exhaustion_expires_at_exact_deadline() {
+        let wall = frozen_wall();
+        let mut cooled = account(crate::provider::ZEN_FREE_ACCOUNT_ID, false, None);
+        cooled.provider_id = crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID.to_string();
+        cooled.offering_id = crate::provider::ANONYMOUS_FREE_OFFERING_ID.to_string();
+        cooled.credential_kind = crate::provider::CredentialKind::None;
+        cooled.quota_scope = crate::provider::QuotaScope::EgressIp;
+        cooled.key_cipher.clear();
+        cooled.cooldown_free_until = Some(wall);
+        let accounts = vec![cooled];
+
+        assert!(
+            AccountSelector::free_channel_exhausted_at(&accounts, wall - Duration::seconds(1)),
+            "until > now must exhaust the Free channel even on a disabled row"
+        );
+        assert!(
+            !AccountSelector::free_channel_exhausted_at(&accounts, wall),
+            "until == now must expire Free exhaustion on a disabled Zen row"
         );
     }
 }

@@ -3840,7 +3840,11 @@ impl Database {
         self.free_channel_cooldown_until_at(Utc::now())
     }
 
-    fn free_channel_cooldown_until_at(&self, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
+    /// Evaluate the durable Free cooldown against an explicit wall time.
+    pub(crate) fn free_channel_cooldown_until_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>> {
         let Some(value) = self.get_setting(FREE_CHANNEL_COOLDOWN_SETTING)? else {
             return Ok(None);
         };
@@ -7437,6 +7441,48 @@ mod tests {
                 .expect("expiry should be evaluated")
                 .is_none(),
             "the global gate must reopen after its deadline"
+        );
+
+        drop(db);
+        fs::remove_dir_all(dir).expect("test data dir should be removed");
+    }
+
+    #[test]
+    fn durable_free_cooldown_expires_at_exact_deadline() {
+        let dir = temp_data_dir("free-cooldown-exact-boundary");
+        let until = DateTime::from_naive_utc_and_offset(
+            NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(3, 4, 5)
+                .unwrap(),
+            Utc,
+        );
+        let db = Database::open(dir.clone()).expect("db should open");
+        db.create_account(&account("free-source"))
+            .expect("source account should be created");
+        db.set_account_rate_limit(
+            "free-source",
+            until,
+            "free quota exhausted",
+            Some(UsageWindowKind::Free),
+        )
+        .expect("free rate limit should save");
+
+        let stored = db
+            .free_channel_cooldown_until_at(until - Duration::days(1))
+            .expect("durable cooldown should load")
+            .expect("durable cooldown should be active far before the deadline");
+        assert!(
+            db.free_channel_cooldown_until_at(stored - Duration::seconds(1))
+                .expect("pre-deadline evaluation")
+                .is_some(),
+            "until > now must keep the durable Free gate closed"
+        );
+        assert_eq!(
+            db.free_channel_cooldown_until_at(stored)
+                .expect("exact-deadline evaluation"),
+            None,
+            "until == now must expire the durable Free gate"
         );
 
         drop(db);

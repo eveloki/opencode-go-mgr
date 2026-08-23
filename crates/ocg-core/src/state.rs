@@ -38,7 +38,8 @@ const CLIENT_ROOT_URL_ENV: &str = "OCG_CLIENT_ROOT_URL";
 // held while acquiring another lock; auth-path readers take only the
 // snapshot read lock. Never acquire in reverse order; always drop one before
 // acquiring another where possible. Do not hold the routing lock across DB
-// or network I/O.
+// or network I/O. `gateway_clock` is immutable after construction and
+// lock-free to sample; the executor samples wall/mono before the db lock.
 // Async gates: `settings_host_effects` (settings persist → listener rebind →
 // compensation) is acquired before `gateway_lifecycle` when a settings write
 // also rebinds. Never hold a parking_lot lock across those awaits.
@@ -87,6 +88,10 @@ pub struct CoreStateInner {
     /// Official Go usage sync gates (concurrency, dedupe, clock/jitter seams).
     /// The background loop is started from gateway startup, not construction.
     pub usage_sync: crate::usage_sync::UsageSyncRuntime,
+    /// Host-private dual clock for Gateway selection (wall + monotonic).
+    /// Distinct from `usage_sync`'s calendar clock and not stored on request
+    /// snapshots. Sampled through [`Self::sample_gateway_clock`].
+    gateway_clock: crate::gateway_clock::GatewayClock,
     pub data_dir: PathBuf,
     pub cipher: Arc<dyn KeyCipher + Send + Sync>,
 }
@@ -143,11 +148,50 @@ impl CoreStateInner {
         Self::new_with_client_root_url_override(db, data_dir, cipher, client_root_url_override)
     }
 
+    /// Test-support constructor: inject immutable wall/mono sources at
+    /// construction. Production callers must use [`Self::new`], which always
+    /// samples `Utc::now` / `Instant::now`. Integration tests link this crate
+    /// without `cfg(test)`, so the seam is `#[doc(hidden)]` rather than a
+    /// live mutation API on a public clock type.
+    #[doc(hidden)]
+    pub fn new_with_test_gateway_clock(
+        db: Database,
+        data_dir: PathBuf,
+        cipher: Arc<dyn KeyCipher + Send + Sync>,
+        wall: impl Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync + 'static,
+        mono: impl Fn() -> std::time::Instant + Send + Sync + 'static,
+    ) -> crate::Result<Self> {
+        let client_root_url_override = client_root_url_override_from_env()?;
+        Self::construct(
+            db,
+            data_dir,
+            cipher,
+            client_root_url_override,
+            crate::gateway_clock::GatewayClock::from_sources(wall, mono),
+        )
+    }
+
     fn new_with_client_root_url_override(
         db: Database,
         data_dir: PathBuf,
         cipher: Arc<dyn KeyCipher + Send + Sync>,
         client_root_url_override: Option<String>,
+    ) -> crate::Result<Self> {
+        Self::construct(
+            db,
+            data_dir,
+            cipher,
+            client_root_url_override,
+            crate::gateway_clock::GatewayClock::system(),
+        )
+    }
+
+    fn construct(
+        db: Database,
+        data_dir: PathBuf,
+        cipher: Arc<dyn KeyCipher + Send + Sync>,
+        client_root_url_override: Option<String>,
+        gateway_clock: crate::gateway_clock::GatewayClock,
     ) -> crate::Result<Self> {
         crate::auth::bootstrap_admin_from_env(&db)?;
         let browser_recovery =
@@ -226,9 +270,19 @@ impl CoreStateInner {
             routing: RoutingRuntime::new(),
             browser: crate::browser::BrowserRuntime::new(),
             usage_sync: crate::usage_sync::UsageSyncRuntime::new(),
+            gateway_clock,
             data_dir,
             cipher,
         })
+    }
+
+    /// One wall+mono pair for a Gateway outer-fallback decision. Production
+    /// clocks are `Utc::now` / `Instant::now`; tests inject sources at
+    /// construction.
+    pub(crate) fn sample_gateway_clock(
+        &self,
+    ) -> (chrono::DateTime<chrono::Utc>, std::time::Instant) {
+        (self.gateway_clock.now_wall(), self.gateway_clock.now_mono())
     }
 
     pub fn config(&self) -> AppConfig {
@@ -1630,6 +1684,86 @@ mod tests {
         assert!(state.set_config(invalid).is_err());
         assert_eq!(state.settings_revision(), committed_revision);
 
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn gateway_clock_is_a_distinct_host_runtime_slot() {
+        let production = include_str!("state.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production state.rs precedes this test module");
+        assert!(production.contains("gateway_clock: crate::gateway_clock::GatewayClock"));
+        assert!(!production.contains("pub gateway_clock"));
+        assert!(!production.contains("pub use crate::gateway_clock::GatewayClock"));
+        assert!(production.contains("GatewayClock::system()"));
+        assert!(production.contains("fn sample_gateway_clock("));
+        assert!(production.contains("usage_sync: crate::usage_sync::UsageSyncRuntime::new()"));
+        assert!(
+            !production.contains("usage_sync.set_clock")
+                && !production.contains("self.usage_sync.now("),
+            "gateway selection must not share UsageSyncRuntime's calendar clock"
+        );
+        assert!(
+            !production.contains("set_wall_for_test")
+                && !production.contains("set_mono_for_test")
+                && !production.contains("clear_test_seams"),
+            "CoreState must not expose live GatewayClock mutation"
+        );
+        assert!(
+            !production.contains("RequestSnapshots"),
+            "request snapshots must not be constructed or stored on CoreState"
+        );
+    }
+
+    fn frozen_gateway_wall() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_naive_utc_and_offset(
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(3, 4, 5)
+                .unwrap(),
+            chrono::Utc,
+        )
+    }
+
+    #[test]
+    fn production_core_state_samples_system_gateway_clocks() {
+        let dir = temp_data_dir("gateway-clock-system");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+        let before_wall = chrono::Utc::now();
+        let before_mono = std::time::Instant::now();
+        let (wall, mono) = state.sample_gateway_clock();
+        let after_wall = chrono::Utc::now();
+        let after_mono = std::time::Instant::now();
+        assert!(wall >= before_wall - chrono::Duration::seconds(1));
+        assert!(wall <= after_wall + chrono::Duration::seconds(1));
+        assert!(mono >= before_mono);
+        assert!(mono <= after_mono);
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn core_state_injects_immutable_gateway_clock_at_construction() {
+        let dir = temp_data_dir("gateway-clock-injected");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let wall = frozen_gateway_wall();
+        let mono = std::time::Instant::now() - std::time::Duration::from_secs(3_600);
+        let state = CoreStateInner::new_with_test_gateway_clock(
+            db,
+            dir.clone(),
+            cipher,
+            move || wall,
+            move || mono,
+        )
+        .expect("state should initialize with injected clocks");
+        let (got_wall, got_mono) = state.sample_gateway_clock();
+        assert_eq!(got_wall, wall);
+        assert_eq!(got_mono, mono);
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");
     }
