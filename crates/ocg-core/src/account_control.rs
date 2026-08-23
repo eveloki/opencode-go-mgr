@@ -4,24 +4,112 @@
 //! same functions without a Dashboard CAS token; both paths bump
 //! `settings_revision` after a successful persist. This module does not
 //! serialize HTTP envelopes or import `dashboard` / `dashboard_v3` /
-//! `gateway`.
+//! `gateway` / `state`. Concrete hosts implement [`AccountControlHost`].
 
 use crate::browser::{BrowserProfileOperationKind, StagedBrowserProfiles};
 use crate::models::{
     Account, AccountSetupStep, AccountType, AccountUpdate, normalize_account_notes,
 };
 use crate::provider::{
-    GO_OFFERING_ID, OPENCODE_PROVIDER_ID, VerificationPolicy, ZEN_FREE_ACCOUNT_ID,
+    ConnectionVerificationStatus, GO_OFFERING_ID, OPENCODE_PROVIDER_ID, VerificationPolicy,
+    ZEN_FREE_ACCOUNT_ID,
 };
-use crate::state::CoreState;
 use chrono::Utc;
 use std::fmt;
+use std::future::Future;
+use std::ops::Deref;
+use std::path::PathBuf;
 
 const ZEN_FREE_MUTATION_MESSAGE: &str =
     "Zen Free settings must use the dedicated provider-settings endpoint";
 const ZEN_FREE_DELETE_MESSAGE: &str = "Zen Free is a built-in singleton and cannot be deleted";
 const SETUP_INCOMPLETE_MESSAGE: &str = "account setup is not complete and cannot be enabled";
 const VERIFY_BEFORE_ENABLE_MESSAGE: &str = "verify the account connection before enabling it";
+
+/// Process-level account mutation host. Concrete adapters live in `state`;
+/// this module never names the process-level owner.
+pub trait AccountControlHost: Sync {
+    fn with_settings_update<R>(&self, f: impl FnOnce() -> R) -> R;
+    fn encrypt_key(&self, plaintext: &str) -> anyhow::Result<String>;
+    fn bump_settings_revision(&self) -> u64;
+    fn settings_revision(&self) -> u64;
+    fn process_generation(&self) -> u64;
+    fn recover_browser_profiles_for_account(&self, account_id: &str) -> anyhow::Result<()>;
+    fn data_dir(&self) -> PathBuf;
+    fn reload_provider_contracts(&self) -> anyhow::Result<()>;
+    fn create_account_with_contract(&self, account: &Account) -> anyhow::Result<()>;
+    fn update_account(&self, id: &str, update: &AccountUpdate) -> anyhow::Result<()>;
+    fn get_account(&self, id: &str) -> anyhow::Result<Option<Account>>;
+    fn account_verification_status(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<ConnectionVerificationStatus>>;
+    fn delete_account_row(&self, id: &str) -> anyhow::Result<()>;
+    fn log_gateway(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()>;
+    fn stop_browser_account(
+        &self,
+        account_id: &str,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
+}
+
+impl<T> AccountControlHost for T
+where
+    T: Deref + Sync,
+    T::Target: AccountControlHost,
+{
+    fn with_settings_update<R>(&self, f: impl FnOnce() -> R) -> R {
+        self.deref().with_settings_update(f)
+    }
+    fn encrypt_key(&self, plaintext: &str) -> anyhow::Result<String> {
+        self.deref().encrypt_key(plaintext)
+    }
+    fn bump_settings_revision(&self) -> u64 {
+        self.deref().bump_settings_revision()
+    }
+    fn settings_revision(&self) -> u64 {
+        self.deref().settings_revision()
+    }
+    fn process_generation(&self) -> u64 {
+        self.deref().process_generation()
+    }
+    fn recover_browser_profiles_for_account(&self, account_id: &str) -> anyhow::Result<()> {
+        self.deref()
+            .recover_browser_profiles_for_account(account_id)
+    }
+    fn data_dir(&self) -> PathBuf {
+        self.deref().data_dir()
+    }
+    fn reload_provider_contracts(&self) -> anyhow::Result<()> {
+        self.deref().reload_provider_contracts()
+    }
+    fn create_account_with_contract(&self, account: &Account) -> anyhow::Result<()> {
+        self.deref().create_account_with_contract(account)
+    }
+    fn update_account(&self, id: &str, update: &AccountUpdate) -> anyhow::Result<()> {
+        self.deref().update_account(id, update)
+    }
+    fn get_account(&self, id: &str) -> anyhow::Result<Option<Account>> {
+        self.deref().get_account(id)
+    }
+    fn account_verification_status(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<ConnectionVerificationStatus>> {
+        self.deref().account_verification_status(account_id)
+    }
+    fn delete_account_row(&self, id: &str) -> anyhow::Result<()> {
+        self.deref().delete_account_row(id)
+    }
+    fn log_gateway(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()> {
+        self.deref().log_gateway(level, category, message)
+    }
+    fn stop_browser_account(
+        &self,
+        account_id: &str,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        self.deref().stop_browser_account(account_id)
+    }
+}
 
 #[derive(Debug)]
 pub enum AccountControlError {
@@ -65,13 +153,22 @@ impl std::error::Error for AccountControlError {
 /// and other catalog plans are not accepted here; the CLI surface stays
 /// Go-only.
 pub fn create_go_api_key(
-    state: &CoreState,
+    host: &impl AccountControlHost,
     name: String,
     key: String,
     username: Option<String>,
     password: Option<String>,
 ) -> Result<Account, AccountControlError> {
-    let _settings_update = state.settings_update.lock();
+    host.with_settings_update(|| create_go_api_key_locked(host, name, key, username, password))
+}
+
+fn create_go_api_key_locked(
+    host: &impl AccountControlHost,
+    name: String,
+    key: String,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<Account, AccountControlError> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(AccountControlError::Invalid("name is required".into()));
@@ -95,8 +192,8 @@ pub fn create_go_api_key(
         quota_scope: crate::provider::QuotaScope::Key,
         name,
         username: clean_optional(username),
-        password_cipher: encrypted_optional(state, password)?,
-        key_cipher: state
+        password_cipher: encrypted_optional(host, password)?,
+        key_cipher: host
             .encrypt_key(key.trim())
             .map_err(AccountControlError::Internal)?,
         enabled: true,
@@ -124,17 +221,14 @@ pub fn create_go_api_key(
         account.enabled,
     )
     .map_err(|error| AccountControlError::Conflict(error.to_string()))?;
-    {
-        let db = state.db.lock();
-        db.create_account_with_contract(&account, None, &[], None)
-            .map_err(map_write_error)?;
-        let _ = db.log_gateway(
-            "info",
-            "account",
-            &format!("created account {}", account.name),
-        );
-    }
-    commit_account(state, &id, true)
+    host.create_account_with_contract(&account)
+        .map_err(map_write_error)?;
+    let _ = host.log_gateway(
+        "info",
+        "account",
+        &format!("created account {}", account.name),
+    );
+    commit_account(host, &id, true)
 }
 
 /// Enable or disable an account using Dashboard enablement policy.
@@ -142,22 +236,21 @@ pub fn create_go_api_key(
 /// Holds `settings_update` and bumps `settings_revision` on success. Pending
 /// Custom accounts cannot be enabled; Zen Free is rejected.
 pub fn set_account_enabled(
-    state: &CoreState,
+    host: &impl AccountControlHost,
     id: &str,
     enabled: bool,
 ) -> Result<Account, AccountControlError> {
-    let _settings_update = state.settings_update.lock();
-    set_account_enabled_locked(state, id, enabled)
+    host.with_settings_update(|| set_account_enabled_locked(host, id, enabled))
 }
 
 /// Same persist + revision bump as [`set_account_enabled`], for callers that
 /// already hold `settings_update` (Dashboard CAS).
 pub(crate) fn set_account_enabled_locked(
-    state: &CoreState,
+    host: &impl AccountControlHost,
     id: &str,
     enabled: bool,
 ) -> Result<Account, AccountControlError> {
-    let account = load_account(state, id)?;
+    let account = load_account(host, id)?;
     if account.is_zen_free() {
         return Err(AccountControlError::Invalid(
             ZEN_FREE_MUTATION_MESSAGE.into(),
@@ -169,7 +262,7 @@ pub(crate) fn set_account_enabled_locked(
         ));
     }
     if enabled {
-        ensure_account_can_enable(state, &account)?;
+        ensure_account_can_enable(host, &account)?;
     }
     let update = AccountUpdate {
         name: None,
@@ -181,21 +274,17 @@ pub(crate) fn set_account_enabled_locked(
         purchase_date: None,
         notes: None,
     };
-    {
-        let db = state.db.lock();
-        db.update_account(id, &update, None, None)
-            .map_err(map_write_error)?;
-        let _ = db.log_gateway(
-            "info",
-            "account",
-            &format!(
-                "{} account {}",
-                if enabled { "enabled" } else { "disabled" },
-                account.name
-            ),
-        );
-    }
-    commit_account(state, id, false)
+    host.update_account(id, &update).map_err(map_write_error)?;
+    let _ = host.log_gateway(
+        "info",
+        "account",
+        &format!(
+            "{} account {}",
+            if enabled { "enabled" } else { "disabled" },
+            account.name
+        ),
+    );
+    commit_account(host, id, false)
 }
 
 /// Delete an account, staging and purging its browser profiles.
@@ -205,48 +294,48 @@ pub(crate) fn set_account_enabled_locked(
 /// process_generation)` rechecked after the await so Dashboard can keep
 /// strong CAS; the CLI passes `None`. Does not cancel process-level workers.
 pub async fn delete_account(
-    state: &CoreState,
+    host: &impl AccountControlHost,
     id: &str,
     cas: Option<(u64, u64)>,
 ) -> Result<u64, AccountControlError> {
-    {
-        let _settings_update = state.settings_update.lock();
-        check_cas(state, cas)?;
+    host.with_settings_update(|| {
+        check_cas(host, cas)?;
         reject_zen_free_delete(id)?;
-        state
-            .recover_browser_profiles_for_account(id)
+        host.recover_browser_profiles_for_account(id)
             .map_err(AccountControlError::Internal)?;
-        load_account(state, id)?;
-    }
+        load_account(host, id)?;
+        Ok(())
+    })?;
 
-    let browser_operation = state.browser.operation().await;
-    browser_operation
-        .stop_account(id)
+    host.stop_browser_account(id)
         .await
         .map_err(|error| AccountControlError::Unavailable(error.to_string()))?;
 
-    let _settings_update = state.settings_update.lock();
-    check_cas(state, cas)?;
+    host.with_settings_update(|| delete_account_persist(host, id, cas))
+}
+
+fn delete_account_persist(
+    host: &impl AccountControlHost,
+    id: &str,
+    cas: Option<(u64, u64)>,
+) -> Result<u64, AccountControlError> {
+    check_cas(host, cas)?;
     reject_zen_free_delete(id)?;
-    let account = load_account(state, id)?;
+    let account = load_account(host, id)?;
     let staged = StagedBrowserProfiles::stage(
-        &state.data_dir(),
+        &host.data_dir(),
         id,
         BrowserProfileOperationKind::DeleteAccount,
     )
     .map_err(AccountControlError::Internal)?;
-    let delete_result = {
-        let mut db = state.db.lock();
-        let result = db.delete_account(id);
-        if result.is_ok() {
-            let _ = db.log_gateway(
-                "info",
-                "account",
-                &format!("deleted account {} ({})", id, account.name),
-            );
-        }
-        result
-    };
+    let delete_result = host.delete_account_row(id);
+    if delete_result.is_ok() {
+        let _ = host.log_gateway(
+            "info",
+            "account",
+            &format!("deleted account {} ({})", id, account.name),
+        );
+    }
     if let Err(error) = delete_result {
         let restore_error = staged.restore().err();
         return Err(AccountControlError::Internal(match restore_error {
@@ -256,16 +345,15 @@ pub async fn delete_account(
             None => anyhow::anyhow!("failed to delete account: {error}"),
         }));
     }
-    let revision = state.bump_settings_revision();
+    let revision = host.bump_settings_revision();
     staged.purge().map_err(AccountControlError::Internal)?;
-    state
-        .reload_provider_contracts()
+    host.reload_provider_contracts()
         .map_err(AccountControlError::Internal)?;
     Ok(revision)
 }
 
 pub(crate) fn ensure_account_can_enable(
-    state: &CoreState,
+    host: &impl AccountControlHost,
     account: &Account,
 ) -> Result<(), AccountControlError> {
     crate::provider::ensure_offering_can_enable(&account.provider_id, &account.offering_id)
@@ -273,13 +361,10 @@ pub(crate) fn ensure_account_can_enable(
     let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
         .ok_or_else(|| AccountControlError::Invalid("unknown provider offering".into()))?;
     if plan.verification_policy == VerificationPolicy::Required {
-        let status = state
-            .db
-            .lock()
-            .account_verification_state(&account.id)
+        let status = host
+            .account_verification_status(&account.id)
             .map_err(AccountControlError::Internal)?
-            .map(|state| state.status)
-            .unwrap_or(crate::provider::ConnectionVerificationStatus::Pending);
+            .unwrap_or(ConnectionVerificationStatus::Pending);
         if !status.allows_enablement() {
             return Err(AccountControlError::Conflict(
                 VERIFY_BEFORE_ENABLE_MESSAGE.into(),
@@ -290,33 +375,32 @@ pub(crate) fn ensure_account_can_enable(
 }
 
 fn commit_account(
-    state: &CoreState,
+    host: &impl AccountControlHost,
     id: &str,
     reload_contracts: bool,
 ) -> Result<Account, AccountControlError> {
-    let _revision = state.bump_settings_revision();
+    let _revision = host.bump_settings_revision();
     if reload_contracts {
-        state
-            .reload_provider_contracts()
+        host.reload_provider_contracts()
             .map_err(AccountControlError::Internal)?;
     }
-    load_account(state, id)
+    load_account(host, id)
 }
 
-fn load_account(state: &CoreState, id: &str) -> Result<Account, AccountControlError> {
-    state
-        .db
-        .lock()
-        .get_account(id)
+fn load_account(host: &impl AccountControlHost, id: &str) -> Result<Account, AccountControlError> {
+    host.get_account(id)
         .map_err(AccountControlError::Internal)?
         .ok_or(AccountControlError::NotFound)
 }
 
-fn check_cas(state: &CoreState, cas: Option<(u64, u64)>) -> Result<(), AccountControlError> {
+fn check_cas(
+    host: &impl AccountControlHost,
+    cas: Option<(u64, u64)>,
+) -> Result<(), AccountControlError> {
     let Some((revision, generation)) = cas else {
         return Ok(());
     };
-    if revision != state.settings_revision() || generation != state.process_generation() {
+    if revision != host.settings_revision() || generation != host.process_generation() {
         Err(AccountControlError::RevisionConflict)
     } else {
         Ok(())
@@ -343,12 +427,12 @@ fn clean_optional(value: Option<String>) -> Option<String> {
 }
 
 fn encrypted_optional(
-    state: &CoreState,
+    host: &impl AccountControlHost,
     value: Option<String>,
 ) -> Result<Option<String>, AccountControlError> {
     match value.as_deref().map(str::trim) {
         Some("") | None => Ok(None),
-        Some(v) => state
+        Some(v) => host
             .encrypt_key(v)
             .map(Some)
             .map_err(AccountControlError::Internal),
@@ -521,6 +605,8 @@ mod tests {
             "crate::dashboard",
             "crate::dashboard_v3",
             "crate::gateway",
+            "crate::state",
+            "CoreState",
             "expected_revision",
             "expectedRevision",
         ] {
@@ -529,6 +615,7 @@ mod tests {
                 "account_control must stay HTTP-neutral, missing-CAS for CLI, found {needle}"
             );
         }
+        assert!(production.contains("AccountControlHost"));
         assert!(production.contains("bump_settings_revision"));
         assert!(production.contains("VERIFY_BEFORE_ENABLE_MESSAGE"));
     }

@@ -935,6 +935,85 @@ impl crate::gateway_keys::KeyHost for CoreStateInner {
     }
 }
 
+impl crate::account_control::AccountControlHost for CoreStateInner {
+    fn with_settings_update<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _guard = self.settings_update.lock();
+        f()
+    }
+
+    fn encrypt_key(&self, plaintext: &str) -> anyhow::Result<String> {
+        CoreStateInner::encrypt_key(self, plaintext)
+    }
+
+    fn bump_settings_revision(&self) -> u64 {
+        CoreStateInner::bump_settings_revision(self)
+    }
+
+    fn settings_revision(&self) -> u64 {
+        CoreStateInner::settings_revision(self)
+    }
+
+    fn process_generation(&self) -> u64 {
+        CoreStateInner::process_generation(self)
+    }
+
+    fn recover_browser_profiles_for_account(&self, account_id: &str) -> anyhow::Result<()> {
+        CoreStateInner::recover_browser_profiles_for_account(self, account_id).map(|_| ())
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        CoreStateInner::data_dir(self)
+    }
+
+    fn reload_provider_contracts(&self) -> anyhow::Result<()> {
+        CoreStateInner::reload_provider_contracts(self)
+    }
+
+    fn create_account_with_contract(&self, account: &crate::models::Account) -> anyhow::Result<()> {
+        self.db
+            .lock()
+            .create_account_with_contract(account, None, &[], None)
+    }
+
+    fn update_account(
+        &self,
+        id: &str,
+        update: &crate::models::AccountUpdate,
+    ) -> anyhow::Result<()> {
+        self.db.lock().update_account(id, update, None, None)
+    }
+
+    fn get_account(&self, id: &str) -> anyhow::Result<Option<crate::models::Account>> {
+        Database::get_account(&self.db.lock(), id)
+    }
+
+    fn account_verification_status(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<crate::provider::ConnectionVerificationStatus>> {
+        Ok(self
+            .db
+            .lock()
+            .account_verification_state(account_id)?
+            .map(|state| state.status))
+    }
+
+    fn delete_account_row(&self, id: &str) -> anyhow::Result<()> {
+        self.db.lock().delete_account(id)
+    }
+
+    fn log_gateway(&self, level: &str, category: &str, message: &str) -> anyhow::Result<()> {
+        Database::log_gateway(&self.db.lock(), level, category, message)
+    }
+
+    fn stop_browser_account(
+        &self,
+        account_id: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
+        self.browser.stop_account(account_id)
+    }
+}
+
 impl crate::usage_sync::UsageSyncStore for Database {
     fn list_accounts(&self) -> anyhow::Result<Vec<crate::models::Account>> {
         Database::list_accounts(self)

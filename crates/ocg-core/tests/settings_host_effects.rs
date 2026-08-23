@@ -335,7 +335,6 @@ fn production_host_scc_membership_is_unchanged() {
     assert_eq!(
         members,
         [
-            "account_control",
             "dashboard",
             "dashboard_v3",
             "gateway",

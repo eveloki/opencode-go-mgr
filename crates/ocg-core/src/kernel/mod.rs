@@ -65,7 +65,6 @@ mod dependency_guard {
     ];
 
     const EXPECTED_HOST_SCC: &[&str] = &[
-        "account_control",
         "dashboard",
         "dashboard_v3",
         "gateway",
@@ -430,9 +429,12 @@ mod dependency_guard {
         let gateway_keys_source =
             production_source(&read_to_string(&src_root.join("gateway_keys.rs")));
         let usage_sync_source = production_source(&read_to_string(&src_root.join("usage_sync.rs")));
+        let account_control_source =
+            production_source(&read_to_string(&src_root.join("account_control.rs")));
         for (name, source) in [
             ("gateway_keys.rs", &gateway_keys_source),
             ("usage_sync.rs", &usage_sync_source),
+            ("account_control.rs", &account_control_source),
         ] {
             assert!(
                 !source.contains("crate::state"),
@@ -443,20 +445,45 @@ mod dependency_guard {
                 "{name} production source must not name CoreState"
             );
         }
+        for forbidden in ["state", "dashboard", "dashboard_v3", "gateway"] {
+            assert!(
+                !crate_path_roots(&account_control_source).contains(forbidden),
+                "account_control production source must not import {forbidden}"
+            );
+        }
+        assert!(
+            !graph.get("account_control").is_some_and(|edges| {
+                edges.contains("state")
+                    || edges.contains("dashboard")
+                    || edges.contains("dashboard_v3")
+                    || edges.contains("gateway")
+            }),
+            "account_control must not depend on host SCC modules, graph={graph:?}"
+        );
+        let account_control_component = tarjan(&graph)
+            .into_iter()
+            .find(|component| component.contains("account_control"))
+            .expect("account_control module should exist in the production graph");
+        assert_eq!(
+            account_control_component.len(),
+            1,
+            "account_control must not join a production SCC, account_control_component={account_control_component:?}"
+        );
 
         // Clocked `pricing` still has state/dashboard edges (next host
         // inversion). This lease cut gateway_keys and usage_sync out of the
         // measured host SCC by depending on KeyHost/UsageSyncHost instead.
-        // dashboard_v3 joined the remaining cycle when the contract kernel
-        // mounted at the gateway router. protocol_probe joins the same host
-        // SCC through gateway/state (shared admin probe transport) without a
-        // dashboard or dashboard_v3 edge. Inverting the remaining pure
-        // catalog/sanitizer edges from provider_contracts into gateway also
-        // dropped auth, db, and provider_contracts out of that cycle. The Go
-        // usage endpoint now lives in the I/O-free kernel catalog, removing
-        // provider -> go_usage and the former catalog SCC. Whitelist every
-        // remaining nontrivial SCC exactly so a new non-gateway cycle cannot
-        // pass unnoticed.
+        // account_control uses the same pattern (AccountControlHost in state)
+        // so it stays outside the host SCC. dashboard_v3 joined the remaining
+        // cycle when the contract kernel mounted at the gateway router.
+        // protocol_probe joins the same host SCC through gateway/state
+        // (shared admin probe transport) without a dashboard or dashboard_v3
+        // edge. Inverting the remaining pure catalog/sanitizer edges from
+        // provider_contracts into gateway also dropped auth, db, and
+        // provider_contracts out of that cycle. The Go usage endpoint now
+        // lives in the I/O-free kernel catalog, removing provider -> go_usage
+        // and the former catalog SCC. Whitelist every remaining nontrivial
+        // SCC exactly so a new non-gateway cycle cannot pass unnoticed.
         let mut measured = graph.clone();
         measured.remove("pricing");
         for edges in measured.values_mut() {
@@ -486,8 +513,9 @@ mod dependency_guard {
                 && !host_scc.contains("redaction")
                 && !host_scc.contains("upstream_limit")
                 && !host_scc.contains("db")
-                && !host_scc.contains("auth"),
-            "inverted contract/redaction leaves must stay outside the host SCC, host_scc={host_scc:?}"
+                && !host_scc.contains("auth")
+                && !host_scc.contains("account_control"),
+            "inverted contract/redaction/account_control leaves must stay outside the host SCC, host_scc={host_scc:?}"
         );
     }
 
