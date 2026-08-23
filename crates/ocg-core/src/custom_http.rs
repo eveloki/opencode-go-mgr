@@ -5,112 +5,23 @@
 //! client never follows redirects, never forwards dashboard/client auth, and
 //! always composes isolated Bearer / `x-api-key` headers.
 //!
-//! [`HttpInferenceTransport`] owns reusable client construction, proxy/default
-//! routing, connect timeout, redirect policy, endpoint join, isolated auth
-//! headers, per-request timeout/body, and bounded response reading.
-//! Provider policy (Custom URL trust, GOAT loopback, OpenCode redirect-follow)
-//! stays in the owning adapter.
+//! Catalog-free transport mechanics live in [`ocg_infra::inference_http`]. This
+//! module maps [`AppConfig`] through [`crate::http_client::outbound_proxy_spec`]
+//! and [`UpstreamAuthScheme`] onto that transport. Custom product policy stays
+//! here: URL trust, 5-60s connect clamp, isolated send gating, and JSON /
+//! forbidden-header helpers.
 
 use crate::models::{AppConfig, ProxyMode};
 use crate::provider::UpstreamAuthScheme;
 use crate::provider::validate_custom_base_url;
-use futures_util::StreamExt;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::fmt;
 use std::time::Duration;
 
-/// Redirect policy for an inference HTTP client. OpenCode Go / Zen follow
-/// redirects; Command Code GOAT, SCNet, and Configurable HTTP do not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InferenceRedirectPolicy {
-    Follow,
-    None,
-}
-
-impl InferenceRedirectPolicy {
-    pub fn reqwest_policy(self) -> reqwest::redirect::Policy {
-        match self {
-            Self::Follow => reqwest::redirect::Policy::default(),
-            Self::None => crate::http_client::no_redirect_policy(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InferenceHttpError {
-    InvalidUrl(String),
-    EndpointOverride(String),
-    Build(String),
-    Network(String),
-    Oversize { limit: usize },
-}
-
-impl fmt::Display for InferenceHttpError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidUrl(message)
-            | Self::EndpointOverride(message)
-            | Self::Build(message)
-            | Self::Network(message) => f.write_str(message),
-            Self::Oversize { limit } => {
-                write!(f, "response exceeded the {limit}-byte limit")
-            }
-        }
-    }
-}
-
-impl std::error::Error for InferenceHttpError {}
-
-/// Join `path` onto an already-canonical http(s) base while keeping the origin
-/// and path prefix. Absolute URLs, protocol-relative targets, decoded
-/// dot-segments, encoded slash/backslash, and nested percent-encoding are
-/// rejected as endpoint override. Does not apply Custom URL trust policy.
-pub fn join_inference_endpoint(
-    base_url: &str,
-    path: &str,
-) -> Result<reqwest::Url, InferenceHttpError> {
-    let canonical = base_url.trim().trim_end_matches('/');
-    let base = reqwest::Url::parse(canonical)
-        .map_err(|error| InferenceHttpError::InvalidUrl(error.to_string()))?;
-    if !matches!(base.scheme(), "http" | "https") {
-        return Err(InferenceHttpError::InvalidUrl(
-            "base URL must use http or https".to_string(),
-        ));
-    }
-    let relative = path.trim();
-    if relative.is_empty() {
-        return Ok(base);
-    }
-    if is_endpoint_override(relative) {
-        return Err(InferenceHttpError::EndpointOverride(relative.to_string()));
-    }
-    let stripped = relative.trim_start_matches('/');
-    let joined = format!("{canonical}/{stripped}");
-    let parsed = reqwest::Url::parse(&joined)
-        .map_err(|error| InferenceHttpError::InvalidUrl(error.to_string()))?;
-    if parsed.scheme() != base.scheme()
-        || parsed.host() != base.host()
-        || parsed.port_or_known_default() != base.port_or_known_default()
-    {
-        return Err(InferenceHttpError::EndpointOverride(relative.to_string()));
-    }
-    if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(InferenceHttpError::EndpointOverride(
-            "joined endpoint must not include a query or fragment".to_string(),
-        ));
-    }
-    if !path_has_prefix(parsed.path(), base.path()) {
-        return Err(InferenceHttpError::EndpointOverride(
-            "joined path escaped the Custom base prefix".to_string(),
-        ));
-    }
-    if path_has_unsafe_segments(parsed.path()) {
-        return Err(InferenceHttpError::EndpointOverride(
-            "joined path must not contain unsafe or recursively encoded segments".to_string(),
-        ));
-    }
-    Ok(parsed)
-}
+pub use ocg_infra::inference_http::{
+    InferenceHttpError, InferenceRedirectPolicy, apply_inference_request_timeout,
+    join_inference_endpoint,
+};
 
 /// Build isolated upstream auth headers. Callers supply the configured scheme
 /// and key; this never copies dashboard or client credentials.
@@ -118,30 +29,7 @@ pub fn isolated_inference_headers(
     scheme: UpstreamAuthScheme,
     api_key: &str,
 ) -> Result<HeaderMap, InferenceHttpError> {
-    let mut headers = HeaderMap::new();
-    match scheme {
-        UpstreamAuthScheme::Bearer => {
-            let value = HeaderValue::from_str(&format!("Bearer {api_key}"))
-                .map_err(|error| InferenceHttpError::InvalidUrl(error.to_string()))?;
-            headers.insert(AUTHORIZATION, value);
-        }
-        UpstreamAuthScheme::XApiKey => {
-            let value = HeaderValue::from_str(api_key)
-                .map_err(|error| InferenceHttpError::InvalidUrl(error.to_string()))?;
-            headers.insert(HeaderName::from_static("x-api-key"), value);
-        }
-    }
-    Ok(headers)
-}
-
-pub fn apply_inference_request_timeout(
-    builder: reqwest::RequestBuilder,
-    request_timeout: Option<Duration>,
-) -> reqwest::RequestBuilder {
-    match request_timeout {
-        Some(request_timeout) => builder.timeout(request_timeout),
-        None => builder,
-    }
+    ocg_infra::inference_http::isolated_inference_headers(inference_auth_scheme(scheme), api_key)
 }
 
 /// Connect timeout for the provider-neutral inference HTTP adapter.
@@ -153,6 +41,24 @@ pub fn inference_connect_timeout(config: &AppConfig) -> Duration {
 /// the provider-neutral transport's process-wide timeout setting.
 fn custom_connect_timeout(config: &AppConfig) -> Duration {
     Duration::from_secs(config.connect_timeout_secs.clamp(5, 60))
+}
+
+fn inference_auth_scheme(
+    scheme: UpstreamAuthScheme,
+) -> ocg_infra::inference_http::InferenceAuthScheme {
+    match scheme {
+        UpstreamAuthScheme::Bearer => ocg_infra::inference_http::InferenceAuthScheme::Bearer,
+        UpstreamAuthScheme::XApiKey => ocg_infra::inference_http::InferenceAuthScheme::XApiKey,
+    }
+}
+
+fn core_proxy_mode(mode: ocg_infra::http::ProxyMode) -> ProxyMode {
+    match mode {
+        ocg_infra::http::ProxyMode::Auto => ProxyMode::Auto,
+        ocg_infra::http::ProxyMode::Manual => ProxyMode::Manual,
+        ocg_infra::http::ProxyMode::Direct => ProxyMode::Direct,
+        ocg_infra::http::ProxyMode::List => ProxyMode::List,
+    }
 }
 
 /// Construction spec for a provider-neutral inference HTTP client.
@@ -175,6 +81,16 @@ impl HttpInferenceTransportSpec {
             redirect: InferenceRedirectPolicy::None,
         }
     }
+
+    fn to_infra(self) -> ocg_infra::inference_http::HttpInferenceTransportSpec {
+        ocg_infra::inference_http::HttpInferenceTransportSpec::new(self.redirect)
+    }
+
+    fn from_infra(spec: ocg_infra::inference_http::HttpInferenceTransportSpec) -> Self {
+        Self {
+            redirect: spec.redirect(),
+        }
+    }
 }
 
 /// One outbound inference attempt. Auth is optional so keyless adapters can
@@ -190,24 +106,19 @@ pub struct InferenceHttpRequest<'a> {
     pub request_timeout: Option<Duration>,
 }
 
-/// Neutral inference HTTP wrapper. Owns reusable client construction,
-/// proxy/default routing, connect timeout, redirect policy, endpoint join,
-/// isolated auth headers, per-request timeout/body, and bounded response
-/// reading. Provider policy (Custom URL trust, permitted auth, redirect
-/// prohibition, endpoint prefix isolation, verify lifecycle) stays in the
-/// owning adapter.
+/// Neutral inference HTTP wrapper around [`ocg_infra::inference_http`].
+/// Provider policy (Custom URL trust, permitted auth, redirect prohibition,
+/// endpoint prefix isolation, verify lifecycle) stays in the owning adapter.
 #[derive(Clone)]
 pub struct HttpInferenceTransport {
-    client: reqwest::Client,
-    proxy_mode: ProxyMode,
-    spec: HttpInferenceTransportSpec,
+    inner: ocg_infra::inference_http::HttpInferenceTransport,
 }
 
 impl fmt::Debug for HttpInferenceTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpInferenceTransport")
-            .field("proxy_mode", &self.proxy_mode)
-            .field("redirect", &self.spec.redirect)
+            .field("proxy_mode", &self.proxy_mode())
+            .field("redirect", &self.spec().redirect)
             .finish_non_exhaustive()
     }
 }
@@ -225,29 +136,26 @@ impl HttpInferenceTransport {
         spec: HttpInferenceTransportSpec,
         connect_timeout: Duration,
     ) -> Result<Self, InferenceHttpError> {
-        let client = crate::http_client::configured_builder(config)
-            .map_err(|error| InferenceHttpError::Build(error.to_string()))?
-            .redirect(spec.redirect.reqwest_policy())
-            .connect_timeout(connect_timeout)
-            .build()
-            .map_err(|error| InferenceHttpError::Build(error.to_string()))?;
+        let mut proxy = crate::http_client::outbound_proxy_spec(config);
+        proxy.connect_timeout = connect_timeout;
         Ok(Self {
-            client,
-            proxy_mode: config.proxy_mode,
-            spec,
+            inner: ocg_infra::inference_http::HttpInferenceTransport::build(
+                &proxy,
+                spec.to_infra(),
+            )?,
         })
     }
 
     pub fn spec(&self) -> HttpInferenceTransportSpec {
-        self.spec
+        HttpInferenceTransportSpec::from_infra(self.inner.spec())
     }
 
     pub fn proxy_mode(&self) -> ProxyMode {
-        self.proxy_mode
+        core_proxy_mode(self.inner.proxy_mode())
     }
 
     pub fn redirect_policy(&self) -> InferenceRedirectPolicy {
-        self.spec.redirect
+        self.inner.redirect_policy()
     }
 
     pub fn connect_timeout(config: &AppConfig) -> Duration {
@@ -255,7 +163,7 @@ impl HttpInferenceTransport {
     }
 
     pub fn join_endpoint(base_url: &str, path: &str) -> Result<reqwest::Url, InferenceHttpError> {
-        join_inference_endpoint(base_url, path)
+        ocg_infra::inference_http::HttpInferenceTransport::join_endpoint(base_url, path)
     }
 
     pub fn isolated_headers(
@@ -270,57 +178,33 @@ impl HttpInferenceTransport {
         method: reqwest::Method,
         url: reqwest::Url,
     ) -> reqwest::RequestBuilder {
-        self.client.request(method, url)
+        self.inner.request(method, url)
     }
 
     pub async fn send(
         &self,
         request: InferenceHttpRequest<'_>,
     ) -> Result<reqwest::Response, InferenceHttpError> {
-        let mut builder = self.client.request(request.method, request.url);
-        if let Some((scheme, api_key)) = request.auth {
-            let headers = isolated_inference_headers(scheme, api_key)?;
-            for (name, value) in &headers {
-                builder = builder.header(name, value);
-            }
-        }
-        for (name, value) in &request.extra_headers {
-            builder = builder.header(name, value);
-        }
-        if let Some(body) = request.body {
-            builder = builder.body(body);
-        }
-        let builder = apply_inference_request_timeout(builder, request.request_timeout);
-        builder.send().await.map_err(map_inference_send_error)
+        self.inner
+            .send(ocg_infra::inference_http::InferenceHttpRequest::new(
+                request.method,
+                request.url,
+                request
+                    .auth
+                    .map(|(scheme, key)| (inference_auth_scheme(scheme), key)),
+                request.extra_headers,
+                request.body,
+                request.request_timeout,
+            ))
+            .await
     }
 
     pub async fn read_body_limited(
         response: reqwest::Response,
         max_bytes: usize,
     ) -> Result<Vec<u8>, InferenceHttpError> {
-        if let Some(length) = response.content_length()
-            && length > max_bytes as u64
-        {
-            return Err(InferenceHttpError::Oversize { limit: max_bytes });
-        }
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(map_inference_send_error)?;
-            if body.len().saturating_add(chunk.len()) > max_bytes {
-                return Err(InferenceHttpError::Oversize { limit: max_bytes });
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(body)
-    }
-}
-
-fn map_inference_send_error(error: reqwest::Error) -> InferenceHttpError {
-    if error.is_timeout() {
-        InferenceHttpError::Network(format!("upstream request timed out: {error}"))
-    } else {
-        InferenceHttpError::Network(error.to_string())
+        ocg_infra::inference_http::HttpInferenceTransport::read_body_limited(response, max_bytes)
+            .await
     }
 }
 
@@ -402,112 +286,6 @@ pub fn build_custom_http_client(config: &AppConfig) -> Result<CustomHttpClient, 
 pub fn join_custom_endpoint(base_url: &str, path: &str) -> Result<reqwest::Url, CustomHttpError> {
     let canonical = validate_custom_base_url(base_url).map_err(CustomHttpError::from)?;
     join_inference_endpoint(&canonical, path).map_err(CustomHttpError::from)
-}
-
-fn is_endpoint_override(path: &str) -> bool {
-    let trimmed = path.trim();
-    if trimmed.contains("://")
-        || trimmed.starts_with("//")
-        || trimmed.starts_with('\\')
-        || trimmed.contains('\\')
-    {
-        return true;
-    }
-    if trimmed.contains('\0') || trimmed.chars().any(char::is_control) {
-        return true;
-    }
-    if path_has_unsafe_segments(trimmed) {
-        return true;
-    }
-    matches!(
-        reqwest::Url::parse(trimmed)
-            .ok()
-            .map(|url| url.scheme().to_string()),
-        Some(scheme) if matches!(
-            scheme.as_str(),
-            "http" | "https" | "ftp" | "file" | "ws" | "wss" | "javascript" | "data"
-        )
-    )
-}
-
-fn path_has_unsafe_segments(path: &str) -> bool {
-    for segment in path.split(['/', '\\']) {
-        if segment.is_empty() {
-            continue;
-        }
-        if segment == "."
-            || segment == ".."
-            || segment.contains('\0')
-            || segment.chars().any(char::is_control)
-        {
-            return true;
-        }
-        match percent_decode_utf8(segment) {
-            Some(decoded)
-                if decoded == "."
-                    || decoded == ".."
-                    || decoded.contains('/')
-                    || decoded.contains('\\')
-                    || decoded.contains('\0')
-                    || decoded.chars().any(char::is_control)
-                    || contains_percent_escape(&decoded) =>
-            {
-                return true;
-            }
-            None => return true,
-            Some(_) => {}
-        }
-    }
-    false
-}
-
-fn contains_percent_escape(input: &str) -> bool {
-    input.as_bytes().windows(3).any(|window| {
-        window[0] == b'%' && hex_val(window[1]).is_some() && hex_val(window[2]).is_some()
-    })
-}
-
-fn percent_decode_utf8(input: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            if index + 2 >= bytes.len() {
-                return None;
-            }
-            let value = hex_pair(bytes[index + 1], bytes[index + 2])?;
-            out.push(value);
-            index += 3;
-        } else {
-            out.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-fn hex_pair(high: u8, low: u8) -> Option<u8> {
-    Some((hex_val(high)? << 4) | hex_val(low)?)
-}
-
-fn hex_val(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn path_has_prefix(path: &str, prefix: &str) -> bool {
-    match prefix {
-        "" | "/" => path.starts_with('/'),
-        other => {
-            let prefix = other.trim_end_matches('/');
-            path == prefix || path.starts_with(&format!("{prefix}/"))
-        }
-    }
 }
 
 const FORBIDDEN_CLIENT_HEADERS: &[&str] = &[
@@ -613,6 +391,7 @@ mod tests {
     use super::*;
     use crate::models::AppConfig;
     use reqwest::StatusCode;
+    use reqwest::header::AUTHORIZATION;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 pub(crate) use ocg_infra::http::{RouteLabel, no_redirect_policy};
 
-fn outbound_proxy_spec(config: &AppConfig) -> ocg_infra::http::OutboundProxySpec {
+pub(crate) fn outbound_proxy_spec(config: &AppConfig) -> ocg_infra::http::OutboundProxySpec {
     ocg_infra::http::OutboundProxySpec {
         mode: match config.proxy_mode {
             ProxyMode::Auto => ocg_infra::http::ProxyMode::Auto,
