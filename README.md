@@ -52,7 +52,7 @@ on macOS, or `sha256sum <file>` on Linux.
 
 Keep `dist/` beside the CLI executable so `serve` can serve the dashboard.
 Platform caveats (SmartScreen, Gatekeeper, unsigned Windows, no ARM64 / RPM /
-Snap / stores) are in the [User guide](docs/USER.md#install-and-first-run) and
+Snap / stores) are in the [User guide](docs/user/install.md) and
 [Maintainer guide](docs/MAINTAINER.md).
 
 ## Quick Start
@@ -97,7 +97,7 @@ docker compose up -d --no-build
 
 Open `http://127.0.0.1:9042/dashboard/` — the server root `/` is not the
 dashboard. Credentials, the optional browser sidecar, backup, HTTPS, image
-pins, and source builds: [User guide — Docker](docs/USER.md#docker).
+pins, and source builds: [User guide — Docker](docs/user/docker.md).
 
 ## Models
 
@@ -129,8 +129,8 @@ The Applications picker stays Go aliases ∩ the active pricing snapshot.
 
 Passthrough matrix, context / input / reasoning / tools, conversion limits,
 and true vs false circuit breakers:
-[User guide — model capabilities](docs/USER.md#model-capabilities) and
-[protocol conversion](docs/USER.md#protocol-conversion).
+[User guide — model capabilities](docs/user/applications.md) and
+[protocol conversion](docs/user/protocol-conversion.md).
 
 ## Documentation
 
@@ -138,9 +138,8 @@ and true vs false circuit breakers:
 | --- | --- | --- |
 | End users | [User guide](docs/USER.md) | [用户指南](docs/USER.zh-CN.md) |
 | Maintainers | [Maintainer guide](docs/MAINTAINER.md) | [维护者指南](docs/MAINTAINER.zh-CN.md) |
-| Schema v27 runbook | [V3 schema recovery](docs/MAINTAINER-v3-migration.md) | [V3 库恢复](docs/MAINTAINER-v3-migration.zh-CN.md) |
 | Policy | [Anti-abuse statement](docs/OPENCODE_GO_ANTI_ABUSE.md) | [防滥用声明](docs/OPENCODE_GO_ANTI_ABUSE.zh-CN.md) |
-| Index | [docs/](docs/README.md) | bilingual |
+| Index | [docs/](docs/README.md) | [文档索引](docs/README.zh-CN.md) |
 
 Also: [Contributors](docs/CONTRIBUTORS.md), [DESIGN.md](DESIGN.md),
 [AGENTS.md](AGENTS.md).
@@ -165,8 +164,7 @@ Exit any running release tray app first so the single-instance lock and port
 `http://127.0.0.1:30001/dashboard/` once the gateway is ready. The dashboard
 SPA talks HTTP `/dashboard/api/v3`; authenticated unversioned
 `/dashboard/api` REST is retired. Checks, builds, and the release pipeline:
-[Maintainer guide](docs/MAINTAINER.md). Schema v27 runbook:
-[V3 schema recovery](docs/MAINTAINER-v3-migration.md).
+[Maintainer guide](docs/MAINTAINER.md).
 
 ## License
 

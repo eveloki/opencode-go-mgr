@@ -1,0 +1,39 @@
+[简体中文](data-security.zh-CN.md)
+
+# Data And Security
+
+- **GUI data location.** Windows: `%USERPROFILE%\.ocg-mgr`. macOS / Linux:
+  `~/.ocg-mgr`. CLI data defaults to `~/.ocg-mgr-cli` on every platform and
+  can be overridden with `--data-dir <path>`.
+- **Credential storage.** Account keys and saved login passwords are
+  obfuscated before storage; this is not cryptographic protection. Dashboard
+  Access Keys live in `access_keys` (schema v27). The macOS / Linux GUI and
+  the CLI also place a `.encryption-key` file inside the data directory;
+  **back it up with the database** because losing it makes stored credentials
+  unreadable. Obfuscation is not a security boundary: anyone with the data
+  directory and its `.encryption-key`, or able to run the Windows GUI in the
+  original Windows user/machine context, can recover account keys and saved
+  login passwords. The dashboard SPA never writes Key plaintext to
+  `localStorage`; Connection Center secrets stay in memory until logout or
+  401.
+- **Browser profiles.** `browser-profiles/`, or Docker's
+  `ocg-browser-profiles`, contains long-lived cookies and official-site login
+  state and is not encrypted by OCG Manager at all. Protect, transfer, and
+  destroy it with the same care as the database and account keys.
+- **No cross-node sync.** Each node manages its own accounts through its own
+  dashboard. OCG Manager does not synchronize account credentials between
+  nodes.
+- **Plain HTTP warning.** A non-loopback `http://` root URL exposes the Key
+  and request contents to the network. Use HTTPS or a trusted LAN only.
+- **Administrator password.** The single administrator password is stored as
+  an Argon2 hash in SQLite. There is no self-service password recovery —
+  protect the data directory.
+- **Custom API destinations.** Custom base URLs are administrator-trusted.
+  Any syntactically valid HTTP or HTTPS origin is allowed, including LAN and
+  loopback. URL-embedded credentials are rejected; redirects are never
+  followed; dashboard and client credentials are never forwarded. Choose
+  destinations you intend to reach from this node.
+
+---
+
+[User guide index](../USER.md) · [简体中文](data-security.zh-CN.md) · [Docs index](../README.md)

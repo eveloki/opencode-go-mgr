@@ -1,0 +1,222 @@
+[简体中文](state-and-lifecycle.zh-CN.md)
+
+# State, Credentials, And Lifecycle
+
+## State, credentials, and settings
+
+`CoreStateInner` (`state.rs`) is shared by gateway, dashboard, and CLI.
+
+Lock order: (1) `settings_update`, (2) `db`, (3) `config`, (4)
+`http_client`, (5) `gateway`, (6) `pricing`, (7) `zen_free_models`,
+(8) `provider_contracts`, (9) `routing`, (10) `credential_snapshot`.
+Never acquire in reverse. Do not hold the routing lock across DB or
+network I/O. Async gates: `settings_host_effects` (persist → listener
+rebind → compensation) is acquired before `gateway_lifecycle` when a
+settings write also rebinds. Never hold a `parking_lot` lock across those
+awaits.
+
+Two credential tiers share one `access_keys` table (schema v27) and one
+auth snapshot:
+
+- Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
+  name `"Primary"`. Always enabled, never deleted. Public `AppConfig` and
+  dashboard APIs still expose `gateway_key`; sanitized config JSON is
+  **not** the database authority after v27.
+- Sub keys: non-primary rows, active ceiling 64, soft-delete keeps
+  identity/name and clears the value. Lifecycle only through
+  `/dashboard/api/v3/keys*`. CLI has no sub-key commands.
+
+Primary/sub values are mutually exclusive
+(`gateway_keys::ensure_primary_value_allowed`) on dashboard, settings, and
+sub-key enable paths.
+
+`AppConfig` uses serde defaults for backward-compatible loading. A pre-1.3
+config without `claude_desktop_models` receives default Sonnet
+`minimax-m3` and is rewritten. Ordinary settings saves preserve the
+dedicated Claude Desktop mapping. Downstream client root URL priority:
+non-empty `OCG_CLIENT_ROOT_URL` (read-only, never written back) > SQLite
+manual value > frontend derivation from production origin / dev Gateway
+port.
+
+Dashboard authentication is skipped for **direct** requests when the
+gateway binds loopback. Requests carrying standard reverse-proxy
+forwarding headers still require login. Non-loopback binds use a single
+administrator (Argon2 hash in SQLite, HttpOnly session cookie). Docker may
+bootstrap the first administrator with **both** `OCG_ADMIN_USERNAME` and
+`OCG_ADMIN_PASSWORD`; setting only one fails startup; otherwise the first
+registration wins.
+
+Settings uses `GET /dashboard/api/v3/settings/check-update` for GitHub
+Release metadata. Updater-enabled installed desktop runtimes can continue
+through a signed download and install; development builds, CLI, and Docker
+retain the metadata/release-link path. The outbound request runs only when
+the user clicks the button.
+
+## Account lifecycle and browser runtime
+
+Schema v16 added `account_type` (`key | managed`) and `setup_step`
+(`google_account → opencode_registration → payment → key_verification → ready`).
+Existing rows migrate to `key + ready`. A managed draft is persisted
+immediately with an empty key and `enabled=false`; selector, enable, and
+the request path all require both `ready` and a non-empty key.
+`google_account` is labeled **sign-in identity** in the UI and is
+skippable.
+
+`AppConfig::default()` seeds `opencode_invite_url` with
+`DEFAULT_OPENCODE_INVITE_URL` (demo). Normalized values must be a
+credential-free HTTPS URL up to 2,048 characters whose host is exactly
+`opencode.ai` or `console.opencode.ai`. Creating a managed draft can edit
+the invite URL and write it back to Settings when it differs. Signup,
+registration, and payment remain manual in the isolated browser; the user
+copies the key back. Never add CDP autofill or automated payment clicks.
+
+Managed setup may move **forward exactly one step** or **rewind to any
+earlier unfinished step**. Skipping forward is rejected; the setup API
+must not enter `ready` directly. A real key probe returning `2xx`
+transitions to `ready + enabled`; `429` also proves validity and records
+cooldown. `401`/`403`, network errors, and `5xx` remain at
+`key_verification`.
+
+Official Go usage (`go_usage.rs`, `https://opencode.ai/zen/go/v1/usage`) is
+a calibration baseline coordinated by `usage_sync.rs`. Manual
+`POST /dashboard/api/v3/accounts/{id}/usage/refresh` and the background
+reconciler share one fetch + key-CAS + three-window calibration path.
+Ready+enabled accounts with local activity in the last 24h reconcile about
+hourly; inactive ones about daily. Disabled / non-ready / empty-key
+accounts are excluded. Startup must not stampede: global concurrency 1,
+pacing, bounded jitter, injectable clock/jitter/fetch seams. Manual
+refresh has a 15s per-account throttle after any attempt, in-flight
+dedupe, and Retry-After / `nextAllowedAt`. Local max Go usage ≥80% may
+expedite at most once per 15 minutes. Real inference `429` keeps existing
+cooldown/selector writes and additionally schedules an official sync ~1–2
+minutes later (never inline). Official failures or `status=rate-limited`
+must never write inference cooldown. After success, schedule around the
+earliest `resetsAt` (bounded jitter) while respecting active/inactive
+cadence. Failure backoff: 5m → 15m → 1h → 6h; never erase last success or
+the previous baseline. Sync metadata lives in `provider_usage_sync_state`
+(the five leftover `accounts.usage_sync_*` columns are dropped in v27).
+The public Go docs have not listed this path yet.
+
+`console_usage.rs` is **frozen** deprecated compatibility code — do not
+call or extend. Remove only after ≥2 minor releases plus stable
+real-account evidence. Manual slider/PATCH calibration stays available.
+
+Zen Free is database-owned: it can be enabled, disabled, and reordered,
+but cannot be created or deleted through generic account APIs. GOAT /
+SCNet drafts stay disabled and unroutable. Custom is catalog-routable
+after verify-then-enable.
+
+Browser: `GET /dashboard/api/v3/browser/capabilities`,
+`POST /accounts/{id}/browser`, `DELETE /accounts/{id}/browser-profile`,
+and `/browser/sessions/{token}/ws`. Targets include Google signup/login,
+GitHub signup/login, the configured invite, and the OpenCode console
+(`https://opencode.ai/auth`). The worker host allowlist includes
+`accounts.google.com`, `github.com`, `opencode.ai`,
+`console.opencode.ai`, and `auth.opencode.ai`. Remote tokens are
+memory-only, administrator-session-bound, and Origin-checked; they expire
+after 30 minutes idle or four hours total.
+
+Desktop native browser hooks are registered by `src-tauri/src/host/` into
+`CoreState`. Vue still calls HTTP. Windows discovers Edge then Chrome;
+macOS checks Chrome, Edge, and Chromium; Linux searches `PATH` for
+Chrome/Chromium/Edge. The external browser uses
+`browser-profiles/<account_id>`, `--no-first-run`,
+`--no-default-browser-check`, and a new window. Never add CDP,
+automation, `--no-sandbox`, or disabled web security.
+
+`crates/ocg-browser-worker` keeps one Chromium per node. An account switch
+sends SIGTERM to the current process group and waits for profile flush,
+forcing termination only after the bounded timeout. The sidecar runs as
+UID/GID 10001 with a read-only root and no capabilities; a shared runtime
+volume holds a random control token. Chromium must create its own
+user/PID/network namespaces and renderer seccomp sandbox, so the browser
+service uses `seccomp=unconfined` and cannot use `no-new-privileges`. It
+still does not mount SQLite or publish a host port. The project-scoped
+browser bridge is not Docker `internal`, because Chromium needs outbound
+HTTPS to Google/OpenCode.
+
+Profile deletion must stop the browser, validate account IDs against path
+traversal, and atomically rename both new and legacy profiles into
+staging. Purge only after the database operation commits; restore staging
+on failure. Reset keeps a completed account's key, while a pending managed
+account also returns to `google_account`. Delete confirmations must state
+that cookies/profile are removed.
+
+## Persistence
+
+`crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
+queries. Current schema is **v27**. `provider_contracts.rs` owns provider
+contract scopes and model-protocol evidence. `models.rs` defines shared
+serde types and `AppConfig`. Key obfuscation is `ocg-infra::crypto`
+(facade `ocg_core::crypto`): this is lightweight obfuscation, not a KMS.
+Windows desktop uses `MachineBoundCipher`; CLI/Docker use
+`StaticKeyCipher` from `OCG_MANAGER_ENCRYPTION_KEY` or
+`<data-dir>/.encryption-key`. Production hosts must call
+`Database::open_with_cipher` so v27 ciphertext probes use the already
+resolved cipher. Account `key_cipher` / `password_cipher` are validated in
+place and **never re-encrypted**. A schema newer than this build supports
+fails closed.
+
+Historical versions still matter on upgrade:
+
+- v16: managed setup columns.
+- v21: usage-sync metadata (later moved off `accounts` in v27).
+- v22: immutable provider/offering bindings, provider pricing/usage,
+  quota windows, provider-aware forward logs.
+- v23: Plan verification, Alias / upstream log identity, optional native
+  cost, Custom config tables, SCNet acknowledgements.
+- v24: actual proxy route leg on forward logs (`auto` / `proxy` /
+  `direct`; historical empty string = unrecorded).
+- v25: `provider_model_catalogs` (last successful Zen Free snapshot).
+- v26: `provider_contract_scopes` and `provider_contract_model_protocols`.
+  Additive.
+- **v27:** copy primary `gateway_key` + `sub_gateway_keys` into
+  `access_keys`; drop `sub_gateway_keys`; drop leftover
+  `accounts.usage_sync_*`. After the database is at canonical v26, an
+  existing (non-empty) library gets a unique sibling
+  `data.sqlite.pre-v3.<UTC>.bak` plus a SHA-256 sidecar **before any v27
+  write**. A brand-new empty directory creates v27 directly and does not
+  write that copy. Operator recovery:
+  [storage-migration.md](storage-migration.md).
+
+GUI data directory: Windows `%USERPROFILE%\.ocg-mgr` or macOS/Linux
+`~/.ocg-mgr`. CLI default: `~/.ocg-mgr-cli`. Docker stores SQLite, keys,
+and `.encryption-key` in `ocg-data`; long-lived cookies and browser state
+live in `ocg-browser-profiles`. Stop and back up those two sensitive
+volumes together. `ocg-browser-runtime` contains only the runtime control
+token and should not be backed up. OCG Manager does not encrypt browser
+profiles.
+
+Forward-log inserts go through `ocg-infra::sqlite_logs` (one explicit
+statement per helper). Callers own timestamps, diagnostics, cost policy,
+redaction, and transactions.
+
+## Per-node boundaries
+
+Each node owns its account data and is managed through its own dashboard.
+There is no cross-node sync and no Admin API. Do not add one.
+
+## Lifecycle Classes
+
+Keep these four classes separate. Do not cancel one from another.
+
+| Class | Start | Stop | Notes |
+| --- | --- | --- | --- |
+| **Gateway listener** (`GatewayLifecycle`) | `start_gateway` / `bind` | `stop` (signal-only) or `stop_and_wait` (CLI) | TCP bind, dashboard trust, forward-log backfill, HTTP server. Rebind is slot-aware (same-port stop-then-bind, new-port bind-first). Does not start or cancel process-level workers. |
+| **Control-plane workers** (`ControlPlaneWorkers`) | `ensure_started` from `start_gateway` (once per `CoreState`) | none — exits when the owning `CoreState` is dropped | Official usage reconciler. No public cancel API. Listener stop must not kill it. |
+| **Desktop capabilities** | Tauri setup: auto-start (Windows release/installed only), Dock (macOS), updater starter | process exit | Not WebView commands. CLI/Docker leave hooks unset. `auto_start` and `show_dock_icon` stay capability-gated on the HTTP settings form. |
+| **Browser runtime** | Native hooks on desktop; remote worker in Docker | account switch / profile reset / process exit | Native Browser vs sidecar are different hosts of the same `BrowserRuntime` slot. |
+
+Tauri `src/lib.rs`: start uses `start_gateway` (listener + usage workers);
+exit uses `host::gateway::stop_listener` (listener only). Settings port
+changes rebind through `GatewayLifecycle` / `settings_host_effects` with
+config-fingerprint compensation; concurrent failed port writes must not
+clobber a successful timeout write.
+
+Updater is configured as a `CoreState` starter, never a WebView `invoke`
+command. `src-tauri/capabilities/default.json` has no updater permission.
+Updater outbound follows the process-wide **default-leg** proxy policy
+(List mode included).
+---
+
+[Maintainer guide index](../MAINTAINER.md) · [简体中文](state-and-lifecycle.zh-CN.md) · [Docs index](../README.md)

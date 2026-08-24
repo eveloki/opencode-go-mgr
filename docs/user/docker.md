@@ -1,0 +1,214 @@
+[简体中文](docker.zh-CN.md)
+
+# Docker
+
+The public headless image can be pulled from GHCR without signing in. It is a
+Linux container publishing `linux/amd64` and `linux/arm64`; a plain
+`docker pull` selects the matching native variant on either architecture. Each
+release also includes a pull-only
+`compose.example.yaml`; save it as `compose.yaml` and optionally create a
+neighboring `.env`. The example pins its matching release by default, while
+`OCG_IMAGE` can override it. Alternatively, run the Compose commands from a
+checkout containing `compose.yaml` and `.env.example` (preferably the
+matching release tag):
+
+```bash
+git clone --branch v1.8.2 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+cd opencode-go-mgr
+cp .env.example .env
+# PowerShell: Copy-Item .env.example .env
+# Edit .env before exposing the service outside the host.
+docker compose pull
+docker compose up -d --no-build
+docker compose ps
+```
+
+## Choosing An Image
+
+- The repository's source-capable `compose.yaml` defaults to
+  `ghcr.io/klarkxy/opencode-go-mgr:latest`; the Release
+  `compose.example.yaml` defaults to its matching full version.
+- For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.8.2`.
+- Full-version and `sha-<commit>` tags identify one release and are intended
+  not to move; `1.5` and `latest` move forward. Only a digest such as
+  `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is technically immutable.
+- To build the current checkout instead, set `OCG_IMAGE=ocg-manager:local`
+  and run `docker compose up -d --build`. `NPM_REGISTRY` and
+  `CARGO_REGISTRY` are build arguments for that source-build path only; they
+  do not change a pulled image.
+
+| Variable | Scope | Meaning |
+| --- | --- | --- |
+| `OCG_IMAGE` | Compose | Image tag, mirror, local name, or immutable digest. |
+| `OCG_BROWSER_IMAGE` | Compose | Optional Chromium/noVNC sidecar image tag, mirror, local name, or digest. |
+| `OCG_PORT` | Compose | Host loopback port; the container still listens on `9042`. |
+| `OCG_ADMIN_USERNAME` + `OCG_ADMIN_PASSWORD` | First start | Optional administrator bootstrap; both or neither. |
+| `OCG_CLIENT_ROOT_URL` | Runtime | Read-only external client root override. |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | Runtime | Standard proxy variables used by `Automatic (system / environment)` outbound proxy mode. |
+| `OCG_MANAGER_ENCRYPTION_KEY` | Runtime restore | Original explicit obfuscation key, when one was used. |
+| `NPM_REGISTRY` + `CARGO_REGISTRY` | Source build | Dependency registries used only by `--build`. |
+
+## Optional Remote Browser
+
+The default gateway deployment does not start the browser sidecar. To use
+managed onboarding and website login on a Linux server or Docker host,
+reserve at least 2 CPUs, 2 GiB of RAM, and 1 GiB of `/dev/shm`, then run:
+
+```bash
+docker compose --profile browser up -d
+docker compose ps
+```
+
+`OCG_BROWSER_IMAGE` overrides the default
+`ghcr.io/klarkxy/opencode-go-mgr-browser:<version>`. The sidecar runs ordinary
+Chromium, Xvfb, a lightweight window manager, x11vnc, and noVNC. The dashboard
+shows it in a dedicated full browser tab through an authenticated same-origin
+WebSocket, including keyboard and pointer input. Use the page's explicit
+remote clipboard area to copy or paste a key. A reverse proxy in front of the
+dashboard must support WebSocket upgrades.
+The sidecar launches Chromium with its basic password store so its persistent
+profiles do not depend on a host keyring.
+
+Only one remote Chromium runs per node. Switching accounts first shuts down
+the current process cleanly and waits for its profile to flush, then starts
+the target account; any older remote page becomes invalid immediately.
+Dashboard browser tokens are memory-only, bound to the current administrator
+session, and Origin-checked. They expire after 30 minutes idle or four hours
+total; reopen the account website to create another session.
+
+The sidecar publishes no host port and never mounts the database. Its control
+and noVNC endpoints exist only on the Compose `browser-private` network. This
+project-scoped bridge is not Docker `internal`, because Chromium needs outbound
+HTTPS access to Google and OpenCode; neither sidecar endpoint is published to
+the host. A random control token lives in the shared `ocg-browser-runtime`
+runtime volume.
+Account cookies and profiles live in `ocg-browser-profiles`; do not back up the
+runtime volume, but always stop and back up the two sensitive persistent
+volumes, `ocg-data` and `ocg-browser-profiles`, together.
+
+Google may treat a data-center egress IP as high risk, require additional
+verification, or reject registration/login. OCG Manager does not bypass that
+risk control. Complete Google's checks yourself, or use the desktop build on
+a residential connection. Real payment is always an explicit user action on
+the official site.
+
+## Administrator Bootstrap
+
+`OCG_ADMIN_USERNAME` and `OCG_ADMIN_PASSWORD` create the administrator **only
+when the database has no administrator yet**.
+
+- Both must be set together; setting only one stops startup with an error.
+- Once an administrator exists, later environment changes do not reset it.
+- When both are omitted, the first visitor creates the administrator in the
+  dashboard.
+- After the administrator exists, you may remove both variables while keeping
+  the volume; the stored account remains. Remove them from the container
+  environment with `docker compose up -d --no-build --force-recreate`.
+
+Bootstrap credentials are visible to anyone with Docker daemon access.
+Protect `.env`, use a long random password, and do not expose an
+uninitialized dashboard publicly.
+
+## Secrets And Addresses
+
+`OCG_MANAGER_ENCRYPTION_KEY` is an advanced restore override. Leave it unset
+for normal deployments so the generated `.encryption-key` stays in the data
+volume. If the original deployment supplied this variable, the restored
+deployment must use the same value; changing or losing it makes saved
+credentials unreadable. Treat it like a password.
+
+The optional `OCG_CLIENT_ROOT_URL` is the environment equivalent of the
+dashboard's Downstream Access Root. Use it when a reverse proxy is present or
+the dashboard and gateway have different externally reachable addresses. A
+non-empty value must be an absolute HTTP(S) URL; when present, it overrides
+the saved SQLite value, and an invalid value stops startup. It does not
+configure the listener, DNS, or reverse proxy. Normally use
+`https://ocg.example.com`, not `/dashboard/` or a concrete API endpoint; a
+trailing `/v1` is accepted.
+
+## Runtime Behavior
+
+Set `OCG_PORT` in `.env` to change the host port; the container still uses
+port `9042`. Open `http://127.0.0.1:<OCG_PORT>/dashboard/` and sign in. Use
+`/dashboard/`, not the server root `/`.
+
+- Data and the generated `.encryption-key` obfuscation secret persist in the
+  `ocg-data` volume; account browser cookies/profiles persist separately in
+  `ocg-browser-profiles`.
+- The container process binds `0.0.0.0`, so the dashboard requires
+  administrator login even when it is published only on host `127.0.0.1`.
+  That host mapping limits reachability; it does not enable the loopback
+  login bypass.
+- The container's `HEALTHCHECK` opens `127.0.0.1:9042` over TCP every 30
+  seconds; there is no `/healthz` route. That TCP check proves only that the
+  process is listening — not that the dashboard API, an upstream account, or
+  a real model request works.
+- Both images run as the unprivileged `ocg` user (UID/GID 10001). The supplied
+  Compose services make the root filesystem read-only, mount `/tmp` as tmpfs,
+  and drop every Linux capability. The main service also enables
+  `no-new-privileges`; the browser service instead uses `seccomp=unconfined`
+  so ordinary Chromium can establish its own namespace and renderer seccomp
+  sandboxes. The sidecar does not use `--no-sandbox` and has 1 GiB of shared
+  memory. `ocg-data` and `ocg-browser-profiles` are the two persistent state
+  volumes.
+- The startup log contains the Key, so log output and Docker daemon
+  access are sensitive. Configure log rotation on the Docker host if its
+  defaults are not bounded.
+
+Routine operational checks:
+
+```bash
+docker compose config --quiet
+docker compose ps
+docker compose logs --tail=100 -f ocg-manager
+docker compose --profile browser logs --tail=100 -f browser
+curl --fail http://127.0.0.1:9042/dashboard/
+```
+
+Replace `9042` in the curl command with the configured host `OCG_PORT` when
+you changed it.
+
+## Verifying An Image
+
+Both the main and browser images include an SPDX SBOM, BuildKit SLSA
+provenance, and a GitHub signed provenance attestation. Inspect and verify a
+release with:
+
+```bash
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.2
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.2
+gh attestation verify \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.2 \
+  --repo klarkxy/opencode-go-mgr
+gh attestation verify \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.2 \
+  --repo klarkxy/opencode-go-mgr
+```
+
+Both `gh attestation verify` commands require an authenticated GitHub CLI. Public pulls are
+anonymous; if the OCI client still requests registry credentials,
+authenticate to `ghcr.io` with a token that can read packages. Provenance
+proves how the artifact was produced; it is not a vulnerability scan.
+
+Regenerate the Key if it leaks.
+
+## HTTPS
+
+Point an existing reverse proxy at the loopback port. For example, with
+Caddy:
+
+```caddyfile
+ocg.example.com {
+    reverse_proxy 127.0.0.1:9042
+}
+```
+
+After signing in, set a non-empty Key before sending API traffic.
+Stop the service with `docker compose down`; add `-v` only when you
+intentionally want to delete all stored accounts, credentials, keys, cookies,
+and browser profiles.
+
+---
+
+[User guide index](../USER.md) · [简体中文](docker.zh-CN.md) · [Docs index](../README.md)

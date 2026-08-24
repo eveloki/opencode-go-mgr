@@ -1,21 +1,35 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 const design = readFileSync(new URL("../../DESIGN.md", import.meta.url), "utf8");
-const userEn = readFileSync(new URL("../../docs/USER.md", import.meta.url), "utf8");
-const userZh = readFileSync(new URL("../../docs/USER.zh-CN.md", import.meta.url), "utf8");
-const docsIndex = readFileSync(new URL("../../docs/README.md", import.meta.url), "utf8");
+const userIndexEn = readFileSync(new URL("../../docs/USER.md", import.meta.url), "utf8");
+const userIndexZh = readFileSync(new URL("../../docs/USER.zh-CN.md", import.meta.url), "utf8");
+const docsIndexEn = readFileSync(new URL("../../docs/README.md", import.meta.url), "utf8");
+const docsIndexZh = readFileSync(new URL("../../docs/README.zh-CN.md", import.meta.url), "utf8");
+
+const userDir = new URL("../../docs/user/", import.meta.url);
+const chapterFiles = readdirSync(userDir)
+  .filter((name) => name.endsWith(".md"))
+  .sort();
+const enChapterFiles = chapterFiles.filter((name) => !name.endsWith(".zh-CN.md"));
+const zhChapterFiles = chapterFiles.filter((name) => name.endsWith(".zh-CN.md"));
+const readChapter = (name: string) =>
+  readFileSync(new URL(name, userDir), "utf8");
+const userEn = enChapterFiles.map(readChapter).join("\n");
+const userZh = zhChapterFiles.map(readChapter).join("\n");
 
 function headings(markdown: string): string[] {
-  return markdown.split(/\r?\n/).filter((line) => /^#{2,3} /.test(line));
+  return markdown
+    .split(/\r?\n/)
+    .filter((line) => /^#{1,3} /.test(line));
 }
 
-function tocBlock(markdown: string, title: string): string[] {
+function chapterLinks(markdown: string, title: string): string[] {
   const start = markdown.indexOf(title);
   assert.ok(start >= 0, `missing ${title}`);
   const next = markdown.indexOf("\n## ", start + title.length);
-  assert.ok(next > start, `TOC for ${title} has no following H2`);
+  assert.ok(next > start, `chapter list for ${title} has no following H2`);
   return markdown
     .slice(start, next)
     .split(/\r?\n/)
@@ -35,17 +49,32 @@ test("DESIGN.md names Providers as the fourth of seven views", () => {
   assert.match(design, /Do call the access credential “Key”/);
 });
 
-test("USER guides keep matching TOC structure with Providers replacing Pricing", () => {
-  const enToc = tocBlock(userEn, "## Table Of Contents");
-  const zhToc = tocBlock(userZh, "## 目录");
-  assert.equal(enToc.length, zhToc.length);
-  assert.match(userEn, /- \[Providers\]\(#providers\)/);
-  assert.match(userZh, /- \[供应商\]\(#供应商\)/);
-  assert.doesNotMatch(userEn, /- \[Pricing\]\(#pricing\)/);
-  assert.doesNotMatch(userZh, /- \[价格表\]\(#价格表\)/);
-  assert.equal(headings(userEn).length, headings(userZh).length);
-  assert.match(userEn, /### Providers/);
-  assert.match(userZh, /### 供应商/);
+test("USER index pages keep matching chapter lists with Providers replacing Pricing", () => {
+  const enChapters = chapterLinks(userIndexEn, "## Chapters");
+  const zhChapters = chapterLinks(userIndexZh, "## 章节");
+  assert.equal(enChapters.length, zhChapters.length);
+  assert.match(userIndexEn, /- \[Providers\]\(user\/providers\.md\)/);
+  assert.match(userIndexZh, /- \[供应商\]\(user\/providers\.zh-CN\.md\)/);
+  assert.doesNotMatch(userIndexEn, /- \[Pricing\]\(user\//);
+  assert.doesNotMatch(userIndexZh, /- \[价格表\]\(user\//);
+});
+
+test("USER chapter files pair EN/ZH with matching heading structure", () => {
+  assert.deepEqual(
+    enChapterFiles.map((name) => name.replace(/\.md$/, ".zh-CN.md")),
+    zhChapterFiles,
+  );
+  for (const name of enChapterFiles) {
+    const en = readChapter(name);
+    const zh = readChapter(name.replace(/\.md$/, ".zh-CN.md"));
+    assert.equal(
+      headings(en).length,
+      headings(zh).length,
+      `heading count mismatch in ${name}`,
+    );
+  }
+  assert.match(userEn, /# Providers/);
+  assert.match(userZh, /# 供应商/);
 });
 
 test("USER guides describe the Providers control plane and drop stale locations", () => {
@@ -61,7 +90,7 @@ test("USER guides describe the Providers control plane and drop stale locations"
   assert.match(userZh, /可能消耗\s*额度/);
   assert.match(userEn, /\?view=pricing/);
   assert.match(userZh, /\?view=pricing/);
-  assert.match(userEn, /Schema v26/);
+  assert.match(userEn, /schema v26/i);
   assert.match(userZh, /schema v26/);
   assert.match(userEn, /\*\*Open\s+provider\*\*/);
   assert.match(userZh, /\*\*前往供应商\*\*/);
@@ -83,9 +112,12 @@ test("USER guides keep GOAT/SCNet non-routable and refresh/probe manual-only", (
 });
 
 test("docs index routes user facts through Providers and the contract module", () => {
-  assert.match(docsIndex, /Provider contracts \/ 供应商合约/);
-  assert.match(docsIndex, /provider_contracts\.rs/);
-  assert.match(docsIndex, /ConfigurableHttpAdapter/);
-  assert.match(docsIndex, /Do not claim there is\s+no supplier page/);
-  assert.match(docsIndex, /不要写“没有供应商页”/);
+  assert.match(docsIndexEn, /Provider contracts/);
+  assert.match(docsIndexZh, /供应商合约/);
+  assert.match(docsIndexEn, /provider_contracts\.rs/);
+  assert.match(docsIndexZh, /provider_contracts\.rs/);
+  assert.match(docsIndexEn, /ConfigurableHttpAdapter/);
+  assert.match(docsIndexZh, /ConfigurableHttpAdapter/);
+  assert.match(docsIndexEn, /Do not claim there is\s+no supplier page/);
+  assert.match(docsIndexZh, /存在独立的供应商页/);
 });

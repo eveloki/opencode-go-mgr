@@ -1,0 +1,158 @@
+[简体中文](protocol-conversion.zh-CN.md)
+
+# Protocol Conversion
+
+At request time the gateway never discovers or probes a protocol. It resolves
+the Alias, checks account eligibility, applies the adapter structural ceiling,
+then the saved provider contract, then the Chat Completions / Responses /
+Messages switches, and only then passthroughs or converts. Switches take
+precedence: a globally closed protocol is not used even if the model lists it
+as supported.
+
+Each known OpenCode Go model starts from a hardcoded **preferred** protocol
+and a **supported** set (maintained after test-account probes; not discovered
+at request time). Explicit probe success on **Providers** may confirm or add
+support only inside that adapter ceiling; probe failure is recorded and does
+not delete static capability. When the client protocol is supported and
+enabled, the gateway passthroughs the request and response. Otherwise it
+converts the **request body** to the preferred upstream protocol and the
+**response body** (or SSE stream) back to the client protocol.
+`MODEL_PROTOCOLS` remains the Go starting point. Custom API converts the
+client protocol to that account's declared upstream protocol, then still
+honors the Custom endpoint contract and switches. Conversion covers text,
+system instructions, images, tool calls and tool results, reasoning content,
+completion status, errors, and usage fields. Example: `glm-5.2` passthroughs
+Chat Completions, Responses, and Messages; `grok-4.5` is Responses-only and
+converts Chat / Messages / Gemini entries to Responses; `gpt-5.6-luna`
+prefers Responses and also passthroughs Chat; `glm-5.3` is Chat-only.
+
+| Preferred upstream | Models |
+| --- | --- |
+| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3`, `ox-alpha-free`, `big-pickle`, `mimo-v2.5-free`, `hy3-free`, `deepseek-v4-flash-free`, `ling-3.0-flash-free`, `laguna-s-2.1-free`, `longcat-2.0-free`, `north-mini-code-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free` |
+| OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.2-contributor-free` |
+| Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
+
+Passthrough matrix (live test-account probe, 2026-08-14). ✓ = client protocol
+is forwarded as-is; empty = converted to the model's preferred protocol.
+Source of truth: `MODEL_PROTOCOLS` in
+`crates/ocg-domain/src/protocol.rs`.
+
+`reasoning.effort` aliases (applied before forwarding or conversion):
+`muse-spark-1.2`, `muse-spark-1.2-contributor`, and
+`muse-spark-1.2-contributor-free` map `max` → `xhigh` (upstream rejects
+`max`). Other models pass `reasoning.effort` through unchanged.
+
+| Model | Preferred | Chat | Responses | Messages |
+| --- | --- | :---: | :---: | :---: |
+| `grok-4.5` | Responses | | ✓ | |
+| `glm-5.3` | Chat | ✓ | | |
+| `glm-5.2` | Chat | ✓ | ✓ | ✓ |
+| `glm-5.1` | Chat | ✓ | ✓ | ✓ |
+| `glm-5` | Chat | ✓ | ✓ | ✓ |
+| `gpt-5.6-luna` | Responses | ✓ | ✓ | |
+| `muse-spark-1.2` | Responses | | ✓ | |
+| `muse-spark-1.2-contributor` | Responses | ✓ | ✓ | |
+| `muse-spark-1.2-contributor-free` | Responses | | ✓ | |
+| `kimi-k3` | Chat | ✓ | | ✓ |
+| `kimi-k2.7-code` | Chat | ✓ | | |
+| `kimi-k2.6` | Chat | ✓ | | |
+| `kimi-k2.5` | Chat | ✓ | | |
+| `deepseek-v4-pro` | Chat | ✓ | ✓ | ✓ |
+| `deepseek-v4-flash` | Chat | ✓ | ✓ | ✓ |
+| `mimo-v2.5` | Chat | ✓ | | |
+| `mimo-v2.5-pro` | Chat | ✓ | | |
+| `hy3` | Chat | ✓ | | |
+| `ox-alpha-free` | Chat | ✓ | | |
+| `big-pickle` | Chat | ✓ | | |
+| `mimo-v2.5-free` | Chat | ✓ | | |
+| `hy3-free` | Chat | ✓ | | |
+| `deepseek-v4-flash-free` | Chat | ✓ | | |
+| `ling-3.0-flash-free` | Chat | ✓ | | |
+| `laguna-s-2.1-free` | Chat | ✓ | | |
+| `longcat-2.0-free` | Chat | ✓ | | |
+| `north-mini-code-free` | Chat | ✓ | | |
+| `nemotron-3-ultra-free` | Chat | ✓ | | |
+| `nemotron-3.5-lightning-free` | Chat | ✓ | | |
+| `minimax-m3` | Messages | ✓ | | ✓ |
+| `minimax-m2.7` | Messages | ✓ | | ✓ |
+| `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
+| `minimax-m2.5` | Messages | ✓ | | ✓ |
+| `minimax-m2.5-highspeed` | Messages | ✓ | | ✓ |
+| `qwen3.8-max` | Messages | ✓ | | ✓ |
+| `qwen3.7-max` | Messages | ✓ | | ✓ |
+| `qwen3.7-plus` | Messages | ✓ | | ✓ |
+| `qwen3.6-plus` | Messages | ✓ | | ✓ |
+| `qwen3.5-plus` | Messages | ✓ | | ✓ |
+
+Unknown model names are rejected with `400` on every supported client format
+(Chat Completions, Responses, Messages, and Gemini `generateContent` /
+`streamGenerateContent`). Unknown Claude Desktop aliases are also `400`. The
+gateway will not guess a protocol by trial because that could double-bill the
+request. See [Aliases](gateway.md#aliases).
+
+Gateway protocol endpoints accept JSON request bodies up to 16 MiB. This
+transport limit is separate from each model's context window. If a reverse
+proxy sits in front of OCG Manager, configure it to allow request bodies of
+at least 16 MiB or it may return `413 Payload Too Large` before the gateway
+sees the request.
+
+## Responses is stateless
+
+The following fields return `400` instead of being silently ignored:
+
+- `previous_response_id`
+- `conversation`
+- `store: true` or any `store` value other than `false`
+- `background: true`
+- `input_image.file_id` (the gateway has no Files API)
+
+Function, custom, and namespace tools convert normally. Hosted tools such as
+`web_search`, `web_search_preview`, and `tool_search` cannot run on
+OpenCode-Go; their declarations are dropped in automatic tool mode, and
+forcing one returns `400`.
+
+## Gemini is a client-only format
+
+The gateway never sends Gemini wire data upstream. It converts `contents`,
+text-only `systemInstruction`, supported `inlineData` images,
+`functionDeclarations`, function calls/results, JSON-schema output,
+generation options, Google error envelopes, usage metadata, and SSE frames to
+and from the known model's native Chat Completions or Messages protocol. Both
+the `v1beta` and `v1` URL forms are accepted.
+
+The compatibility boundary — nothing is silently pretended equivalent:
+
+- Non-empty `safetySettings` return `400 INVALID_ARGUMENT`, because a
+  different upstream protocol cannot preserve their safety semantics.
+  Omitted, `null`, and `[]` are accepted. Do not treat `safetySettings` as a
+  hint the upstream will enforce.
+- `generationConfig.topK` and `generationConfig.thinkingConfig` are accepted
+  as cross-protocol compatibility hints only; sampling, reasoning budgets,
+  and thought display are not guaranteed equivalent to a native Gemini
+  backend and depend on the selected OpenCode-Go model.
+- Other non-null generation options that cannot be preserved — including
+  `seed`, presence/frequency penalties, log-probability controls, and media
+  resolution — return `400` instead of being silently discarded.
+- `cachedContent`, `fileData`, Google Search, URL Context, Code Execution,
+  multimodal function-response parts, function response schemas/behavior,
+  `VALIDATED` function calling, candidate counts other than one, and response
+  modalities other than `TEXT` return `400`. Use base64 `inlineData` for PNG,
+  JPEG, GIF, or WebP images.
+- `countTokens` and `embedContent` return `501 UNIMPLEMENTED`; Gemini CLI can
+  fall back to local token estimation, and the gateway has no embeddings
+  route.
+
+## Claude Desktop aliases
+
+The dedicated entry accepts only the advertised aliases
+`claude-sonnet-4-6`, `claude-opus-4-6`, and `claude-haiku-4-5-20251001`.
+Before entering the existing Messages conversion path, the gateway rewrites
+the alias to the actual model saved from the Applications view; model
+capabilities, tool support, and context limits in the response still follow
+the actual model. The `sonnet`, `opus`, and `haiku` mappings are serialized
+inside `AppConfig`; omitted roles inherit the first configured role, while
+the dashboard returns the resolved three-role mapping.
+
+---
+
+[User guide index](../USER.md) · [简体中文](protocol-conversion.zh-CN.md) · [Docs index](../README.md)

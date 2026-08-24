@@ -2,8 +2,7 @@
 
 # OpenCode-Go 防滥用声明
 
-OCG Manager 只用于合法的本地账号管理和 Gateway 路由。它不是用于滥用
-OpenCode-Go、规避限制、批量养号、绕过验证或隐藏未授权使用的工具。
+OCG Manager 只用于合法的本地账号管理和 Gateway 路由。它不是用于滥用 OpenCode-Go、规避限制、批量养号、绕过验证或隐藏未授权使用的工具。
 
 请勿使用本项目：
 
@@ -14,13 +13,10 @@ OpenCode-Go、规避限制、批量养号、绕过验证或隐藏未授权使用
 - 运行垃圾信息、爬取、撞库、欺诈或其他滥用流量；
 - 将自动化滥用伪装成本地客户端的正常请求。
 
-OCG Manager 会记录上游 429 冷却时间，并跳过冷却中的账号，因为尊重上游限制是
-项目设计的一部分。
+OCG Manager 会记录上游 429 冷却时间，并跳过冷却中的账号，因为尊重上游限制是项目设计的一部分。
 
-使用者有责任遵守 OpenCode-Go 的服务条款、当地法律，以及所访问上游服务的规则。
-维护者可以拒绝支持疑似滥用的工作流。
+使用者有责任遵守 OpenCode-Go 的服务条款、当地法律，以及所访问上游服务的规则。维护者可以拒绝支持疑似滥用的工作流。
 
 ---
 
-[English](OPENCODE_GO_ANTI_ABUSE.md) · [文档索引](README.md) ·
-[回到 README](../README.zh-CN.md)
+[English](OPENCODE_GO_ANTI_ABUSE.md) · [文档索引](README.md) · [回到 README](../README.zh-CN.md)

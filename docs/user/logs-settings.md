@@ -1,0 +1,140 @@
+[简体中文](logs-settings.zh-CN.md)
+
+# Logs And Settings
+
+## Logs
+
+The **Logs** view shows the rolling buffer of requests the gateway has
+forwarded: timestamp, selected provider/offering, route account, credential
+account, model, status code, the upstream error if any, and the streamed usage
+when the upstream emitted a usage chunk. Filters cover provider, offering,
+route account, credential account, model, status, time range, and client Key.
+Each stored row keeps the request identity separate from the upstream
+identity. There is no `requested_alias` field:
+
+- `requested_model` — the alias or model name the client sent
+- `resolved_alias` — the canonical kebab alias when one exists
+- `upstream_model` — the Plan's raw upstream ID
+
+plus `provider_id` and `offering_id`. The existing model filter exact-matches
+any of those identities or the legacy `model` column. Native cost
+(`native_cost_value`, `native_cost_unit`, `native_cost_currency`) is optional
+and present only when the offering supplies enough pricing evidence.
+
+Each row also preserves raw supplier cost, quota debit, and effective paid cost
+when the selected offering supplies enough pricing evidence. These are distinct
+values: an allowance only changes the quota-debit multiplier; it does not make
+a model or provider routable.
+
+- Chat streaming requests set `stream_options.include_usage` so OpenAI-compatible
+  upstreams emit a usage chunk. Rows with `success_no_usage` mean the stream
+  still finished without one. A usage chunk makes token counts accurate; quota
+  use is still estimated from the active OpenCode Go pricing snapshot. Registered
+  Zen free models (`big-pickle`, `mimo-v2.5-free`, and other ids on the Zen
+  allowlist) record tokens with `cost_state=free` and do not enter Go quota
+  totals. Go models whose names contain `free` (currently `ox-alpha-free`) stay
+  on Go and are unpriced while the official table lists dash rates. Custom API
+  rows record `cost_state=unknown` with no provider quota debit. Expand a row to
+  see the request ID and diagnostic
+  detail.
+- An `outcome_unknown` row means the upstream may already have completed and
+  charged the request, but the gateway lost the response or timed out. Such a
+  request is not replayed automatically and its local cost remains unknown.
+- The **Key** filter narrows rows and the summary totals to one client key.
+  Its options come from the log table itself, so disabled, deleted, and
+  otherwise unknown keys stay filterable. **Unattributed** selects rows
+  written before multi-key support; a background task attributes those to
+  the primary key after upgrading, so usage from before the upgrade is
+  counted toward the primary key as an approximation.
+
+## Settings
+
+The **Settings** view exposes the persistent gateway configuration:
+
+- **Gateway Port** — the port the gateway binds (default `9042`).
+- **Upstream URL** — the OpenCode-Go base URL.
+- **Routing mode** — strict priority, global sticky, or round robin. All three
+  modes apply the one global card order only after filtering incompatible,
+  disabled, cooling, or already-failed cards; they do not create a provider or
+  model routing table. Only one base mode is active at a time.
+- **Conversation sticky** — an overlay switch, not a fourth routing mode.
+  When on, the gateway prefers the `X-OCG-Conversation-Id` request header;
+  without it, it uses a prompt fingerprint (system / tools / first user
+  message). If no conversation key can be built, the base routing mode is
+  used. Similar prompts may share a binding.
+- **Outbound proxy** — shared by every account. Automatic, manual, and force
+  direct apply one process-wide policy; **Per-model list** (below) splits chat
+  forwarding by model instead.
+  `Automatic (system / environment)` reads `HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY`, and `NO_PROXY`; Windows also reads the system proxy and connects
+  directly when none is configured. `Manual HTTP proxy` strictly routes all
+  HTTP/HTTPS targets through one `http://` or `https://` proxy such as
+  `http://127.0.0.1:7890`; a proxy failure never silently falls back to a direct
+  connection. `Force direct connection` ignores system and environment proxy
+  configuration. Proxy URLs cannot contain credentials. For these three modes,
+  the policy covers model forwarding (OpenCode Go, Zen Free, and Custom API),
+  account-key tests and Custom verification, official OpenCode Go usage API,
+  pricing refreshes, release checks, and signed desktop installer downloads;
+  authenticated `GET /v1/models` and protected
+  `GET /dashboard/api/v3/application-models` are local lists and do not use
+  this outbound path. The browser sidecar is outside its scope. **Test
+  connection** uses the unsaved form values against the current upstream. Any
+  HTTP status proves network reachability, without running model inference or
+  incurring model usage. In list mode it probes only the
+  direction's default leg, not a listed model's real forwarding path.
+- **Per-model list** (fourth proxy mode) — routes chat forwarding per model
+  instead of process-wide. Pick a direction and check models from the known
+  registry; the list accepts exact known model ids only (no patterns or
+  free-text). With the **whitelist** direction, listed models — for example
+  region-restricted ones such as `gpt-5.6-luna`, `grok-4.5`, or
+  `muse-spark-1.2` — connect through the proxy URL while every unlisted model
+  connects directly (ignoring system/environment proxies, exactly like force
+  direct). The **blacklist** direction inverts this: listed models connect
+  directly and everything else uses the proxy URL. Both directions require the
+  proxy URL; an empty list or an empty URL cannot be saved. Non-chat outbound
+  traffic (pricing refreshes, official usage sync, update checks, and signed
+  downloads) always follows the direction's default leg: direct for a
+  whitelist, the proxy URL for a blacklist — so switching from `Manual HTTP
+  proxy` to a whitelist changes that traffic to direct. The account-key test
+  and **Test connection** likewise probe the default leg, so they do not
+  represent the real forwarding path of a listed model. Free-channel models
+  can be listed, but Zen free quota is shared by egress IP, so routing them
+  through a proxy changes which quota they draw from. Every forward-log row
+  (successes included) records the leg it used — `proxy`, `direct`, or `auto`
+  — in its expanded details; rows from before this feature show "not
+  recorded". List mode requires this version or newer; an older binary cannot
+  start on a config saved with `list` mode — switch back to manual or direct
+  mode first when rolling back.
+- **OpenCode Go invite URL** — the restricted HTTPS invite used by managed
+  account onboarding. Fresh installs may ship a demo default; replace it with
+  your own link before a real signup. Creating a managed draft can also edit
+  and write this value back.
+- **Downstream Access Root** — see [Connection Center](dashboard.md#connection-center).
+- **Auto-start on login** — only the installed Windows desktop build exposes
+  this switch. Development builds, the CLI, Docker, macOS, and Linux
+  dashboards hide it.
+- **Dock icon** — only the macOS desktop build exposes this switch. Turning
+  it off keeps the menu-bar icon available. Windows, Linux, CLI, and Docker
+  dashboards hide it.
+- **Connect / non-stream / stream-idle timeouts** — default to 30, 900, and
+  300 seconds. The non-stream value is a whole-request deadline; the stream
+  idle value is enforced between response chunks. Existing installations are
+  migrated from 30/120/300 only when that complete old default tuple is still
+  untouched.
+- **Check for updates / Update now** — updater-enabled installed desktop
+  builds check the latest GitHub Release and can download, verify, and
+  install its signed platform package. Development builds, the CLI, and
+  Docker keep the release-link/manual-upgrade path. The host must be able to
+  reach GitHub; a failed check or install does not affect gateway forwarding.
+- **Zen Free** — enable or disable it from its account card. Use
+  **Providers** to refresh the Free catalog, inspect protocol evidence, and
+  toggle Chat Completions / Responses / Messages.
+
+Configuration settings are written to SQLite and reloaded on the next start.
+The Settings resource never includes Key plaintext. Saving settings uses the
+same `expectedRevision` / `processGeneration` tokens as other Dashboard V3
+writes. The update check is an on-demand action and is not persisted.
+
+---
+
+[User guide index](../USER.md) · [简体中文](logs-settings.zh-CN.md) · [Docs index](../README.md)

@@ -1,0 +1,30 @@
+[English](install.md)
+
+# 安装与首次启动
+
+## Windows 10/11 x64
+
+1. 运行 NSIS 安装包 `ocg-manager_<version>_windows-x64-setup.exe`，按当前用户安装，不需要管理员权限。
+2. 在开始菜单中启动 **OCG Manager**。正常启动会在系统浏览器打开管理面板；之后可从托盘图标重新打开。
+3. 当前 Windows 包未签名，SmartScreen 可能弹出警告，点击 **更多信息 → 仍要运行** 继续。
+4. 在 **账号** 视图添加 OpenCode-Go 账号，复制 Key，把客户端指向 `http://127.0.0.1:9042/v1`。
+5. 卸载时会询问是否删除 `%USERPROFILE%\.ocg-mgr`；静默升级与静默卸载保留数据目录。
+
+## macOS 11+ Intel / Apple Silicon
+
+1. 打开 Universal DMG，把 **OCG Manager** 拖入 **Applications**。
+2. 应用使用临时签名（ad-hoc），首次启动可能被 Gatekeeper 拦截。打开 **Privacy & Security**，点击 **Open Anyway** 放行。
+3. 启动应用。正常启动会在系统浏览器打开管理面板；之后可从托盘图标重新打开。添加账号，复制 Key，配置客户端。
+
+## Linux x64
+
+1. 安装前先核对 `SHA256SUMS`。
+2. 用发行版包管理器安装 `.deb`，或对 AppImage 执行 `chmod +x ocg-manager_<version>_linux-x64.AppImage`。
+3. 启动可执行文件。正常启动会在系统浏览器打开管理面板；之后可从托盘图标重新打开。
+4. 数据保存在 `~/.ocg-mgr/`。
+
+已安装的 Windows 版自动启动时只会进入托盘，不会主动打开浏览器。
+
+---
+
+[用户指南索引](../USER.zh-CN.md) · [English](install.md) · [文档索引](../README.zh-CN.md)

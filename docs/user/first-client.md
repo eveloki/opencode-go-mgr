@@ -1,0 +1,55 @@
+[简体中文](first-client.zh-CN.md)
+
+# Connect Your First Client
+
+1. In **Accounts**, add an OpenCode Go account with an officially distributable
+   API key. The login account is optional; when entered first, it is copied
+   into the required display name until you edit that name yourself. The
+   dashboard does not collect or manage an OpenCode login password.
+2. In the dashboard's **Connection Center**, copy the **Key** and the
+   **API Base URL** (`http://127.0.0.1:9042/v1`).
+3. Point your client at the base URL with the Key. The
+   **Applications** view has a per-client guide for 16 common tools.
+4. Verify the setup with a real request.
+
+The Key is the only credential a client needs, and it works in three
+header forms: `Authorization: Bearer <key>`, the Anthropic-compatible
+`x-api-key: <key>`, or the Gemini-compatible `x-goog-api-key: <key>`. It is a
+local secret unrelated to the OpenCode-Go account key, which the gateway
+retrieves from SQLite and injects on the upstream side itself.
+
+Minimal POSIX-shell checks for all five client formats:
+
+```bash
+BASE=http://127.0.0.1:9042
+KEY=replace-with-gateway-key
+
+# OpenAI Chat Completions
+curl "$BASE/v1/chat/completions" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ping"}],"stream":false}'
+
+# OpenAI Responses
+curl "$BASE/v1/responses" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","input":"ping","store":false}'
+
+# Anthropic Messages
+curl "$BASE/v1/messages" -H "x-api-key: $KEY" \
+  -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
+
+# Claude Desktop: the alias is rewritten to the model saved in the Applications view
+curl "$BASE/claude-desktop/v1/messages" -H "x-api-key: $KEY" \
+  -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
+
+# Gemini generateContent
+curl "$BASE/v1beta/models/deepseek-v4-flash:generateContent" \
+  -H "x-goog-api-key: $KEY" -H "Content-Type: application/json" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}'
+```
+
+---
+
+[User guide index](../USER.md) · [简体中文](first-client.zh-CN.md) · [Docs index](../README.md)
