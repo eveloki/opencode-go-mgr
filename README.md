@@ -19,9 +19,9 @@ Live routing is OpenCode Go, Zen Free, and Custom API.
 
 ## Highlights
 
-- **One port, four client families** — OpenAI Chat Completions / Responses,
-  Anthropic Messages, Gemini `generateContent` / `streamGenerateContent`,
-  a local Alias list, and Claude Desktop aliases.
+- **One port, five wire formats** — OpenAI Chat Completions, OpenAI Responses,
+  Anthropic Messages, Gemini `generateContent` / `streamGenerateContent`, and
+  Claude Desktop.
 - **Local multi-account routing** — drag account cards to persist one global
   order; strict priority, sticky, and round-robin reuse it after capability
   filtering.
@@ -101,7 +101,7 @@ pins, and source builds: [User guide — Docker](docs/USER.md#docker).
 
 ## Models
 
-Each known model has a hardcoded **preferred** OpenCode-Go protocol and a
+OpenCode Go models have a hardcoded **preferred** upstream protocol and a
 probed **supported** set. Matching client protocols passthrough; others
 convert. The gateway never probes a protocol at request time — that could
 double-bill.
@@ -111,13 +111,13 @@ double-bill.
 | OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3`, `ox-alpha-free` |
 | OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor` |
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
-| Zen free (Chat) | `big-pickle`, `mimo-v2.5-free`, `hy3-free`, `nemotron-3-ultra-free`, `laguna-s-2.1-free` |
-| Zen free (Responses) | `muse-spark-1.2-contributor-free` |
 
 `ox-alpha-free` (Ox Alpha Free) is a Go Chat model; the name contains `free`
-but it stays on `/zen/go`. Only the registered Zen promo set above uses
-`https://opencode.ai/zen`. The Zen catalog is promotional and changes; those
-rows are the live-verified set from 2026-08-21.
+but it stays on `/zen/go`. Zen Free is not a fixed model list: an administrator
+explicitly refreshes its official catalog, and the manager persists the last
+successful normalized `-free` snapshot. A failed or empty refresh retains the
+previous snapshot; published aliases and protocol entries come from that saved
+catalog.
 
 Gemini is a client format only (requests never go to Google). Claude Desktop
 aliases are rewritten to the mapping saved in **Applications**. Clients should
@@ -138,6 +138,7 @@ and true vs false circuit breakers:
 | --- | --- | --- |
 | End users | [User guide](docs/USER.md) | [用户指南](docs/USER.zh-CN.md) |
 | Maintainers | [Maintainer guide](docs/MAINTAINER.md) | [维护者指南](docs/MAINTAINER.zh-CN.md) |
+| Schema v27 runbook | [V3 schema recovery](docs/MAINTAINER-v3-migration.md) | [V3 库恢复](docs/MAINTAINER-v3-migration.zh-CN.md) |
 | Policy | [Anti-abuse statement](docs/OPENCODE_GO_ANTI_ABUSE.md) | [防滥用声明](docs/OPENCODE_GO_ANTI_ABUSE.zh-CN.md) |
 | Index | [docs/](docs/README.md) | bilingual |
 
@@ -161,8 +162,11 @@ pnpm run dev
 
 Exit any running release tray app first so the single-instance lock and port
 `9042` are free. Tauri starts Vite and opens
-`http://127.0.0.1:30001/dashboard/` once the gateway is ready. Checks, builds,
-and the release pipeline: [Maintainer guide](docs/MAINTAINER.md).
+`http://127.0.0.1:30001/dashboard/` once the gateway is ready. The dashboard
+SPA talks HTTP `/dashboard/api/v3`; authenticated unversioned
+`/dashboard/api` REST is retired. Checks, builds, and the release pipeline:
+[Maintainer guide](docs/MAINTAINER.md). Schema v27 runbook:
+[V3 schema recovery](docs/MAINTAINER-v3-migration.md).
 
 ## License
 

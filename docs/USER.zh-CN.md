@@ -13,6 +13,7 @@
 - [接入第一个客户端](#接入第一个客户端)
 - [升级、备份、恢复与卸载](#升级备份恢复与卸载)
 - [管理面板](#管理面板)
+  - [面板 V3](#面板-v3)
   - [接入中心](#接入中心)
   - [接入 Key](#接入-key)
   - [应用教程](#应用教程)
@@ -43,8 +44,8 @@ OCG Manager 把供应商 API Key 保存在本地 SQLite（官方分发的 OpenCo
 受信的 Custom API 目的地），并通过回环 Gateway `http://127.0.0.1:9042/v1` 暴露给
 客户端。每张账号卡对应一个 **Plan**（provider + offering）。客户端发送本地注册表里的
 **别名** 或合格 Custom 模型 ID；当前可路由的是 OpenCode Go、OpenCode Zen Free 与
-Custom API。同一个 Gateway 同时承载 Vue 3 管理面板（路径 `/dashboard/`）和面板的
-JSON API（路径 `/dashboard/api`）。每个节点都独立运行——项目不提供远端同步、
+Custom API。同一个 Gateway 同时承载 Vue 3 管理面板（路径 `/dashboard/`）。
+当前面板 SPA 通过 `/dashboard/api/v3` 读写 JSON。每个节点都独立运行——项目不提供远端同步、
 Admin API、遥测。
 
 Gateway 的四件事：
@@ -165,18 +166,28 @@ macOS 与 Linux 用户按下文的直接替换方式完成这一次过渡。装�
 Release 后，后续签名桌面版可在 **设置** 中一键下载并安装。CLI 与 Docker 仍需
 手动升级。
 
-### 多 Key 升级与降级说明
+### 接入 Key 升级与 schema v27
 
-从单 Key 版本升级是无感的：既有 Key 继续作为 **主 Key**，值不变，客户端
-无需改动即可继续鉴权；后台任务会把历史转发日志归到主 Key（升级前用量统一
-计入主 Key，属近似归因）。
+从单 Key 版本升级会把既有凭证继续作为 **主 Key**（固定 id
+`00000000-0000-0000-0000-000000000001`），值不变，客户端无需改动即可继续鉴权。
+后台任务会把没有客户端 Key id 的历史转发日志归到主 Key（升级前用量统一计入
+主 Key，属近似归因）。
 
-升级后创建的子 Key 存放在独立的数据库表中，单 Key 旧版本既不读取也不重写
-该表。因此降级到旧版是安全的：主 Key 值原样保留，所有子 Key 及其启用/停用/
-删除状态在再次升级后完好如初，任何已撤销的凭证都不可能因降级而复活。只是
-旧版本运行期间子 Key 暂时无法鉴权。
+主 Key 与额外的子 Key 现在同在一张 `access_keys` 表中。config JSON 不再是
+主 Key 值的数据库权威来源。未删除的子 Key 最多 64 把；删除子 Key 是软删除：
+保留名称供日志归因，并清除明文。
 
-### Plan 迁移（schema v26）
+不要用旧版程序打开 schema v27 数据库。已有（非空）库会先迁到 schema v26，再在
+任何 v27 写入前生成一份不覆盖的同级快照 `data.sqlite.pre-v3.<timestamp>.bak`
+及其 SHA-256 sidecar。全新空数据目录会直接创建 schema v27，不写这份副本。
+pre-v3 文件只能还原到仍支持 v26 的程序，或用于重试尚未提交的 v27 打开；它是
+v26 快照，不能替代完整备份。若必须运行更旧的二进制，请先还原该 pre-v3
+（或更早）备份。单 Key 时代的程序不会读取额外 Key；旧版本运行期间子 Key
+无法鉴权，已撤销的值也不会因降级而复活。
+
+### 数据库迁移（schema v27）
+
+当前数据库 schema 是 **v27**。历史库仍会按下面的较早步骤一路迁到这里。
 
 schema v23 保存 Plan 验证状态、别名 / 上游日志身份（`requested_model`、
 `resolved_alias`、`upstream_model`）、可选的原生成本（`native_cost_value`、
@@ -190,9 +201,13 @@ schema v24 为转发日志新增实际代理路由段（`auto` / `proxy` / `dire
 新增供应商模型目录快照表，用于保存 Zen Free 模型。schema v26 新增范围级供应商
 合约：本地目录、Chat / Responses / Messages 开关，以及按模型的协议证据。手动
 刷新目录成功后原子替换快照；失败或过滤结果为空时保留旧快照。禁用账号不会删除
-已保存的合约；重新启用会恢复该合约。这个加法迁移不会单独生成 pre-v24、pre-v25
-或 pre-v26 备份；上文的 pre-v23 回滚副本仍是迁移安全边界。v25 的 Zen 目录行会
+已保存的合约；重新启用会恢复该合约。这些加法迁移不会单独生成 pre-v24、pre-v25
+或 pre-v26 备份；上文的 pre-v23 回滚副本仍是更早的迁移安全边界。v25 的 Zen 目录行会
 投影到 Zen 供应商范围。
+
+schema v27 把主 Key 与额外 Key 复制进 `access_keys`，删除账号表上遗留的
+usage-sync 列（官方用量同步元数据已在 `provider_usage_sync_state`），并为已有
+库生成上文的 pre-v3 快照。这次复制不会改写官方用量同步元数据。
 
 若源库还早于 schema v22，同一次启动还会额外保留
 `data.sqlite.pre-v22.<timestamp>.bak` 作为更早的回滚点。每次
@@ -290,6 +305,36 @@ Français、Deutsch、Português (Brasil)、Русский，默认简体中文�
 在 `localStorage` 的 `ocg-manager.locale`；如果浏览器拒绝持久化（例如隐私窗
 口），当前会话仍能正常使用。
 
+### 面板 V3
+
+当前面板 SPA **只** 访问 `/dashboard/api/v3`。接入中心、接入 Key、账号、供应商、
+应用、日志、设置，以及登录 / 注册 / 退出，都走这条数据路径。写入会带上最近一次
+见到的 `expectedRevision` 与 `processGeneration`。若同一运行进程中的另一个标签页先
+保存，服务端会以 HTTP 409（`revisionConflict`）拒绝陈旧写入。当前 SPA 尚不能用这个
+真实错误码自动恢复冲突，因此请手动刷新受影响的页面并重新提交。这些 token 只属于
+当前进程；多个进程共用一个数据目录时不构成统一 CAS 域。OpenCode Go 价格快照另有
+独立的 `pricingRevision`，与这些设置 token 不是同一套计数。
+
+明文 Key 只出现在接入中心载荷（`GET /dashboard/api/v3/connection`）里。Settings
+资源从不包含 Key 值。浏览器只把这些秘密留在内存；退出登录或 401 会话失效会立即
+清除。
+
+七个视图在切换标签时保持缓存（`KeepAlive`）。回到某个视图会刷新该页的服务端数据；
+仪表盘还会在浏览器标签重新回到前台时刷新。目录、价格与供应商模型列表不会自动轮询。
+官方用量同步是服务端调度，不是面板轮询。从设置页开始签名桌面安装后，该页可能轮询
+安装进度，直到进程重启。
+
+仍在调用已退役 `/dashboard/api` REST（而不是 `/dashboard/api/v3`）的旧版缓存页面
+会收到 HTTP 410，错误码 `dashboardV2Removed`，并提示先刷新页面，不够再升级。未登录
+的退役 REST 会先返回 401。两类 V2 路径仅作为兼容例外保留，**不是**当前 SPA 数据
+路径：`/dashboard/api/auth/status`、`/dashboard/api/auth/register`、
+`/dashboard/api/auth/login`、`/dashboard/api/auth/logout`，以及
+`/dashboard/api/browser/sessions/{token}/ws`。当前面板改用 V3 的鉴权与浏览器
+WebSocket 路由。
+
+面板上没有 **Ping** 按钮。要从本产品探测 OpenCode Go Key，请用 CLI `key ping`
+或发一次真实客户端请求。Custom 卡片仍有 **验证连接**；托管注册仍有 Key 验证。
+
 ### 接入中心
 
 首屏第一个面板——也是始终在最上方的面板——是 **接入中心**，它集中展示客户端
@@ -324,10 +369,14 @@ Français、Deutsch、Português (Brasil)、Русский，默认简体中文�
 
 ### 接入 Key
 
-**接入 Key** 视图是客户端凭证的主名单：
+**接入 Key** 视图是客户端凭证的主名单。主 Key 与子 Key 一起存放在
+`access_keys`（schema v27）。新建、改名、启停、重新生成和删除都走 Dashboard V3；
+成功变更会 bump settings revision。变更回执不含明文——页面会重新加载接入中心
+以展示新值。
 
-- **主 Key** 恒为有效，不能停用或删除；用重置生成新值，也是客户端教程默认
-  展示的凭证。没有自定义主 Key 输入框。
+- **主 Key** 恒为有效，不能停用或删除；用重置生成新值。其 id 为
+  `00000000-0000-0000-0000-000000000001`。它也是客户端教程默认展示的凭证。
+  没有自定义主 Key 输入框。
 - **子 Key** 是额外创建的凭证，可命名、重命名、启用/停用、重新生成或删除——
   适合每台设备分发一把。删除子 Key 是软删除：立即失效且明文被清除，但转发
   日志仍能按名称归因。子 Key 的值不能与主 Key 或其他子 Key 相同；未删除的
@@ -371,7 +420,7 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 的代理模式，请按 CC Switch 保存的配置目录单独备份，不要把 OCG 直连配置和代理配置
 混写。
 
-应用选择器列表来自受保护的 `GET /dashboard/api/application-models`：当前可路由
+应用选择器列表来自受保护的 `GET /dashboard/api/v3/application-models`：当前可路由
 的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。
 空交集是 `[]`，不是错误。这份列表 **不是** 带鉴权的 `GET /v1/models`：后者公布
 当前可路由的 Go 别名、已保存 Zen Free 目录，并并入合格 Custom 声明 ID。
@@ -424,14 +473,16 @@ Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和
 独立行对齐（$1.40 / $4.40 / $0.26，与官方 Go 表一致；Usage 仍为 $15）。
 
 Claude Desktop 是例外，它的模型映射是持久化的：复制配置前，选中的 `sonnet`、
-`opus`、`haiku` 目标模型会通过受保护的面板 API 保存到 SQLite。留空的角色回退
+`opus`、`haiku` 目标模型会通过受保护的
+`GET/PUT /dashboard/api/v3/claude-desktop/models` 保存到 SQLite。留空的角色回退
 到第一个已配置模型，三个角色不能同时为空。它的恢复操作回到当前页面已加载或
 最后保存的映射。
 
 ### 账号
 
-每张账号卡绑定一个 **Plan**（provider + offering）；该 Plan 需要时绑定一份凭据，另有
-一个独立额度池。所有卡片共享一份可手动持久化的全局顺序；请求先经过能力过滤，严格
+每张账号卡绑定一个 **Plan**（provider + offering）；该 Plan 需要时绑定一份凭据。
+额度权威随 Plan 而异：OpenCode Go 按账号 / Key 统计，Zen Free 按出口 IP 共享额度与
+冷却，Custom API 不做供应商额度核算。所有卡片共享一份可手动持久化的全局顺序；请求先经过能力过滤，严格
 优先级、全局粘性和轮询三种路由再复用这份顺序。没有按模型划分的额度池。面板
 仍是七个视图：**仪表盘**、**接入 Key**、**账号**、**供应商**、**应用**、**日志**、
 **设置**。
@@ -452,10 +503,11 @@ Claude Desktop 是例外，它的模型映射是持久化的：复制配置前�
 | SCNet Token Plans | `scnet` / `token-plan-basic`、`token-plan-standard`、`token-plan-premium` | 否 | Key 必须以 `sk-tp-` 开头；保存为禁用的 `pending` 草稿；验证返回 `501`；官方交互式使用限制见下 |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地；创建/更新后仍为禁用 `pending`；先验证再显式启用；合格声明 ID 会出现在 `/v1/models`；费用 unpriced/unknown，不扣额度 |
 
-所有持久化变更路径（Database、dashboard、CLI、Tauri）都会在改动行、revision 或时间戳
+所有持久化变更路径（数据库闸口，以及 dashboard / CLI 共用服务）都会在改动行、revision 或时间戳
 之前，拒绝为目录内 `routable=false` offering（GOAT 与全部 SCNet tier）设置
 `enabled=true`。Custom 在目录中可路由，但创建/更新后仍为禁用 `pending`；验证状态
-不是 `verified` 时拒绝启用。禁用草稿仍可保存。
+不是 `verified` 时拒绝启用。禁用草稿仍可保存。桌面 UI 只经 Dashboard V3 HTTP 变更，
+没有独立的 Tauri invoke 变更路径。
 
 对于 OpenCode Go、Command Code GOAT 和 SCNet Token Plans，不要把消费者订阅凭据、
 浏览器 Cookie 或反向代理凭据当作账号 Key。该限制不约束管理员配置的 Custom Bearer 或
@@ -502,7 +554,7 @@ OpenCode Go；Custom 把客户端协议转换到该账号声明的上游协议�
 - **Key 账号**直接保存一份官方分发的 OpenCode Go API Key。
 - **托管账号**先创建一条禁用的可恢复草稿，再按向导完成登录身份（可选）、邀请
   注册、支付、Key 验证。草稿与当前步骤会立即写入 SQLite；关闭页面或重启服务后
-  可继续。注册中账号不会参与 Gateway 路由，也不会显示用量、测试或启用控件。
+  可继续。注册中账号不会参与 Gateway 路由，也不会显示用量、验证或启用控件。
 
 托管注册与独立浏览器 Profile 是 **Beta** 功能，尚未经过充分测试；请勿依赖其用于
 生产环境。
@@ -641,7 +693,7 @@ Key 的额度。
 
 请求路径不会发现或探测。流程是：别名 → 账号资格 → 适配器上限 → 已保存合约 →
 协议开关 → 透传或转换。带鉴权的 `GET /v1/models` 与受保护的
-`GET /dashboard/api/application-models` 只公布当前可路由且有有效启用协议的模型。
+`GET /dashboard/api/v3/application-models` 只公布当前可路由且有有效启用协议的模型。
 应用选择器仍是 Go 别名 ∩ 当前价格快照，不含 Custom。
 
 ### 日志
@@ -685,7 +737,11 @@ account、模型、状态、时间范围与客户端 Key 筛选。每条存储�
 - **Gateway 端口**：Gateway 监听端口（默认 `9042`）。
 - **上游地址**：OpenCode-Go 基础 URL。
 - **路由方案**：严格优先级、全局粘性或轮询。三种方案都会先过滤不兼容、禁用、冷却或
-  本请求已失败的卡片，再使用同一份全局卡片顺序；不会生成供应商或模型路由表。
+  本请求已失败的卡片，再使用同一份全局卡片顺序；不会生成供应商或模型路由表。同一时刻
+  只能启用一种基础方案。
+- **对话粘性**：叠加开关，不是第四种路由方案。开启后优先使用请求头
+  `X-OCG-Conversation-Id`；未提供时用 Prompt 指纹（system / tools / 首条 user）。
+  无法生成会话 key 时回退基础路由。相似提示词可能绑到同一账号。
 - **出站代理**：不区分账号。`自动（系统 / 环境）`、`手动 HTTP 代理`、`强制直连`
   是进程全局策略；**按模型名单**（下一条）则按模型分流聊天转发。`自动（系统 / 环境）` 会读取
   `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，Windows 还会读取系统
@@ -695,9 +751,8 @@ account、模型、状态、时间范围与客户端 Key 筛选。每条存储�
   前三种模式下，该策略覆盖模型转发（OpenCode Go、Zen Free 与 Custom API）、账号 Key 测试与
   Custom 验证、OpenCode Go 官方用量接口、价格刷新、Release 检查以及已安装桌面版
   的签名升级下载等核心 HTTP 请求；带鉴权的 `GET /v1/models` 与受保护的
-  `GET /dashboard/api/application-models` 是本地列表，不走这条出站路径。浏览器
-  Sidecar 不在此设置范围内。**测试连接**
-  **测试连接**使用尚未保存的表单值访问当前上游，收到任意 HTTP 状态都表示网络
+  `GET /dashboard/api/v3/application-models` 是本地列表，不走这条出站路径。浏览器
+  Sidecar 不在此设置范围内。**测试连接**使用尚未保存的表单值访问当前上游，收到任意 HTTP 状态都表示网络
   链路可用，且不会发起模型推理或产生模型费用。名单模式下它只验证方向默认段，
   不能代表名单内模型的真实转发路径。
 - **按模型名单**（第四种代理模式）：按模型而不是进程全局分流聊天转发。选择方向并
@@ -732,7 +787,9 @@ account、模型、状态、时间范围与客户端 Key 筛选。每条存储�
 - **Zen Free**：在账号卡上直接启用或关闭；在 **供应商** 页刷新 Free 模型目录、
   查看协议证据，并切换 Chat Completions / Responses / Messages。
 
-配置项写入 SQLite，下次启动时重新加载；检查更新是按需动作，不会持久化。
+配置项写入 SQLite，下次启动时重新加载。Settings 资源从不包含 Key 明文。保存设置
+使用与其他 Dashboard V3 写入相同的 `expectedRevision` / `processGeneration`
+token。检查更新是按需动作，不会持久化。
 
 ## Gateway 行为
 
@@ -753,7 +810,8 @@ Gateway 监听 `http://<bind>:<port>`，暴露：
 | `GET`  | `/claude-desktop/v1/models` | Claude Desktop 可选别名列表 |
 | `POST` | `/claude-desktop/v1/messages` | Claude Desktop Messages；改写三个 Claude 模型别名 |
 | `GET`  | `/dashboard/` | Vue 3 管理面板（HTML） |
-| `*`    | `/dashboard/api/...` | 管理面板 JSON API |
+| `*`    | `/dashboard/api/v3/...` | 当前管理面板 JSON API |
+| `*`    | `/dashboard/api/...` | 已退役的 V2 REST（已登录返回 410 `dashboardV2Removed`），不含已标明的 V2 鉴权与浏览器 WebSocket 兼容路由 |
 
 默认监听 `127.0.0.1:9042`。CLI 可用 `serve --host 0.0.0.0` 覆盖监听地址，用
 `serve --port <port>` 覆盖端口。桌面端同样绑定回环，并由 Tauri 单实例锁防止
@@ -769,7 +827,12 @@ Gateway API 必须携带 **Key**，可使用 `Authorization: Bearer <key>`、
 Custom API 只构造已配置的 Bearer 或 `x-api-key`，永不转发 dashboard 或客户端
 凭据。
 
-管理面板的鉴权模式取决于监听地址：
+管理面板的鉴权模式取决于监听地址。当前 SPA 使用
+`/dashboard/api/v3/auth/status`、`/dashboard/api/v3/auth/register`、
+`/dashboard/api/v3/auth/login` 与 `/dashboard/api/v3/auth/logout`。注册、登录、
+退出需要与其他 V3 写入相同的 `expectedRevision` / `processGeneration` token。
+对应的 `/dashboard/api/auth/...` 路由只作为已标明的 V2 兼容例外，供缓存的旧页面
+使用，不是当前 SPA 数据路径。
 
 - **回环监听（默认）**：直接发到回环地址的请求跳过面板登录；但只要带有
   `Forwarded`、`x-forwarded-for`、`x-forwarded-proto` 或 `x-real-ip` 中任一请求
@@ -793,7 +856,7 @@ Custom API 只构造已配置的 Bearer 或 `x-api-key`，永不转发 dashboard
 存在 Go 账号。合格 Custom ID 来自 enabled + verified + ready 且有 Key 的 Custom
 账号。动态或探测确认的模型不会自动获得新的稳定别名。
 
-受保护的 `GET /dashboard/api/application-models` 是另一份本地列表：当前可路由
+受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：当前可路由
 的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。
 空交集是 `[]`。它不含 Custom ID，也不选账号、不调用上游。
 
@@ -844,12 +907,12 @@ Claude Desktop 仍是独立的三角色别名层（`claude-sonnet-4-6`、`claude
 
 | 推荐上游协议 | 模型 |
 | --- | --- |
-| OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`、`ox-alpha-free`、`big-pickle`、`mimo-v2.5-free`、`hy3-free`、`nemotron-3-ultra-free`、`laguna-s-2.1-free` |
+| OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`、`ox-alpha-free`、`big-pickle`、`mimo-v2.5-free`、`hy3-free`、`deepseek-v4-flash-free`、`ling-3.0-flash-free`、`laguna-s-2.1-free`、`longcat-2.0-free`、`north-mini-code-free`、`nemotron-3-ultra-free`、`nemotron-3.5-lightning-free` |
 | OpenAI Responses | `grok-4.5`、`gpt-5.6-luna`、`muse-spark-1.2`、`muse-spark-1.2-contributor`、`muse-spark-1.2-contributor-free` |
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
 
 透传矩阵（测试账号实测，2026-08-14）。✓ = 客户端协议原样转发；空 = 转换到该
-模型推荐协议。权威来源：`crates/ocg-core/src/gateway/protocol.rs` 的
+模型推荐协议。权威来源：`crates/ocg-domain/src/protocol.rs` 的
 `MODEL_PROTOCOLS`。
 
 `reasoning.effort` 别名（转发或转换前应用）：`muse-spark-1.2`、
@@ -880,8 +943,13 @@ Claude Desktop 仍是独立的三角色别名层（`claude-sonnet-4-6`、`claude
 | `big-pickle` | Chat | ✓ | | |
 | `mimo-v2.5-free` | Chat | ✓ | | |
 | `hy3-free` | Chat | ✓ | | |
-| `nemotron-3-ultra-free` | Chat | ✓ | | |
+| `deepseek-v4-flash-free` | Chat | ✓ | | |
+| `ling-3.0-flash-free` | Chat | ✓ | | |
 | `laguna-s-2.1-free` | Chat | ✓ | | |
+| `longcat-2.0-free` | Chat | ✓ | | |
+| `north-mini-code-free` | Chat | ✓ | | |
+| `nemotron-3-ultra-free` | Chat | ✓ | | |
+| `nemotron-3.5-lightning-free` | Chat | ✓ | | |
 | `minimax-m3` | Messages | ✓ | | ✓ |
 | `minimax-m2.7` | Messages | ✓ | | ✓ |
 | `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
@@ -960,11 +1028,17 @@ Gateway 不会把 Gemini 线格式数据发往上游。它把 `contents`、纯�
 - 已保存供应商合约对该解析模型没有启用上游协议的账号。
 
 带有可识别 `Resets in …` 时间短语的 `429` 写入 `cooldown_until`，然后尝试下一
-个账号。`403` 不写冷却、直接换号。`401` **原样返回给客户端**，不换号、也不写
-`auth_error`——OpenCode Go 会把「模型不存在」也打成 401 `ModelError`，若当成
-Key 失效会打断 CLI 并误伤好账号。面板 **Ping** / Key 验证拿到 401 时仍会记录
-`auth_error`。只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败，才会在同一账号
+个账号。`403` 不写冷却、直接换号。OpenCode Go 与 Zen Free 的 `401` **原样返回
+给客户端**，不换号、也不写 `auth_error`——OpenCode Go 会把「模型不存在」也打成
+401 `ModelError`，若当成 Key 失效会打断 CLI 并误伤好账号。Custom API 的 `401`
+会换到下一张合格卡片并写入 `auth_error`。托管账号 Key 验证与 Custom **验证
+连接** 拿到 401 时仍会记录 `auth_error`。CLI `key ping` 只打印真实上游状态，
+不写该字段。只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败，才会在同一账号
 重试一次，流式请求也遵循这一规则。
+
+开启 **对话粘性** 时，匹配的会话 key 会先于基础路由方案尝试。存在
+`X-OCG-Conversation-Id` 请求头时优先使用；否则 Gateway 对 system / tools /
+首条 user 做指纹。无法生成可用 key 时，严格优先级、全局粘性或轮询按原样执行。
 
 `408`、`5xx`、建连后的传输失败、响应体超时和流式中断一律不重放。无法确认上游
 是否已经完成的失败会以 `upstream_outcome_unknown` 返回并记为
@@ -1049,13 +1123,18 @@ CLI 数据目录默认在 `~/.ocg-mgr-cli`（所有平台一致），可用 `--d
 覆盖。混淆密钥默认保存在 `<data-dir>/.encryption-key`，可用名为
 `--encryption-key <key>` 的参数或 `OCG_MANAGER_ENCRYPTION_KEY` 环境变量覆盖。
 
+CLI 命令面只有 `serve`、`key` 与 `status`。`key` 管理 OpenCode Go 账号凭据，
+不是面板接入 Key，也不能创建 Custom 或操作 Zen Free 卡片。接入 Key、Custom
+目的地、协议开关与目录仍在面板里完成。CLI 账号写入会 bump 该进程的 settings
+revision，命令行不接受 `expectedRevision`。
+
 ```text
 ocg-manager-cli
 ├── serve         启动 Gateway 服务
 │   --host        监听地址（默认 127.0.0.1）
 │   -p, --port    Gateway 端口（设置并保存配置）
 │   --dashboard-dir  内置管理面板 dist 目录
-├── key list      列出账号与启用状态
+├── key list      列出 OpenCode Go API Key 账号（不含 Zen Free）
 ├── key add <name> <key>
 │   --username    OpenCode-Go 登录账号
 │   --password    OpenCode-Go 登录密码
@@ -1241,7 +1320,7 @@ gh attestation verify \
   --repo klarkxy/opencode-go-mgr
 ```
 
-第二条命令要求 GitHub CLI 已登录。公开镜像可匿名拉取；如果 OCI 客户端仍要求
+两条 `gh attestation verify` 命令都要求 GitHub CLI 已登录。公开镜像可匿名拉取；如果 OCI 客户端仍要求
 registry 凭据，请用具备 package 读取权限的 token 登录 `ghcr.io`。Provenance
 证明产物如何构建，不等于漏洞扫描。
 
@@ -1267,10 +1346,12 @@ ocg.example.com {
   `~/.ocg-mgr`。CLI 数据默认 `~/.ocg-mgr-cli`（所有平台一致），可用
   `--data-dir <path>` 覆盖。
 - **凭据存储**：账号 Key 与保存的登录密码在存储前都只做混淆，**不是密码学
-  保护**。macOS / Linux GUI 与 CLI 的数据目录里还有 `.encryption-key` 文件；
-  **必须和数据库一起备份**，丢失后已存的凭据将无法读取。混淆不是安全边界：拿到
-  数据目录及其 `.encryption-key`，或能在原 Windows 用户/机器上下文运行 Windows
-  GUI 的人，都能恢复账号 Key 与保存的登录密码。
+  保护**。面板接入 Key 存放在 `access_keys`（schema v27）。macOS / Linux GUI 与
+  CLI 的数据目录里还有 `.encryption-key` 文件；**必须和数据库一起备份**，丢失后
+  已存的凭据将无法读取。混淆不是安全边界：拿到数据目录及其 `.encryption-key`，
+  或能在原 Windows 用户/机器上下文运行 Windows GUI 的人，都能恢复账号 Key 与
+  保存的登录密码。面板 SPA 不会把 Key 明文写入 `localStorage`；接入中心的秘密
+  只留在内存，直到退出登录或 401。
 - **浏览器 Profile**：`browser-profiles/` 或 Docker 的
   `ocg-browser-profiles` 含长期 Cookie 与官网登录状态，完全不由 OCG Manager
   加密。备份、传输、访问控制和销毁都应按数据库与账号 Key 的敏感级别处理。
@@ -1333,7 +1414,7 @@ ocg.example.com {
   隔离的 `CustomEndpoint` 范围呈现。
 - 未知模型名在所有受支持的客户端格式上返回 `400`。客户端应发送带鉴权的
   `GET /v1/models` 公布的、当前有有效启用协议的别名或合格 Custom ID。受保护的
-  `GET /dashboard/api/application-models` 是 Go 别名 ∩ 当前价格快照，不是那份
+  `GET /dashboard/api/v3/application-models` 是 Go 别名 ∩ 当前价格快照，不是那份
   完整客户端列表。
 
 ## 常见问题
@@ -1342,9 +1423,17 @@ ocg.example.com {
   还握着单实例锁。退出占用端口的进程或上一个 release 托盘程序后重试。仅源码开
   发时可用 `scripts/free-dev-port.mjs` 清理 `30001` 上的残留 Vite 进程；它不会
   释放 `9042`，也不会释放桌面端单实例锁。
-- **上游返回 `401 Unauthorized`。**Gateway 会把该状态原样返回给客户端，不会
-  换号。OpenCode Go 也会对未上架模型返回 401 `ModelError`。要确认 Key 本身是
-  否失效，在 **账号** 视图用 **Ping**，或执行 `key ping <id>`。
+- **上游返回 `401 Unauthorized`。**OpenCode Go 与 Zen Free 会把该状态原样返回
+  给客户端，不会换号。OpenCode Go 也会对未上架模型返回 401 `ModelError`。
+  Custom API 的 `401` 会换到下一张合格卡片并记录 `auth_error`。要确认 OpenCode
+  Go Key 本身是否失效，请执行 `key ping <id>` 或发一次真实客户端请求。托管账号
+  Key 验证与 Custom **验证连接** 在各自流程里拿到 401 时仍会记录 `auth_error`。
+- **面板提示页面版本与服务不匹配。**缓存的旧 SPA 命中了已退役的
+  `/dashboard/api` REST（而不是 `/dashboard/api/v3`），收到 HTTP 410。请刷新
+  页面；若仍失败，安装匹配的桌面、CLI 或 Docker 版本。
+- **面板保存失败并提示冲突 / 409。**同一运行进程中的另一个标签页已经先写入。
+  当前 SPA 不会针对服务端的 `revisionConflict` 自动恢复；请刷新受影响的页面，再次
+  提交更改。
 - **本地进度条满格但请求依然成功。**这是 **假熔断**——本地估算不是上游账单。
   继续使用即可，Gateway 会继续转发。
 - **本地进度条满格，Gateway 返回 `429`。**这是 **真熔断**。等 `cooldown_until`

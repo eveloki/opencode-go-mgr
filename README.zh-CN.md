@@ -17,9 +17,9 @@ Gateway 与管理面板。客户端使用 OpenAI、Anthropic、Gemini 或 Claude
 
 ## 主要特性
 
-- **一个端口，四类客户端协议**：OpenAI Chat Completions / Responses、
-  Anthropic Messages、Gemini `generateContent` / `streamGenerateContent`、
-  本地 Alias 列表与 Claude Desktop 别名入口。
+- **一个端口，五种线协议格式**：OpenAI Chat Completions、OpenAI Responses、
+  Anthropic Messages、Gemini `generateContent` / `streamGenerateContent`，以及
+  Claude Desktop。
 - **本地多账号轮询**：拖动账号卡片即可持久调整优先级；Gateway 自动跳过已禁用、
   冷却中或本次请求已失败的账号。
 - **额度条只是警告**：5 小时 / 本周 / 本月用量是本地估算。满格不会停流量；只有
@@ -92,8 +92,8 @@ docker compose up -d --no-build
 
 ## 模型
 
-每个已知模型有硬编码的 **推荐协议** 与实测 **已验证可用协议集合**。客户端协议
-落在集合内时透传，否则转换到推荐协议。请求路径不会试探协议——否则可能把同一
+OpenCode Go 模型有硬编码的 **推荐上游协议** 与实测 **已验证可用协议集合**。客户端
+协议落在集合内时透传，否则转换到推荐协议。请求路径不会试探协议——否则可能把同一
 请求重复计费。
 
 | 推荐上游协议 | 模型 |
@@ -101,12 +101,11 @@ docker compose up -d --no-build
 | OpenAI Chat Completions | `glm-5.3`、`glm-5.2`、`glm-5.1`、`glm-5`、`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`、`hy3`、`ox-alpha-free` |
 | OpenAI Responses | `grok-4.5`、`gpt-5.6-luna`、`muse-spark-1.2`、`muse-spark-1.2-contributor` |
 | Anthropic Messages | `minimax-m3`、`minimax-m2.7`、`minimax-m2.7-highspeed`、`minimax-m2.5`、`minimax-m2.5-highspeed`、`qwen3.8-max`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus` |
-| Zen free（Chat） | `big-pickle`、`mimo-v2.5-free`、`hy3-free`、`nemotron-3-ultra-free`、`laguna-s-2.1-free` |
-| Zen free（Responses） | `muse-spark-1.2-contributor-free` |
 
 `ox-alpha-free`（Ox Alpha Free）是 Go 的 Chat 模型，名字里带 `free` 但仍走
-`/zen/go`。只有上表登记的 Zen 促销集合才走 `https://opencode.ai/zen`。Zen
-目录是促销、会变；那些行是 2026-08-21 实测仍可用的集合。
+`/zen/go`。Zen Free 不是固定模型列表：管理员显式刷新官方目录后，管理器会持久化
+最后一次成功的规范化 `-free` 快照。刷新失败或结果为空时保留旧快照；已公布的别名与
+协议条目均来自这份已保存目录。
 
 Gemini 只是客户端格式（请求不会发往 Google）。Claude Desktop 别名会改写为
 **应用** 视图里保存的映射。客户端应发送已公布别名或合格 Custom ID；带鉴权的 `GET /v1/models`
@@ -124,6 +123,7 @@ ready 且有 Key 的 Custom ID（不发现上游）。未知名称若不在该�
 | --- | --- | --- |
 | 终端用户 | [User guide](docs/USER.md) | [用户指南](docs/USER.zh-CN.md) |
 | 维护者 | [Maintainer guide](docs/MAINTAINER.md) | [维护者指南](docs/MAINTAINER.zh-CN.md) |
+| Schema v27 运维手册 | [V3 schema recovery](docs/MAINTAINER-v3-migration.md) | [V3 库恢复](docs/MAINTAINER-v3-migration.zh-CN.md) |
 | 使用边界 | [Anti-abuse statement](docs/OPENCODE_GO_ANTI_ABUSE.md) | [防滥用声明](docs/OPENCODE_GO_ANTI_ABUSE.zh-CN.md) |
 | 文档索引 | [docs/](docs/README.md) | 中英同页 |
 
@@ -146,8 +146,10 @@ pnpm run dev
 ```
 
 开发前先退出 release 托盘程序，释放单实例锁和 `9042` 端口。Tauri 会启动 Vite，
-并在 Gateway 就绪后打开 `http://127.0.0.1:30001/dashboard/`。检查、构建与发布
-流水线见[维护者指南](docs/MAINTAINER.zh-CN.md)。
+并在 Gateway 就绪后打开 `http://127.0.0.1:30001/dashboard/`。面板 SPA 走
+HTTP `/dashboard/api/v3`；已鉴权的未版本化 `/dashboard/api` REST 已退役。
+检查、构建与发布流水线见[维护者指南](docs/MAINTAINER.zh-CN.md)。Schema v27
+运维手册见 [V3 库恢复](docs/MAINTAINER-v3-migration.zh-CN.md)。
 
 ## 许可证
 

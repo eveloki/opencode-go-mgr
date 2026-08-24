@@ -2,10 +2,11 @@
 
 OCG Manager documentation is split by audience. Start from the product README,
 then open the guide that matches your role. Keep Chinese/English pairs in sync
-when you edit a paired page.
+when you edit a paired page. Code at HEAD is authoritative when a paired body
+lags.
 
 OCG Manager 文档按读者拆分。先从产品 README 入手，再打开对应角色的指南。修改
-成对文档时请保持中英同步。
+成对文档时请保持中英同步。成对正文若滞后，以当前代码为准。
 
 ## Catalog / 目录
 
@@ -14,6 +15,7 @@ OCG Manager 文档按读者拆分。先从产品 README 入手，再打开对应
 | Product overview / 产品概览 | [../README.md](../README.md) | [../README.zh-CN.md](../README.zh-CN.md) | What it is, download matrix, 3-step start, pointers into USER |
 | End users / 终端用户 | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | Install, dashboard, Plans, Providers, aliases, model tables, gateway behavior, CLI, Docker, limits, troubleshooting |
 | Maintainers / 维护者 | [MAINTAINER.md](MAINTAINER.md) | [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) | Layout, dev loop, architecture, release matrix, CI, validation |
+| V3 schema runbook / V3 库运维 | [MAINTAINER-v3-migration.md](MAINTAINER-v3-migration.md) | [MAINTAINER-v3-migration.zh-CN.md](MAINTAINER-v3-migration.zh-CN.md) | Schema v27 / V3 access-key operator runbook (upgrade, pre-v3 backup hash, rollback, failed open). Not a general backup policy and not a down-migration |
 | Anti-abuse / 防滥用 | [OPENCODE_GO_ANTI_ABUSE.md](OPENCODE_GO_ANTI_ABUSE.md) | [OPENCODE_GO_ANTI_ABUSE.zh-CN.md](OPENCODE_GO_ANTI_ABUSE.zh-CN.md) | Allowed use boundary for OpenCode-Go |
 | Contributors / 贡献者 | [CONTRIBUTORS.md](CONTRIBUTORS.md) | bilingual / 中英同页 | Community credits |
 | Design system / 设计系统 | [../DESIGN.md](../DESIGN.md) | English source of truth | Themes, type scale, Key naming, layout rules |
@@ -36,16 +38,18 @@ When docs disagree, prefer the source below and fix the other side.
 | Topic / 主题 | Source of truth / 权威来源 |
 | --- | --- |
 | User-visible product behavior / 用户可见行为 | Code + [USER.md](USER.md) / [USER.zh-CN.md](USER.zh-CN.md) |
-| Plan catalog / Plan 目录 | `crates/ocg-core/src/provider.rs` (`BUILTIN_PLANS`, `ProviderRegistry`); USER Accounts mirrors live vs pending families; Custom is `ConfigurableHttpAdapter`, not a base class |
+| Plan catalog / Plan 目录 | `crates/ocg-domain/src/provider.rs` (`BUILTIN_PLANS`, sealed `ProviderRegistry`); `crates/ocg-core/src/provider.rs` is the compatibility facade plus Custom URL inspection; USER Accounts mirrors live vs pending families; Custom is `ConfigurableHttpAdapter`, not a base class or a dynamic plugin |
 | Provider contracts / 供应商合约 | `crates/ocg-core/src/provider_contracts.rs`; USER Providers mirrors scopes, local catalogs, switches, probes, and request-time selection |
-| Client aliases / 客户端别名 | `crates/ocg-core/src/alias.rs`; USER Aliases / 别名 mirrors the contract |
+| Client aliases / 客户端别名 | `crates/ocg-gateway/src/alias.rs`; `crates/ocg-core/src/alias.rs` is the compatibility facade; USER Aliases / 别名 mirrors the contract |
 | Local `GET /v1/models` / 本地客户端模型列表 | `crates/ocg-core/src/gateway/handler.rs`; authenticated Go aliases ∪ saved Zen Free aliases ∪ eligible Custom IDs that have an effective enabled protocol; the GET itself makes no upstream request |
-| Applications picker list / 应用选择器列表 | `crates/ocg-core/src/dashboard.rs` (`GET /dashboard/api/application-models`); Go routeable aliases ∩ active pricing; no Custom |
+| Applications picker list / 应用选择器列表 | `crates/ocg-core/src/dashboard_v3/` (`GET /dashboard/api/v3/application-models`) via `control/observability.rs`; Go routeable aliases ∩ active pricing; no Custom |
 | Custom API HTTP / Custom API HTTP | `crates/ocg-core/src/custom.rs` + `custom_http.rs`; trusted-admin destinations, Direct/Manual/Auto, no redirects, isolated auth |
-| SCNet official snapshot / SCNet 官方快照 | `crates/ocg-core/src/provider.rs` (`SCNET_TOKEN_PLAN_*`); adapter input only, never client aliases |
-| Model preferred/supported protocols / 模型协议表 | `crates/ocg-core/src/gateway/protocol.rs` (`MODEL_PROTOCOLS`); USER Protocol Conversion mirrors the table |
+| SCNet official snapshot / SCNet 官方快照 | `crates/ocg-domain/src/provider.rs` (`SCNET_TOKEN_PLAN_*`); adapter input only, never client aliases |
+| Model preferred/supported protocols / 模型协议表 | `crates/ocg-domain/src/protocol.rs` (`MODEL_PROTOCOLS`); conversion kernel `crates/ocg-gateway/src/protocol.rs`; host parse/stream `crates/ocg-core/src/gateway/protocol.rs`; USER Protocol Conversion mirrors the table |
 | Model context/input/reasoning capabilities / 模型能力表 | `src/views/application-guides.ts` (`APPLICATION_MODEL_METADATA`); USER Model capabilities mirrors the table |
-| Dashboard HTTP API / 面板 API | `crates/ocg-core/src/dashboard.rs` |
+| Dashboard HTTP API / 面板 API | `crates/ocg-core/src/dashboard_v3/` mounted at `/dashboard/api/v3`; frozen contract `schema/dashboard-api-v3.schema.json`; SPA client `src/api/dashboard-v3.ts` + presentation `src/api/dashboard.ts`. Composition root `crates/ocg-core/src/host_router.rs`. Protected unversioned `/dashboard/api` REST is a structured `410` tombstone; auth/session, browser WebSocket, and inference stay distinct. `src/api/tauri.ts` is leftover V2-shaped test surface, not the live SPA path |
+| Access keys / 接入凭证 | SQLite `access_keys` (schema v27) via `crates/ocg-core/src/gateway_keys.rs` and `dashboard_v3/keys.rs`. Primary id is `PRIMARY_KEY_ID`. Historical `sub_gateway_keys` is not the live authority |
+| SQLite schema / 库版本 | `crates/ocg-core/src/db.rs` (`CURRENT_SCHEMA_VERSION = 27`). Operator runbook: [MAINTAINER-v3-migration.md](MAINTAINER-v3-migration.md) / [MAINTAINER-v3-migration.zh-CN.md](MAINTAINER-v3-migration.zh-CN.md) |
 | Release artifacts, CI, signing / 发版与签名 | [MAINTAINER.md](MAINTAINER.md) / [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) + `docs/MAINTAINER` CI sections |
 | Current package version pins / 版本钉 | `package.json` / workspace `Cargo.toml` / `src-tauri/tauri.conf.json` / `compose.example.yaml` |
 | UI copy for the access credential / 接入凭证文案 | Panel shows **Key** (`DESIGN.md`, `src/theme.ts`); never “Gateway Key” |
@@ -69,10 +73,13 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
 2. **Docker / CLI operator** — User guide Docker and CLI chapters; enable the
    browser profile when managed onboarding needs noVNC.
 3. **Contributor** — Maintainer guide layout, development, checks; keep
-   `AGENTS.md` for project facts (managed wizard, quota refresh, protocol
-   table, Key naming).
+   `AGENTS.md` for project facts (V3 crate split, `/dashboard/api/v3`, schema
+   v27 `access_keys`, managed wizard, quota refresh, protocol table, Key
+   naming). Do not treat unversioned `/dashboard/api` REST, `src/api/tauri.ts`,
+   or Tauri `invoke` as the live dashboard path.
 4. **Release owner** — Maintainer guide release procedure, CI, and validation
-   checklist (include managed rewind and refresh-quota paths).
+   checklist (include managed rewind and refresh-quota paths). Schema v27
+   runbook: [MAINTAINER-v3-migration.md](MAINTAINER-v3-migration.md).
 5. **UI / theme work** — `DESIGN.md` first, then `src/theme.ts` and the Vue
    surface you are changing.
 
@@ -81,9 +88,12 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
 2. **Docker / CLI 运维** — 用户指南的 Docker 与 CLI 章节；托管注册需要时启用
    browser profile。
 3. **贡献者** — 维护者指南的仓库结构、开发与检查；编码时以 `AGENTS.md` 为准
-   （托管向导、刷新额度、协议表、Key 命名）。
+   （V3 crate 拆分、`/dashboard/api/v3`、schema v27 `access_keys`、托管向导、
+   刷新额度、协议表、Key 命名）。不要把未版本化 `/dashboard/api` REST、
+   `src/api/tauri.ts` 或 Tauri `invoke` 当成当前面板路径。
 4. **发版负责人** — 维护者指南的发版步骤、CI 与发版前检查清单（含托管回退与
-   刷新额度路径）。
+   刷新额度路径）。Schema v27 运维手册见
+   [MAINTAINER-v3-migration.zh-CN.md](MAINTAINER-v3-migration.zh-CN.md)。
 5. **UI / 主题** — 先读 `DESIGN.md`，再改 `src/theme.ts` 与对应 Vue 页面。
 
 ## Editing rules / 编辑约定
@@ -99,6 +109,12 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
   `requested_alias` log field. Do not equate `GET /v1/models` with
   `application-models` (the latter is Go ∩ pricing only). Do not claim there is
   no supplier page, or that Zen catalog refresh lives on the account card.
+  Do not claim the current schema is v26, that `sub_gateway_keys` is the live
+  key table, that `src/api/tauri.ts` is the SPA client, that Tauri `invoke`
+  commands are live, or that unversioned `/dashboard/api` REST is the dashboard
+  primary path. The SPA uses `/dashboard/api/v3`. Protected V2 REST returns
+  structured `410`; auth/session, browser WebSocket, and inference stay
+  distinct. Provider registry is a static sealed catalog, not dynamic plugins.
   Do not claim browser, live-provider-key, or
   installed-desktop proof unless those checks were actually run.
 - After release version bumps, update Docker clone tags and image pins in
@@ -118,6 +134,12 @@ USER / `.env.example` / `compose.example.yaml` 留在旧 patch。产品 README
   休眠或 SSRF denylist。不要发明 `requested_alias` 日志字段。不要把
   `GET /v1/models` 与 `application-models` 写成同一份列表（后者只是 Go ∩ 价格）。
   不要写“没有供应商页”，也不要把 Zen 目录刷新写回账号卡。
+  不要把当前 schema 写成 v26，不要把 `sub_gateway_keys` 写成现行 Key 表，
+  不要把 `src/api/tauri.ts` 写成 SPA 客户端，不要宣称仍有 live Tauri
+  `invoke` command，也不要把未版本化 `/dashboard/api` REST 写成面板主路径。
+  SPA 走 `/dashboard/api/v3`。受保护 V2 REST 返回结构化 `410`；auth/session、
+  browser WebSocket 与推理入口语义保持独立。Provider 注册表是静态密封目录，
+  不是动态插件。
   除非实际做过检查，不要宣称浏览器、真实供应商 Key 或已安装桌面版实测。
 - 发版升版后，同步更新 USER、`.env.example`、`compose.example.yaml` 中的
   clone tag 与镜像钉（`pnpm run release:check` 会核对 compose/package

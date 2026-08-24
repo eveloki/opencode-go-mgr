@@ -14,6 +14,7 @@ the true / false circuit breakers, and protocol conversion actually work.
 - [Connect Your First Client](#connect-your-first-client)
 - [Upgrade, Backup, Restore, And Uninstall](#upgrade-backup-restore-and-uninstall)
 - [The Dashboard](#the-dashboard)
+  - [Dashboard V3](#dashboard-v3)
   - [Connection Center](#connection-center)
   - [Access Keys](#access-keys)
   - [Application Guides](#application-guides)
@@ -46,9 +47,9 @@ exposes a loopback gateway at `http://127.0.0.1:9042/v1`. Each
 account card is one **Plan** (provider + offering). Clients send **aliases**
 from the local registry or eligible Custom model IDs; live routing is
 OpenCode Go, OpenCode Zen Free, and Custom API.
-The same gateway also serves the Vue 3 dashboard at `/dashboard/` and its JSON
-API at `/dashboard/api`. Every node is independent: there is no remote sync,
-no Admin API, and no telemetry.
+The same gateway also serves the Vue 3 dashboard at `/dashboard/`. The current
+dashboard SPA reads and writes JSON at `/dashboard/api/v3`. Every node is
+independent: there is no remote sync, no Admin API, and no telemetry.
 
 The gateway does four jobs:
 
@@ -181,22 +182,34 @@ After the first updater-enabled release is installed, future signed desktop
 releases can be downloaded and installed from **Settings** with one action.
 CLI and Docker upgrades remain manual.
 
-### Multi-Key Upgrade And Downgrade Notes
+### Access-Key Upgrade And Schema v27
 
-Upgrading from a single-key version is seamless: your existing key remains
-the **primary key** with its value unchanged, clients keep authenticating
-with it, and a background task attributes historical forward logs to the
-primary key (usage from before the upgrade is counted toward the primary key
-as an approximation).
+Upgrading from a single-key version keeps your existing credential as the
+**primary key** (fixed id `00000000-0000-0000-0000-000000000001`). Clients
+keep authenticating with the same value. A background task attributes
+historical forward logs that had no client-key id to the primary key
+(pre-upgrade usage is counted toward the primary key as an approximation).
 
-Sub keys you create after upgrading live in their own database table that
-single-key builds never read or rewrite. Downgrading to such a build is
-safe: the primary key value survives untouched, every sub key and its
-enabled/disabled/deleted state is intact when you upgrade again, and no
-revoked credential can ever come back to life by downgrading. Sub keys
-simply do not authenticate while the older build runs.
+Primary and additional (sub) Keys now live together in one `access_keys`
+table. Config JSON is not the database authority for the primary value. At
+most 64 non-deleted sub keys are supported; deleting a sub key is a soft
+delete that keeps the name for log attribution and clears the plaintext.
 
-### Plan Migration (Schema v26)
+Do not open a schema v27 database with an older build. An existing
+(non-empty) library migrates through schema v26 first, then receives a unique
+sibling snapshot `data.sqlite.pre-v3.<timestamp>.bak` plus a SHA-256 sidecar
+before any v27 write. A brand-new empty data directory creates schema v27
+directly and does not write that copy. Restore the pre-v3 file only onto a
+v26-capable binary, or to retry a v27 open that never committed; it is a v26
+snapshot, not a substitute for a complete backup. If you must run an older
+binary, restore that pre-v3 (or earlier) backup first. Extra Keys do not
+authenticate on a single-key-era build, and a revoked value cannot come back
+to life by downgrading.
+
+### Database Migration (Schema v27)
+
+The current database schema is **v27**. Historical databases still migrate
+through the earlier steps on the way there.
 
 Schema v23 stores Plan verification state, Alias / upstream log identity
 (`requested_model`, `resolved_alias`, `upstream_model`), optional native cost
@@ -214,10 +227,16 @@ Free. Schema v26 adds scope-level provider contracts: local catalogs, Chat /
 Responses / Messages switches, and per-model protocol evidence. A successful
 manual catalog refresh replaces that snapshot atomically; a failed or empty
 refresh leaves the previous snapshot untouched. Disabling an account does not
-delete the saved contract; re-enabling restores it. This additive migration
-does not create separate pre-v24, pre-v25, or pre-v26 backups; the pre-v23
-rollback copy described above remains the migration safety boundary. v25 Zen
-catalog rows are projected into the Zen provider scope.
+delete the saved contract; re-enabling restores it. Those additive migrations
+do not create separate pre-v24, pre-v25, or pre-v26 backups; the pre-v23
+rollback copy described above remains the earlier migration safety boundary.
+v25 Zen catalog rows are projected into the Zen provider scope.
+
+Schema v27 copies the primary Key and any extra Keys into `access_keys`,
+drops leftover per-account usage-sync columns (official usage-sync metadata
+already lives in `provider_usage_sync_state`), and takes the pre-v3 snapshot
+described above for existing libraries. Official usage-sync metadata is not
+rewritten during that copy.
 
 If the source database was older than schema v22, the same startup also keeps
 `data.sqlite.pre-v22.<timestamp>.bak` as the earlier rollback point. On every
@@ -334,6 +353,46 @@ default is 简体中文. The choice persists in `localStorage` under
 `ocg-manager.locale`; when persistence is unavailable (for example in a
 private window), the in-memory locale still works for the current session.
 
+### Dashboard V3
+
+The current dashboard SPA talks only to **`/dashboard/api/v3`**. That is the
+data path for Connection Center, Access Keys, Accounts, Providers,
+Applications, Logs, Settings, and the login/register/logout flow. Writes send
+the last seen `expectedRevision` and `processGeneration`. If another tab in
+the same running process saves first, the server rejects the stale write with
+HTTP 409 (`revisionConflict`). The current SPA does not recognize that exact
+server code for automatic conflict recovery, so refresh the affected page and
+re-apply the change manually. These tokens are process-local; separate
+processes sharing one data directory are not a coordinated CAS domain. The
+OpenCode Go pricing snapshot carries its own
+`pricingRevision`, independent of those settings tokens.
+
+Plaintext Keys exist only on the Connection Center payload
+(`GET /dashboard/api/v3/connection`). The Settings resource never includes
+Key values. The browser keeps those secrets in memory only; signing out or a
+401 session expiry wipes them immediately.
+
+The seven views stay cached while you switch tabs (`KeepAlive`). Returning to
+a view refreshes its server data; the Dashboard also refreshes when you bring
+the browser tab back to the foreground. Catalogs, pricing, and provider
+directories are never polled automatically. Official usage sync remains a
+server-side schedule, not a dashboard poll. After you start a signed desktop
+install from Settings, that page may poll install progress until the process
+restarts.
+
+A cached older dashboard page that still calls retired `/dashboard/api` REST
+(not `/dashboard/api/v3`) receives HTTP 410 with code `dashboardV2Removed` and
+guidance to refresh the page, then upgrade if that is not enough. Anonymous
+retired REST is 401 before that 410. Two V2 families remain as compatibility
+exceptions, not as the current SPA data path: `/dashboard/api/auth/status`,
+`/dashboard/api/auth/register`, `/dashboard/api/auth/login`,
+`/dashboard/api/auth/logout`, and `/dashboard/api/browser/sessions/{token}/ws`.
+The current dashboard uses the V3 auth and browser-WebSocket routes instead.
+
+There is no dashboard **Ping** button. To probe an OpenCode Go key from this
+product, use CLI `key ping` or send a real client request. Custom cards still
+have **Verify connection**; managed signup still has Key verification.
+
 ### Connection Center
 
 The first panel above the fold — and the only panel that always stays on
@@ -379,10 +438,16 @@ contents to the network.
 
 ### Access Keys
 
-The **Access Keys** view is the home for client-facing credentials:
+The **Access Keys** view is the home for client-facing credentials. Primary
+and sub Keys are stored together in `access_keys` (schema v27). Create,
+rename, enable, disable, regenerate, and delete go through Dashboard V3; a
+successful change bumps the settings revision. Mutation acknowledgements do
+not include plaintext — the page reloads Connection Center to show the new
+value.
 
 - The **primary key** is always active and cannot be disabled or deleted; you
-  rotate it with the reset control. It is the credential the application
+  rotate it with the reset control. Its id is
+  `00000000-0000-0000-0000-000000000001`. It is the credential the application
   guides show by default. There is no field for typing a custom primary
   value.
 - **Sub keys** are additional credentials you create, give a display name,
@@ -442,7 +507,7 @@ or merging it. When using CC Switch proxy mode, back up the configuration direct
 CC Switch separately; do not mix the direct OCG configuration with the proxy configuration.
 
 The Applications picker list is the protected
-`GET /dashboard/api/application-models` response: currently routeable OpenCode
+`GET /dashboard/api/v3/application-models` response: currently routeable OpenCode
 Go aliases intersected with the active OpenCode Go pricing snapshot. Highspeed
 variants inherit the base model's pricing row. An empty intersection is `[]`,
 not an error. That list is **not** the same as authenticated `GET /v1/models`,
@@ -506,7 +571,8 @@ official Go table; Usage remains $15).
 
 Claude Desktop is the exception with durable model mappings: before its
 configuration is copied, the selected `sonnet`, `opus`, and `haiku` targets
-are saved to SQLite through the protected dashboard API. Omitted roles
+are saved to SQLite through protected
+`GET/PUT /dashboard/api/v3/claude-desktop/models`. Omitted roles
 inherit the first configured role, and the three roles cannot all be empty.
 Its restore action returns to the mapping loaded or last saved in the current
 page.
@@ -514,8 +580,10 @@ page.
 ### Accounts
 
 Each account card binds one **Plan** (provider + offering), and when that Plan
-requires one, one credential, plus one independent quota pool. Cards share one
-manually persisted global order;
+requires one, one credential. Quota authority depends on the Plan: OpenCode Go
+tracks account/Key usage, Zen Free shares quota and cooldown by egress IP, and
+Custom API has no provider quota accounting. Cards share one manually
+persisted global order;
 after the request's capability filter, strict priority, global sticky, and
 round-robin routing all reuse that order. There is no per-model quota pool.
 The seven dashboard views stay
@@ -540,12 +608,14 @@ The built-in Plan families are:
 | SCNet Token Plans | `scnet` / `token-plan-basic`, `token-plan-standard`, `token-plan-premium` | No | Keys must start with `sk-tp-`; saved as disabled `pending` drafts; verification returns `501`; official interactive-use restriction below |
 | Custom API | `custom` / `api` | Yes | Trusted-administrator destination; create/update stay disabled `pending`; verify then explicit enable; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
-Every persistent mutation path (Database, dashboard, CLI, and Tauri) rejects
+Every persistent mutation path (database guards and the shared dashboard/CLI
+services) rejects
 `enabled=true` for a catalogued `routable=false` offering (GOAT and all SCNet
 tiers) before it mutates the row, revision, or timestamps. Custom is
 catalog-routable, but create/update still leave the card disabled and
 `pending`; enable is rejected until verification status is `verified`.
-Disabled drafts remain saveable.
+Disabled drafts remain saveable. The desktop UI uses Dashboard V3 HTTP and has
+no separate Tauri invoke mutation path.
 
 For OpenCode Go, Command Code GOAT, and SCNet Token Plans, do not add consumer
 subscription credentials, browser cookies, or reverse-proxy credentials as
@@ -613,7 +683,7 @@ The **Accounts** view splits creation into **Import existing Key** and
   payment, and key verification. The draft and current step are persisted to
   SQLite, so closing the page or restarting the service does not lose the
   flow. Pending accounts cannot be selected by the gateway and do not expose
-  usage, test, or enable controls.
+  usage, verify, or enable controls.
 
 Managed signup and isolated browser profiles are **Beta** features. They have
 not been thoroughly tested; do not rely on them in production.
@@ -689,7 +759,7 @@ has its own anonymous, egress-IP-shared free cooldown rather than a key quota.
   immediately: eligible accounts without a saved schedule are spread across
   the first 0–15 minutes, then follow the normal cadence.
   Clicking **Refresh quota** still runs the same secure path on demand, with a
-  server-side 60-second per-account throttle (Retry-After / next-allowed). The
+  server-side 15-second per-account throttle (Retry-After / next-allowed). The
   card shows the last successful official sync time and any temporary retry
   wait—not only a button spinner. Local estimates that reach ≥80% may get an
   expedited sync at most once per 15 minutes. A real inference `429` still
@@ -806,7 +876,7 @@ There is no model-level quota pool.
 At request time the gateway never discovers or probes. Flow: Alias → account
 eligibility → adapter ceiling → saved contract → protocol switch →
 passthrough or conversion. Authenticated `GET /v1/models` and protected
-`GET /dashboard/api/application-models` publish only currently routable
+`GET /dashboard/api/v3/application-models` publish only currently routable
 models that have an effective enabled protocol. The Applications picker stays
 Go aliases ∩ active pricing and does not include Custom.
 
@@ -864,7 +934,12 @@ The **Settings** view exposes the persistent gateway configuration:
 - **Routing mode** — strict priority, global sticky, or round robin. All three
   modes apply the one global card order only after filtering incompatible,
   disabled, cooling, or already-failed cards; they do not create a provider or
-  model routing table.
+  model routing table. Only one base mode is active at a time.
+- **Conversation sticky** — an overlay switch, not a fourth routing mode.
+  When on, the gateway prefers the `X-OCG-Conversation-Id` request header;
+  without it, it uses a prompt fingerprint (system / tools / first user
+  message). If no conversation key can be built, the base routing mode is
+  used. Similar prompts may share a binding.
 - **Outbound proxy** — shared by every account. Automatic, manual, and force
   direct apply one process-wide policy; **Per-model list** (below) splits chat
   forwarding by model instead.
@@ -879,7 +954,7 @@ The **Settings** view exposes the persistent gateway configuration:
   account-key tests and Custom verification, official OpenCode Go usage API,
   pricing refreshes, release checks, and signed desktop installer downloads;
   authenticated `GET /v1/models` and protected
-  `GET /dashboard/api/application-models` are local lists and do not use
+  `GET /dashboard/api/v3/application-models` are local lists and do not use
   this outbound path. The browser sidecar is outside its scope. **Test
   connection** uses the unsaved form values against the current upstream. Any
   HTTP status proves network reachability, without running model inference or
@@ -935,7 +1010,9 @@ The **Settings** view exposes the persistent gateway configuration:
   toggle Chat Completions / Responses / Messages.
 
 Configuration settings are written to SQLite and reloaded on the next start.
-The update check is an on-demand action and is not persisted.
+The Settings resource never includes Key plaintext. Saving settings uses the
+same `expectedRevision` / `processGeneration` tokens as other Dashboard V3
+writes. The update check is an on-demand action and is not persisted.
 
 ## Gateway Behavior
 
@@ -956,7 +1033,8 @@ The gateway is served at `http://<bind>:<port>` and exposes:
 | `GET`  | `/claude-desktop/v1/models` | Claude Desktop alias model list |
 | `POST` | `/claude-desktop/v1/messages` | Claude Desktop Messages with alias rewriting |
 | `GET`  | `/dashboard/` | Vue 3 dashboard (HTML) |
-| `*`    | `/dashboard/api/...` | Dashboard JSON API |
+| `*`    | `/dashboard/api/v3/...` | Current dashboard JSON API |
+| `*`    | `/dashboard/api/...` | Retired V2 REST (authenticated 410 `dashboardV2Removed`), except the labeled V2 auth and browser-WebSocket compatibility routes |
 
 The default bind is `127.0.0.1:9042`. The CLI can override the host with
 `serve --host 0.0.0.0` and the port with `serve --port <port>`. The desktop
@@ -974,7 +1052,13 @@ uses `x-api-key` for Messages upstreams and `Authorization: Bearer` for Chat
 Completions / Responses. Custom API constructs only the configured Bearer or
 `x-api-key` header and never forwards dashboard or client credentials.
 
-Dashboard authentication depends on the listener bind:
+Dashboard authentication depends on the listener bind. The current SPA uses
+`/dashboard/api/v3/auth/status`, `/dashboard/api/v3/auth/register`,
+`/dashboard/api/v3/auth/login`, and `/dashboard/api/v3/auth/logout`. Register,
+login, and logout require the same `expectedRevision` / `processGeneration`
+tokens as other V3 writes. The matching `/dashboard/api/auth/...` routes are
+preserved only as a labeled V2 compatibility exception for cached older
+pages; they are not the current SPA data path.
 
 - **Loopback binds (the default).** Requests that come straight to the
   loopback address skip dashboard login unless they carry `Forwarded`,
@@ -1007,7 +1091,7 @@ Go account exists. Eligible Custom IDs come from enabled + verified + ready
 Custom accounts that have a key. Dynamic or probe-confirmed models do not
 gain a new stable alias automatically.
 
-Protected `GET /dashboard/api/application-models` is a different local list:
+Protected `GET /dashboard/api/v3/application-models` is a different local list:
 currently routeable OpenCode Go aliases intersected with the active OpenCode
 Go pricing snapshot. Highspeed variants inherit the base row. Empty
 intersection is `[]`. It never includes Custom IDs, never selects an account,
@@ -1076,14 +1160,14 @@ prefers Responses and also passthroughs Chat; `glm-5.3` is Chat-only.
 
 | Preferred upstream | Models |
 | --- | --- |
-| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3`, `ox-alpha-free`, `big-pickle`, `mimo-v2.5-free`, `hy3-free`, `nemotron-3-ultra-free`, `laguna-s-2.1-free` |
+| OpenAI Chat Completions | `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `deepseek-v4-pro`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro`, `hy3`, `ox-alpha-free`, `big-pickle`, `mimo-v2.5-free`, `hy3-free`, `deepseek-v4-flash-free`, `ling-3.0-flash-free`, `laguna-s-2.1-free`, `longcat-2.0-free`, `north-mini-code-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free` |
 | OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.2-contributor-free` |
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
 Passthrough matrix (live test-account probe, 2026-08-14). ✓ = client protocol
 is forwarded as-is; empty = converted to the model's preferred protocol.
 Source of truth: `MODEL_PROTOCOLS` in
-`crates/ocg-core/src/gateway/protocol.rs`.
+`crates/ocg-domain/src/protocol.rs`.
 
 `reasoning.effort` aliases (applied before forwarding or conversion):
 `muse-spark-1.2`, `muse-spark-1.2-contributor`, and
@@ -1114,8 +1198,13 @@ Source of truth: `MODEL_PROTOCOLS` in
 | `big-pickle` | Chat | ✓ | | |
 | `mimo-v2.5-free` | Chat | ✓ | | |
 | `hy3-free` | Chat | ✓ | | |
-| `nemotron-3-ultra-free` | Chat | ✓ | | |
+| `deepseek-v4-flash-free` | Chat | ✓ | | |
+| `ling-3.0-flash-free` | Chat | ✓ | | |
 | `laguna-s-2.1-free` | Chat | ✓ | | |
+| `longcat-2.0-free` | Chat | ✓ | | |
+| `north-mini-code-free` | Chat | ✓ | | |
+| `nemotron-3-ultra-free` | Chat | ✓ | | |
+| `nemotron-3.5-lightning-free` | Chat | ✓ | | |
 | `minimax-m3` | Messages | ✓ | | ✓ |
 | `minimax-m2.7` | Messages | ✓ | | ✓ |
 | `minimax-m2.7-highspeed` | Messages | ✓ | | ✓ |
@@ -1210,13 +1299,22 @@ from the Accounts view. The selector skips:
 
 A `429` with a recognized `Resets in …` phrase writes `cooldown_until` and
 the gateway tries the next account. `403` fails over without writing a
-cooldown. `401` is returned as-is and does **not** rotate accounts or persist
-`auth_error` — OpenCode Go uses 401 for both invalid keys and `ModelError`
-("model is not supported"), so treating it as a key breaker would interrupt
-the client and strand a valid account. Dashboard **Ping** / key verification
-still record `auth_error` when they get a 401. A DNS/TCP/TLS connection
+cooldown. OpenCode Go and Zen Free `401` is returned as-is and does **not**
+rotate accounts or persist `auth_error` — OpenCode Go uses 401 for both
+invalid keys and `ModelError` ("model is not supported"), so treating it as a
+key breaker would interrupt the client and strand a valid account. Custom API
+`401` does rotate to the next eligible card and persists `auth_error`.
+Managed-account Key verification and Custom **Verify connection** still
+record `auth_error` when they get a 401. CLI `key ping` prints the real
+upstream status without writing that field. A DNS/TCP/TLS connection
 failure that proves the request was not sent is retried once on the same
 account, including for streaming calls.
+
+When **Conversation sticky** is on, a matching conversation key is tried
+before the base routing mode. The header `X-OCG-Conversation-Id` wins when
+present; otherwise the gateway fingerprints system / tools / the first user
+message. No usable key means the selected strict-priority, global-sticky, or
+round-robin mode runs unchanged.
 
 The gateway does not replay `408`, `5xx`, post-connect transport failures,
 response-body timeouts, or interrupted streams. Ambiguous failures are
@@ -1331,13 +1429,19 @@ override it with `--data-dir <path>`. The obfuscation secret defaults to
 `--encryption-key <key>` option or the `OCG_MANAGER_ENCRYPTION_KEY`
 environment variable.
 
+The CLI surface is `serve`, `key`, and `status` only. `key` manages OpenCode
+Go account credentials, not dashboard Access Keys and not Custom or Zen Free
+cards. Access Keys, Custom destinations, protocol switches, and catalogs stay
+on the dashboard. CLI account writes bump that process's settings revision
+in-process; they do not take `expectedRevision` on the command line.
+
 ```text
 ocg-manager-cli
 ├── serve         Start the gateway server
 │   --host        Address to listen on (default 127.0.0.1)
 │   -p, --port    Gateway port (sets and saves config)
 │   --dashboard-dir  Directory containing the built web dashboard
-├── key list      List accounts and their enabled state
+├── key list      List OpenCode Go API-key accounts (excludes Zen Free)
 ├── key add <name> <key>
 │   --username    OpenCode-Go login account
 │   --password    OpenCode-Go login password
@@ -1553,7 +1657,7 @@ gh attestation verify \
   --repo klarkxy/opencode-go-mgr
 ```
 
-The second command requires an authenticated GitHub CLI. Public pulls are
+Both `gh attestation verify` commands require an authenticated GitHub CLI. Public pulls are
 anonymous; if the OCI client still requests registry credentials,
 authenticate to `ghcr.io` with a token that can read packages. Provenance
 proves how the artifact was produced; it is not a vulnerability scan.
@@ -1582,13 +1686,16 @@ and browser profiles.
   `~/.ocg-mgr`. CLI data defaults to `~/.ocg-mgr-cli` on every platform and
   can be overridden with `--data-dir <path>`.
 - **Credential storage.** Account keys and saved login passwords are
-  obfuscated before storage; this is not cryptographic protection. The
-  macOS / Linux GUI and the CLI also place a `.encryption-key` file inside
-  the data directory; **back it up with the database** because losing it
-  makes stored credentials unreadable. Obfuscation is not a security
-  boundary: anyone with the data directory and its `.encryption-key`, or able
-  to run the Windows GUI in the original Windows user/machine context, can
-  recover account keys and saved login passwords.
+  obfuscated before storage; this is not cryptographic protection. Dashboard
+  Access Keys live in `access_keys` (schema v27). The macOS / Linux GUI and
+  the CLI also place a `.encryption-key` file inside the data directory;
+  **back it up with the database** because losing it makes stored credentials
+  unreadable. Obfuscation is not a security boundary: anyone with the data
+  directory and its `.encryption-key`, or able to run the Windows GUI in the
+  original Windows user/machine context, can recover account keys and saved
+  login passwords. The dashboard SPA never writes Key plaintext to
+  `localStorage`; Connection Center secrets stay in memory until logout or
+  401.
 - **Browser profiles.** `browser-profiles/`, or Docker's
   `ocg-browser-profiles`, contains long-lived cookies and official-site login
   state and is not encrypted by OCG Manager at all. Protect, transfer, and
@@ -1672,7 +1779,7 @@ and browser profiles.
 - Unknown model names return `400` on every supported client format. Clients
   should send published aliases or eligible Custom IDs from authenticated
   `GET /v1/models` that currently have an effective enabled protocol.
-  Protected `GET /dashboard/api/application-models` is Go aliases ∩ active
+  Protected `GET /dashboard/api/v3/application-models` is Go aliases ∩ active
   pricing, not that full client list.
 
 ## Troubleshooting
@@ -1683,11 +1790,22 @@ and browser profiles.
   source development only, `scripts/free-dev-port.mjs` clears stale Vite
   processes on port `30001`; it does not release `9042` or the desktop
   single-instance lock.
-- **`401 Unauthorized` from the upstream.** The gateway returns that status
-  to the client and does not rotate accounts. OpenCode Go also uses 401 for
-  `ModelError` when the model is not on that product. Use **Ping** in the
-  **Accounts** view (or `key ping <id>`) to check whether the Key itself is
-  invalid.
+- **`401 Unauthorized` from the upstream.** For OpenCode Go and Zen Free, the
+  gateway returns that status to the client and does not rotate accounts.
+  OpenCode Go also uses 401 for `ModelError` when the model is not on that
+  product. Custom API `401` rotates to the next eligible card and records
+  `auth_error`. To check whether an OpenCode Go key itself is invalid, use
+  CLI `key ping <id>` or send a real client request. Managed-account Key
+  verification and Custom **Verify connection** still record `auth_error`
+  on 401 for those flows.
+- **The dashboard says the page version does not match the service.** A cached
+  older SPA hit retired `/dashboard/api` REST (not `/dashboard/api/v3`) and
+  received HTTP 410. Refresh the page; if that is not enough, install the
+  matching desktop, CLI, or Docker build.
+- **A dashboard save failed with a conflict / 409.** Another tab in the same
+  running process wrote first. The current SPA does not automatically recover
+  from the server's `revisionConflict` code; refresh the affected page, then
+  re-apply the change.
 - **Local bar at 100% but requests still succeed.** That is a *false* circuit
   breaker — local accounting only. Continue using the account; the gateway
   will keep forwarding.
