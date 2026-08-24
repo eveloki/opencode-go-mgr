@@ -12,6 +12,7 @@ This guide is for people changing code, building releases, debugging the gateway
 - [Dashboard API](maintainer/dashboard-api.md) — V3 contract, CAS tokens, and mutation rules.
 - [State, Credentials, And Lifecycle](maintainer/state-and-lifecycle.md) — `CoreState`, locks, credentials, and persistence.
 - [HTTP Routes](maintainer/http-routes.md) — Inference routes, V3 paths, the V2 tombstone, and auth/session routes.
+- [Runtime Invariants](maintainer/runtime-invariants.md) — Detailed gateway, alias, Zen Free, plan catalog, access key, proxy, and usage-sync semantics.
 - [Storage And Migrations](maintainer/storage-migration.md) — SQLite schema v27, backup, and the operator runbook.
 - [Extending OCG Manager](maintainer/extending.md) — Sealed provider extension procedure.
 - [Release Artifacts](maintainer/release-artifacts.md) — Supported platform matrix and package names.

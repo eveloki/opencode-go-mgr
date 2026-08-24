@@ -142,6 +142,49 @@ difference, and the Claude Desktop three-role persistence behavior.
 The side rail is Dashboard / Access Keys / Accounts / Providers /
 Applications / Logs / Settings. A `pricing` query is a legacy alias for
 Providers. `BrowserSession` is a session overlay, not an eighth rail item.
+
+## Local Release Smoke Build (Windows)
+
+Full release process, CI matrix, and signing keys are in
+`docs/maintainer/releasing.md` and `docs/maintainer/ci.md`. Local smoke
+build:
+
+1. Make sure `pnpm` is available (`packageManager: pnpm@10.29.2`). If PATH
+   has no pnpm, create a shim in your user directory.
+2. Quit the installed release version to release the single-instance lock
+   and `9042`:
+
+   ```powershell
+   Get-NetTCPConnection -LocalPort 9042 -ErrorAction SilentlyContinue |
+     Select-Object OwningProcess | Get-Process | Stop-Process -Force
+   ```
+
+3. Version alignment: `package.json`, `src-tauri/tauri.conf.json`, workspace
+   `Cargo.toml`, `src-tauri/Cargo.toml`, and the title/default image in
+   `compose.example.yaml`.
+4. Run `pnpm run build` (invokes `scripts/release.mjs`).
+
+Signing-related environment variables (same as CI / MAINTAINER):
+
+- `TAURI_SIGNING_PRIVATE_KEY`: private key content, or a secure path outside
+  the repo (the script normalizes it to Tauri's path form).
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: private key password (if any).
+- `TAURI_UPDATER_PUBLIC_KEY`: public key content; must match
+  `src-tauri/updater-public-key.sha256`.
+- `OCG_REQUIRE_UPDATER_ARTIFACTS=1`: forces signed artifacts; fails if keys
+  are missing.
+
+**Without `TAURI_SIGNING_PRIVATE_KEY` only plain local packages are
+produced, which cannot be used for in-app upgrades and are only for local
+smoke tests.**
+
+On Windows, Tauri may convert line endings of `src-tauri/Cargo.toml` and
+`src-tauri/gen/schemas/*.json` to CRLF; to get a clean working tree after
+the build:
+
+```powershell
+git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json src-tauri/gen/schemas/windows-schema.json
+```
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](development.zh-CN.md) · [Docs index](../README.md)

@@ -93,6 +93,36 @@ CLI 表面只有 `serve` / `key` / `status`。`key add` 通过 `account_control:
 
 侧栏是仪表盘、接入 Key、账号、供应商、应用、日志、设置。`pricing` 查询是供应商页的遗留别名。`BrowserSession` 是会话层，不是第八个侧栏项。
 
+## 本地发布冒烟构建（Windows）
+
+完整发布流程、CI 矩阵与签名密钥见 `docs/maintainer/releasing.md` 与 `docs/maintainer/ci.md`。本地冒烟构建：
+
+1. 确保 `pnpm` 可用（`packageManager: pnpm@10.29.2`）。如果 PATH 中没有 pnpm，请在用户目录创建一个 shim。
+2. 退出已安装的 release 版本，释放单实例锁与 `9042`：
+
+   ```powershell
+   Get-NetTCPConnection -LocalPort 9042 -ErrorAction SilentlyContinue |
+     Select-Object OwningProcess | Get-Process | Stop-Process -Force
+   ```
+
+3. 版本对齐：`package.json`、`src-tauri/tauri.conf.json`、workspace `Cargo.toml`、`src-tauri/Cargo.toml`，以及 `compose.example.yaml` 中的 title/default image。
+4. 运行 `pnpm run build`（调用 `scripts/release.mjs`）。
+
+签名相关环境变量（与 CI / MAINTAINER 一致）：
+
+- `TAURI_SIGNING_PRIVATE_KEY`：私钥内容，或仓库外的安全路径（脚本会将其规范化为 Tauri 路径形式）。
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：私钥密码（如有）。
+- `TAURI_UPDATER_PUBLIC_KEY`：公钥内容；必须与 `src-tauri/updater-public-key.sha256` 匹配。
+- `OCG_REQUIRE_UPDATER_ARTIFACTS=1`：强制生成签名产物；缺少密钥时失败。
+
+**没有 `TAURI_SIGNING_PRIVATE_KEY` 时只生成普通本地包，不能用于应用内升级，仅供本地冒烟测试。**
+
+在 Windows 上，Tauri 可能把 `src-tauri/Cargo.toml` 与 `src-tauri/gen/schemas/*.json` 的换行符转为 CRLF；构建后若要干净的工作树：
+
+```powershell
+git checkout -- src-tauri/Cargo.toml src-tauri/gen/schemas/desktop-schema.json src-tauri/gen/schemas/windows-schema.json
+```
+
 ---
 
 [维护者指南索引](../MAINTAINER.zh-CN.md) · [English](development.md) · [文档索引](../README.zh-CN.md)

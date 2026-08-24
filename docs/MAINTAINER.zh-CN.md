@@ -12,6 +12,7 @@
 - [Dashboard API](maintainer/dashboard-api.zh-CN.md) — V3 契约、CAS token 与变更规则。
 - [状态、凭据与生命周期](maintainer/state-and-lifecycle.zh-CN.md) — `CoreState`、锁顺序、凭据与持久化。
 - [HTTP 路由](maintainer/http-routes.zh-CN.md) — 推理路由、V3 路径、V2 墓碑与 auth/session 路由。
+- [运行时不变式](maintainer/runtime-invariants.zh-CN.md) — Gateway、别名、Zen Free、套餐目录、访问 Key、代理与用量同步的详细语义。
 - [存储与迁移](maintainer/storage-migration.zh-CN.md) — SQLite schema v27、备份与运维手册。
 - [扩展 OCG Manager](maintainer/extending.zh-CN.md) — 静态密封的供应商扩展步骤。
 - [发布产物](maintainer/release-artifacts.zh-CN.md) — 支持的平台矩阵与包名。
