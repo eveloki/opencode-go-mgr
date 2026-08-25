@@ -43,8 +43,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run contract:v3:check
       - run: pnpm run test:web
-      - run: pnpm run typecheck
-      - run: pnpm exec vite build
+      - run: pnpm run build:web
       - run: pnpm run design:lint
       - run: docker compose -f compose.example.yaml config --quiet
 
@@ -60,12 +59,10 @@ jobs:
 
       - run: cargo fmt --all -- --check
 
-      - name: Install Linux test dependencies
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
-
+      # The Linux leg excludes the Tauri desktop crate (ocg-manager): only it
+      # needs WebKit headers, and the windows-tauri job already compiles, tests,
+      # and lints that crate. Linux src-tauri compile coverage lives in the
+      # release build matrix.
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -74,13 +71,8 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.event_name != 'pull_request' }}
 
-      - name: Provide stub dashboard for tauri-build
-        run: |
-          mkdir -p dist
-          printf '%s\n' '<!doctype html><div id="app"></div>' > dist/index.html
-
-      - run: cargo test --workspace --locked
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --exclude ocg-manager --locked
+      - run: cargo clippy --workspace --exclude ocg-manager --all-targets --locked -- -D warnings
 
   windows-tauri:
     name: Windows Tauri tests

@@ -68,10 +68,15 @@ jobs:
           echo "production=$production" >> "$GITHUB_OUTPUT"
 
   quality:
+    # Only production tag pushes re-run the full quality gate; manual
+    # candidate dispatches build a commit that already passed it on PR/main.
+    needs: plan
+    if: needs.plan.outputs.production == 'true'
     uses: ./.github/workflows/quality.yml
 
   preflight:
     name: Release preflight
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -95,7 +100,15 @@ jobs:
         run: ./scripts/validate-windows-release-smoke.ps1
       - name: Test release helpers
         run: node --test scripts/generate-release-notes.test.mjs scripts/generate-updater-manifest.test.mjs scripts/release-policy.test.mjs scripts/verify-release-assets.test.mjs scripts/prune-appimage-wayland-libs.test.mjs
-      - name: Validate version and unsigned candidate contract
+      - name: Validate release contract and signing pair
+        # On a production tag push this also proves the updater signing pair
+        # and committed public-key fingerprint before any native runner starts;
+        # manual candidates receive empty signing values and stay unsigned.
+        env:
+          OCG_REQUIRE_UPDATER_ARTIFACTS: ${{ needs.plan.outputs.production == 'true' && '1' || '0' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.plan.outputs.production == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.plan.outputs.production == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ needs.plan.outputs.production == 'true' && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
         run: pnpm run release:check
 
   build:
@@ -163,15 +176,8 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Validate production signing pair and public-key continuity
-        if: needs.plan.outputs.production == 'true'
-        env:
-          OCG_REQUIRE_UPDATER_ARTIFACTS: "1"
-          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.plan.outputs.production == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.plan.outputs.production == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-          TAURI_UPDATER_PUBLIC_KEY: ${{ needs.plan.outputs.production == 'true' && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
-        run: pnpm run release:check
-
+      # The signing pair and public-key continuity were already proven by
+      # preflight; release.mjs re-validates the plan inside the build itself.
       - name: Build platform artifacts
         env:
           OCG_REQUIRE_UPDATER_ARTIFACTS: ${{ needs.plan.outputs.production == 'true' && '1' || '0' }}

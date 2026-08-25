@@ -179,7 +179,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      # Smoke runs on amd64 only; the arm64 leg builds and pushes without it.
       - name: Build smoke images
+        if: matrix.arch == 'amd64'
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         with:
           source: .
@@ -195,6 +197,7 @@ jobs:
             CACHE_BROWSER_SCOPE=ocg-browser-linux-${{ matrix.arch }}
 
       - name: Smoke-test container
+        if: matrix.arch == 'amd64'
         shell: bash
         run: |
           set -euo pipefail
@@ -250,6 +253,7 @@ jobs:
           fi
 
       - name: Smoke-test browser container and real Chromium
+        if: matrix.arch == 'amd64'
         shell: bash
         run: |
           set -euo pipefail
@@ -342,12 +346,12 @@ jobs:
           docker exec "$SMOKE_BROWSER_CONTAINER" test -d /profiles/ci-smoke
 
       - name: Show browser smoke logs on failure
-        if: failure()
+        if: failure() && matrix.arch == 'amd64'
         shell: bash
         run: docker logs "$SMOKE_BROWSER_CONTAINER" 2>&1 || true
 
       - name: Clean up smoke test
-        if: always()
+        if: always() && matrix.arch == 'amd64'
         shell: bash
         run: |
           docker rm --force "$SMOKE_CONTAINER" >/dev/null 2>&1 || true
