@@ -2,23 +2,22 @@
 
 # CLI
 
-Download the archive for your platform and extract it as a directory. It
-contains the executable, `dist/`, and `LICENSE`. Keep `dist/` beside the
-executable so `serve` can serve the dashboard. On Windows the executable is
+The CLI is the desktop app with the tray icon removed. Download the archive
+for your platform and extract it into a directory. Keep `dist/` next to the
+executable so `serve` has a dashboard to serve. On Windows the executable is
 `ocg-manager-cli.exe`; on Linux you may need `chmod +x ocg-manager-cli` after
 extraction.
 
 The CLI data directory defaults to `~/.ocg-mgr-cli` on every platform;
-override it with `--data-dir <path>`. The obfuscation secret defaults to
-`<data-dir>/.encryption-key`; override it with the named
-`--encryption-key <key>` option or the `OCG_MANAGER_ENCRYPTION_KEY`
-environment variable.
+override it with `--data-dir <path>`. The obfuscation secret lives at
+`<data-dir>/.encryption-key` by default, or set it with `--encryption-key <key>`
+or `OCG_MANAGER_ENCRYPTION_KEY`.
 
-The CLI surface is `serve`, `key`, and `status` only. `key` manages OpenCode
-Go account credentials, not dashboard Access Keys and not Custom or Zen Free
-cards. Access Keys, Custom destinations, protocol switches, and catalogs stay
-on the dashboard. CLI account writes bump that process's settings revision
-in-process; they do not take `expectedRevision` on the command line.
+The CLI only does `serve`, `key`, and `status`. `key` manages OpenCode Go
+account credentials — not dashboard Keys and not Custom or Zen Free cards.
+Keys, Custom destinations, protocol switches, and catalogs stay on the
+dashboard. CLI writes bump that process's settings revision directly; there is
+no `--expectedRevision` flag.
 
 ```text
 ocg-manager-cli
@@ -40,7 +39,7 @@ ocg-manager-cli
 └── status        Show data dir, gateway port/key, upstream, account totals
 ```
 
-The fastest way to bootstrap a headless gateway:
+Headless bootstrap in three commands:
 
 ```bash
 ./ocg-manager-cli key add main sk-...
@@ -48,13 +47,12 @@ The fastest way to bootstrap a headless gateway:
 ./ocg-manager-cli serve --port 9042
 ```
 
-`serve --port <port>` writes the new port to SQLite. Later `serve` runs
-without `--port` reuse that saved value.
+`serve --port <port>` writes the port to SQLite; later runs without the flag
+reuse it.
 
-`key ping` reads the obfuscated key, sends a tiny chat completion, and prints
-the real upstream status code and a short body excerpt — use it to surface
-real `401`/`403`/`429`/`200` from each key without going through the
-dashboard.
+`key ping` sends a tiny chat completion through one key and prints the real
+upstream status code with a short body excerpt — a quick way to surface
+`401`/`403`/`429`/`200` without opening the dashboard.
 
 ---
 

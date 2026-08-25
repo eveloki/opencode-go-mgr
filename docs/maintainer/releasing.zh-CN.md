@@ -9,11 +9,11 @@
 5. 等待 `quality`、`preflight`、全部原生矩阵 job、`draft-release`、 `verify-release` 和 `publish-release` 通过。确认公开的是同一个已验证 draft，再复核与组装产物逐名一致的附件集合、冒烟日志、平台警告，以及基于上一个 tag diff 编写的说明。
 6. 对已发布 tag 显式触发 `container.yml`（例如 `gh workflow run container.yml --ref main -f tag=vX.Y.Z -f publish_latest=true`，无需传 `source_ref`），等待它通过，确认两个 GHCR package 已公开，分别核验版本与 digest，再匿名拉取两个完整版本标签。
 
-已发布的资产和 tag 是只读的。已发布 payload 有误时应发布新的 patch 版本，而不是替换资产或移动 tag。
+已发布资产与 tag 不可变。发布有误时通过新 patch 版本修复，禁止替换资产或移动 tag。
 
 ## 发布前验证清单
 
-推送 `v*` tag **前** 跑完这些检查。CI 冒烟覆盖大部分；需要真实桌面的部分手动验证。
+推送 `v*` tag 前完成本清单。CI 覆盖大部分；需真实桌面的条目手工验证。
 
 - [ ] 可复用质量门中的三个 job 全绿（含 `contract:v3:check`）；tag-only 签名
       `release:check` 通过；选中的每个 `pnpm run build` 与平台冒烟全绿。

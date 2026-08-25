@@ -4,7 +4,7 @@
 
 ## 日志
 
-**日志** 视图展示 Gateway 转发的请求滚动列表：时间戳、选中的 provider/offering、 route account、credential account、模型、状态码、上游错误（如果有），以及上游发出 usage chunk 时的精确流式用量。可按 provider、offering、route account、credential account、模型、状态、时间范围与客户端 Key 筛选。每条存储行把请求身份与上游身份分开。没有 `requested_alias` 字段：
+**日志** 视图是 Gateway 转发请求的滚动记账本：时间戳、选中的 provider/offering、route account、credential account、模型、状态码、上游错误（如果有），以及上游吐出 usage chunk 时的流式用量。可按 provider、offering、route account、credential account、模型、状态、时间范围与客户端 Key 筛选。它不会修你的提示词，但会告诉你这次是谁背的锅。每条存储行把请求身份与上游身份分开，没有 `requested_alias` 字段：
 
 - `requested_model` — 客户端发送的别名或模型名
 - `resolved_alias` — 存在时的规范 kebab 别名
@@ -12,15 +12,15 @@
 
 以及 `provider_id` 与 `offering_id`。现有模型筛选会对这些身份或遗留 `model` 列做精确匹配。原生成本（`native_cost_value`、`native_cost_unit`、 `native_cost_currency`）是可选字段，只有 offering 提供足够价格证据时才有值。
 
-在所选 offering 提供足够的价格证据时，每行还会保留原始供应商成本、额度扣减与实际付费成本。这三者互不等同：allowance 只改变额度扣减倍率，不会让某个模型或供应商变得可路由。
+当 offering 有足够价格证据时，每行还会保留原始供应商成本、额度扣减和实际付费成本。allowance 只改变额度扣减倍率，不会让某个模型或供应商变得可路由。
 
 - Chat 流式请求会设置 `stream_options.include_usage`，让 OpenAI 兼容上游返回 usage chunk。仍然没有 usage chunk 的行会标 `success_no_usage`。usage chunk 只会让 token 数量准确；Go 费用仍按当前 OpenCode Go 价格快照估算。已登记的 Zen free 模型（`big-pickle`、`mimo-v2.5-free` 等）会记录 token，但 `cost_state=free`，不计入 Go 额度。Go 上名字带 `free` 的模型（目前 `ox-alpha-free`）仍走 Go；官方价格列为 `-` 时记为 unpriced。Custom API 行记 `cost_state=unknown`，不扣供应商额度。展开行可查看请求 ID 与诊断详情。
 - `outcome_unknown` 表示上游可能已经完成并扣额，但 Gateway 超时或丢失响应；这类请求不会自动重试，且本地额度消耗保持未知。
-- **Key** 筛选把行与汇总统计限定到单个客户端 Key。选项来自日志表本身，因此已停用、已删除或未知的 Key 仍可筛选。**未归因** 表示多 Key 支持之前写入的行；升级后后台任务会把它们归到主 Key，因此升级前的用量统一计入主 Key （近似归因）。
+- **Key** 筛选把行与汇总统计限定到单个客户端 Key。选项来自日志表本身，因此已停用、已删除或未知的 Key 仍可筛选。**未归因** 表示多 Key 支持之前写入的行；后台任务会近似归到主 Key。
 
 ## 设置
 
-**设置** 视图暴露持久化的 Gateway 配置：
+**设置** 视图保存 Gateway 的持久化配置：
 
 - **Gateway 端口**：Gateway 监听端口（默认 `9042`）。
 - **上游地址**：OpenCode-Go 基础 URL。
@@ -36,7 +36,7 @@
 - **检查更新 / 立即升级**：支持升级的已安装桌面版会检查 GitHub 最新 Release，并可下载、校验签名、安装对应平台的包。开发构建、CLI、Docker 仍显示发布页并手动升级。主机必须能访问 GitHub；检查或安装失败不影响 Gateway 转发。
 - **Zen Free**：在账号卡上直接启用或关闭；在 **供应商** 页刷新 Free 模型目录、查看协议证据，并切换 Chat Completions / Responses / Messages。
 
-配置项写入 SQLite，下次启动时重新加载。Settings 资源从不包含 Key 明文。保存设置使用与其他 Dashboard V3 写入相同的 `expectedRevision` / `processGeneration` token。检查更新是按需动作，不会持久化。
+配置项写入 SQLite，下次启动时重新加载。Settings 资源从不包含 Key 明文。保存使用与其他 Dashboard V3 写入相同的 `expectedRevision` / `processGeneration` token。检查更新是按需动作，不会持久化。
 
 ---
 

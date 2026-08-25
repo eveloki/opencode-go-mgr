@@ -2,7 +2,7 @@
 
 # 运行时不变式
 
-运行系统的详细行为不变式，已从 `AGENTS.md` 迁出，以便该文件保持可快速浏览。在修改 Gateway 路由、别名、Zen Free、套餐目录、访问 Key、出站代理或用量同步之前，请先阅读本文。代码仍是最终权威；本页梳理的是容易出错的语义地图。
+运行系统的行为不变式。修改 Gateway 路由、别名、Zen Free、套餐目录、访问 Key、出站代理或用量同步前请先阅读本文。代码是最终权威；本页梳理容易出错的语义。
 
 ## Gateway 与模型列表
 
@@ -40,7 +40,7 @@
 
 ## 套餐目录与 Custom API 边界
 
-- 套餐目录位于 `ocg_domain::provider` 的 `BUILTIN_PLANS`：OpenCode Go、Zen Free、Command Code GOAT、SCNet Token Plans（`token-plan-basic|standard|premium`，Key 前缀 `sk-tp-`，官方交互式使用限制），以及 Custom API。内部身份是 `provider_id` + `offering_id`。GOAT 与所有 SCNet 套餐都是禁用的 `pending` 草稿（`routable=false`）；`POST /dashboard/api/v3/accounts/{id}/verify` 对这些套餐返回 `501`。所有持久化变更路径（DB 关卡 / 面板 / CLI 共享服务）在写入、revision 或 timestamp 变更前，拒绝为任何 `routable=false` 的套餐设置 `enabled=true`；桌面 UI 只通过 Dashboard V3 HTTP 变更，没有单独的 invoke 变更路径。每次 `Database::open` 仅禁用旧版 GOAT 与全部三个 SCNet 层级的 `enabled` 行而不修改 `updated_at`；Custom 的 enabled 状态保留；只把已存在的未验证 GOAT 重置为 `pending`。Go、Zen Free 与未知对不受影响。SCNet 官方可用模型表与端点快照只是适配器输入，不得作为客户端别名发布。
+- 套餐目录位于静态 `ocg_domain::provider` 的 `BUILTIN_PLANS`：OpenCode Go、Zen Free、Command Code GOAT、SCNet Token Plans（`token-plan-basic|standard|premium`，Key 前缀 `sk-tp-`，官方交互式使用限制），以及 Custom API。内部身份是 `provider_id` + `offering_id`。GOAT 与所有 SCNet 套餐都是禁用的 `pending` 草稿（`routable=false`）；`POST /dashboard/api/v3/accounts/{id}/verify` 对这些套餐返回 `501`。所有持久化变更路径（DB 关卡 / 面板 / CLI 共享服务）在写入、revision 或 timestamp 变更前，拒绝为任何 `routable=false` 的套餐设置 `enabled=true`；桌面 UI 只通过 Dashboard V3 HTTP 变更，没有单独的 invoke 变更路径。每次 `Database::open` 仅禁用旧版 GOAT 与全部三个 SCNet 层级的 `enabled` 行而不修改 `updated_at`；Custom 的 enabled 状态保留；只把已存在的未验证 GOAT 重置为 `pending`。Go、Zen Free 与未知对不受影响。SCNet 官方可用模型表与端点快照只是适配器输入，不得作为客户端别名发布。
 - Custom API（`custom`/`api`，`routable=true`）是可信管理员目标：可配置任何语法有效的 HTTP/HTTPS 上游（包括 LAN、loopback 与自选定目标）；拒绝含嵌入凭据、query 或 fragment 的 URL；永不跟随重定向；永不转发面板/客户端认证；只构造配置的 Bearer 或 `x-api-key`；组装端点必须保留 scheme/host/port/base-path 前缀。创建/更新后仍保持 disabled `pending`；verify 向第一个声明模型发送一条最小非流式请求，使用正确协议，仅在 2xx JSON object 时成功，不发现/重写能力，也不会自动启用。verify 成功后仍需显式 enable。符合条件的账号（enabled+verified+ready+非空 Key）动态路由其声明的模型 ID/协议。Custom 成本/用量未定价/未知，不扣除供应商配额。Key、base URL 或声明能力变更会使验证失效并禁用账号；协议与认证方案创建后不可更改。不要用 GOAT/SCNet 反滥用框架来描述 Custom 的可信管理员边界。
 
 ## 别名
@@ -66,8 +66,8 @@
 ## 定价、容器与 CI 说明
 
 - 定价按 Provider 独立管理：读取 `GET /dashboard/api/v3/providers/{provider_id}/{offering_id}/pricing`，刷新 `POST /dashboard/api/v3/providers/{provider_id}/pricing/refresh`；Go 倍率写入使用 `PUT /dashboard/api/v3/providers/opencode/go/pricing/multipliers`。OpenCode 与 Command Code 各自维护修订号和最后一次成功快照；只有用户点击对应 Provider 的刷新按钮时才访问其固定官方来源，禁止自动轮询。
-- 公开 GitHub Release 发布后，`.github/workflows/container.yml` 在原生 amd64（`ubuntu-24.04`）与 arm64（`ubuntu-24.04-arm`）runner 上构建并冒烟测试 `linux/amd64` 与 `linux/arm64` 镜像，按 digest 推送各架构，再合并为同一标签下的多架构 OCI index，发布到 `ghcr.io/klarkxy/opencode-go-mgr`。Compose 默认使用该镜像；本地源码构建需 `OCG_IMAGE=ocg-manager:local` 后 `docker compose up -d --build`。
-- `.github/workflows/quality.yml` 在 PR / `main` 上分为三个并行 job：Web（含 `pnpm run contract:v3:check`、前端测试/类型/lint）、Linux workspace Rust 测试/Clippy（stub `dist/`，编译包含 Tauri crate）与 Windows Tauri 目标测试（stub `dist/`，不运行 Vite）。`release.yml` 手动候选（即使选择 tag ref）始终未签名，且可能只构建所选平台；只有 `v*` tag push 事件才会构建全部三个平台并读取仓库签名密钥。tag push 被视为单维护者显式发版授权：工作流逐个校验附件集合与组装产物名称匹配（数量由产物推导，非硬编码）、升级器签名、公钥连续性，以及 GitHub 服务端摘要，然后自动发布同一未改动草稿。
+- 公开 GitHub Release 发布后，`.github/workflows/container.yml` 在原生 amd64（`ubuntu-24.04`）与 arm64（`ubuntu-24.04-arm`）runner 上构建 `linux/amd64` 与 `linux/arm64` 镜像（仅 amd64 跑冒烟测试），按 digest 推送各架构，再合并为同一标签下的多架构 OCI index，发布到 `ghcr.io/klarkxy/opencode-go-mgr`。Compose 默认使用该镜像；本地源码构建需 `OCG_IMAGE=ocg-manager:local` 后 `docker compose up -d --build`。
+- `.github/workflows/quality.yml` 在 PR / `main` 上分为三个并行 job：Web（含 `pnpm run contract:v3:check`、前端测试/类型/lint）、Linux workspace Rust 测试/Clippy（排除 Tauri 桌面 crate，无需安装系统包）与 Windows Tauri 目标测试（stub `dist/`，不运行 Vite）。`release.yml` 仅在生产 `v*` tag push 时调用该质量门。`release.yml` 手动候选（即使选择 tag ref）始终未签名，且可能只构建所选平台；只有 `v*` tag push 事件才会构建全部三个平台并读取仓库签名密钥。tag push 被视为单维护者显式发版授权：工作流逐个校验附件集合与组装产物名称匹配（数量由产物推导，非硬编码）、升级器签名、公钥连续性，以及 GitHub 服务端摘要，然后自动发布同一未改动草稿。
 - 容器以固定 UID/GID `10001` 运行，包含 `LICENSE`；Compose 透传可选 `OCG_MANAGER_ENCRYPTION_KEY` 以支持显式 Key 恢复，但正常部署仍倾向于在卷中保留 `.encryption-key`。
 
 ---

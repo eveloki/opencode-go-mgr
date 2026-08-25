@@ -2,29 +2,29 @@
 
 # Protocol Conversion
 
-At request time the gateway never discovers or probes a protocol. It resolves
-the Alias, checks account eligibility, applies the adapter structural ceiling,
-then the saved provider contract, then the Chat Completions / Responses /
-Messages switches, and only then passthroughs or converts. Switches take
-precedence: a globally closed protocol is not used even if the model lists it
-as supported.
+OCG Manager speaks five client protocols on one port, then translates each
+request into whatever the upstream Plan actually understands. The conversion
+layer is deliberately incurious: it resolves the Alias, checks account
+eligibility, applies the adapter ceiling and saved provider contract, respects
+the Chat Completions / Responses / Messages switches, and only then
+passthroughs or converts. A globally closed protocol wins — even if the model
+claims it supports it.
 
 Each known OpenCode Go model starts from a hardcoded **preferred** protocol
-and a **supported** set (maintained after test-account probes; not discovered
-at request time). Explicit probe success on **Providers** may confirm or add
-support only inside that adapter ceiling; probe failure is recorded and does
-not delete static capability. When the client protocol is supported and
-enabled, the gateway passthroughs the request and response. Otherwise it
-converts the **request body** to the preferred upstream protocol and the
-**response body** (or SSE stream) back to the client protocol.
-`MODEL_PROTOCOLS` remains the Go starting point. Custom API converts the
-client protocol to that account's declared upstream protocol, then still
-honors the Custom endpoint contract and switches. Conversion covers text,
-system instructions, images, tool calls and tool results, reasoning content,
-completion status, errors, and usage fields. Example: `glm-5.2` passthroughs
-Chat Completions, Responses, and Messages; `grok-4.5` is Responses-only and
-converts Chat / Messages / Gemini entries to Responses; `gpt-5.6-luna`
-prefers Responses and also passthroughs Chat; `glm-5.3` is Chat-only.
+and a **supported** set, maintained after test-account probes; the request
+path does not discover protocols. A successful probe on **Providers** can
+confirm or add support only within that adapter ceiling; failures are recorded
+but never remove static capability. If the client protocol is supported and
+enabled, request and response pass through. Otherwise the gateway converts
+the **request body** to the preferred upstream protocol and the **response
+body** — or SSE stream — back to the client protocol. Custom API does the
+same to the account's declared upstream protocol, then honors that endpoint's
+contract and switches. Conversion covers text, system instructions, images,
+tool calls and results, reasoning content, completion status, errors, and
+usage fields. `glm-5.2` passthroughs Chat, Responses, and Messages;
+`grok-4.5` is Responses-only and converts Chat / Messages / Gemini entries;
+`gpt-5.6-luna` prefers Responses but also passthroughs Chat; `glm-5.3` is
+Chat-only.
 
 | Preferred upstream | Models |
 | --- | --- |
@@ -84,17 +84,16 @@ Source of truth: `MODEL_PROTOCOLS` in
 | `qwen3.6-plus` | Messages | ✓ | | ✓ |
 | `qwen3.5-plus` | Messages | ✓ | | ✓ |
 
-Unknown model names are rejected with `400` on every supported client format
-(Chat Completions, Responses, Messages, and Gemini `generateContent` /
-`streamGenerateContent`). Unknown Claude Desktop aliases are also `400`. The
-gateway will not guess a protocol by trial because that could double-bill the
-request. See [Aliases](gateway.md#aliases).
+Unknown model names return `400` on every supported client format — Chat
+Completions, Responses, Messages, and Gemini `generateContent` /
+`streamGenerateContent` — and unknown Claude Desktop aliases do too. The
+gateway refuses to guess a protocol by trial — that would bill the request
+twice. See [Aliases](gateway.md#aliases).
 
-Gateway protocol endpoints accept JSON request bodies up to 16 MiB. This
-transport limit is separate from each model's context window. If a reverse
-proxy sits in front of OCG Manager, configure it to allow request bodies of
-at least 16 MiB or it may return `413 Payload Too Large` before the gateway
-sees the request.
+Gateway protocol endpoints accept JSON request bodies up to 16 MiB. That is
+a transport limit, not a context-window limit. If a reverse proxy sits in
+front of OCG Manager, allow at least 16 MiB request bodies or the proxy may
+return `413 Payload Too Large` before the gateway sees the request.
 
 ## Responses is stateless
 

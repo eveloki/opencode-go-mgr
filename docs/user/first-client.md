@@ -2,6 +2,8 @@
 
 # Connect Your First Client
 
+Once the gateway is running, connecting a client is mostly a copy-paste exercise — the hard part is pretending you understand why the base URL ends in `/v1`.
+
 1. In **Accounts**, add an OpenCode Go account with an officially distributable
    API key. The login account is optional; when entered first, it is copied
    into the required display name until you edit that name yourself. The
@@ -12,11 +14,11 @@
    **Applications** view has a per-client guide for 16 common tools.
 4. Verify the setup with a real request.
 
-The Key is the only credential a client needs, and it works in three
-header forms: `Authorization: Bearer <key>`, the Anthropic-compatible
-`x-api-key: <key>`, or the Gemini-compatible `x-goog-api-key: <key>`. It is a
-local secret unrelated to the OpenCode-Go account key, which the gateway
-retrieves from SQLite and injects on the upstream side itself.
+The **Key** is the only secret you hand to the client. It accepts three
+header shapes — `Authorization: Bearer <key>`, Anthropic-style
+`x-api-key: <key>`, or Gemini-style `x-goog-api-key: <key>` — and has nothing
+to do with the upstream OpenCode-Go account key, which the gateway pulls from
+SQLite and injects itself.
 
 Minimal POSIX-shell checks for all five client formats:
 

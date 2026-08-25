@@ -29,14 +29,13 @@
    public, inspect each version and digest, and anonymously pull both
    full-version tags.
 
-Treat published assets and tags as immutable. If a published payload is
-wrong, ship a new patch version; do not replace the asset or retarget the
-tag.
+Published assets and tags are immutable. Fix a bad release with a new
+patch version; never replace an asset or retarget a tag.
 
 ## Release Validation Checklist
 
-Run these checks **before** publishing a `v*` tag. The CI smoke flow covers
-most of them; the manual parts need a real desktop.
+Run this checklist before pushing a `v*` tag. CI covers most items;
+desktop-specific steps need a real machine.
 
 - [ ] All three jobs in the reusable quality gate are green (including
       `contract:v3:check`); the tag-only signed `release:check` passed; every

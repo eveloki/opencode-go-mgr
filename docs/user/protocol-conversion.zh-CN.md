@@ -2,9 +2,9 @@
 
 # 协议转换
 
-请求路径不会发现或探测协议。Gateway 先解析别名，再检查账号资格、适配器结构上限、已保存的供应商合约，以及 Chat Completions / Responses / Messages 开关，然后才透传或转换。开关优先：全局关闭的协议即使模型静态支持也不会被使用。
+OCG Manager 在一个端口上讲五种客户端协议，再把每份请求翻译成上游 Plan 真正听得懂的格式。转换层没有好奇心：解析别名、检查账号资格、应用适配器上限与已保存的供应商合约、尊重 Chat Completions / Responses / Messages 开关，然后才决定透传或转换。全局关闭的协议优先——哪怕模型说自己支持。
 
-每个已知 OpenCode Go 模型从硬编码的 **推荐协议** 与 **已验证可用协议集合** 起步（由维护者测试账号探测后写入代码，请求路径不做协议试探）。在 **供应商** 页显式探测成功时，只能在该适配器上限内确认或新增支持；探测失败会被记录，但不会删除静态能力。客户端协议在集合内且开关启用时透传；否则把 **请求体** 转到推荐上游协议，再把 **响应体**（或 SSE 流）转回客户端协议，覆盖文本、system、图像、工具调用与工具结果、推理内容、完成状态、错误、usage 字段。`MODEL_PROTOCOLS` 仍是 Go 的起点。Custom API 把客户端协议转换到该账号声明的上游协议，再遵守该 Custom 端点的合约与开关。例如 `glm-5.2` 对 Chat Completions / Responses / Messages 均透传； `grok-4.5` 仅 Responses，Chat / Messages / Gemini 入口会转到 Responses； `gpt-5.6-luna` 推荐 Responses，Chat 也可透传；`glm-5.3` 仅 Chat。
+每个已知 OpenCode Go 模型从硬编码的 **推荐协议** 与 **已验证可用协议集合** 起步，由测试账号探测后写入代码；请求路径不做协议试探。在 **供应商** 页探测成功只能在该适配器上限内确认或新增支持，失败会被记录，但不会删除静态能力。客户端协议在集合内且开关启用时透传；否则 **请求体** 转到推荐上游协议，**响应体** 或 SSE 流转回客户端协议。Custom API 同样转到该账号声明的上游协议，再遵守该端点的合约与开关。转换覆盖文本、system、图像、工具调用与结果、推理内容、完成状态、错误与 usage 字段。`glm-5.2` 对 Chat / Responses / Messages 均透传；`grok-4.5` 仅 Responses，Chat / Messages / Gemini 入口会转到 Responses；`gpt-5.6-luna` 推荐 Responses 但 Chat 也可透传；`glm-5.3` 仅 Chat。
 
 | 推荐上游协议 | 模型 |
 | --- | --- |
@@ -58,9 +58,9 @@
 | `qwen3.6-plus` | Messages | ✓ | | ✓ |
 | `qwen3.5-plus` | Messages | ✓ | | ✓ |
 
-未知模型名在所有受支持的客户端格式上直接 `400` 拒绝（Chat Completions、 Responses、Messages，以及 Gemini `generateContent` / `streamGenerateContent`）。未知 Claude Desktop 别名同样 `400`。Gateway 不会靠试探选协议，否则可能把同一请求重复计费。见 [别名](gateway.zh-CN.md#别名)。
+未知模型名在所有支持的客户端格式上直接返回 `400`——Chat Completions、Responses、Messages，以及 Gemini `generateContent` / `streamGenerateContent`——未知 Claude Desktop 别名也一样。Gateway 不靠试探选协议——那会把同一请求计两次费。见 [别名](gateway.zh-CN.md#别名)。
 
-Gateway 协议端点最多接受 16 MiB 的 JSON 请求体；这是 HTTP 传输上限，与具体模型的上下文窗口不是同一个概念。若 OCG Manager 前面还有反向代理，需要把代理的请求体上限设为至少 16 MiB，否则请求可能尚未到达 Gateway 就被代理以 `413 Payload Too Large` 拒绝。
+Gateway 协议端点最多接受 16 MiB 的 JSON 请求体；这是传输上限，不是上下文窗口。若 OCG Manager 前面还有反向代理，需把请求体上限设为至少 16 MiB，否则请求可能还没到达 Gateway 就被代理以 `413 Payload Too Large` 拒绝。
 
 ## Responses 是无状态端点
 

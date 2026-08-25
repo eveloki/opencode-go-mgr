@@ -145,21 +145,21 @@ src-tauri   -> ocg-core
        （没有 requested_alias 字段）
 ```
 
-鉴权收集 Bearer / `x-api-key` / `x-goog-api-key` 全部非空候选头。任一命中 `CoreStateInner.credential_snapshot`（主 Key 与启用子 Key）即通过；按候选头顺序首次命中归因。该快照也是转发日志名称来源。客户端凭据在出站前剥离，只注入所选账号已配置的方案。Gemini 或 Anthropic 客户端凭据不会透传到上游 offering；Command Code / GOAT 不会被别名到 OpenCode，其 Key 也不会发往 OpenCode endpoint。
+鉴权接受 Bearer、`x-api-key`、`x-goog-api-key`。候选头中首个命中 `CoreStateInner.credential_snapshot`（主 Key 或启用子 Key）者即通过，并作为转发日志名称归因。客户端凭据在出站前剥离，只注入所选账号配置的鉴权方案。Gemini 或 Anthropic 客户端凭据不会透传到上游 offering；Command Code / GOAT 不会被别名到 OpenCode，其 Key 也不会发往 OpenCode endpoint。
 
-标准入口：`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、 `/v1/models`。Claude Desktop：`/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`。Gemini 同时接受 `/v1beta/models/{model}:*` 与 `/v1/models/{model}:*`；`generateContent` / `streamGenerateContent` 进入转换链；`countTokens` / `embedContent` 返回 `501`；未知 action 返回 `404`。带鉴权的 `GET /v1/models` 是当前可路由已公布别名（OpenCode Go 与最后一次成功 Zen Free 快照）加上合格 Custom 声明 ID 的 **本地** 读取——**零上游发现**。受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：Go 可路由别名 ∩ 当前 Go 价格快照（highspeed 变体继承基价行；空交集为 `[]`）。它不含 Custom ID。Claude Desktop `/claude-desktop/v1/models` 仍然只公布三个角色别名。
+标准入口为 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`。Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`。Gemini 接受 `/v1beta/models/{model}:*` 与 `/v1/models/{model}:*`；`generateContent` 与 `streamGenerateContent` 进入转换链，`countTokens` 与 `embedContent` 返回 `501`，未知 action 返回 `404`。带鉴权的 `GET /v1/models` 仅本地读取当前可路由别名：OpenCode Go、最后一次成功的 Zen Free 快照，以及合格的 Custom 声明 ID。受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：Go 可路由别名 ∩ 当前 Go 价格快照（highspeed 变体继承基价行），不含 Custom ID。Claude Desktop `/claude-desktop/v1/models` 只公布三个角色别名。
 
-Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选别名是稳定的小写 kebab-case（沿用现有 OpenCode Go ID）。大小写折叠的 kebab 拼写可接受；含 `/`、`_` 或空白的名称视为原始 ID，不会折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个 mapping 时钉在该 mapping；之后才检查可路由性，因此不可路由 mapping 会被识别但不能产出生产路由。重叠的原始 ID 返回 `400`，错误码 `ambiguous_model_id`，且不会调用上游。未知名称在 Chat Completions、 Responses、Messages 以及 Gemini generate / streamGenerate 上返回 `400`。合格 Custom ID 会 overlay 进解析与 `/v1/models`，但不会替换已公布的 Go/Zen 别名。已公布 kebab 别名 `deepseek-v4-flash` 仍归 Go；原始 ID `deepseek/deepseek-v4-flash` 钉在不可路由的 GOAT。转发日志持久化 `requested_model`、`resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`。没有 `requested_alias` 字段。
+Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选别名是小写 kebab-case。kebab 拼写大小写折叠；含 `/`、`_` 或空白的名称视为原始 ID，不会折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个 mapping 时钉在该 mapping，之后再检查可路由性；不可路由的 mapping 会被识别，但不能产出生产路由。重叠的原始 ID 返回 `400` `ambiguous_model_id`，不调用上游。未知名称在 Chat Completions、Responses、Messages 以及 Gemini generate / streamGenerate 上返回 `400`。合格 Custom ID 会 overlay 进解析与 `/v1/models`，但不替换已公布的 Go/Zen 别名。已公布 kebab 别名 `deepseek-v4-flash` 归 Go；原始 ID `deepseek/deepseek-v4-flash` 钉在不可路由的 GOAT。转发日志持久化 `requested_model`、`resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`；没有 `requested_alias` 字段。
 
-JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解析、 usage、流式与路由身份类型。Gemini 只是客户端格式，不是上游协议。已知模型使用 `ocg-domain` 中硬编码的 `MODEL_PROTOCOLS`（`preferred` + `supported`）：客户端协议在 `supported` 内则透传，否则转到 `preferred`。未知模型在所有受支持的客户端格式上直接 `400`，请求路径不试探协议。非空 `safetySettings` 会返回 `400`；空数组可以接受。`topK`、`thinkingConfig` 只是兼容提示，不保证与 Gemini 等价。
+JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解析、usage、流式与路由身份类型。Gemini 只是客户端格式。已知模型使用 `ocg-domain` 中硬编码的 `MODEL_PROTOCOLS`：客户端协议在 `supported` 内则透传，否则转到 `preferred`。未知模型在所有受支持的客户端格式上返回 `400`；请求路径不试探协议。非空 `safetySettings` 返回 `400`；空数组可以接受。`topK` 与 `thinkingConfig` 只是兼容提示，不保证与 Gemini 等价。
 
-`materialize.rs` 只解析一次客户端协议，解析 Alias，再按候选物化 model / protocol / endpoint / auth。适配器不会通过可计费推理路径来试探协议支持。OpenCode `MODEL_PROTOCOLS` 表仍只服务 Go。表中未知的动态 Zen `-free` ID 默认按 Chat 物化。Custom 按账号把协议、隔离 origin 与鉴权方案重新物化为该卡声明值。
+`materialize.rs` 只解析一次客户端协议与 Alias，再按候选物化 model、protocol、endpoint 与 auth。适配器不会通过可计费推理路径试探协议支持。OpenCode `MODEL_PROTOCOLS` 表只服务 Go。表中未知的动态 Zen `-free` ID 默认按 Chat 物化。Custom 按账号把协议、隔离 origin 与鉴权方案重新物化为该卡声明值。
 
-`zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的供应商页显式刷新通过全局代理请求固定无 Key endpoint `https://opencode.ai/zen/v1/models`，不跟随重定向，只保留合法且以 `-free` 结尾的 ID；完整成功快照先持久化，再切换运行时。每个模型同时公布原 ID 与去掉 `-free` 的 Alias。失败或过滤结果为空时保留旧快照，`/v1/models` 只读取这份快照。Go 所有的 `ox-alpha-free` 是保留排除项。
+`zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的供应商页显式刷新通过全局代理请求固定无 Key endpoint `https://opencode.ai/zen/v1/models`，不跟随重定向，只保留合法且以 `-free` 结尾的 ID；完整快照先持久化，再切换运行时。每个模型同时公布原 ID 与去掉 `-free` 的 Alias。失败或过滤结果为空时保留旧快照，`/v1/models` 只读取这份快照。Go 所属的 `ox-alpha-free` 是保留排除项。
 
-选择器：宿主 `gateway/selector.rs` 按能力、enabled/ready、凭据有效性、冷却与本次已失败账号过滤卡片，然后无密钥的 `ocg-gateway::selector` 状态机按该顺序行走（`StrictPriority` / `StickyGlobal` / `RoundRobin`）。设计不包含模型路由页或按模型额度池。Zen free 额度按出口 IP 共享：任一有效 `cooldown_free_until` 即视为整条 free 通道耗尽（不换 Key）。
+选择器：宿主 `gateway/selector.rs` 按能力、enabled/ready、凭据有效性、冷却与本次已失败账号过滤卡片，然后无密钥的 `ocg-gateway::selector` 状态机按剩余顺序行走，使用 `StrictPriority`、`StickyGlobal` 或 `RoundRobin`。没有模型路由页，也没有按模型额度池。Zen free 额度按出口 IP 共享：任一有效 `cooldown_free_until` 即视为整条 free 通道耗尽，不换 Key。
 
-价格快照不可变且按供应商分范围。刷新只在用户点击时发生。Provider 路径只抓取并启用该 Provider 自己有价格的 offering；OpenCode 与 Command Code 使用独立 revision 和最后成功状态，一个来源失败不能否决另一个。对 OpenCode Go，月额度只用来推导账号额度扣减倍率（`月额度 / Usage`），它不是可路由额度池。官方表中 Input/Output/Usage 全是 `-` 的行（目前 Ox Alpha Free / `ox-alpha-free`）按无价格的 Go 促销跳过。官方倍率与当前值不同时，先返回不激活的差异预览；后续请求同时绑定当前 revision 与刚预览的官方 content hash。抓取器仅允许 OpenCode Go HTTPS 主机和同主机重定向，总时限 20 秒、响应体上限 2 MiB。MiniMax 长上下文、priority 和 high-speed 调整是本地策略。
+价格快照不可变且按供应商分范围。刷新只在用户点击时发生。Provider 路径只抓取并启用该 Provider 自己有价格的 offering；OpenCode 与 Command Code 使用独立 revision 与最后成功状态，一个来源失败不能否决另一个。对 OpenCode Go，月额度只推导账号额度扣减倍率（`月额度 / Usage`），不是可路由额度池。官方表中 Input/Output/Usage 全是 `-` 的行（目前 Ox Alpha Free / `ox-alpha-free`）按无价格促销跳过。官方倍率与当前值不同时，先返回不激活的差异预览；后续请求同时绑定当前 revision 与刚预览的官方 content hash。抓取器仅允许 OpenCode Go HTTPS 主机和同主机重定向，总时限 20 秒、响应体上限 2 MiB。MiniMax 长上下文、priority 与 high-speed 调整是本地策略。
 
 回退 / 重试（executor + classify，**不是** `forward_once`）：
 
@@ -176,7 +176,7 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 - `ProcessWideNoRedirect` — 仅 GOAT 回环测试。生产 GOAT 在没有回环守卫时 fail-closed。
 - `IsolatedTrustedAdmin` — Custom：进程级代理、禁重定向、不转发客户端头、管理员受信 URL。
 
-全局出站代理是进程级（`AppConfig`）：自动 / 手动 HTTP / 强制直连 / List。 List 模式使用 `proxy_list_direction` 与 `proxy_list_models`。名单内模型走方向例外段（白名单→代理 / 黑名单→直连）；名单外模型与非模型出站（验证、 Zen 刷新、用量、价格、升级下载）走方向默认段。名单成员校验只在 dashboard `update_settings` 写闸口执行（非空、精确已知 id、去重）；加载路径容忍旧值。构造在 `ocg-infra::http`；`ocg-core::http_client` 在精确匹配前折叠目录别名。请求从入口持有一份 `ForwardRouteSet`；并发设置切换只影响之后启动的请求。
+全局出站代理是进程级（`AppConfig`）：自动、手动 HTTP、强制直连或 List。List 模式使用 `proxy_list_direction` 与 `proxy_list_models`。名单内模型走例外段（白名单→代理，黑名单→直连）；名单外模型与非模型出站（验证、Zen 刷新、用量、价格、升级）走默认段。名单成员校验只在 dashboard `update_settings` 写闸口执行（非空、精确已知 id、去重）；加载路径容忍旧值。构造在 `ocg-infra::http`；`ocg-core::http_client` 在精确匹配前折叠目录别名。请求从入口持有一份 `ForwardRouteSet`；并发设置切换只影响之后启动的请求。
 
 ```text
   AppConfig  （进程级）
@@ -215,11 +215,11 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 | SCNet Token Plans | `scnet` / `token-plan-basic\|standard\|premium` | 否 | `sk-tp-` 前缀；验证 `501` |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地 |
 
-所有持久化变更路径都不会在改动行、revision 或时间戳之前把目录内 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会禁用遗留的已启用 GOAT 与全部三个 SCNet tier，且不改 `updated_at`。Custom 的 enabled 状态予以保留。未验证 GOAT 重置为 `pending`。Go、Zen Free 和未知 pair 不受影响。
+所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会禁用遗留的已启用 GOAT 与全部三个 SCNet tier，且不改 `updated_at`；未验证 GOAT 重置为 `pending`。Custom 的 enabled 状态保留。Go、Zen Free 与未知 pair 不受影响。
 
-Custom API（`custom.rs` + `custom_http.rs`）：接受任意语法合法的 HTTP 或 HTTPS 源（含局域网、回环与自选目的地）；拒绝 URL 内嵌凭据、query 与 fragment。不会跟随重定向；不会转发 dashboard 或客户端鉴权；只构造已配置的 Bearer 或 `x-api-key`。拼接 endpoint 必须保持 scheme、host、port 与 base-path 前缀。超时把 `connect_timeout_secs` 夹到 5–60 秒。创建/更新后仍为禁用 `pending`。验证对第一个声明模型发一次协议正确的最小非流式请求；只有 `2xx` JSON object 成功；不发现或改写能力，不会自动启用。验证成功后需显式启用。Key、base URL 或能力变更会使验证失效并禁用账号；协议与鉴权方案创建后固定不变。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
+Custom API（`custom.rs` + `custom_http.rs`）接受任意语法合法的 HTTP 或 HTTPS 源；拒绝 URL 内嵌凭据、query 与 fragment。不跟随重定向，不转发 dashboard 或客户端鉴权，只构造已配置的 Bearer 或 `x-api-key`。拼接 endpoint 必须保持 scheme、host、port 与 base-path 前缀。`connect_timeout_secs` 夹到 5–60 秒。创建/更新后仍为禁用 `pending`。验证对第一个声明模型发一次协议正确的最小非流式请求；只有 `2xx` JSON object 成功。验证不发现或改写能力，也不会自动启用。验证成功后需显式启用。Key、base URL 或能力变更会使验证失效并禁用账号；协议与鉴权方案创建后固定不变。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
 
-SCNet 官方可用模型快照 `2026-08-21`（大小写与顺序与代码保持一致，只作适配器输入，不会作为 `model_aliases`）：`GLM-5.2`、`GLM-5`、`GLM-5.1`、`Kimi-K3`、 `Kimi-K2.7-Code`、`Kimi-K2.6`、`Kimi-K2.5`、`DeepSeek-V4-Flash`、 `DeepSeek-V3.2`、`MiniMax-M3`、`MiniMax-M2.7`、`MiniMax-M2.5`、 `MiMo-V2.5-Pro`。价格表 / FAQ 里 **不在** 该表的额外名称：`DeepSeek-V4-Pro`、 `DeepSeek-V4-Flash-0731`、`Qwen3.8-max`、`Qwen3-235B-A22B`。文档记载的 base 是 `https://api.scnet.cn/api/llm/v1` 与 `https://api.scnet.cn/api/llm/anthropic`。风险确认 id `scnet-token-plan-restrictions`，版本 `2026-08-21`。本 crate 不会对 Token Plan 发真实请求。
+SCNet 官方可用模型快照 `2026-08-21`（大小写与顺序与代码保持一致，只作适配器输入，不会作为 `model_aliases`）：`GLM-5.2`、`GLM-5`、`GLM-5.1`、`Kimi-K3`、`Kimi-K2.7-Code`、`Kimi-K2.6`、`Kimi-K2.5`、`DeepSeek-V4-Flash`、`DeepSeek-V3.2`、`MiniMax-M3`、`MiniMax-M2.7`、`MiniMax-M2.5`、`MiMo-V2.5-Pro`。价格表 / FAQ 里 **不在** 该表的额外名称：`DeepSeek-V4-Pro`、`DeepSeek-V4-Flash-0731`、`Qwen3.8-max`、`Qwen3-235B-A22B`。文档记载的 base 是 `https://api.scnet.cn/api/llm/v1` 与 `https://api.scnet.cn/api/llm/anthropic`。风险确认 id `scnet-token-plan-restrictions`，版本 `2026-08-21`。本 crate 不会对 Token Plan 发真实请求。
 
 ## 控制面
 

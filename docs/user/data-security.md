@@ -2,6 +2,10 @@
 
 # Data And Security
 
+OCG Manager stores your keys, passwords, and browser sessions on the local disk
+and does not ask any remote service to hold them. That is the privacy trade-off:
+no telemetry, no remote sync, and no recovery if the data directory is lost.
+
 - **GUI data location.** Windows: `%USERPROFILE%\.ocg-mgr`. macOS / Linux:
   `~/.ocg-mgr`. CLI data defaults to `~/.ocg-mgr-cli` on every platform and
   can be overridden with `--data-dir <path>`.

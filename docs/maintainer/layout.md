@@ -2,6 +2,8 @@
 
 # Layout
 
+Repository layout and the boundary between crates, dashboard, and host.
+
 ```
 ocg-manager/
 ├── crates/
@@ -42,14 +44,14 @@ ocg-manager/
 
 Workspace members are declared in the root `Cargo.toml`: `ocg-domain`,
 `ocg-gateway`, `ocg-infra`, `ocg-core`, `ocg-cli`, `ocg-browser-worker`,
-`src-tauri` (package `ocg-manager`). Binary names: `ocg-manager-cli` and
-the Tauri app. Current workspace version is `1.8.2`; `rust-version` is
-`1.85.0`; edition is `2024`.
+`src-tauri` (package `ocg-manager`). Binaries: `ocg-manager-cli` and the
+Tauri app. Current workspace version is `1.8.2`; `rust-version` is `1.85.0`;
+edition is `2024`.
 
-The live Vue data path is HTTP Dashboard V3 (`src/api/dashboard-v3.ts` and
-the presenters in `src/api/dashboard.ts` / `src/api/providers.ts`). There is
-no `src-tauri/src/commands/` module and no `tauri::generate_handler` /
-`#[tauri::command]` surface. The production dashboard client is not `invoke()`.
+The production dashboard uses HTTP Dashboard V3 (`src/api/dashboard-v3.ts`
+and the presenters in `src/api/dashboard.ts` / `src/api/providers.ts`).
+There is no `src-tauri/src/commands/` module and no `#[tauri::command]`
+surface; the dashboard does not call `invoke()`.
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](layout.zh-CN.md) · [Docs index](../README.md)

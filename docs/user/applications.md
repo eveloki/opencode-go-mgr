@@ -4,23 +4,20 @@
 
 ## Application Guides
 
-The **Applications** view ships with per-client configuration snippets for 16
-tools: Claude Code, Claude Desktop, Codex, Gemini CLI, Pi, Kimi Code CLI,
-OpenCode, WorkBuddy, OpenClaw, Hermes, Cherry Studio, VS Code Copilot Chat,
-Cline, Roo Code, Continue, and Chatbox. The connection panel shows the current
+The **Applications** view contains copy-ready configuration snippets for 16
+tools that all believe they are special. The connection panel shows the current
 client's request URL, a Key selector (the primary Key plus enabled sub keys),
 and model pickers. Node addresses and the upstream URL stay on Dashboard. Each
-guide shows the protocol the tool speaks, the official documentation URL,
-step-by-step instructions, and one or more editable code blocks with a
-**Copy** button. The displayed block masks the Key; copying restores the real
-key, so screenshots remain shareable without producing an unusable
-configuration.
+guide lists the protocol the tool speaks, the official documentation URL,
+step-by-step instructions, and editable code blocks with a **Copy** button. The
+displayed block masks the Key; copying restores the real key, so screenshots
+remain shareable without producing an unusable configuration.
 
 Before overwriting any existing configuration file, back up the original file. The code blocks
 in Applications are editable, but keep a recoverable copy before copying or manually merging
 their contents.
 
-Base URL conventions per client:
+Each client has its own idea of where the API lives:
 
 - Claude Code, Cherry Studio, and Chatbox use the root URL without `/v1`.
 - Claude Desktop uses that root plus `/claude-desktop`; its client then calls
@@ -47,30 +44,27 @@ Codex's `~/.codex/ocg-model-catalog.json`, `~/.codex/ocg.config.toml`, and
 or merging it. When using CC Switch proxy mode, back up the configuration directory saved by
 CC Switch separately; do not mix the direct OCG configuration with the proxy configuration.
 
-The Applications picker list is the protected
-`GET /dashboard/api/v3/application-models` response: currently routeable OpenCode
-Go aliases intersected with the active OpenCode Go pricing snapshot. Highspeed
-variants inherit the base model's pricing row. An empty intersection is `[]`,
-not an error. That list is **not** the same as authenticated `GET /v1/models`,
-which publishes currently routeable Go aliases, the saved Zen Free catalog,
-and eligible Custom declared IDs. `application-models` stays Go-only. Both
-endpoints are local reads: no SCNet official table spellings, no unpublished
-Command Code GOAT names, and no request-time upstream discovery or account
-selection. They publish only currently routable models that have an effective
-enabled protocol. Zen Free catalog refresh is an explicit **Providers**
-action. An accepted pricing refresh on **Providers** can
-change which Go aliases `application-models` returns. The view reloads this
-local list whenever you return to it. Model selections and edited snippets are
-cached separately per application while the current dashboard page remains
-alive; a page reload resets this in-memory state. **Restore defaults** resets
-the active application's model selection and snippet drafts.
+The picker list comes from protected `GET /dashboard/api/v3/application-models`:
+currently routeable OpenCode Go aliases intersected with the active OpenCode Go
+pricing snapshot. Highspeed variants inherit the base model's pricing row. An
+empty intersection is `[]`, not an error. This is **not** authenticated
+`GET /v1/models`, which also includes the saved Zen Free catalog and eligible
+Custom declared IDs. Both endpoints are local reads: no SCNet spellings, no
+unpublished Command Code GOAT names, and no request-time upstream discovery or
+account selection. They publish only currently routable models that have an
+effective enabled protocol. Zen Free catalog refresh is an explicit
+**Providers** action. A pricing refresh there can change which Go aliases
+appear here. The view reloads the list whenever you return. Per-app model
+selections and edited snippets live only in the current page session; a reload
+resets them. **Restore defaults** resets the active application's model
+selection and snippet drafts.
 
 ## Model capabilities
 
-Application snippets use the verified limits below
-(`src/views/application-guides.ts`, 2026-08-14). Input is what OCG can
-actually carry. The passthrough / conversion matrix is under
-[Protocol Conversion](protocol-conversion.md).
+The table below lists verified limits from `src/views/application-guides.ts`
+(2026-08-14). Input is what OCG can actually carry. See
+[Protocol Conversion](protocol-conversion.md) for the passthrough / conversion
+matrix.
 
 | Model | Context | Output | Input | Reasoning | Tools | Efforts |
 | --- | ---: | ---: | --- | --- | :---: | --- |

@@ -2,7 +2,7 @@
 
 # Documentation index
 
-OCG Manager documentation is split by audience. Start from the product README, then open the guide that matches your role. Keep Chinese/English pairs in sync when you edit a paired page. Code at HEAD is authoritative when a paired body lags.
+OCG Manager documentation is split by audience: open the guide that matches your role. When you edit a paired page, keep the English and Chinese twins in sync; when a page and the code disagree, code at HEAD wins the argument.
 
 ## Catalog
 

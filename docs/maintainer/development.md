@@ -13,36 +13,36 @@ libfuse2 xvfb xauth xdg-utils dbus-x11`.
 
 ## Development
 
-Exit any running release tray app so the single-instance lock and port `9042`
-are free, then start the full development stack:
+Quit the release tray app to free the single-instance lock and port `9042`,
+then run:
 
 ```bash
 pnpm install
 pnpm run dev
 ```
 
-`pnpm run dev` runs `tauri dev`. On Windows the `predev` script
-(`scripts/free-dev-port.mjs`) inspects `127.0.0.1:30001` and stops any stale
-Vite process from a previous run. Tauri starts Vite and waits for the gateway
-to be ready, then opens `http://127.0.0.1:30001/dashboard/`. Vite proxies
-`/dashboard/api` (including WebSockets) to `http://127.0.0.1:9042`.
+`pnpm run dev` runs `tauri dev`. On Windows, `predev`
+(`scripts/free-dev-port.mjs`) inspects `127.0.0.1:30001` and stops stale Vite
+processes. Tauri starts Vite, waits for the gateway, then opens
+`http://127.0.0.1:30001/dashboard/`. Vite proxies `/dashboard/api` (including
+WebSockets) to `http://127.0.0.1:9042`.
 
 - Frontend (Vue, CSS, TypeScript) changes use Vite HMR.
 - Rust changes use Tauri's watcher plus Cargo's incremental compiler, then
   restart the process. Rust code is **not** replaced inside a running
   process — expect a restart.
 
-After cloning, enable the shared git hooks once (also runs from `pnpm install`
-via the `prepare` script):
+Enable shared git hooks once after cloning (`pnpm install` runs this via
+`prepare`):
 
 ```bash
 pnpm run hooks:install
 # equivalent: git config core.hooksPath .githooks
 ```
 
-When a commit stages any `*.rs` file, `.githooks/pre-commit` runs
-`cargo fmt --all` and re-stages those Rust files so the commit stays
-rustfmt-clean (same tool CI checks with `cargo fmt --all -- --check`).
+When a commit stages `*.rs` files, `.githooks/pre-commit` runs
+`cargo fmt --all` and re-stages them. CI checks the same with
+`cargo fmt --all -- --check`.
 
 ## Checks And Builds
 
@@ -69,13 +69,12 @@ pnpm run build
   `pnpm run contract:v3:generate`.
 - `pnpm run design:lint` runs the `@google/design.md` linter against
   `DESIGN.md`.
-- `pnpm run build` is reserved for **release validation**. It runs
-  `scripts/release.mjs`, which builds the current supported native platform
-  and atomically replaces `release/` only after every expected file passes
-  validation. The previous `release/` is preserved on failure. Cargo's
-  incremental build cache is **not** erased. Release binaries use thin LTO
-  (`[profile.release]` in the workspace `Cargo.toml`) so native CI linking
-  stays bounded.
+- `pnpm run build` is for **release validation** only. It runs
+  `scripts/release.mjs`, builds the current native platform, and atomically
+  replaces `release/` only after every expected file passes validation. The
+  previous `release/` is kept on failure. Cargo's incremental cache is **not**
+  erased. Release binaries use thin LTO (`[profile.release]` in the workspace
+  `Cargo.toml`) to keep native CI linking bounded.
 
 ## Rust Checks
 
@@ -86,8 +85,8 @@ cargo test --workspace --locked
 ```
 
 The first command checks formatting without changing files. Run
-`cargo fmt --all` to apply formatting. With hooks enabled, staged Rust
-commits auto-run that format step via `.githooks/pre-commit`.
+`cargo fmt --all` to apply formatting. With hooks enabled, staged Rust commits
+run that step via `.githooks/pre-commit`.
 
 For focused work:
 
@@ -105,13 +104,13 @@ cargo test -p ocg-core dashboard_v3
 cargo test -p ocg-core v3_runtime_invariants
 ```
 
-`ocg-domain` / `ocg-gateway` crates compile their production-source
-dependency and purity guards as ordinary `cargo test` cases. Host
-characterization lives in `crates/ocg-core/tests/fixtures/v3/requirement_map.md`
-and the copy at `src-tauri/tests/fixtures/v3/host_requirement_map.md` /
+`ocg-domain` and `ocg-gateway` compile their production-source dependency and
+purity guards as ordinary `cargo test` cases. Host characterization is in
+`crates/ocg-core/tests/fixtures/v3/requirement_map.md` and the copies at
+`src-tauri/tests/fixtures/v3/host_requirement_map.md` and
 `crates/ocg-cli/tests/fixtures/v3/host_requirement_map.md`.
 
-Run the CLI in a sandbox first when testing real account flows:
+Test real account flows in a sandboxed CLI first:
 
 ```bash
 ocg-manager-cli --data-dir /tmp/ocg-cli-test key add smoke sk-smoke
@@ -119,22 +118,21 @@ ocg-manager-cli --data-dir /tmp/ocg-cli-test key list
 ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042
 ```
 
-The CLI surface is `serve` / `key` / `status` only. `key add` creates an
-enabled ready OpenCode Go card through `account_control::create_go_api_key`
-and bumps that process's `settings_revision`. It cannot create Custom
-accounts, sub keys, or settings. Direct `Database::update_account` still
-does not bump revision; that is intentional and is not the CLI path.
+The CLI only exposes `serve`, `key`, and `status`. `key add` creates an
+enabled, ready OpenCode Go card via `account_control::create_go_api_key` and
+bumps that process's `settings_revision`. It cannot create Custom accounts,
+sub keys, or settings. Direct `Database::update_account` still does not bump
+revision; this is intentional and not the CLI path.
 
 ## Frontend Checks
 
-Frontend unit tests live next to the code they cover (`src/**/*.test.ts`)
-and run with Node's experimental `--experimental-strip-types` flag — no
-extra test runner is required. Script-level tests live in
-`scripts/*.test.mjs` (release helpers, Dashboard V3 contract, container
-publish). Pair them with `pnpm run build:web` and
+Frontend unit tests live next to the code (`src/**/*.test.ts`) and run with
+Node's `--experimental-strip-types` — no extra test runner is required.
+Script-level tests live in `scripts/*.test.mjs` (release helpers, Dashboard V3
+contract, container publish). Pair them with `pnpm run build:web` and
 `pnpm run contract:v3:check`.
 
-The application guides are driven by the 16 entries in
+The 16 application guides are driven by
 `src/views/application-guides.ts`. When changing that registry, check the
 guide count, unique IDs, protocol endpoints, the display/copy masking
 difference, and the Claude Desktop three-role persistence behavior.
@@ -145,9 +143,8 @@ Providers. `BrowserSession` is a session overlay, not an eighth rail item.
 
 ## Local Release Smoke Build (Windows)
 
-Full release process, CI matrix, and signing keys are in
-`docs/maintainer/releasing.md` and `docs/maintainer/ci.md`. Local smoke
-build:
+Local smoke build steps below. Full release process, CI matrix, and signing
+keys: `docs/maintainer/releasing.md` and `docs/maintainer/ci.md`.
 
 1. Make sure `pnpm` is available (`packageManager: pnpm@10.29.2`). If PATH
    has no pnpm, create a shim in your user directory.

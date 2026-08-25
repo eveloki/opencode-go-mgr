@@ -4,11 +4,12 @@
 
 ## Logs
 
-The **Logs** view shows the rolling buffer of requests the gateway has
-forwarded: timestamp, selected provider/offering, route account, credential
+The **Logs** view is the rolling receipt tape for every request the gateway
+forwards: timestamp, selected provider/offering, route account, credential
 account, model, status code, the upstream error if any, and the streamed usage
-when the upstream emitted a usage chunk. Filters cover provider, offering,
-route account, credential account, model, status, time range, and client Key.
+when the upstream emits a usage chunk. Filters cover provider, offering, route
+account, credential account, model, status, time range, and client Key. It will
+not fix your prompt, but it will tell you exactly which account took the fall.
 Each stored row keeps the request identity separate from the upstream
 identity. There is no `requested_alias` field:
 
@@ -21,10 +22,9 @@ any of those identities or the legacy `model` column. Native cost
 (`native_cost_value`, `native_cost_unit`, `native_cost_currency`) is optional
 and present only when the offering supplies enough pricing evidence.
 
-Each row also preserves raw supplier cost, quota debit, and effective paid cost
-when the selected offering supplies enough pricing evidence. These are distinct
-values: an allowance only changes the quota-debit multiplier; it does not make
-a model or provider routable.
+Each row also stores raw supplier cost, quota debit, and effective paid cost
+when the selected offering supplies enough pricing evidence. An allowance only
+changes the quota-debit multiplier; it does not make a model or provider routable.
 
 - Chat streaming requests set `stream_options.include_usage` so OpenAI-compatible
   upstreams emit a usage chunk. Rows with `success_no_usage` mean the stream
@@ -41,15 +41,14 @@ a model or provider routable.
   charged the request, but the gateway lost the response or timed out. Such a
   request is not replayed automatically and its local cost remains unknown.
 - The **Key** filter narrows rows and the summary totals to one client key.
-  Its options come from the log table itself, so disabled, deleted, and
-  otherwise unknown keys stay filterable. **Unattributed** selects rows
-  written before multi-key support; a background task attributes those to
-  the primary key after upgrading, so usage from before the upgrade is
-  counted toward the primary key as an approximation.
+  Options come from the log table itself, so disabled, deleted, and otherwise
+  unknown keys stay filterable. **Unattributed** selects rows written before
+  multi-key support; a background task attributes them to the primary key as an
+  approximation.
 
 ## Settings
 
-The **Settings** view exposes the persistent gateway configuration:
+The **Settings** view holds the gateway's persistent configuration:
 
 - **Gateway Port** — the port the gateway binds (default `9042`).
 - **Upstream URL** — the OpenCode-Go base URL.
@@ -130,10 +129,10 @@ The **Settings** view exposes the persistent gateway configuration:
   **Providers** to refresh the Free catalog, inspect protocol evidence, and
   toggle Chat Completions / Responses / Messages.
 
-Configuration settings are written to SQLite and reloaded on the next start.
-The Settings resource never includes Key plaintext. Saving settings uses the
-same `expectedRevision` / `processGeneration` tokens as other Dashboard V3
-writes. The update check is an on-demand action and is not persisted.
+Settings are written to SQLite and reloaded on the next start. The Settings
+resource never includes Key plaintext. Saves use the same `expectedRevision` /
+`processGeneration` tokens as other Dashboard V3 writes. The update check is
+on-demand and is not persisted.
 
 ---
 

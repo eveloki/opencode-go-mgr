@@ -2,6 +2,8 @@
 
 # Install And First Run
 
+A local gateway that lives on your machine, not in the cloud — install it, launch it, and close the browser tab when you're done. The rest is mostly convincing your OS that small developers exist.
+
 ## Windows 10/11 x64
 
 1. Run the NSIS setup `ocg-manager_<version>_windows-x64-setup.exe`. It
@@ -33,8 +35,7 @@
    tray icon to reopen it.
 4. Data lives in `~/.ocg-mgr/`.
 
-The installed Windows auto-start path stays in the tray without opening a
-browser.
+If you enable auto-start on Windows, the app resumes from the tray and leaves the browser closed.
 
 ---
 

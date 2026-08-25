@@ -2,6 +2,9 @@
 
 # 数据与安全
 
+OCG Manager 把 Key、密码和浏览器会话存在本地磁盘，不委托给任何远端服务托管。
+隐私模型的正面是无遥测、无远端同步，背面是数据目录丢了就是丢了。
+
 - **GUI 数据目录**：Windows `%USERPROFILE%\.ocg-mgr`；macOS / Linux `~/.ocg-mgr`。CLI 数据默认 `~/.ocg-mgr-cli`（所有平台一致），可用 `--data-dir <path>` 覆盖。
 - **凭据存储**：账号 Key 与保存的登录密码在存储前都只做混淆，**不是密码学保护**。面板接入 Key 存放在 `access_keys`（schema v27）。macOS / Linux GUI 与 CLI 的数据目录里还有 `.encryption-key` 文件；**必须和数据库一起备份**，丢失后已存的凭据将无法读取。混淆不是安全边界：拿到数据目录及其 `.encryption-key`，或能在原 Windows 用户/机器上下文运行 Windows GUI 的人，都能恢复账号 Key 与保存的登录密码。面板 SPA 不会把 Key 明文写入 `localStorage`；接入中心的秘密只留在内存，直到退出登录或 401。
 - **浏览器 Profile**：`browser-profiles/` 或 Docker 的 `ocg-browser-profiles` 含长期 Cookie 与官网登录状态，完全不由 OCG Manager 加密。备份、传输、访问控制和销毁都应按数据库与账号 Key 的敏感级别处理。

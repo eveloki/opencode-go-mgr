@@ -2,7 +2,7 @@
 
 # Maintainer Guide
 
-This guide is for people changing code, building releases, debugging the gateway, and validating the desktop bundles. It describes the implemented V3 architecture and operating contracts at HEAD.
+This guide is for people changing code, cutting releases, debugging the gateway, and validating desktop bundles. It documents the V3 architecture and operating contracts as implemented at HEAD — not as once planned.
 
 ## Chapters
 

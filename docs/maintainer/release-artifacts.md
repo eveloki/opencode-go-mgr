@@ -2,7 +2,8 @@
 
 # Release Artifacts
 
-The supported matrix is intentionally small:
+OCG Manager ships desktop installers for three platforms, a CLI archive for each,
+and a multi-arch container image.
 
 | Runner | GUI | CLI |
 | --- | --- | --- |
@@ -30,22 +31,21 @@ latest.json
 SHA256SUMS
 ```
 
-Each CLI archive contains its executable, `dist/`, and `LICENSE`. Do not
-ship the CLI executable alone: `serve` needs the sibling dashboard assets.
-Windows has no portable GUI artifact.
+Each CLI archive ships with its executable, a `dist/` directory, and `LICENSE`.
+Do not distribute the executable by itself — `serve` needs the sibling dashboard
+assets. Windows has no portable GUI artifact.
 
 The `linux/amd64` and `linux/arm64` containers are published separately as
-`ghcr.io/klarkxy/opencode-go-mgr`; the GitHub Release contains the seven
-ordinary platform payloads, the extra macOS updater archive, four updater
-signatures, the pull-only Compose example, `latest.json`, and `SHA256SUMS`
-(currently 15 attachments). The local verifier pins that current 15-file
-contract, while the workflow also requires the GitHub asset names and count
-to match the assembled `release/` set exactly. The runtime image includes
-`LICENSE` at `/usr/share/licenses/ocg-manager/LICENSE`.
+`ghcr.io/klarkxy/opencode-go-mgr`. A GitHub Release contains the seven platform
+payloads, the extra macOS updater archive, four updater signatures, the Compose
+example, `latest.json`, and `SHA256SUMS` — currently 15 attachments. The local
+verifier and the workflow both require the GitHub asset names and count to match
+the assembled `release/` directory exactly. The runtime image places `LICENSE` at
+`/usr/share/licenses/ocg-manager/LICENSE`.
 
 ## scripts/release.mjs
 
-`scripts/release.mjs` does the heavy lifting:
+`scripts/release.mjs` builds and stages the release directory:
 
 1. Validates that `package.json`, `src-tauri/tauri.conf.json`, the workspace
    `Cargo.toml`, `src-tauri/Cargo.toml`, and all three versioned fields in
@@ -83,15 +83,16 @@ to match the assembled `release/` set exactly. The runtime image includes
 9. Atomically replaces `release/`. On any error, the previous `release/` is
    preserved and the staged tree is removed.
 
-`scripts/release.mjs` does **not** erase Cargo's incremental build caches —
-repeated release builds reuse the same `target/` tree.
+`scripts/release.mjs` leaves Cargo's incremental build cache in `target/`
+untouched.
 
 `pnpm run release:check` validates versions, Compose, and any configured
-signing key without building a native bundle. The keyless preflight
-exercises the unsigned contract. For a production tag push, each runner
-signs a temporary payload with the repository signing secret and verifies
-it against the continuity-checked `TAURI_UPDATER_PUBLIC_KEY` before
-starting the expensive native build.
+signing key without building a native bundle. The keyless preflight covers
+the unsigned contract. For a production tag push, each runner signs a
+temporary payload with the repository signing secret and verifies it against
+the continuity-checked `TAURI_UPDATER_PUBLIC_KEY` before starting the
+expensive native build.
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](release-artifacts.zh-CN.md) · [Docs index](../README.md)

@@ -4,8 +4,8 @@
 
 ## Account Selection And Failover
 
-Accounts are tried in **list order**, which can be reordered and persisted
-from the Accounts view. The selector skips:
+The gateway is not sentimental: accounts are tried in **list order**, which
+you can drag into shape and persist from the Accounts view. The selector skips:
 
 - Disabled accounts.
 - Accounts that are cooling down.
@@ -42,10 +42,10 @@ time.
 
 ## Cost Accounting
 
-The 5-hour, weekly, and monthly bars are local estimates, driven by the
-requests the gateway actually forwards — not by the upstream's authoritative
-billing. Token rates, window limits, and each model's `Usage` come from the
-active OpenCode Go USD snapshot.
+The 5-hour, weekly, and monthly bars are local estimates, driven by what the
+gateway actually forwards — not by the upstream's authoritative billing. Token
+rates, window limits, and each model's `Usage` all come from the active
+OpenCode Go USD snapshot.
 
 - The official multiplier defaults to `monthly limit / Usage`. A user can
   override it for a temporary promotion; subsequent requests use the active
@@ -79,8 +79,8 @@ Edge cases in the log:
   the request while the gateway lost the response; the request is not
   retried and its local cost stays unknown.
 
-The dashboard always pairs a bar with the account's cooldown state — see the
-next section.
+Each bar is shown next to the account's cooldown state — the next section
+explains what actually stops traffic.
 
 ## True And False Circuit Breakers
 
@@ -110,9 +110,9 @@ next section.
 ## Zen Free models
 
 Zen Free is one credentialless account card with one enable switch. There is
-no separate Deny / Explicit / Prefer policy. Disable the card if you do not
-want Free traffic; otherwise its position in the account list is its routing
-priority.
+no Deny / Explicit / Prefer policy — disable the card if you do not want Free
+traffic, or leave it enabled and let its position in the account list decide
+its routing priority.
 
 **Refresh model catalog** on **Providers** calls the official keyless Zen
 model directory only on user request. The backend keeps only IDs ending in

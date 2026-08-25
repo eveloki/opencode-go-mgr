@@ -11,7 +11,7 @@
 5. 在路由、验证、用量、计价真正实现之前 fail closed。GOAT/SCNet 是「目录在、未上线」的模板。
 6. 跑 `cargo test -p ocg-domain`、`cargo test -p ocg-gateway` 与 `cargo test -p ocg-core`。纯度/依赖守卫会拦截越界导入。
 
-架构不提供插件加载器、动态库或用户提供的适配器脚本。
+Provider 注册表是静态密封的。不提供插件加载器、动态库或用户提供的适配器脚本。
 
 ## 新增或修改 Dashboard V3 端点
 
@@ -24,7 +24,7 @@
 
 ## 新增宿主能力
 
-桌面能力放在 `src-tauri/src/host/`，注册进 `CoreState`。当前设计不再通过 `#[tauri::command]` 暴露命令，Vue 继续走 HTTP。
+桌面能力加入 `src-tauri/src/host/` 并注册到 `CoreState`。不要重新引入 `#[tauri::command]`；Vue 面板只走 HTTP。
 
 ## 故障模式
 

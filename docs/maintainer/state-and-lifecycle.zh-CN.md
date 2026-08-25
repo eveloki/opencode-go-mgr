@@ -17,9 +17,9 @@
 
 `AppConfig` 使用 serde 默认值做向后兼容加载。1.3 之前没有 `claude_desktop_models` 的配置会得到默认 Sonnet 目标 `minimax-m3`，并被规范写回。常规 settings 保存会保留专用的 Claude Desktop 映射。下游访问根地址优先级：非空 `OCG_CLIENT_ROOT_URL`（只读，不会写回 SQLite）> SQLite 手工值 > 前端按生产 origin / 开发 Gateway 端口自动推导。
 
-**回环监听时** 直接访问跳过登录。带标准反向代理转发头但没 Cookie 的请求仍需登录。**非回环监听** 走单管理员模型：密码以 Argon2 哈希存 SQLite，登录下发 HttpOnly 会话 Cookie。Docker 可用 **同时设置的** `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；只设一个会启动报错；不提供时由首位注册者创建。
+**回环监听时** 直接访问跳过登录。带标准反向代理转发头但没 Cookie 的请求仍需登录。**非回环监听** 走单管理员模型：密码以 Argon2 哈希存 SQLite，登录下发 HttpOnly 会话 Cookie。Docker 用 **同时设置的** `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 引导首个管理员；只设一个会启动失败；不提供时由首位注册者创建。
 
-设置页通过 `GET /dashboard/api/v3/settings/check-update` 获取 GitHub Release 元数据。支持升级的已安装桌面运行时可继续下载、校验签名并安装；开发构建、CLI、Docker 只保留元数据/发布页路径。出站请求只在用户点击按钮时发起。
+设置页通过 `GET /dashboard/api/v3/settings/check-update` 获取 GitHub Release 元数据。支持升级的已安装桌面运行时可下载、校验签名并安装；开发构建、CLI、Docker 只保留元数据/发布页路径。出站请求只在用户点击时发起。
 
 ## 账号生命周期与浏览器运行时
 
@@ -29,9 +29,17 @@ schema v16 给账号增加 `account_type`（`key | managed`）与 `setup_step` �
 
 托管状态允许 **向前一步** 或 **回退到任意更早的未完成步骤**；跳步前进不被允许，setup API 也不会直接进入 `ready`。Key 实测返回 `2xx` 时进入 `ready + enabled`；`429` 同样证明 Key 有效并写入冷却；`401`/`403`、网络错误或 `5xx` 保持 `key_verification`。
 
-官方 Go usage（`go_usage.rs`，`https://opencode.ai/zen/go/v1/usage`）是校准基线，由 `usage_sync.rs` 协调。手动 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` 与后台对账共用同一条 fetch + key CAS + 三窗口校准路径。ready+enabled 且近 24h 有本地活动的账号约每小时对账，无活动约每天；禁用 / 非 ready / 空 Key 排除。启动时避免轰鸣：全局并发 1、节奏控制、有界抖动，并提供可注入 clock/jitter/fetch 缝。手动刷新在任何尝试后有 15 秒每账号节流、并发去重与 Retry-After / `nextAllowedAt`。本地最大 Go 用量 ≥80% 时最多每 15 分钟加速一次。真实推理 `429` 仍写现有 cooldown/selector，并额外调度约 1–2 分钟后的官方同步（不是 inline）。官方失败或 `status=rate-limited` 不会写推理冷却。成功后按最早 `resetsAt`（有界抖动）调度，同时尊重活跃/非活跃节奏。失败退避：5m → 15m → 1h → 6h；last-success 与上次基线不会被清除。sync 元数据在 `provider_usage_sync_state`（v27 删除遗留的五列 `accounts.usage_sync_*`）。公开 Go docs 尚未列出该路径。
+官方 Go usage（`go_usage.rs`，`https://opencode.ai/zen/go/v1/usage`）是校准基线，由 `usage_sync.rs` 协调。手动 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` 与后台对账共用同一条 fetch + key CAS + 三窗口校准路径。
 
-用量同步仅由 `usage_sync.rs` 处理；不存在 Profile Cookie/HTML 控制台用量路径。
+ready+enabled 且近 24h 有本地活动的账号约每小时对账，无活动约每天；禁用、非 ready、空 Key 排除。启动时避免轰鸣：全局并发 1、节奏控制、有界抖动，并提供可注入 clock/jitter/fetch 缝。
+
+手动刷新在任何尝试后按账号 15s 节流、并发去重，并遵守 Retry-After / `nextAllowedAt`。本地最大 Go 用量 ≥80% 时最多每 15 分钟加速一次。
+
+真实推理 `429` 仍写现有 cooldown/selector，并额外调度约 1–2 分钟后的官方同步（非 inline）。官方失败或 `status=rate-limited` 不会写推理冷却。成功后按最早 `resetsAt`（有界抖动）调度，同时尊重活跃/非活跃节奏。失败退避：5m → 15m → 1h → 6h；last-success 与上次基线不会被清除。
+
+sync 元数据在 `provider_usage_sync_state`；v27 删除遗留的五列 `accounts.usage_sync_*`。公开 Go docs 尚未列出该路径。
+
+用量同步仅由 `usage_sync.rs` 处理；不存在 Profile Cookie 或 HTML 控制台用量路径。
 
 Zen Free 由数据库持有：可启用、停用、排序，但不能通过通用账号 API 创建或删除。GOAT / SCNet 草稿保持禁用且不可路由。Custom 在验证后显式启用即可路由。
 
@@ -39,9 +47,13 @@ Zen Free 由数据库持有：可启用、停用、排序，但不能通过通�
 
 桌面原生浏览器 hook 由 `src-tauri/src/host/` 注册进 `CoreState`。Vue 仍通过 HTTP 调用。Windows 依次查 Edge、Chrome；macOS 查 Chrome、Edge、Chromium； Linux 从 `PATH` 查 Chrome/Chromium/Edge。外部浏览器使用 `browser-profiles/<account_id>`、`--no-first-run`、 `--no-default-browser-check` 与新窗口，启动参数中不包含 CDP、automation、`--no-sandbox` 或关闭 Web 安全的选项。
 
-`crates/ocg-browser-worker` 每节点只保留一个 Chromium。切换账号先 SIGTERM 当前进程组并等待 Profile 写盘，超时才强制结束。Sidecar 以 UID/GID 10001、只读根文件系统、零 capability 运行；控制 token 由共享运行时卷随机生成。 Chromium 需要建立自身的 user/PID/network namespace 和 renderer seccomp 沙箱，因此 browser 服务使用 `seccomp=unconfined` 且不能启用 `no-new-privileges`。Sidecar 仍不挂载 SQLite，不发布宿主机端口。浏览器项目桥接网络不能设为 Docker `internal`，因为 Chromium 需要访问 Google/OpenCode 的 HTTPS 出站网络。
+`crates/ocg-browser-worker` 每节点只保留一个 Chromium。切换账号先 SIGTERM 当前进程组并等待 Profile 写盘，超时才强制结束。
 
-Profile 删除必须先停浏览器，校验账号 ID 防目录穿越，再把新旧 Profile 原子改名暂存；数据库操作成功后清理暂存目录，失败则恢复。重置完成账号不删除 Key；重置注册中账号还要回到 `google_account`。删除账号的 UI 确认需要说明 Cookie/Profile 也会一起删除。
+Sidecar 以 UID/GID 10001、只读根文件系统、零 capability 运行；控制 token 由共享运行时卷随机生成。Chromium 需要建立自身的 user/PID/network namespace 和 renderer seccomp 沙箱，因此 browser 服务使用 `seccomp=unconfined` 且不能启用 `no-new-privileges`。
+
+Sidecar 仍不挂载 SQLite，不发布宿主机端口。浏览器项目桥接网络不能设为 Docker `internal`，因为 Chromium 需要访问 Google/OpenCode 的 HTTPS 出站网络。
+
+Profile 删除先停浏览器，校验账号 ID 防目录穿越，再把新旧 Profile 原子改名暂存；数据库提交成功后清理暂存目录，失败则恢复。重置完成账号不删除 Key；重置注册中账号回到 `google_account`。删除账号的 UI 确认必须说明 Cookie 与 Profile 会一并删除。
 
 ## 持久化
 

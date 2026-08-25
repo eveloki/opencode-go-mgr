@@ -2,12 +2,12 @@
 
 # Providers
 
-**Providers** is the supplier control plane. Older bookmarks that use
-`?view=pricing` open this view.
+**Providers** is the supplier control plane — the page you land on when an old
+bookmark still ends in `?view=pricing`.
 
-The public base is a static Provider Registry plus capability-specific
-adapters. Custom API is one Configurable HTTP adapter, not a base class.
-Contract scopes are:
+Under the hood it is a static Provider Registry plus a handful of
+capability-specific adapters. Custom API is just one of those adapters, not a
+base class everyone inherits from. Scopes are split like this:
 
 - `Provider(provider_id)` for built-ins. SCNet's three token-plan offerings
   share one SCNet scope.
@@ -24,10 +24,9 @@ bound accounts (enabled/disabled and verification). Command Code GOAT routes
 only through verified, explicitly enabled accounts. SCNet remains archived
 and cannot be promoted to production routing.
 
-**Model catalog** is local. Source labels are Static catalog, Official Zen
-catalog, Custom discovery, or Account-declared. When a source URL is present
-it is shown, as is the last successful refresh time (or Not yet refreshed).
-Refresh is never automatic:
+**Model catalog** is local. Sources are labeled Static catalog, Official Zen
+catalog, Custom discovery, or Account-declared; the URL and last refresh time
+are shown when available. Refresh never happens on its own:
 
 - OpenCode Go **Refresh model catalog** uses the selected Go account Key to
   call the official `GET /zen/go/v1/models` endpoint. The saved provider
@@ -53,31 +52,28 @@ catalog but fails closed for client routing. Zen Free still derives one extra
 alias by stripping `-free` from each saved ID, as described under
 [Zen Free models](routing.md#zen-free-models).
 
-**Upstream protocol policy** has three switches: Chat Completions, Responses,
-and Messages. Turning a protocol on or off immediately applies to every
-account in this scope and affects production routing. Switches take
-precedence over probe evidence and static support. Disabling an account does
-not delete the saved contract; re-enabling restores the saved catalog,
-evidence, and switches.
+**Upstream protocol policy** gives you three switches: Chat Completions,
+Responses, and Messages. Flipping one immediately applies to every account in
+this scope and changes production routing. Switches beat probe evidence and
+static support. Disabling an account keeps the saved contract intact;
+re-enabling restores the saved catalog, evidence, and switches.
 
-**Model contracts** list each local model with its preferred protocol and
-per-protocol status: Globally closed (the switch is off), Unavailable,
-Unsupported, Static, Preset, Probe confirmed, or Latest probe failed (with a
-sanitized error and last-probe time). Probe success may confirm or add
-support only inside the adapter's structural ceiling. Probe failure is
-recorded and does not delete static capability.
+**Model contracts** list every local model with its preferred protocol and
+per-protocol status: Globally closed, Unavailable, Unsupported, Static,
+Preset, Probe confirmed, or Latest probe failed (with a sanitized error and
+timestamp). A probe can only confirm or add support inside the adapter's
+structural ceiling. A failed probe is recorded; it does not erase static
+capability.
 
-**Protocol probe** is an explicit action. It uses the selected test account
-and sends a real minimal request that may consume quota — confirm that
-warning before sending. Client requests never probe. GOAT and SCNet show that
-probes are not available for this plan.
+**Protocol probe** is an explicit action: pick a test account, send a real
+minimal request, and accept that it may spend quota. Client requests never
+probe. GOAT and SCNet show that probes are not available for this plan.
 
 **Pricing** is scoped to the selected provider. **Refresh price table** only
-fetches and validates the official source owned by the currently selected
-Provider. OpenCode and Command Code keep separate revisions and separate
-last-good snapshots; failure in one never blocks or replaces the other. If a
-Provider later owns several priced Plans, its one action refreshes those Plans
-only. Refresh remains manual only:
+hits the official source owned by that Provider. OpenCode and Command Code
+keep separate revisions and last-good snapshots; one failing does not touch
+the other. If a Provider later owns several priced Plans, the same action
+refreshes those Plans only. Refresh stays manual:
 
 - OpenCode Go shows revision, documentation timestamp, window limits, token
   rates, `Usage`, and the quota-debit multiplier, and can fetch

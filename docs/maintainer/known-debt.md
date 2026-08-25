@@ -7,8 +7,8 @@
 - The server emits 409 code `revisionConflict`, but
   `src/api/dashboard-v3.ts` still checks `revision_conflict`. The matching
   frontend test also mocks the obsolete spelling, so real conflicts do not
-  trigger the intended token/resource refresh. Until fixed, users must refresh
-  and re-apply the mutation manually.
+  trigger the intended token/resource refresh. Fix pending; users must refresh
+  and re-apply manually.
 - Auto-start is capability-gated: only Windows release/installed Tauri
   processes inject the registry sync hook. Development builds, the CLI,
   Docker, macOS, and Linux dashboards do not expose the switch. Dock
@@ -25,15 +25,14 @@
 - The Responses endpoint is stateless. `previous_response_id`, `conversation`,
   `store: true`, and `background: true` return `400` rather than being
   silently ignored. This is intentional — see `protocol.rs` and the [User guide](../USER.md).
-- Gemini is a compatibility input, not a native upstream. Only
-  `generateContent` and `streamGenerateContent` forward requests;
-  `countTokens` and `embedContent` return `501`. Non-empty safety policy,
-  cached content, file-backed media, Google-hosted tools, and other semantics
-  that cannot survive conversion are rejected with `400`. `topK` and
-  `thinkingConfig` may be accepted for client compatibility but are not a
-  promise of equivalent behavior on Chat Completions or Messages upstreams.
-  Every other non-null `generationConfig` field must be mapped or rejected;
-  never add a silent pass-through exception.
+- Gemini is a client compatibility format, not a native upstream. Only
+  `generateContent` and `streamGenerateContent` forward; `countTokens` and
+  `embedContent` return `501`. Non-empty `safetySettings`, `cachedContent`,
+  file-backed media, Google-hosted tools, and other unconvertible semantics
+  return `400`. `topK` and `thinkingConfig` are accepted for compatibility
+  but not guaranteed to behave equivalently on Chat Completions or Messages
+  upstreams. Every other non-null `generationConfig` field must be mapped or
+  rejected; no silent pass-through.
 - Claude Desktop only advertises three fixed Claude aliases, mapped to the
   supported actual models; it does not mean OCG Manager provides native
   Claude 4.6 models or the full Anthropic Models API.
@@ -43,7 +42,7 @@
   snapshots are adapter input only and must not be published as client
   aliases. Do not document or ship those families as live support. Custom API
   is live under the trusted-administrator boundary (`custom.rs` +
-  `custom_http.rs`); keep that path out of GOAT/SCNet anti-abuse wording.
+  `custom_http.rs`); keep it out of GOAT/SCNet anti-abuse wording.
 - Custom provider-scope protocol probes are not on V3; the V2 account-owned
   probe path is 410. Custom verify and model discovery are the live Custom
   operational paths.

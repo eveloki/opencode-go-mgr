@@ -2,14 +2,16 @@
 
 # OCG Manager
 
-OCG Manager is a local operations console for provider API-key accounts. Each
-account card binds one Plan (provider/offering) and, when that Plan requires
-one, one credential in SQLite. It
-serves a multi-protocol gateway — plus the management dashboard — at
-`http://127.0.0.1:9042`. Clients speak OpenAI, Anthropic, Gemini, or Claude
+A local gateway that keeps your provider API keys in one SQLite database and
+speaks five client protocols on one port (`http://127.0.0.1:9042`) — so every
+AI tool on your machine can stop pretending it has its own key manager.
+
+Each account card binds one Plan (provider/offering) and, when the Plan needs
+one, one credential. Clients speak OpenAI, Anthropic, Gemini, or Claude
 Desktop and send local aliases; the gateway converts each request to the
-selected Plan's supported upstream protocol and converts the response back.
-Live routing is OpenCode Go, Zen Free, and Custom API.
+Plan's upstream protocol and the answer back. Live routing: OpenCode Go,
+Zen Free, and Custom API. No telemetry, no remote sync — your keys never
+leave the machine.
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
@@ -21,28 +23,25 @@ Live routing is OpenCode Go, Zen Free, and Custom API.
 
 - **One port, five wire formats** — OpenAI Chat Completions, OpenAI Responses,
   Anthropic Messages, Gemini `generateContent` / `streamGenerateContent`, and
-  Claude Desktop.
-- **Local multi-account routing** — drag account cards to persist one global
-  order; strict priority, sticky, and round-robin reuse it after capability
-  filtering.
-- **Quota bars are warnings** — 5-hour / weekly / monthly usage is a local
-  estimate. A full bar does not stop traffic; only an upstream `429` cools
-  an account down.
+  Claude Desktop. Your clients never learn which one the upstream wanted.
+- **Drag to reroute** — account cards persist one global order; strict
+  priority, sticky, and round-robin reuse it after capability filtering.
+- **Quota bars are warnings, not walls** — 5-hour / weekly / monthly usage is
+  a local estimate. A full bar stops nothing; only an upstream `429` cools an
+  account down.
 - **16 client guides** — copy-ready snippets for Claude Code, Codex, Gemini
   CLI, and 13 other tools.
-- **Desktop, CLI, and Docker** — a Tauri v2 tray app, `ocg-manager-cli`, and
-  `ghcr.io/klarkxy/opencode-go-mgr`. Installed desktop builds can install
-  signed updates from Settings.
-- **No remote sync, no telemetry** — every node owns its own data. Managed
-  onboarding is Beta; do not rely on it in production.
+- **Desktop, CLI, Docker** — a Tauri v2 tray app, `ocg-manager-cli`, and
+  `ghcr.io/klarkxy/opencode-go-mgr`. Installed desktops update themselves,
+  signed, from Settings.
 
 ## Download
 
-Download the GUI installer or CLI archive from the
+Grab the GUI installer or CLI archive from the
 [latest GitHub Release](https://github.com/klarkxy/opencode-go-mgr/releases/latest)
-and verify it against that release's `SHA256SUMS` before installing:
-`Get-FileHash <file> -Algorithm SHA256` on PowerShell, `shasum -a 256 <file>`
-on macOS, or `sha256sum <file>` on Linux.
+and check it against that release's `SHA256SUMS` (`Get-FileHash <file>
+-Algorithm SHA256` on PowerShell, `shasum -a 256` on macOS, `sha256sum` on
+Linux):
 
 | Platform | GUI | CLI |
 | --- | --- | --- |
@@ -50,10 +49,9 @@ on macOS, or `sha256sum <file>` on Linux.
 | macOS 11+ Intel and Apple Silicon | `ocg-manager_<version>_macos-universal.dmg` | `ocg-manager-cli_<version>_macos-universal.tar.gz` |
 | Linux x64 | `ocg-manager_<version>_linux-x64.AppImage` and `.deb` | `ocg-manager-cli_<version>_linux-x64.tar.gz` |
 
-Keep `dist/` beside the CLI executable so `serve` can serve the dashboard.
-Platform caveats (SmartScreen, Gatekeeper, unsigned Windows, no ARM64 / RPM /
-Snap / stores) are in the [User guide](docs/user/install.md) and
-[Maintainer guide](docs/MAINTAINER.md).
+Keep `dist/` beside the CLI executable, or `serve` has no dashboard to serve.
+Platform caveats (SmartScreen, Gatekeeper, no ARM64 / RPM / Snap / stores):
+[User guide](docs/user/install.md).
 
 ## Quick Start
 
@@ -62,17 +60,13 @@ Gateway: http://127.0.0.1:9042/v1
 Auth:    Authorization: Bearer <key>
 ```
 
-The dashboard **Key** is the only secret a client needs. For live traffic,
-import an OpenCode Go account key; Zen Free sends no upstream credential.
-Custom API is a trusted-administrator destination: save, verify, then enable.
-
-1. Install and launch OCG Manager. The dashboard opens in your system browser
-   once the gateway is ready; use the tray icon to reopen it.
-2. In **Accounts**, import an OpenCode Go account key, choose credential-free
-   Zen Free, add a Custom API destination (verify, then enable), or use
-   managed onboarding (Beta). Copy the Key.
+1. Install and launch. The dashboard opens in your system browser once the
+   gateway is ready; the tray icon brings it back.
+2. In **Accounts**, import an OpenCode Go account key, pick credential-free
+   Zen Free, or add a Custom API destination (verify, then enable). Copy the
+   **Key** — the only secret your client ever sees.
 3. Point your client at `http://127.0.0.1:9042/v1`. **Applications** has
-   per-client configuration guides.
+   per-client setup guides.
 
 ```bash
 curl http://127.0.0.1:9042/v1/chat/completions \
@@ -81,29 +75,28 @@ curl http://127.0.0.1:9042/v1/chat/completions \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}],"stream":true}'
 ```
 
-Install, first-client checks for all five protocols, backup, and upgrades:
+Install details, per-protocol first-client checks, backup, and upgrades:
 [User guide](docs/USER.md).
 
 ## Docker
 
-Public image: `ghcr.io/klarkxy/opencode-go-mgr` (`linux/amd64, linux/arm64`,
-anonymous pull). Save [`compose.example.yaml`](compose.example.yaml) (also
-attached to each Release) as `compose.yaml` and run:
+Save [`compose.example.yaml`](compose.example.yaml) as `compose.yaml` and run:
 
 ```bash
 docker compose pull
 docker compose up -d --no-build
 ```
 
-Open `http://127.0.0.1:9042/dashboard/` — the server root `/` is not the
-dashboard. Credentials, the optional browser sidecar, backup, HTTPS, image
-pins, and source builds: [User guide — Docker](docs/user/docker.md).
+Image: `ghcr.io/klarkxy/opencode-go-mgr` (`linux/amd64, linux/arm64`,
+anonymous pull). Open `http://127.0.0.1:9042/dashboard/` — bare `/` is not
+the dashboard. Browser sidecar, backup, HTTPS, image pins, source builds:
+[User guide — Docker](docs/user/docker.md).
 
 ## Models
 
-OpenCode Go models have a hardcoded **preferred** upstream protocol and a
-probed **supported** set. Matching client protocols passthrough; others
-convert. The gateway never probes a protocol at request time — that could
+Each OpenCode Go model has a hardcoded **preferred** upstream protocol and a
+probed **supported** set: matching client protocols pass through, the rest
+get converted. The gateway never probes at request time — that could
 double-bill.
 
 | Preferred upstream | Models |
@@ -112,24 +105,11 @@ double-bill.
 | OpenAI Responses | `grok-4.5`, `gpt-5.6-luna`, `muse-spark-1.2`, `muse-spark-1.2-contributor` |
 | Anthropic Messages | `minimax-m3`, `minimax-m2.7`, `minimax-m2.7-highspeed`, `minimax-m2.5`, `minimax-m2.5-highspeed`, `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus` |
 
-`ox-alpha-free` (Ox Alpha Free) is a Go Chat model; the name contains `free`
-but it stays on `/zen/go`. Zen Free is not a fixed model list: an administrator
-explicitly refreshes its official catalog, and the manager persists the last
-successful normalized `-free` snapshot. A failed or empty refresh retains the
-previous snapshot; published aliases and protocol entries come from that saved
-catalog.
-
-Gemini is a client format only (requests never go to Google). Claude Desktop
-aliases are rewritten to the mapping saved in **Applications**. Clients should
-send published aliases or eligible Custom IDs; authenticated `GET /v1/models`
-lists currently routeable published aliases (OpenCode Go and Zen Free) plus
-eligible Custom IDs from enabled, verified, ready accounts with a key (no
-upstream discovery). Unknown names return `400` unless they match that list.
-The Applications picker stays Go aliases ∩ the active pricing snapshot.
-
-Passthrough matrix, context / input / reasoning / tools, conversion limits,
-and true vs false circuit breakers:
-[User guide — model capabilities](docs/user/applications.md) and
+Yes, `ox-alpha-free` says `free` and still rides `/zen/go` — naming is hard.
+Zen Free has no fixed list: an administrator refreshes the official catalog
+and the last good snapshot wins. Gemini is a client format only; nothing is
+sent to Google. Passthrough matrix, capabilities, and conversion limits:
+[model capabilities](docs/user/applications.md) and
 [protocol conversion](docs/user/protocol-conversion.md).
 
 ## Documentation
@@ -159,11 +139,8 @@ pnpm install
 pnpm run dev
 ```
 
-Exit any running release tray app first so the single-instance lock and port
-`9042` are free. Tauri starts Vite and opens
-`http://127.0.0.1:30001/dashboard/` once the gateway is ready. The dashboard
-SPA talks HTTP `/dashboard/api/v3`; authenticated unversioned
-`/dashboard/api` REST is retired. Checks, builds, and the release pipeline:
+Quit the release tray app first — the single-instance lock and port `9042`
+don't share. Checks, builds, and the release pipeline:
 [Maintainer guide](docs/MAINTAINER.md).
 
 ## License

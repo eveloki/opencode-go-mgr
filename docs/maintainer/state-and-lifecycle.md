@@ -46,11 +46,10 @@ bootstrap the first administrator with **both** `OCG_ADMIN_USERNAME` and
 `OCG_ADMIN_PASSWORD`; setting only one fails startup; otherwise the first
 registration wins.
 
-Settings uses `GET /dashboard/api/v3/settings/check-update` for GitHub
-Release metadata. Updater-enabled installed desktop runtimes can continue
-through a signed download and install; development builds, CLI, and Docker
-retain the metadata/release-link path. The outbound request runs only when
-the user clicks the button.
+Settings fetches GitHub Release metadata via `GET /dashboard/api/v3/settings/check-update`.
+Installed desktop runtimes with updater support can download, verify, and install
+signed updates; development builds, CLI, and Docker only receive metadata and
+release links. The outbound request is triggered by the user.
 
 ## Account lifecycle and browser runtime
 
@@ -78,27 +77,31 @@ cooldown. `401`/`403`, network errors, and `5xx` remain at
 `key_verification`.
 
 Official Go usage (`go_usage.rs`, `https://opencode.ai/zen/go/v1/usage`) is
-a calibration baseline coordinated by `usage_sync.rs`. Manual
+the calibration baseline; `usage_sync.rs` coordinates it. Manual
 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` and the background
 reconciler share one fetch + key-CAS + three-window calibration path.
-Ready+enabled accounts with local activity in the last 24h reconcile about
-hourly; inactive ones about daily. Disabled / non-ready / empty-key
-accounts are excluded. Startup must not stampede: global concurrency 1,
-pacing, bounded jitter, injectable clock/jitter/fetch seams. Manual
-refresh has a 15s per-account throttle after any attempt, in-flight
-dedupe, and Retry-After / `nextAllowedAt`. Local max Go usage ≥80% may
-expedite at most once per 15 minutes. Real inference `429` keeps existing
-cooldown/selector writes and additionally schedules an official sync ~1–2
-minutes later (never inline). Official failures or `status=rate-limited`
-must never write inference cooldown. After success, schedule around the
-earliest `resetsAt` (bounded jitter) while respecting active/inactive
-cadence. Failure backoff: 5m → 15m → 1h → 6h; never erase last success or
-the previous baseline. Sync metadata lives in `provider_usage_sync_state`
-(the five leftover `accounts.usage_sync_*` columns are dropped in v27).
-The public Go docs have not listed this path yet.
 
-Usage sync is handled only by `usage_sync.rs`; there is no Profile
-Cookie/HTML console usage path.
+Ready+enabled accounts reconcile about hourly when they had local activity
+in the last 24h, otherwise about daily. Disabled, non-ready, and empty-key
+accounts are excluded. Startup avoids stampedes: global concurrency 1,
+pacing, bounded jitter, and injectable clock/jitter/fetch seams.
+
+Manual refresh is throttled to one attempt per account per 15s, dedupes
+in-flight attempts, and honors Retry-After / `nextAllowedAt`. Local max Go
+usage ≥80% can expedite reconciliation at most once per 15 minutes.
+
+A real inference `429` keeps existing cooldown/selector writes and schedules
+an official sync ~1–2 minutes later, never inline. Official failures or
+`status=rate-limited` never write inference cooldown. After success, schedule
+around the earliest `resetsAt` with bounded jitter while respecting the
+active/inactive cadence. Failure backoff is 5m → 15m → 1h → 6h; never erase
+last success or the previous baseline.
+
+Sync metadata lives in `provider_usage_sync_state`; v27 drops the leftover
+`accounts.usage_sync_*` columns. The public Go docs have not listed this path.
+
+Only `usage_sync.rs` handles usage sync. There is no Profile Cookie or HTML
+console usage path.
 
 Zen Free is database-owned: it can be enabled, disabled, and reordered,
 but cannot be created or deleted through generic account APIs. GOAT /
@@ -134,12 +137,12 @@ still does not mount SQLite or publish a host port. The project-scoped
 browser bridge is not Docker `internal`, because Chromium needs outbound
 HTTPS to Google/OpenCode.
 
-Profile deletion must stop the browser, validate account IDs against path
-traversal, and atomically rename both new and legacy profiles into
-staging. Purge only after the database operation commits; restore staging
-on failure. Reset keeps a completed account's key, while a pending managed
-account also returns to `google_account`. Delete confirmations must state
-that cookies/profile are removed.
+Profile deletion stops the browser, validates account IDs against path
+traversal, and atomically renames both new and legacy profiles into
+staging. Purge only after the database commit; restore staging on failure.
+Reset keeps a completed account's key; a pending managed account also
+returns to `google_account`. Delete confirmations must state that cookies
+and profile are removed.
 
 ## Persistence
 

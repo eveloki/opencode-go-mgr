@@ -2,15 +2,13 @@
 
 # Docker
 
-The public headless image can be pulled from GHCR without signing in. It is a
-Linux container publishing `linux/amd64` and `linux/arm64`; a plain
-`docker pull` selects the matching native variant on either architecture. Each
-release also includes a pull-only
-`compose.example.yaml`; save it as `compose.yaml` and optionally create a
-neighboring `.env`. The example pins its matching release by default, while
-`OCG_IMAGE` can override it. Alternatively, run the Compose commands from a
-checkout containing `compose.yaml` and `.env.example` (preferably the
-matching release tag):
+OCG Manager runs headlessly in Docker, serving the same dashboard and gateway
+on port `9042` without a tray icon to click. Pull the image from GHCR
+anonymously — it ships `linux/amd64` and `linux/arm64`, and Docker picks the
+right variant. Save the release's `compose.example.yaml` as `compose.yaml`,
+add `.env` if you want, and run the commands below. Or use a checkout of the
+matching tag. It is the only version that does not complain when you close
+your laptop lid.
 
 ```bash
 git clone --branch v1.8.2 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
@@ -23,16 +21,17 @@ docker compose up -d --no-build
 docker compose ps
 ```
 
+Image tags move; decide how pinned you want to be.
+
 ## Choosing An Image
 
-- The repository's source-capable `compose.yaml` defaults to
-  `ghcr.io/klarkxy/opencode-go-mgr:latest`; the Release
-  `compose.example.yaml` defaults to its matching full version.
+- The checkout's `compose.yaml` defaults to `latest`; the Release
+  `compose.example.yaml` pins its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
   release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.8.2`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
-  not to move; `1.5` and `latest` move forward. Only a digest such as
-  `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is technically immutable.
+  not to move; `1.5` and `latest` do. Only a digest such as
+  `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is truly immutable.
 - To build the current checkout instead, set `OCG_IMAGE=ocg-manager:local`
   and run `docker compose up -d --build`. `NPM_REGISTRY` and
   `CARGO_REGISTRY` are build arguments for that source-build path only; they
@@ -49,26 +48,28 @@ docker compose ps
 | `OCG_MANAGER_ENCRYPTION_KEY` | Runtime restore | Original explicit obfuscation key, when one was used. |
 | `NPM_REGISTRY` + `CARGO_REGISTRY` | Source build | Dependency registries used only by `--build`. |
 
+Most deployments need only the main service. Add the browser sidecar only
+when you need managed onboarding or website login on a headless host.
+
 ## Optional Remote Browser
 
-The default gateway deployment does not start the browser sidecar. To use
-managed onboarding and website login on a Linux server or Docker host,
-reserve at least 2 CPUs, 2 GiB of RAM, and 1 GiB of `/dev/shm`, then run:
+The sidecar is off by default. Turn it on only when you need managed
+onboarding or website login on a Linux server or Docker host; reserve at
+least 2 CPUs, 2 GiB of RAM, and 1 GiB of `/dev/shm`, then run:
 
 ```bash
 docker compose --profile browser up -d
 docker compose ps
 ```
 
-`OCG_BROWSER_IMAGE` overrides the default
-`ghcr.io/klarkxy/opencode-go-mgr-browser:<version>`. The sidecar runs ordinary
-Chromium, Xvfb, a lightweight window manager, x11vnc, and noVNC. The dashboard
-shows it in a dedicated full browser tab through an authenticated same-origin
-WebSocket, including keyboard and pointer input. Use the page's explicit
-remote clipboard area to copy or paste a key. A reverse proxy in front of the
-dashboard must support WebSocket upgrades.
-The sidecar launches Chromium with its basic password store so its persistent
-profiles do not depend on a host keyring.
+`OCG_BROWSER_IMAGE` overrides the default browser image. The sidecar is
+ordinary Chromium plus Xvfb, a window manager, x11vnc, and noVNC; the
+dashboard opens it in a full tab over an authenticated same-origin WebSocket,
+with keyboard and pointer input. Use the page's remote clipboard area to
+copy or paste a key. Any reverse proxy in front of the dashboard must allow
+WebSocket upgrades.
+Chromium uses its basic password store, so persistent profiles do not depend
+on a host keyring.
 
 Only one remote Chromium runs per node. Switching accounts first shuts down
 the current process cleanly and waits for its profile to flush, then starts
@@ -112,11 +113,10 @@ uninitialized dashboard publicly.
 
 ## Secrets And Addresses
 
-`OCG_MANAGER_ENCRYPTION_KEY` is an advanced restore override. Leave it unset
-for normal deployments so the generated `.encryption-key` stays in the data
-volume. If the original deployment supplied this variable, the restored
-deployment must use the same value; changing or losing it makes saved
-credentials unreadable. Treat it like a password.
+`OCG_MANAGER_ENCRYPTION_KEY` is for restoring a deployment that originally
+set it. Leave it unset normally so the generated `.encryption-key` stays in
+the data volume. Changing or losing the value after credentials are saved
+makes them unreadable; treat it like a password.
 
 The optional `OCG_CLIENT_ROOT_URL` is the environment equivalent of the
 dashboard's Downstream Access Root. Use it when a reverse proxy is present or

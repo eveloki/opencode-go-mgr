@@ -2,17 +2,16 @@
 
 # What OCG Manager Does
 
-OCG Manager keeps provider API keys in a local SQLite database — officially
-distributable OpenCode Go keys, plus trusted Custom API destinations — and
-exposes a loopback gateway at `http://127.0.0.1:9042/v1`. Each
-account card is one **Plan** (provider + offering). Clients send **aliases**
-from the local registry or eligible Custom model IDs; live routing is
-OpenCode Go, OpenCode Zen Free, and Custom API.
-The same gateway also serves the Vue 3 dashboard at `/dashboard/`. The current
-dashboard SPA reads and writes JSON at `/dashboard/api/v3`. Every node is
-independent: there is no remote sync, no Admin API, and no telemetry.
+OCG Manager is a local gateway that stores provider API keys in a SQLite
+database — officially distributed OpenCode Go keys and trusted Custom API
+destinations — and exposes a loopback gateway at `http://127.0.0.1:9042/v1`.
+Each account card is one **Plan** (provider + offering). Clients send
+**aliases** from the local registry or eligible Custom model IDs; live routing
+is OpenCode Go, Zen Free, and Custom API. The Vue 3 dashboard is at
+`/dashboard/` and the current SPA talks JSON at `/dashboard/api/v3`. Every node
+is independent: no remote sync, no Admin API, no telemetry.
 
-The gateway does four jobs:
+The gateway does four jobs, in roughly the order you would expect:
 
 1. Authenticate the client with the **Key** issued by the dashboard.
 2. Resolve the requested model against the local Alias registry (and eligible
@@ -28,9 +27,9 @@ The gateway does four jobs:
 
 ## Shape of a node
 
-Desktop, CLI, and Docker all run one `ocg-core` process. The default bind is
-`127.0.0.1:9042`. The dashboard is a Vue SPA in the system browser; AI
-clients speak OpenAI, Anthropic, Gemini, or Claude Desktop at `/v1`.
+Desktop, CLI, and Docker all run one `ocg-core` process on `127.0.0.1:9042`.
+The dashboard opens in your system browser; clients hit `/v1` in OpenAI,
+Anthropic, Gemini, or Claude Desktop format.
 
 ```text
    Desktop tray / CLI `serve` / Docker
@@ -45,8 +44,8 @@ clients speak OpenAI, Anthropic, Gemini, or Claude Desktop at `/v1`.
               SQLite schema v27 (local only)
 ```
 
-Request flow, Plans, the seven dashboard views, and protocol conversion as
-text diagrams: [Architecture diagrams](architecture.md).
+Text diagrams for request flow, Plans, the seven dashboard views, and protocol
+conversion: [Architecture diagrams](architecture.md).
 
 ---
 

@@ -2,6 +2,8 @@
 
 # 仓库结构
 
+仓库结构，以及各 crate、面板与宿主的边界。
+
 ```
 ocg-manager/
 ├── crates/
@@ -40,9 +42,9 @@ ocg-manager/
 └── compose.example.yaml  Pull-only Compose example attached to each Release
 ```
 
-Workspace 成员在根目录 `Cargo.toml` 声明：`ocg-domain`、`ocg-gateway`、 `ocg-infra`、`ocg-core`、`ocg-cli`、`ocg-browser-worker`、`src-tauri`（包名 `ocg-manager`）。二进制名：`ocg-manager-cli` 与 Tauri 应用。当前 workspace 版本为 `1.8.2`；`rust-version` 为 `1.85.0`；edition 为 `2024`。
+Workspace 成员在根目录 `Cargo.toml` 声明：`ocg-domain`、`ocg-gateway`、`ocg-infra`、`ocg-core`、`ocg-cli`、`ocg-browser-worker`、`src-tauri`（包名 `ocg-manager`）。二进制名：`ocg-manager-cli` 与 Tauri 应用。当前 workspace 版本为 `1.8.2`；`rust-version` 为 `1.85.0`；edition 为 `2024`。
 
-Vue 的主数据路径是 HTTP Dashboard V3（`src/api/dashboard-v3.ts` 以及 `src/api/dashboard.ts` / `src/api/providers.ts` 的 presenter）。不存在 `src-tauri/src/commands/` 模块，也没有 `tauri::generate_handler` / `#[tauri::command]` 表面。生产客户端不是 `invoke()`。
+生产面板使用 HTTP Dashboard V3（`src/api/dashboard-v3.ts` 以及 `src/api/dashboard.ts` / `src/api/providers.ts` 的 presenter）。不存在 `src-tauri/src/commands/` 模块，也没有 `#[tauri::command]` 表面；面板不调用 `invoke()`。
 
 ---
 

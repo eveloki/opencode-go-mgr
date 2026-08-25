@@ -4,36 +4,35 @@
 
 Download upgrades from the
 [latest GitHub Release](https://github.com/klarkxy/opencode-go-mgr/releases/latest)
-and verify them against `SHA256SUMS` from the same release:
+and verify them against the release's `SHA256SUMS`:
 `Get-FileHash <file> -Algorithm SHA256` on PowerShell, `shasum -a 256 <file>`
-on macOS, or `sha256sum <file>` on Linux.
+on macOS, or `sha256sum <file>` on Linux. Backups, restores, and removal are
+the kind of operations that are boring right up until they aren't.
 
 ## Database Migration And Access Keys (Schema v27)
 
-The current database schema is **v27**; historical databases migrate in
-place on startup. Upgrading from a single-key version keeps your existing
-credential as the **primary key** (fixed id
-`00000000-0000-0000-0000-000000000001`), so clients keep authenticating with
-the same value. Primary and additional (sub) Keys live together in one
-`access_keys` table: at most 64 non-deleted sub keys, and deleting a sub key
-is a soft delete that keeps the name for log attribution and clears the
-plaintext.
+The database schema is **v27**; historical databases migrate in place on
+startup. Upgrading from a single-key version keeps your existing credential
+as the **primary key** (fixed id
+`00000000-0000-0000-0000-000000000001`), so clients keep authenticating
+with the same value. The `access_keys` table holds the primary key plus up
+to 64 non-deleted sub keys; deleting a sub key clears its plaintext but
+keeps the name for log attribution.
 
-An existing (non-empty) library migrates through schema v26 first, then
-receives a unique sibling snapshot `data.sqlite.pre-v3.<timestamp>.bak` plus
-a SHA-256 sidecar before any v27 write. A brand-new empty data directory
-creates schema v27 directly and does not write that copy. The snapshot is a
-v26 rollback point, not a substitute for a complete backup; verify the
-sidecar before restoring it, and restore it only onto a v26-capable binary
-or to retry a v27 open that never committed. Never open a migrated database
-with an older build: extra Keys do not authenticate on a single-key-era
-build, and a revoked value cannot come back to life by downgrading.
+An existing, non-empty database migrates through schema v26 first, then
+receives a sibling snapshot `data.sqlite.pre-v3.<timestamp>.bak` plus a
+SHA-256 sidecar before any v27 write. A fresh empty data directory creates
+schema v27 directly and skips the snapshot. That snapshot is a v26 rollback
+point, not a substitute for a complete backup; verify the sidecar before
+restoring it, and restore it only onto a v26-capable binary or to retry a
+v27 open that never committed. Never open a migrated database with an older
+build — extra Keys do not authenticate on a single-key-era build, and a
+revoked value cannot come back to life by downgrading.
 
-On every startup, enabled leftovers for Command Code GOAT and all three
-SCNet Token Plan tiers are disabled without changing `updated_at`; Custom
-API enabled state is preserved, and an existing unverified GOAT row is reset
-to `pending`. OpenCode Go, Zen Free, and unknown provider/offering pairs are
-untouched.
+Every startup disables enabled leftovers for Command Code GOAT and all
+three SCNet Token Plan tiers without changing `updated_at`. Custom API
+stays enabled, and an existing unverified GOAT row resets to `pending`.
+OpenCode Go, Zen Free, and unknown provider/offering pairs are left alone.
 
 ## Backup
 
@@ -73,10 +72,10 @@ Caveats:
 
 ## Docker Restore Into A Fresh Volume
 
-First verify the backup and confirm that `.env` pins the intended same or
+Verify the backup first and make sure `.env` pins the intended same or
 newer image. The `docker compose down -v` command below permanently deletes
-all current named volumes; run it only after preserving both kinds of
-persistent data separately:
+all current named volumes; run it only after both persistent data sets are
+safely elsewhere:
 
 ```bash
 docker compose down -v
@@ -101,7 +100,7 @@ dashboard, accounts, and a real gateway request have all been verified.
 
 ## Upgrade And Uninstall By Surface
 
-The direct GUI steps are also the fallback when in-app update is unavailable.
+The direct GUI steps also work when in-app update is unavailable.
 
 - **Windows GUI:** quit the tray app, run the new installer, and choose
   **Install without uninstalling**. Uninstall from Windows **Installed

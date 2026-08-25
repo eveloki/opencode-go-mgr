@@ -2,9 +2,7 @@
 
 # 架构图
 
-一组描述单个本地节点的文字图。与当前 HEAD 对齐：已上线路由是 OpenCode Go、
-Zen Free 与 Custom API；Command Code GOAT 与 SCNet Token Plans 仍是禁用草稿。
-每张图下面的章节有完整说明；图与章节冲突时，以章节和代码为准。
+这是一组单个本地节点的文字版图。按当前 HEAD：已上线路由是 OpenCode Go、Zen Free 与 Custom API。Command Code GOAT 与 SCNet Token Plans 仍是禁用草稿，往那边路由只会收到 `501`。每张图下面链接到负责详情的章节；图与章节冲突时，以章节和代码为准。
 
 ## 目录
 
@@ -18,9 +16,7 @@ Zen Free 与 Custom API；Command Code GOAT 与 SCNet Token Plans 仍是禁用�
 
 ## 同一节点、同一端口
 
-桌面、CLI 与 Docker 是同一份 `ocg-core` 进程的三种宿主。默认绑定
-`127.0.0.1:9042`。托盘应用用系统浏览器打开面板，不通过 Tauri `invoke`
-驱动面板。项目不提供远端同步、Admin API 或遥测。
+桌面、CLI 与 Docker 只是同一份 `ocg-core` 进程的三种启动方式。默认绑定 `127.0.0.1:9042`。托盘应用用系统浏览器打开面板，不会通过 Tauri `invoke` 远程操控面板。没有远端同步、Admin API 或遥测。
 
 ```text
    桌面托盘              CLI `serve`           Docker
@@ -55,9 +51,7 @@ Zen Free 与 Custom API；Command Code GOAT 与 SCNet Token Plans 仍是禁用�
 
 ## 一次客户端请求
 
-面板签发的 **Key** 用来让客户端接入本节点。选中账号的凭据（Zen Free 没有
-上游 Key）才是本节点发给上游的东西。额度条只是警告，不会停流量。只有上游
-`429` 会冷却一张卡。
+面板签发的 **Key** 让客户端接入本节点。选中账号的凭据才是本节点发给上游的东西——Zen Free 没有上游 Key。额度条只是警告，不会停流量；只有上游 `429` 会冷却一张卡。
 
 ```text
   AI 客户端                         本节点                          Plan
@@ -90,8 +84,7 @@ Messages 与 Gemini generate / stream 上均为 `400`。重叠的原始 ID 返�
 
 ## Plan：已上线与草稿
 
-每张账号卡对应一个 Plan（`provider_id` + `offering_id`）。已上线 Plan
-可以产出生产路由。草稿 Plan 创建为禁用 `pending`；验证返回 `501`，不能启用。
+每张账号卡对应一个 Plan（`provider_id` + `offering_id`）。已上线 Plan 承载生产路由；草稿 Plan 只能作为禁用 `pending` 卡存在——验证返回 `501`，无法启用。
 
 ```text
   已上线（可路由）                          草稿（不可路由）
@@ -122,15 +115,11 @@ Messages 与 Gemini generate / stream 上均为 `400`。重叠的原始 ID 返�
   协议与鉴权方案创建后不可改。
 ```
 
-Zen Free 只有启用开关；不需要 Free 时直接关掉卡片。目录刷新在供应商页，
-不在账号卡上。账号与供应商：[账号](accounts.zh-CN.md)、
-[供应商](providers.zh-CN.md)。
+Zen Free 只有启用开关；不需要时直接关掉卡片。目录刷新在供应商页，不在账号卡上。账号与供应商见 [账号](accounts.zh-CN.md) 和 [供应商](providers.zh-CN.md)。
 
 ## 面板、Key 与账号卡
 
-侧栏是七个视图。`browser` 是托管会话覆盖页，不是第八项。SPA 读写
-`/dashboard/api/v3`。回环监听默认跳过面板登录（带转发头则仍要登录）；
-客户端访问 `/v1` 仍然需要 Key。
+侧栏有七个视图。`browser` 是托管会话覆盖页，不是第八项。SPA 读写 `/dashboard/api/v3`。回环监听默认跳过面板登录（带转发头时仍需登录）；客户端访问 `/v1` 仍然需要 Key。
 
 ```text
   Dashboard -> Access Keys -> Accounts -> Providers
@@ -154,14 +143,11 @@ Zen Free 只有启用开关；不需要 Free 时直接关掉卡片。目录刷�
     账号凭据       Go Key、Custom Key，或 Zen Free（无）
 ```
 
-唯一会返回 Key 明文的 V3 响应是 `GET /dashboard/api/v3/connection`。
-视图、CAS 与数据目录：[管理面板](dashboard.zh-CN.md)、
-[数据与安全](data-security.zh-CN.md)。
+唯一会返回 Key 明文的 V3 响应是 `GET /dashboard/api/v3/connection`。视图、CAS 与数据目录见 [管理面板](dashboard.zh-CN.md) 和 [数据与安全](data-security.zh-CN.md)。
 
 ## 两份本地模型列表
 
-这两条 GET 都不会在请求时做上游发现。Zen Free 目录刷新是唯一例外，
-而且必须由管理员在供应商页显式触发。
+这两条 GET 都不会在请求时做上游发现。唯一的例外是 Zen Free 目录刷新，必须由管理员在供应商页显式触发。
 
 ```text
   GET /v1/models                         （客户端；需要 Key）
@@ -186,8 +172,7 @@ Zen Free 只有启用开关；不需要 Free 时直接关掉卡片。目录刷�
 
 ## 协议转换
 
-请求路径不会试探协议（避免双计费）。Gemini 只是客户端格式；Gateway
-不会把流量发到 Google。
+请求路径不会试探协议——避免双计费。Gemini 只是客户端格式；Gateway 不会把流量发到 Google。
 
 ```text
   客户端线路

@@ -24,8 +24,7 @@
    `cargo test -p ocg-core`. Purity/dependency guards will fail a
    forbidden import.
 
-Do not add a plugin loader, dynamic library, or user-supplied adapter
-script.
+The provider registry is static and sealed. Do not add a plugin loader, dynamic library, or user-supplied adapter script.
 
 ## Add or change a Dashboard V3 endpoint
 
@@ -45,9 +44,7 @@ script.
 
 ## Add a host capability
 
-Desktop capabilities live in `src-tauri/src/host/`, registered into
-`CoreState`. Do not reintroduce `#[tauri::command]`. Vue must keep calling
-HTTP.
+Add desktop capabilities in `src-tauri/src/host/` and register them into `CoreState`. Do not reintroduce `#[tauri::command]`; the Vue dashboard calls HTTP only.
 
 ## Failure Modes
 

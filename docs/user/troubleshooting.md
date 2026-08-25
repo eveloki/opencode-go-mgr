@@ -2,20 +2,25 @@
 
 # Troubleshooting
 
+Troubleshooting OCG Manager usually starts with discovering that something else
+is already squatting on `127.0.0.1:9042`. The entries below cover stale SPAs,
+conflicting writes, accounts that are cooling down, and Plans that look ready
+but are still `pending` drafts — the gateway stays pessimistic so you do not
+get billed for a bad guess.
+
 - **The dashboard never opens from the tray.** Another process is bound to
   `127.0.0.1:9042`, or a previous tray app still holds the single-instance
   lock. Quit that process or the previous release tray app and retry. For
   source development only, `scripts/free-dev-port.mjs` clears stale Vite
   processes on port `30001`; it does not release `9042` or the desktop
   single-instance lock.
-- **`401 Unauthorized` from the upstream.** For OpenCode Go and Zen Free, the
-  gateway returns that status to the client and does not rotate accounts.
-  OpenCode Go also uses 401 for `ModelError` when the model is not on that
-  product. Custom API `401` rotates to the next eligible card and records
-  `auth_error`. To check whether an OpenCode Go key itself is invalid, use
-  CLI `key ping <id>` or send a real client request. Managed-account Key
-  verification and Custom **Verify connection** still record `auth_error`
-  on 401 for those flows.
+- **`401 Unauthorized` from the upstream.** OpenCode Go and Zen Free return it
+  to the client without rotating accounts; OpenCode Go also uses 401 for
+  `ModelError` when the model is not on that product. Custom API `401` rotates
+  to the next eligible card and records `auth_error`. To check an OpenCode Go
+  key directly, use CLI `key ping <id>` or send a real client request.
+  Managed-account Key verification and Custom **Verify connection** still
+  record `auth_error` on 401 in those flows.
 - **The dashboard says the page version does not match the service.** A cached
   older SPA hit retired `/dashboard/api` REST (not `/dashboard/api/v3`) and
   received HTTP 410. Refresh the page; if that is not enough, install the
@@ -46,14 +51,14 @@
   Changing the URL, key, or declared models re-pends verification and
   disables the card.
 - **Gemini requests fail with `400` over `safetySettings`.** The gateway
-  cannot apply Google's safety thresholds equivalently on a Chat/Messages
-  upstream, so it rejects non-empty arrays. Remove the field and retry; do
-  not assume the same Google content-safety policy still runs afterwards.
+  cannot map Google's safety thresholds to a Chat/Messages upstream, so it
+  rejects non-empty arrays. Remove the field and retry; do not assume the
+  same Google content-safety policy still applies.
 - **Docker first-run registration does not pick up my
-  `OCG_ADMIN_PASSWORD`.** The variables are only honored when the database
-  has no administrator yet. Use the stored administrator account. Recreate
+  `OCG_ADMIN_PASSWORD`.** These variables are only honored when the database
+  has no administrator yet; use the stored administrator account. Recreate
   `ocg-data` and `ocg-browser-profiles` only for an intentional full reset
-  after a verified backup; doing so erases every account, credential,
+  after a verified backup — doing so erases every account, credential,
   setting, cookie, and browser profile.
 - **SmartScreen / Gatekeeper warns about the installer or the DMG.** The
   current Windows builds are unsigned and the macOS app is ad-hoc signed. Use

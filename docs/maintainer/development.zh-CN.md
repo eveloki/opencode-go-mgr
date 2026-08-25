@@ -8,26 +8,32 @@
 
 ## 开发模式
 
-先退出 release 托盘程序，释放单实例锁和 `9042` 端口，然后启动完整开发栈：
+退出 release 托盘程序以释放单实例锁和 `9042` 端口，然后启动完整开发栈：
 
 ```bash
 pnpm install
 pnpm run dev
 ```
 
-`pnpm run dev` 实际执行 `tauri dev`。Windows 上 `predev` 脚本（`scripts/free-dev-port.mjs`）会检查 `127.0.0.1:30001` 并清理上一次残留的 Vite 进程。Tauri 启动 Vite，等 Gateway 就绪后打开 `http://127.0.0.1:30001/dashboard/`。Vite 把 `/dashboard/api`（含 WebSocket）代理到 `http://127.0.0.1:9042`。
+`pnpm run dev` 执行 `tauri dev`。Windows 上 `predev`
+（`scripts/free-dev-port.mjs`）检查 `127.0.0.1:30001` 并清理残留 Vite
+进程。Tauri 启动 Vite，等 Gateway 就绪后打开
+`http://127.0.0.1:30001/dashboard/`。Vite 把 `/dashboard/api`（含
+WebSocket）代理到 `http://127.0.0.1:9042`。
 
 - 前端（Vue、CSS、TypeScript）改动走 Vite HMR。
 - Rust 改动走 Tauri watcher + Cargo 增量编译，然后重启进程。Rust 代码 **不会** 在进程内热替换，需要重启。
 
-克隆后启用一次共享 git hooks（`pnpm install` 的 `prepare` 脚本也会执行）：
+克隆后启用一次共享 git hooks（`pnpm install` 的 `prepare` 脚本也会运行）：
 
 ```bash
 pnpm run hooks:install
 # equivalent: git config core.hooksPath .githooks
 ```
 
-当本次提交暂存了任意 `*.rs` 文件时，`.githooks/pre-commit` 会运行 `cargo fmt --all`，并把这些 Rust 文件重新 `git add`，保证提交内容符合 rustfmt（与 CI 的 `cargo fmt --all -- --check` 同一套工具）。
+当提交暂存了 `*.rs` 文件时，`.githooks/pre-commit` 会运行
+`cargo fmt --all` 并重新 `git add`，保证提交符合 rustfmt（CI 用同一套
+`cargo fmt --all -- --check`）。
 
 ## 检查与构建
 
@@ -41,11 +47,11 @@ pnpm run build
 ```
 
 - `pnpm run build:web` 是 **纯前端** 生产构建（`vue-tsc && vite build`），只验证面板时用它。
-- `pnpm run test` 跑 `pnpm run test:web`（Node `--experimental-strip-types` 覆盖 `scripts/*.test.mjs` 与 `src/**/*.test.ts`）、`vue-tsc --noEmit`、 `vite build`，然后 `cargo test --workspace --locked`。
+- `pnpm run test` 跑 `pnpm run test:web`（Node `--experimental-strip-types` 覆盖 `scripts/*.test.mjs` 与 `src/**/*.test.ts`）、`vue-tsc --noEmit`、`vite build`，然后 `cargo test --workspace --locked`。
 - `pnpm run test:rust` 单独跑锁定依赖的 workspace Rust 套件。
 - `pnpm run contract:v3:check` 用 `ocg-core` 的 `export_dashboard_v3_schema` example 重新生成 Dashboard V3 JSON Schema，若 `schema/dashboard-api-v3.schema.json` 或 `src/api/generated/dashboard-v3.ts` 漂移则失败。写入用 `pnpm run contract:v3:generate`。
 - `pnpm run design:lint` 用 `@google/design.md` lint `DESIGN.md`。
-- `pnpm run build` **只用于发版验证**。它会跑 `scripts/release.mjs`，为当前支持的原生平台构建 GUI 与 CLI，并在每个产物都通过校验后原子替换 `release/`。失败时旧 `release/` 保留。Cargo 增量编译缓存不会被清空。发版二进制使用 thin LTO（workspace `Cargo.toml` 的 `[profile.release]`），把原生 CI 链接时间控制在可接受范围。
+- `pnpm run build` **只用于发版验证**。它运行 `scripts/release.mjs`，为当前原生平台构建 GUI 与 CLI，所有产物通过校验后原子替换 `release/`；失败时保留旧 `release/`。Cargo 增量编译缓存不清空。发版二进制使用 thin LTO（workspace `Cargo.toml` 的 `[profile.release]`），控制原生 CI 链接时间。
 
 ## Rust 检查
 
@@ -55,7 +61,7 @@ cargo check --workspace --all-targets
 cargo test --workspace --locked
 ```
 
-第一条命令只检查格式，不修改文件；需要格式化时运行 `cargo fmt --all`。启用 hooks 后，暂存了 Rust 文件的 commit 会由 `.githooks/pre-commit` 自动执行格式化。
+第一条命令只检查格式，不修改文件；需要格式化时运行 `cargo fmt --all`。启用 hooks 后，`.githooks/pre-commit` 会自动为暂存了 Rust 文件的 commit 执行格式化。
 
 聚焦工作：
 
@@ -73,9 +79,13 @@ cargo test -p ocg-core dashboard_v3
 cargo test -p ocg-core v3_runtime_invariants
 ```
 
-`ocg-domain` / `ocg-gateway` 把生产源码的依赖与纯度守卫编成普通 `cargo test`。宿主刻画矩阵见 `crates/ocg-core/tests/fixtures/v3/requirement_map.md`，以及 `src-tauri/tests/fixtures/v3/host_requirement_map.md` / `crates/ocg-cli/tests/fixtures/v3/host_requirement_map.md` 的副本。
+`ocg-domain` 与 `ocg-gateway` 把生产源码的依赖与纯度守卫编成普通
+`cargo test`。宿主刻画矩阵见
+`crates/ocg-core/tests/fixtures/v3/requirement_map.md`，副本在
+`src-tauri/tests/fixtures/v3/host_requirement_map.md` 与
+`crates/ocg-cli/tests/fixtures/v3/host_requirement_map.md`。
 
-测试真实账号流时，先在沙箱里跑 CLI：
+测试真实账号流时先在沙箱跑 CLI：
 
 ```bash
 ocg-manager-cli --data-dir /tmp/ocg-cli-test key add smoke sk-smoke
@@ -83,19 +93,29 @@ ocg-manager-cli --data-dir /tmp/ocg-cli-test key list
 ocg-manager-cli --data-dir /tmp/ocg-cli-test serve --port 19042
 ```
 
-CLI 表面只有 `serve` / `key` / `status`。`key add` 通过 `account_control::create_go_api_key` 创建启用且 ready 的 OpenCode Go 卡，并 bump 该进程的 `settings_revision`。它不能创建 Custom 账号、子 Key 或设置。直接 `Database::update_account` 仍不 bump revision；这是有意的，也不是 CLI 路径。
+CLI 只暴露 `serve` / `key` / `status`。`key add` 通过
+`account_control::create_go_api_key` 创建启用且 ready 的 OpenCode Go 卡，并
+bump 该进程的 `settings_revision`。它不能创建 Custom 账号、子 Key 或设置。直接
+`Database::update_account` 仍不 bump revision；这是有意的，也不是 CLI 路径。
 
 ## 前端检查
 
-前端单元测试与代码放在同一目录（`src/**/*.test.ts`），用 Node 实验性的 `--experimental-strip-types` 跑，不需要额外测试框架。脚本级测试在 `scripts/*.test.mjs`（发版辅助、Dashboard V3 契约、容器发布）。最后再跑 `pnpm run build:web` 与 `pnpm run contract:v3:check`。
+前端单元测试与代码同目录（`src/**/*.test.ts`），用 Node 的
+`--experimental-strip-types` 运行，不需要额外测试框架。脚本级测试在
+`scripts/*.test.mjs`（发版辅助、Dashboard V3 契约、容器发布）。最后跑
+`pnpm run build:web` 与 `pnpm run contract:v3:check`。
 
-应用教程由 `src/views/application-guides.ts` 的 16 个条目驱动；改动注册表时同时检查教程数量、唯一 ID、协议端点、display/copy 脱敏差异，以及 Claude Desktop 三个角色模型的持久化行为。
+16 个应用教程由 `src/views/application-guides.ts` 驱动；改动注册表时检查教程
+数量、唯一 ID、协议端点、display/copy 脱敏差异，以及 Claude Desktop 三个角色
+模型的持久化行为。
 
-侧栏是仪表盘、接入 Key、账号、供应商、应用、日志、设置。`pricing` 查询是供应商页的遗留别名。`BrowserSession` 是会话层，不是第八个侧栏项。
+侧栏是仪表盘、接入 Key、账号、供应商、应用、日志、设置。`pricing` 查询是供应
+商页的遗留别名。`BrowserSession` 是会话层，不是第八个侧栏项。
 
 ## 本地发布冒烟构建（Windows）
 
-完整发布流程、CI 矩阵与签名密钥见 `docs/maintainer/releasing.md` 与 `docs/maintainer/ci.md`。本地冒烟构建：
+本地冒烟构建步骤如下。完整发布流程、CI 矩阵与签名密钥见
+`docs/maintainer/releasing.md` 与 `docs/maintainer/ci.md`。
 
 1. 确保 `pnpm` 可用（`packageManager: pnpm@10.29.2`）。如果 PATH 中没有 pnpm，请在用户目录创建一个 shim。
 2. 退出已安装的 release 版本，释放单实例锁与 `9042`：

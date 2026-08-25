@@ -2,8 +2,7 @@
 
 # HTTP Routes
 
-One-port composition map (inference, Dashboard V3, V2 tombstone, SPA):
-[Architecture](architecture.md).
+All routes share one port: inference, Dashboard V3, V2 tombstone, and SPA. See [Architecture](architecture.md).
 
 ## Inference (unchanged paths)
 

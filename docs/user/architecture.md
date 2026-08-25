@@ -2,10 +2,7 @@
 
 # Architecture Diagrams
 
-Text maps of one local node. They match HEAD: live routing is OpenCode Go,
-Zen Free, and Custom API; Command Code GOAT and SCNet Token Plans stay
-disabled drafts. Details live in the chapters linked under each diagram;
-when a picture and a chapter disagree, the chapter and the code win.
+These are text maps of a single local node, current as of HEAD. Live routes: OpenCode Go, Zen Free, and Custom API. Command Code GOAT and SCNet Token Plans are still disabled drafts — routing traffic there will only earn you a `501`. Each diagram points to the chapter that owns the details; when a picture and a chapter disagree, trust the chapter and the code.
 
 ## Contents
 
@@ -19,10 +16,7 @@ when a picture and a chapter disagree, the chapter and the code win.
 
 ## One node, one port
 
-Desktop, CLI, and Docker are three hosts around the same `ocg-core`
-process. The default bind is `127.0.0.1:9042`. The tray app opens the
-dashboard in the system browser; it does not drive the panel through Tauri
-`invoke`. There is no remote sync, Admin API, or telemetry.
+Desktop, CLI, and Docker are just three ways to host the same `ocg-core` process. The default bind is `127.0.0.1:9042`. The tray app opens the dashboard in your system browser; it does not remote-control the UI through Tauri `invoke`. There is no remote sync, Admin API, or telemetry.
 
 ```text
    Desktop tray          CLI `serve`           Docker
@@ -56,10 +50,7 @@ Install, first client, CLI, and Docker: [Install](install.md),
 
 ## A client request
 
-The dashboard **Key** authenticates the client to this node. The selected
-account's credential (or none, for Zen Free) is what this node sends
-upstream. Quota bars are warnings; they do not stop traffic. Only an
-upstream `429` cools a card.
+The dashboard **Key** authenticates the client to this node. The selected account's credential is what this node sends upstream — Zen Free has none. Quota bars are warnings, not gates; only an upstream `429` cools a card.
 
 ```text
   AI client                         this node                         Plan
@@ -93,9 +84,7 @@ Auth, aliases, selection, and breakers: [Gateway](gateway.md),
 
 ## Plans: live vs draft
 
-Each account card is one Plan (`provider_id` + `offering_id`). Live Plans
-can produce production routes. Draft Plans can be created as disabled
-`pending` cards; verify returns `501` and they cannot be enabled.
+Every account card is one Plan (`provider_id` + `offering_id`). Live Plans carry production traffic; draft Plans sit as disabled `pending` cards — `verify` returns `501` and enabling them is not an option.
 
 ```text
   LIVE (routable)                         DRAFT (not routed)
@@ -126,17 +115,11 @@ can produce production routes. Draft Plans can be created as disabled
   Protocol and auth scheme are fixed at create.
 ```
 
-Zen Free has only an enable switch; turn the card off if you do not want
-Free. Catalog refresh is a Providers action, not an account-card action.
-Accounts and Providers: [Accounts](accounts.md),
-[Providers](providers.md).
+Zen Free has only an enable switch; turn the card off if you do not want it. Catalog refresh is a Providers action, not an account-card action. For accounts and providers, see [Accounts](accounts.md) and [Providers](providers.md).
 
 ## Dashboard, Key, and account cards
 
-The rail is seven views. `browser` is a hosted-session overlay, not an
-eighth item. The SPA reads and writes `/dashboard/api/v3`. Loopback
-listeners skip dashboard login unless forwarding headers are present;
-clients still need the Key for `/v1`.
+The sidebar has seven views. `browser` is a hosted-session overlay, not a hidden eighth. The SPA reads and writes `/dashboard/api/v3`. Loopback listeners skip dashboard login unless forwarding headers are present; clients still need the Key for `/v1`.
 
 ```text
   Dashboard -> Access Keys -> Accounts -> Providers
@@ -160,14 +143,11 @@ clients still need the Key for `/v1`.
     Account cred   Go key, Custom key, or Zen Free (none)
 ```
 
-The only V3 payload that returns Key plaintext is
-`GET /dashboard/api/v3/connection`. Views, CAS, and data locations:
-[Dashboard](dashboard.md), [Data and security](data-security.md).
+The only V3 payload that returns Key plaintext is `GET /dashboard/api/v3/connection`. For views, CAS, and where data lives, see [Dashboard](dashboard.md) and [Data and security](data-security.md).
 
 ## Two local model lists
 
-Neither GET issues an upstream discovery request. Zen Free catalog
-refresh is the one exception, and it is an explicit Providers action.
+Neither GET makes an upstream discovery call. The one exception is Zen Free catalog refresh, which is an explicit Providers action.
 
 ```text
   GET /v1/models                         (clients; Key required)
@@ -192,8 +172,7 @@ Applications picker vs client list: [Applications](applications.md),
 
 ## Protocol conversion
 
-The request path never probes a protocol (that could double-bill). Gemini
-is a client format only; the gateway never sends traffic to Google.
+The request path never probes a protocol — that would double-bill. Gemini is a client format only; no traffic reaches Google.
 
 ```text
   client wire

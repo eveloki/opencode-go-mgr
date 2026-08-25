@@ -2,15 +2,15 @@
 
 # 升级、备份、恢复与卸载
 
-从 [GitHub 最新 Release](https://github.com/klarkxy/opencode-go-mgr/releases/latest) 下载升级包，并用同一 Release 的 `SHA256SUMS` 校验：PowerShell 使用 `Get-FileHash <文件> -Algorithm SHA256`，macOS 使用 `shasum -a 256 <文件>`， Linux 使用 `sha256sum <文件>`。
+从 [GitHub 最新 Release](https://github.com/klarkxy/opencode-go-mgr/releases/latest) 下载升级包，并用同一 Release 的 `SHA256SUMS` 校验：PowerShell 用 `Get-FileHash <文件> -Algorithm SHA256`，macOS 用 `shasum -a 256 <文件>`，Linux 用 `sha256sum <文件>`。下面把备份、恢复和卸载一起讲完——都是平时很枯燥、关键时刻恨自己没看的操作。
 
 ## 数据库迁移与接入 Key（schema v27）
 
-当前数据库 schema 是 **v27**；历史库会在启动时原地迁移。从单 Key 版本升级会把既有凭证继续作为 **主 Key**（固定 id `00000000-0000-0000-0000-000000000001`），客户端无需改动即可继续鉴权。主 Key 与额外的子 Key 同在一张 `access_keys` 表中：未删除的子 Key 最多 64 把；删除子 Key 是软删除，保留名称供日志归因并清除明文。
+数据库 schema 是 **v27**，历史库启动时原地迁移。从单 Key 版本升级会保留既有凭证为 **主 Key**（id 固定为 `00000000-0000-0000-0000-000000000001`），客户端无需改动即可继续鉴权。主 Key 与额外子 Key 共用 `access_keys` 表：未删除子 Key 最多 64 把，删除为软删除，保留名称用于日志归因并清除明文。
 
-已有（非空）库会先迁到 schema v26，再在任何 v27 写入前生成一份不覆盖的同级快照 `data.sqlite.pre-v3.<timestamp>.bak` 及其 SHA-256 sidecar。全新空数据目录会直接创建 schema v27，不写这份副本。快照只是 v26 回滚点，不能替代完整备份；恢复前先校验 sidecar，且只能恢复到仍支持 v26 的程序，或用于重试尚未提交的 v27 打开。旧版程序无法打开已迁移的数据库：单 Key 时代的程序不会读取额外 Key，已撤销的值也不会因降级而复活。
+已有（非空）库会先迁到 schema v26，然后在任何 v27 写入前生成同级快照 `data.sqlite.pre-v3.<timestamp>.bak` 及 SHA-256 sidecar。全新空数据目录直接创建 schema v27，不写该副本。快照只是 v26 回滚点，不能替代完整备份：恢复前先校验 sidecar，只能恢复到仍支持 v26 的程序，或用于重试尚未提交的 v27 打开。旧版程序无法打开已迁移的数据库——单 Key 时代不识额外 Key，已撤销的值也不会因降级复活。
 
-每次启动时，遗留的已启用 Command Code GOAT 与全部三个 SCNet Token Plan tier 会被禁用且不改 `updated_at`；Custom API 的 enabled 状态予以保留，既有未验证 GOAT 行会重置为 `pending`。OpenCode Go、Zen Free 和未知 provider/offering pair 不受影响。
+每次启动时，遗留的已启用 Command Code GOAT 与全部三个 SCNet Token Plan tier 会被禁用，且不改动 `updated_at`；Custom API 的 enabled 状态保留，未验证的 GOAT 行重置为 `pending`。OpenCode Go、Zen Free 与未知 provider/offering pair 不受影响。
 
 ## 备份
 
@@ -33,7 +33,7 @@
 
 ## 恢复 Docker 备份到全新卷
 
-先确认备份有效，并确认 `.env` 固定到原版本或更新版本。下面的 `docker compose down -v` 会永久删除当前的全部命名卷，必须先把两类持久数据另行保存后才能执行：
+先确认备份有效，并确认 `.env` 固定到原版本或更新版本。下面 `docker compose down -v` 会永久删除当前全部命名卷，必须先把两类持久数据另行保存：
 
 ```bash
 docker compose down -v
@@ -56,7 +56,7 @@ docker compose ps
 
 ## 分运行方式的升级与卸载
 
-应用内升级不可用时，GUI 也按下面方式直接覆盖。
+应用内升级不可用时，按下面方式直接覆盖安装。
 
 - **Windows GUI**：退出托盘程序，运行新版安装包，在“升级方式”页选择 **直接安装（无需先卸载）**。在 Windows **已安装的应用** 中卸载；卸载程序会询问是否删除 `%USERPROFILE%\.ocg-mgr`。
 - **macOS GUI**：用新版 DMG 中的应用替换 **Applications** 里的旧应用。删除应用即可卸载；只有确定也要删除数据时才另行删除 `~/.ocg-mgr`。

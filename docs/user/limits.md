@@ -2,6 +2,8 @@
 
 # Limits
 
+Every gateway draws a line somewhere. This page is that line — a running list of things OCG Manager refuses to do, usually with a `400` instead of a polite lie.
+
 - `/embeddings` is not implemented. Gemini `embedContent` is routed but
   returns a Google-style `501 UNIMPLEMENTED` response.
 - Gemini `countTokens` also returns `501`; Gemini CLI is expected to fall
@@ -55,13 +57,13 @@
   builds can install signed releases from Settings; 1.4.1, development
   builds, the CLI, and Docker use the direct/manual upgrade path.
 - Command Code GOAT and SCNet Token Plans can be saved as disabled `pending`
-  drafts (`routable=false`). Connection verification returns `501`. They have
+  drafts (`routable=false`). Connection verification returns `501`; they have
   no live inference, usage, pricing, verification runtime, or production
-  routing; they appear on **Providers** as non-routable scopes and cannot be
-  promoted by probes. Custom API is live under the trusted-administrator
-  boundary in [Accounts](accounts.md); it is unpriced and has no official usage
-  path. Catalog, protocol, and pricing controls for Custom live on
-  **Providers** as isolated `CustomEndpoint` scopes.
+  routing and cannot be promoted by probes. They appear on **Providers** as
+  non-routable scopes. Custom API is live under the trusted-administrator
+  boundary in [Accounts](accounts.md); it is unpriced, has no official usage
+  path, and its catalog, protocol, and pricing controls live on **Providers**
+  as isolated `CustomEndpoint` scopes.
 - Unknown model names return `400` on every supported client format. Clients
   should send published aliases or eligible Custom IDs from authenticated
   `GET /v1/models` that currently have an effective enabled protocol.

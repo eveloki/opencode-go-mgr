@@ -2,11 +2,11 @@
 
 # CLI
 
-下载对应平台的压缩包并解压成目录，目录里有可执行文件、`dist/` 与 `LICENSE`。 `dist/` 必须与可执行文件同级，`serve` 才能提供管理面板。Windows 上可执行文件是 `ocg-manager-cli.exe`；Linux 解压后可能需要 `chmod +x ocg-manager-cli`。
+CLI 是桌面端的无头版本：同样的 Gateway，没有托盘图标。下载对应平台压缩包并解压，让 `dist/` 与可执行文件同级——否则 `serve` 无面板可发。Windows 下可执行文件是 `ocg-manager-cli.exe`；Linux 解压后可能需要 `chmod +x ocg-manager-cli`。
 
-CLI 数据目录默认在 `~/.ocg-mgr-cli`（所有平台一致），可用 `--data-dir <path>` 覆盖。混淆密钥默认保存在 `<data-dir>/.encryption-key`，可用名为 `--encryption-key <key>` 的参数或 `OCG_MANAGER_ENCRYPTION_KEY` 环境变量覆盖。
+CLI 数据目录默认 `~/.ocg-mgr-cli`，所有平台一致，可用 `--data-dir <path>` 覆盖。混淆密钥默认放在 `<data-dir>/.encryption-key`，也可用 `--encryption-key <key>` 参数或 `OCG_MANAGER_ENCRYPTION_KEY` 环境变量覆盖。
 
-CLI 命令面只有 `serve`、`key` 与 `status`。`key` 管理 OpenCode Go 账号凭据，不是面板接入 Key，也不能创建 Custom 或操作 Zen Free 卡片。接入 Key、Custom 目的地、协议开关与目录仍在面板里完成。CLI 账号写入会 bump 该进程的 settings revision，命令行不接受 `expectedRevision`。
+CLI 只提供 `serve`、`key`、`status`。`key` 管 OpenCode Go 账号凭据，不是面板 Key，也不碰 Custom 目的地或 Zen Free 卡片；那些留在面板里操作。CLI 写入会直接 bump 该进程的 settings revision，命令行没有 `expectedRevision`。
 
 ```text
 ocg-manager-cli
@@ -28,7 +28,7 @@ ocg-manager-cli
 └── status        Show data dir, gateway port/key, upstream, account totals
 ```
 
-最快搭出一个无头 Gateway：
+无头 Gateway 的最快搭法：
 
 ```bash
 ./ocg-manager-cli key add main sk-...
@@ -36,9 +36,9 @@ ocg-manager-cli
 ./ocg-manager-cli serve --port 9042
 ```
 
-`serve --port <port>` 会把新端口写入 SQLite；之后不带 `--port` 的 `serve` 会继续使用该值。
+`serve --port <port>` 把端口写进 SQLite；之后不带该参数的 `serve` 会继续使用这个值。
 
-`key ping` 会读取混淆后的 Key、发送一条极小的 chat completion、打印真实的上游状态码与一段响应体摘要——绕过面板直接拿到每个 Key 真实的 `401`/`403`/`429`/`200`。
+`key ping` 读取混淆后的 Key、发一条极小的 chat completion，然后打印真实上游状态码和一段响应摘要——不用开面板就能确认每个 Key 是 `401`/`403`/`429` 还是 `200`。
 
 ---
 

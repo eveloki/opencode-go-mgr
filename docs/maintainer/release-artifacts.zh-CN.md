@@ -2,7 +2,7 @@
 
 # 发布产物
 
-支持的发布矩阵刻意保持精简：
+发布矩阵只保留三个桌面平台与一份多架构容器镜像。
 
 | Runner | GUI | CLI |
 | --- | --- | --- |
@@ -30,13 +30,13 @@ latest.json
 SHA256SUMS
 ```
 
-每个 CLI 压缩包都包含可执行文件、`dist/`、`LICENSE`。CLI 压缩包需整体分发，`serve` 需要同级的 `dist/`。Windows 没有 portable GUI 安装包。
+每个 CLI 压缩包包含可执行文件、`dist/` 和 `LICENSE`；必须整体分发，`serve` 依赖同级的 `dist/`。Windows 没有便携 GUI 安装包。
 
-`linux/amd64` 与 `linux/arm64` 容器单独发布为 `ghcr.io/klarkxy/opencode-go-mgr`。 GitHub Release 包含七份常规平台 payload、额外的 macOS 升级压缩包、四份升级签名、只拉取镜像的 Compose 示例、`latest.json` 与 `SHA256SUMS`（当前共 15 个附件）。本地验证器固定校验当前这 15 个文件，工作流同时要求 GitHub 附件的名称与数量和组装后的 `release/` 集合完全一致。运行镜像内的许可证位于 `/usr/share/licenses/ocg-manager/LICENSE`。
+`linux/amd64` 与 `linux/arm64` 容器单独发布为 `ghcr.io/klarkxy/opencode-go-mgr`。GitHub Release 包含七份平台 payload、macOS 升级压缩包、四份升级签名、Compose 示例、`latest.json` 和 `SHA256SUMS`，当前共 15 个附件。本地验证器和工作流都要求 GitHub 附件的名称与数量同组装后的 `release/` 目录完全一致。运行镜像中的许可证位于 `/usr/share/licenses/ocg-manager/LICENSE`。
 
 ## scripts/release.mjs
 
-`scripts/release.mjs` 负责所有繁重工作：
+`scripts/release.mjs` 负责构建并暂存 `release/` 目录：
 
 1. 校验 `package.json`、`src-tauri/tauri.conf.json`、workspace `Cargo.toml`、 `src-tauri/Cargo.toml`，以及 `compose.example.yaml` 的三个带版本字段（标题、主镜像和浏览器镜像默认值）一致；如有 Git tag，与之比对。
 2. 在创建暂存目录前解析升级签名模式；设置 `OCG_REQUIRE_UPDATER_ARTIFACTS=1` 时，缺私钥或 `TAURI_UPDATER_PUBLIC_KEY` 都会在替换 `release/` 前失败；配置的公钥还必须匹配 `src-tauri/updater-public-key.sha256` 中已提交的 SHA-256 连续性基线。
@@ -48,9 +48,9 @@ SHA256SUMS
 8. 对暂存 `release/` 目录内的每份 payload 与签名写 `SHA256SUMS`。
 9. 原子替换 `release/`。任意步骤失败，旧 `release/` 保留，暂存目录清理。
 
-`scripts/release.mjs` **不会** 清空 Cargo 增量编译缓存——多次发布共用同一个 `target/`。
+`scripts/release.mjs` 不触碰 Cargo 增量编译缓存，多次构建复用同一 `target/`。
 
-`pnpm run release:check` 校验版本、Compose 与已配置签名密钥，不构建原生安装包。无密钥预检先覆盖未签名契约；生产 tag push 中，每台 runner 都会先用 repository signing secret 签一个临时 payload，并用已通过连续性检查的 `TAURI_UPDATER_PUBLIC_KEY` 验证，再开始昂贵的原生构建。
+`pnpm run release:check` 校验版本、Compose 与已配置签名密钥，不构建原生安装包。无密钥预检覆盖未签名契约；生产 tag push 时，每台 runner 先用仓库签名密钥对临时 payload 签名，再用已通过连续性检查的 `TAURI_UPDATER_PUBLIC_KEY` 验证，之后才开始昂贵的原生构建。
 
 ---
 

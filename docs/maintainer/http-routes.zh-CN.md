@@ -2,7 +2,7 @@
 
 # HTTP 路由
 
-单端口组成图（推理、Dashboard V3、V2 墓碑、SPA）：[架构](architecture.zh-CN.md)。
+所有路由共享一个端口：推理、Dashboard V3、V2 墓碑与 SPA。详见[架构](architecture.zh-CN.md)。
 
 ## 推理（路径未改）
 
