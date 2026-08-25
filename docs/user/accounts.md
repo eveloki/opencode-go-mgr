@@ -27,38 +27,37 @@ The built-in Plan families are:
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` / `go` | Yes | One officially distributable API key per card; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
-| Command Code GOAT | `command-code` / `goat` | No | Saved as a disabled `pending` draft; connection verification returns `501`; not a production inference, pricing, usage, or provider-guide path |
-| SCNet Token Plans | `scnet` / `token-plan-basic`, `token-plan-standard`, `token-plan-premium` | No | Keys must start with `sk-tp-`; saved as disabled `pending` drafts; verification returns `501`; official interactive-use restriction below |
+| Command Code GOAT | `command-code` / `goat` | Yes | Create disabled `pending`; verify the Key through official `GET /models`, then explicitly enable; model access defaults to the included `goat` catalog and can switch to `all` |
+| SCNet Token Plans | `scnet` / `token-plan-basic`, `token-plan-standard`, `token-plan-premium` | No | Archived; legacy rows remain disabled and cannot verify, enable, route, or report usage |
 | Custom API | `custom` / `api` | Yes | Trusted-administrator destination; create/update stay disabled `pending`; verify then explicit enable; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
 Every persistent mutation path (database guards and the shared dashboard/CLI
 services) rejects
-`enabled=true` for a catalogued `routable=false` offering (GOAT and all SCNet
-tiers) before it mutates the row, revision, or timestamps. Custom is
+`enabled=true` for a catalogued `routable=false` offering (all SCNet tiers)
+before it mutates the row, revision, or timestamps. GOAT and Custom are
 catalog-routable, but create/update still leave the card disabled and
 `pending`; enable is rejected until verification status is `verified`.
 Disabled drafts remain saveable. The desktop UI uses Dashboard V3 HTTP and has
 no separate Tauri invoke mutation path.
 
-For OpenCode Go, Command Code GOAT, and SCNet Token Plans, do not add consumer
-subscription credentials, browser cookies, or reverse-proxy credentials as
-account keys. This restriction does not constrain administrator-configured
-Custom Bearer or `x-api-key` credentials. Command Code GOAT and SCNet Token
-Plans must not be
-aliased onto OpenCode, must not send their keys to an OpenCode endpoint, and
-must not be described as live routing, usage, pricing, or verification.
+Use only the official provider API Key for OpenCode Go or Command Code GOAT;
+browser cookies and reverse-proxy credentials are not account Keys. GOAT is a
+separate provider mapping and its Key is sent only to the fixed Command Code
+Provider API, never to OpenCode. SCNet is archived and accepts no new
+credentials or routing.
 Custom API must not be aliased onto OpenCode or send its key to an OpenCode
 endpoint; it is a separate trusted-administrator destination, not an
 OpenCode offering.
 
-SCNet Token Plan keys (`sk-tp-`) are limited to interactive use inside AI
-tools. Account sharing and using the API as a custom application backend,
-automation script, or non-interactive batch caller is prohibited and may
-suspend the subscription or revoke the key. Saving a draft records a
-versioned acknowledgement of that restriction (`scnet-token-plan-restrictions`
-/ `2026-08-21`); the acknowledgement itself does not enable routing. The
-official usable-model table and endpoint snapshot are adapter input only and
-are never published as client aliases.
+Legacy SCNet Token Plan rows and their historical acknowledgement records are
+retained for compatibility, but the family is archived. It has no add,
+verify, enable, routing, model-publication, pricing, or usage path.
+
+GOAT verification performs one authenticated, non-billable `GET /models` and
+saves the returned account catalog without enabling the card. After verify,
+explicitly enable the account. The account can use the included `goat` model
+set (default) or the full `all` catalog. Changing the Key invalidates
+verification and disables the account; switching `goat`/`all` does not.
 
 Custom API is a live trusted-administrator destination. The card stores a
 base URL, one upstream protocol (Chat Completions, Responses, or Messages),
@@ -97,8 +96,11 @@ logs record `cost_state=unknown` with no quota debit, and Custom has no
 provider usage refresh. `MODEL_PROTOCOLS` remains Go-specific; Custom
 converts the client protocol to the account's declared upstream protocol.
 
-The **Accounts** view splits creation into **Import existing Key** and
-**Register new account (Beta)**:
+**Add account** is a grouped plan list with a detail pane (**Ready to add** /
+**Draft plans** / **Unavailable**), not a card grid. Zen Free is a
+backend-owned singleton and is not listed there; enable or disable it on the
+account list. Selecting OpenCode Go still offers **Import existing Key** and
+**Register new account (Beta)** in the detail pane:
 
 - A **Key account** stores one officially distributable OpenCode Go API key.
 - A **managed account** immediately creates a disabled, recoverable draft,

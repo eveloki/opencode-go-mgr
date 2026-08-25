@@ -7,6 +7,7 @@ This guide is for people running OCG Manager as a desktop app, a headless gatewa
 ## Chapters
 
 - [What OCG Manager Does](user/overview.md) — Product positioning and the four jobs the gateway performs.
+- [Architecture Diagrams](user/architecture.md) — Text maps of one node, a client request, Plans, and the dashboard.
 - [Install And First Run](user/install.md) — Windows, macOS, and Linux desktop installers and first launch.
 - [Connect Your First Client](user/first-client.md) — Copy the Key and base URL, then verify a request from a client.
 - [Upgrade, Backup, Restore, And Uninstall](user/upgrade-backup.md) — Updater channel, manual upgrade, backup, restore, and uninstall.
@@ -26,8 +27,8 @@ This guide is for people running OCG Manager as a desktop app, a headless gatewa
 
 ## Reading paths
 
-- **New user** — `overview` → `install` → `first-client` → `accounts` → `providers` → `gateway` → `applications` → `troubleshooting`.
-- **Docker / CLI operator** — `overview` → `docker` → `cli` → `accounts` → `providers` → `routing` → `logs-settings` → `troubleshooting`.
+- **New user** — `overview` → `architecture` → `install` → `first-client` → `accounts` → `providers` → `gateway` → `applications` → `troubleshooting`.
+- **Docker / CLI operator** — `overview` → `architecture` → `docker` → `cli` → `accounts` → `providers` → `routing` → `logs-settings` → `troubleshooting`.
 
 ---
 

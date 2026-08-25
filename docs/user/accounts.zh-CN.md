@@ -12,15 +12,17 @@
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` / `go` | 是 | 每张卡一份官方分发的 API Key；托管注册仍是 Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 一张不带鉴权头、无需凭据的匿名单例卡；可排序、可启停，不可删除；额度按出口 IP 共享 |
-| Command Code GOAT | `command-code` / `goat` | 否 | 保存为禁用的 `pending` 草稿；连接验证返回 `501`；不是生产推理、计价、用量或供应商教程路径 |
-| SCNet Token Plans | `scnet` / `token-plan-basic`、`token-plan-standard`、`token-plan-premium` | 否 | Key 必须以 `sk-tp-` 开头；保存为禁用的 `pending` 草稿；验证返回 `501`；官方交互式使用限制见下 |
+| Command Code GOAT | `command-code` / `goat` | 是 | 创建后禁用并为 `pending`；通过官方 `GET /models` 验证 Key，再显式启用；模型级别默认包含套餐 `goat`，可切换为 `all` |
+| SCNet Token Plans | `scnet` / `token-plan-basic`、`token-plan-standard`、`token-plan-premium` | 否 | 已归档；历史行保持禁用，不能验证、启用、路由或报告用量 |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地；创建/更新后仍为禁用 `pending`；先验证再显式启用；合格声明 ID 会出现在 `/v1/models`；费用 unpriced/unknown，不扣额度 |
 
-所有持久化变更路径（数据库闸口，以及 dashboard / CLI 共用服务）都会在改动行、revision 或时间戳之前，拒绝为目录内 `routable=false` offering（GOAT 与全部 SCNet tier）设置 `enabled=true`。Custom 在目录中可路由，但创建/更新后仍为禁用 `pending`；验证状态不是 `verified` 时拒绝启用。禁用草稿仍可保存。桌面 UI 只经 Dashboard V3 HTTP 变更，没有独立的 Tauri invoke 变更路径。
+所有持久化变更路径（数据库闸口，以及 dashboard / CLI 共用服务）都会在改动行、revision 或时间戳之前，拒绝为目录内 `routable=false` offering（全部 SCNet tier）设置 `enabled=true`。GOAT 与 Custom 在目录中可路由，但创建/更新后仍为禁用 `pending`；验证状态不是 `verified` 时拒绝启用。禁用草稿仍可保存。桌面 UI 只经 Dashboard V3 HTTP 变更，没有独立的 Tauri invoke 变更路径。
 
-对于 OpenCode Go、Command Code GOAT 和 SCNet Token Plans，消费者订阅凭据、浏览器 Cookie 或反向代理凭据不会被识别为账号 Key。该限制不约束管理员配置的 Custom Bearer 或 `x-api-key` 凭据。Command Code GOAT 与 SCNet Token Plans 不会被作为 OpenCode 别名发布，其 Key 也不会发往 OpenCode endpoint；它们不是已上线的路由、用量、计价或验证路径。Custom API 同样不是 OpenCode offering，不会被作为 OpenCode 别名发布，其 Key 也不会发往 OpenCode endpoint；它是独立的受信管理员目的地。
+OpenCode Go 与 Command Code GOAT 只接受各自官方 Provider API Key；浏览器 Cookie 与反向代理凭据不是账号 Key。GOAT 是独立供应商映射，其 Key 只会发送到固定的 Command Code Provider API，绝不会发送到 OpenCode。SCNet 已归档，不再接受新凭据或路由。Custom API 同样不是 OpenCode offering，不会把 Key 发往 OpenCode endpoint；它是独立的受信管理员目的地。
 
-SCNet Token Plan Key（`sk-tp-`）仅限在 AI 工具内交互使用。禁止账号共享或把该 API 当作自定义应用后端、自动化脚本或非交互批量调用；否则可能停用订阅或吊销 Key。保存草稿会记录对该限制的带版本确认（`scnet-token-plan-restrictions` / `2026-08-21`）；确认本身不会打开路由。官方可用模型表与 endpoint 快照只作适配器输入，不会作为客户端别名公布。
+历史 SCNet Token Plan 行及其旧确认记录会为兼容保留，但该家族已经归档。它没有新增、验证、启用、路由、模型公布、价格或用量路径。
+
+GOAT 验证只执行一次带鉴权且不计费的 `GET /models`，保存返回的账号目录，但不会自动启用卡片。验证后必须显式启用。账号模型级别可选套餐内 `goat`（默认）或完整 `all` 目录。更换 Key 会使验证失效并禁用账号；切换 `goat`/`all` 不会。
 
 Custom API 是已上线的受信管理员目的地。账号卡保存 base URL、一种上游协议（Chat Completions、Responses 或 Messages）、一种鉴权方案（Bearer 或 `x-api-key`），以及至少一条模型能力。受信管理员可配置任意语法合法的 HTTP 或 HTTPS 源，包括局域网、回环与其他自选目的地。URL 内嵌凭据、query 与 fragment 会被拒绝。Gateway 不会跟随重定向，也不会转发 dashboard 或客户端鉴权，只构造已配置的 Bearer 或 `x-api-key`。拼接后的 endpoint 必须保持已配置的 scheme、host、port 与 base-path 前缀。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；连接与请求超时按配置的连接超时夹到 5–60 秒。
 
@@ -28,7 +30,7 @@ Custom API 是已上线的受信管理员目的地。账号卡保存 base URL、
 
 创建与更新后账号仍为禁用 `pending`。验证对第一个声明模型发送一次协议正确、非流式、 token 受限的 JSON 请求；只有 `2xx` JSON object 才算成功。验证不会发现或改写能力，也不会自动启用账号。验证成功后必须显式启用。合格账号（enabled + verified + ready + 非空 Key）会把声明的模型 ID 暴露在带鉴权的 `GET /v1/models` 上，并可为这些 ID 被选中。声明的能力 ID 既是客户端名称也是上游模型名；kebab ID 按大小写折叠匹配，含 `/`、`_` 或空白的名称不会折成 kebab 别名。Custom overlay 不会抢占已公布的 Go 或 Zen Free 别名。与另一 Plan 的唯一原始 ID 重叠时返回 `ambiguous_model_id`，且不调用上游。未声明名称仍视为未知（`400`）。更改 base URL、Key 或声明能力会使验证失效并禁用账号。上游协议与鉴权方案在创建后不可改。Custom 流量不计价：日志记 `cost_state=unknown`，不扣额度，也没有官方用量刷新。`MODEL_PROTOCOLS` 仍只服务 OpenCode Go；Custom 把客户端协议转换到该账号声明的上游协议。
 
-**账号** 视图把新增入口分为 **导入已有 Key** 与 **注册新账号（Beta）**：
+**账号** 的 **新增账号** 是分组方案列表加详情（**可添加** / **草稿方案** / **暂不可用**），不是卡片网格。Zen Free 是系统管理的单例，不会出现在新增列表里，只在账号列表中启停。选中 OpenCode Go 后，详情里仍提供 **导入已有 Key** 与 **注册新账号（Beta）**：
 
 - **Key 账号**直接保存一份官方分发的 OpenCode Go API Key。
 - **托管账号**先创建一条禁用的可恢复草稿，再按向导完成登录身份（可选）、邀请注册、支付、Key 验证。草稿与当前步骤会立即写入 SQLite；关闭页面或重启服务后可继续。注册中账号不会参与 Gateway 路由，也不会显示用量、验证或启用控件。

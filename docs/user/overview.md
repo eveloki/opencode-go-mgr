@@ -26,6 +26,28 @@ The gateway does four jobs:
    write usage and any cooldown to SQLite, and surface everything in the
    dashboard.
 
+## Shape of a node
+
+Desktop, CLI, and Docker all run one `ocg-core` process. The default bind is
+`127.0.0.1:9042`. The dashboard is a Vue SPA in the system browser; AI
+clients speak OpenAI, Anthropic, Gemini, or Claude Desktop at `/v1`.
+
+```text
+   Desktop tray / CLI `serve` / Docker
+                    |
+                    v
+              ocg-core @ 127.0.0.1:9042
+               /                    \
+    /dashboard/  Vue SPA          /v1  inference
+    (system browser)              clients + Key
+               \                    /
+                v                  v
+              SQLite schema v27 (local only)
+```
+
+Request flow, Plans, the seven dashboard views, and protocol conversion as
+text diagrams: [Architecture diagrams](architecture.md).
+
 ---
 
 [User guide index](../USER.md) · [简体中文](overview.zh-CN.md) · [Docs index](../README.md)

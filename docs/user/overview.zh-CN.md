@@ -11,6 +11,28 @@ Gateway 的四件事：
 3. 把请求转换到所选 Plan 的有效上游协议，再把响应转回客户端协议。客户端请求路径不会发现或探测。
 4. 把请求日志（`requested_model`、`resolved_alias`、`upstream_model`）、用量、冷却全部写回 SQLite，并在面板里呈现。
 
+## 一个节点长什么样
+
+桌面、CLI 与 Docker 都运行同一份 `ocg-core` 进程。默认绑定 `127.0.0.1:9042`。
+面板是系统浏览器里的 Vue SPA；AI 客户端用 OpenAI、Anthropic、Gemini 或 Claude
+Desktop 格式访问 `/v1`。
+
+```text
+   桌面托盘 / CLI `serve` / Docker
+                    |
+                    v
+              ocg-core @ 127.0.0.1:9042
+               /                    \
+    /dashboard/  Vue SPA          /v1  推理
+    （系统浏览器）                 客户端 + Key
+               \                    /
+                v                  v
+              SQLite schema v27（仅本地）
+```
+
+请求路径、Plan、七个面板视图与协议转换的文字图见
+[架构图](architecture.zh-CN.md)。
+
 ---
 
 [用户指南索引](../USER.zh-CN.md) · [English](overview.md) · [文档索引](../README.zh-CN.md)

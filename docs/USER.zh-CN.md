@@ -7,6 +7,7 @@
 ## 章节
 
 - [产品定位](user/overview.zh-CN.md) — 产品定位与 Gateway 承担的四个职责。
+- [架构图](user/architecture.zh-CN.md) — 节点、客户端请求、Plan 与面板的文字图。
 - [安装与首次启动](user/install.zh-CN.md) — Windows、macOS、Linux 桌面安装包与首次启动。
 - [接入第一个客户端](user/first-client.zh-CN.md) — 复制 Key 与 API Base URL，并验证客户端请求。
 - [升级、备份、恢复与卸载](user/upgrade-backup.zh-CN.md) — 升级通道、手动升级、备份、恢复与卸载。
@@ -26,8 +27,8 @@
 
 ## 阅读路径
 
-- **新用户** — `overview` → `install` → `first-client` → `accounts` → `providers` → `gateway` → `applications` → `troubleshooting`。
-- **Docker / CLI 运维** — `overview` → `docker` → `cli` → `accounts` → `providers` → `routing` → `logs-settings` → `troubleshooting`。
+- **新用户** — `overview` → `architecture` → `install` → `first-client` → `accounts` → `providers` → `gateway` → `applications` → `troubleshooting`。
+- **Docker / CLI 运维** — `overview` → `architecture` → `docker` → `cli` → `accounts` → `providers` → `routing` → `logs-settings` → `troubleshooting`。
 
 ---
 

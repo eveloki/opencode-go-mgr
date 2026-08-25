@@ -651,6 +651,10 @@ export const enUSMessages = {
   "按方案筛选": "Filter by plan",
   "按状态筛选": "Filter by status",
   "选择方案": "Choose a plan",
+  "选择要添加的方案": "Choose a plan to add",
+  "可添加": "Ready to add",
+  "草稿方案": "Draft plans",
+  "暂不可用": "Unavailable",
   "该方案暂不可用": "This plan is not available yet",
   "服务商目录加载失败": "Provider catalog failed to load",
   "服务商目录未提供该方案": "The provider catalog does not offer this plan",
@@ -711,8 +715,11 @@ export const enUSMessages = {
   "模型能力必须与上游协议一致": "Model capabilities must use the upstream protocol",
 
   "创建为禁用草稿；验证与路由尚未就绪": "Creates a disabled draft; verification and routing are not ready yet",
-  "选择套餐后创建为禁用草稿；路由尚未就绪": "Choose a tier to create a disabled draft; routing is not ready yet",
   "路由尚未就绪": "Routing is not ready yet",
+  "已归档": "Archived",
+  "该方案已归档，暂不支持创建": "This plan is archived and cannot be created",
+  "该方案已归档，不支持启用": "This plan is archived and cannot be enabled",
+  "SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。": "SCNet Token Plans are archived: historical drafts are view-only and cannot be verified, enabled, routed, or metered.",
 
   "该方案暂不可路由": "This plan is not routable yet",
   "该方案暂不可路由。": "This plan is not routable yet.",
