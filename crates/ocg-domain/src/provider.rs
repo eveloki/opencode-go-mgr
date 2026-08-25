@@ -19,21 +19,111 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-/// Official Command Code Provider API v1 base. Catalog `routable` stays false;
-/// this constant is the transport contract, not a production enablement flag.
+/// Official Command Code Provider API v1 base. Production GOAT routes this
+/// fixed origin; loopback substitutes exist only as a test seam.
 pub const COMMAND_CODE_GOAT_BASE_URL: &str = "https://api.commandcode.ai/provider/v1";
 pub const COMMAND_CODE_GOAT_HOST: &str = "api.commandcode.ai";
 /// Relative to [`COMMAND_CODE_GOAT_BASE_URL`].
 pub const COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
-/// Relative to [`COMMAND_CODE_GOAT_BASE_URL`]. Documented official endpoint;
-/// the first supported GOAT model still converts client Messages to Chat.
+/// Relative to [`COMMAND_CODE_GOAT_BASE_URL`]. Anthropic models use this path;
+/// OpenAI and open-source models use Chat Completions.
 pub const COMMAND_CODE_GOAT_MESSAGES_PATH: &str = "/messages";
-/// Documented official discovery path. Billing/schema is unproven; must not be
-/// used for connection verification or model enablement.
+/// Official GET `/models` discovery path used for connection verification.
 pub const COMMAND_CODE_GOAT_MODELS_PATH: &str = "/models";
-pub const COMMAND_CODE_GOAT_QUOTA_5H: f64 = 14.0;
-pub const COMMAND_CODE_GOAT_QUOTA_WEEK: f64 = 35.0;
-pub const COMMAND_CODE_GOAT_QUOTA_MONTH: f64 = 70.0;
+pub const COMMAND_CODE_GOAT_MODELS_SOURCE: &str = "command_code_get_models";
+pub const COMMAND_CODE_GOAT_MODEL_SOURCE: &str = "command_code_verified_models";
+pub const MAX_COMMAND_CODE_MODELS_CATALOG: usize = 1_000;
+
+/// Models whose monthly allowance is included by the GOAT subscription page.
+/// The Provider API can return additional Pro/Max/PAYG models; those remain
+/// available only when an account explicitly opts into `all` access.
+pub const COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-flash-vision-exp",
+    "moonshotai/Kimi-K3",
+    "moonshotai/Kimi-K2.7-Code",
+    "moonshotai/Kimi-K2.7-Code-Highspeed",
+    "moonshotai/Kimi-K2.6",
+    "moonshotai/Kimi-K2.5",
+    "zai-org/GLM-5.3",
+    "zai-org/GLM-5.2",
+    "zai-org/GLM-5.2-Fast",
+    "zai-org/GLM-5.1",
+    "zai-org/GLM-5",
+    "MiniMaxAI/MiniMax-M3",
+    "MiniMaxAI/MiniMax-M2.7",
+    "MiniMaxAI/MiniMax-M2.5",
+    "xiaomi/mimo-v2.5-pro",
+    "xiaomi/mimo-v2.5",
+    "Qwen/Qwen3.8-Max",
+    "Qwen/Qwen3.8-27B",
+    "Qwen/Qwen3.7-Max",
+    "Qwen/Qwen3.7-Plus",
+    "Qwen/Qwen3.7-Flash",
+    "Qwen/Qwen3.6-Max-Preview",
+    "Qwen/Qwen3.6-Plus",
+    "stepfun/Step-3.7-Flash",
+    "stepfun/Step-3.5-Flash",
+    "tencent/hy3-paid",
+    "google/gemini-3.7-flash",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "thinkingmachines/inkling",
+    "thinkingmachines/inkling-small",
+    "stealth/ox-alpha",
+    "poolside/laguna-s-2.1-free",
+    "meta/muse-spark-1.2",
+    "meta/muse-spark-1.2-contributor",
+    "xai/grok-4.5",
+    "xai/grok-4.6",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoatModelAccess {
+    #[default]
+    Goat,
+    All,
+}
+
+impl GoatModelAccess {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Goat => "goat",
+            Self::All => "all",
+        }
+    }
+
+    pub fn allows(self, model_id: &str) -> bool {
+        self == Self::All || command_code_goat_includes_model(model_id)
+    }
+}
+
+impl TryFrom<&str> for GoatModelAccess {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "goat" => Ok(Self::Goat),
+            "all" => Ok(Self::All),
+            _ => Err(format!(
+                "unknown GOAT model access `{value}`; expected goat or all"
+            )),
+        }
+    }
+}
+
+pub fn command_code_goat_includes_model(model_id: &str) -> bool {
+    let model_id = model_id.trim();
+    !model_id.is_empty()
+        && COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS
+            .iter()
+            .any(|included| included.eq_ignore_ascii_case(model_id))
+}
+
+pub const SCNET_CREATION_UNAVAILABLE_REASON: &str = "SCNet Token Plans are archived and unsupported; existing drafts are preserved but new accounts cannot be created.";
 
 pub const SCNET_TOKEN_PLAN_KEY_PREFIX: &str = "sk-tp-";
 pub const SCNET_RISK_ACKNOWLEDGEMENT_ID: &str = "scnet-token-plan-restrictions";
@@ -484,14 +574,14 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         creation_availability: CreationAvailability::Available,
         creation_unavailable_reason: None,
         verification_policy: VerificationPolicy::Required,
-        verification_runtime_availability: "unavailable",
-        routable: false,
+        verification_runtime_availability: "available",
+        routable: true,
         managed_registration: false,
-        pricing_availability: "unavailable",
+        pricing_availability: "available",
         usage_availability: "unavailable",
-        manual_usage_calibration: true,
-        quota_unit: "credits",
-        model_source: "builtin_command_code_protocol_table",
+        manual_usage_calibration: false,
+        quota_unit: "unpriced",
+        model_source: COMMAND_CODE_GOAT_MODEL_SOURCE,
         key_prefix: None,
         auth_schemes: &BEARER_AUTH,
         upstream_protocols: &GOAT_PROTOCOLS,
@@ -502,8 +592,8 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         offering: key_offering(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
         display_name: "SCNet Token Plan Basic",
         display_family: "SCNet",
-        creation_availability: CreationAvailability::Available,
-        creation_unavailable_reason: None,
+        creation_availability: CreationAvailability::Unavailable,
+        creation_unavailable_reason: Some(SCNET_CREATION_UNAVAILABLE_REASON),
         verification_policy: VerificationPolicy::Required,
         verification_runtime_availability: "unavailable",
         routable: false,
@@ -523,8 +613,8 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         offering: key_offering(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID),
         display_name: "SCNet Token Plan Standard",
         display_family: "SCNet",
-        creation_availability: CreationAvailability::Available,
-        creation_unavailable_reason: None,
+        creation_availability: CreationAvailability::Unavailable,
+        creation_unavailable_reason: Some(SCNET_CREATION_UNAVAILABLE_REASON),
         verification_policy: VerificationPolicy::Required,
         verification_runtime_availability: "unavailable",
         routable: false,
@@ -544,8 +634,8 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         offering: key_offering(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID),
         display_name: "SCNet Token Plan Premium",
         display_family: "SCNet",
-        creation_availability: CreationAvailability::Available,
-        creation_unavailable_reason: None,
+        creation_availability: CreationAvailability::Unavailable,
+        creation_unavailable_reason: Some(SCNET_CREATION_UNAVAILABLE_REASON),
         verification_policy: VerificationPolicy::Required,
         verification_runtime_availability: "unavailable",
         routable: false,
@@ -678,8 +768,10 @@ impl ProviderAdapterKind {
 
     pub const fn catalog_refresh_supported(self) -> bool {
         match self {
-            Self::ZenFree | Self::ConfigurableHttp => true,
-            Self::OpenCodeGo | Self::CommandCodeGoat | Self::Scnet => false,
+            Self::OpenCodeGo | Self::ZenFree | Self::CommandCodeGoat | Self::ConfigurableHttp => {
+                true
+            }
+            Self::Scnet => false,
         }
     }
 
@@ -700,7 +792,8 @@ pub struct OpenCodeGoAdapter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ZenFreeAdapter;
 
-/// Zero-sized Command Code GOAT adapter identity. Production stays fail-closed.
+/// Zero-sized Command Code GOAT adapter identity. Production inference uses
+/// the official Provider API after explicit verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CommandCodeGoatAdapter;
 
@@ -742,6 +835,53 @@ pub fn is_command_code_goat(provider_id: &str, offering_id: &str) -> bool {
         ProviderAdapterKind::from_offering(provider_id, offering_id),
         Some(ProviderAdapterKind::CommandCodeGoat)
     )
+}
+
+/// Normalize a GET `/models` JSON object into a de-duplicated, non-empty
+/// Command Code catalog. Rejects arrays at the root, empty snapshots, and
+/// oversized directories. First spelling of each case-insensitive ID wins.
+pub fn parse_command_code_models_catalog(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| "Command Code GET /models did not return JSON".to_string())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Command Code GET /models did not return a JSON object".to_string())?;
+    let items = object
+        .get("data")
+        .or_else(|| object.get("models"))
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| {
+            "Command Code GET /models did not include a data or models array".to_string()
+        })?;
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        if models.len() >= MAX_COMMAND_CODE_MODELS_CATALOG {
+            return Err(format!(
+                "Command Code GET /models exceeded {MAX_COMMAND_CODE_MODELS_CATALOG} models"
+            ));
+        }
+        let id = match item {
+            serde_json::Value::String(value) => Some(value.as_str()),
+            serde_json::Value::Object(object) => object
+                .get("id")
+                .and_then(|value| value.as_str())
+                .or_else(|| object.get("model").and_then(|value| value.as_str())),
+            _ => None,
+        };
+        let Some(id) = id else {
+            continue;
+        };
+        let normalized = validate_custom_model_id(id).map_err(|error| error.to_string())?;
+        let key = normalized.to_ascii_lowercase();
+        if seen.insert(key) {
+            models.push(normalized);
+        }
+    }
+    if models.is_empty() {
+        return Err("Command Code GET /models returned no usable model ids".to_string());
+    }
+    Ok(models)
 }
 
 pub fn is_custom_api(provider_id: &str, offering_id: &str) -> bool {
@@ -919,7 +1059,9 @@ pub enum ProtocolMatrixKind {
 /// the Custom account's declared protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuralProbeCeiling {
-    /// GOAT/SCNet: probes are unavailable; production stays hard-unroutable.
+    /// GOAT/SCNet: request-path probes are unavailable. GOAT production uses
+    /// saved GET `/models` facts plus hard-coded family rules. SCNet stays
+    /// unroutable.
     Unavailable,
     /// Known OpenCode Go models: Chat Completions, Responses, and Messages
     /// all have constructable `/v1/...` paths and OpenCode auth.
@@ -1117,7 +1259,7 @@ impl ModelCatalogAdapter for OpenCodeGoAdapter {
             kind: ModelCatalogKind::BuiltinGoProtocolTable,
             catalog_source: plan.model_source,
             publishes_client_aliases: true,
-            admin_explicit_refresh: false,
+            admin_explicit_refresh: true,
             overlays_declared_ids: false,
             snapshot_is_adapter_input_only: false,
         }
@@ -1214,7 +1356,7 @@ impl CardCapabilities for OpenCodeGoAdapter {
             protocol_and_auth_immutable_after_create: false,
             risk_acknowledgement: plan.risk_notice.is_some(),
             protocol_probe: true,
-            catalog_refresh: false,
+            catalog_refresh: true,
         }
     }
 }
@@ -1332,8 +1474,8 @@ impl ModelCatalogAdapter for CommandCodeGoatAdapter {
         ModelCatalogDescriptor {
             kind: ModelCatalogKind::BuiltinCommandCodeProtocolTable,
             catalog_source: plan.model_source,
-            publishes_client_aliases: false,
-            admin_explicit_refresh: false,
+            publishes_client_aliases: true,
+            admin_explicit_refresh: true,
             overlays_declared_ids: false,
             snapshot_is_adapter_input_only: false,
         }
@@ -1344,14 +1486,14 @@ impl InferenceAdapter for CommandCodeGoatAdapter {
     fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
         InferenceRoutingDescriptor {
             catalog_routable: plan.routable,
-            production_inference: false,
+            production_inference: true,
             channel: Some(InferenceChannelKind::Go),
             credential_kind: plan.offering.credential_kind,
             quota_scope: plan.offering.quota_scope,
             auth: InferenceAuthDescriptor::Bearer,
             follow_redirects: false,
             origin: InferenceOriginKind::OfficialFixed,
-            loopback_test_seam_only: true,
+            loopback_test_seam_only: false,
         }
     }
 }
@@ -1376,7 +1518,7 @@ impl VerificationAdapter for CommandCodeGoatAdapter {
             runtime_availability: plan.verification_runtime_availability,
             never_auto_enable: true,
             probe_first_declared_model: false,
-            uses_get_models: false,
+            uses_get_models: true,
         }
     }
 }
@@ -1385,13 +1527,13 @@ impl UsageAdapter for CommandCodeGoatAdapter {
     fn usage(plan: BuiltinPlan) -> UsageDescriptor {
         UsageDescriptor {
             catalog_availability: plan.usage_availability,
-            contract: UsageContractKind::ExperimentalUnavailable,
+            contract: UsageContractKind::Unavailable,
             endpoint: None,
-            experimental: true,
+            experimental: false,
             automatic_sync: false,
             authoritative_for_quota: false,
             affects_inference_eligibility: false,
-            publishes_capability: true,
+            publishes_capability: false,
             manual_calibration: plan.manual_usage_calibration,
         }
     }
@@ -1426,11 +1568,11 @@ impl CardCapabilities for CommandCodeGoatAdapter {
             discover_models: false,
             usage_refresh: false,
             manual_usage_calibration: plan.manual_usage_calibration,
-            connection_verify: CardVerifyAction::UnavailableNotImplemented,
+            connection_verify: CardVerifyAction::AvailableThenExplicitEnable,
             protocol_and_auth_immutable_after_create: false,
             risk_acknowledgement: plan.risk_notice.is_some(),
             protocol_probe: false,
-            catalog_refresh: false,
+            catalog_refresh: true,
         }
     }
 }
@@ -1926,6 +2068,28 @@ mod tests {
     }
 
     #[test]
+    fn goat_included_model_set_is_exact_unique_and_mode_gated() {
+        assert_eq!(COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS.len(), 40);
+        let mut unique = std::collections::HashSet::new();
+        for model in COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS {
+            assert!(
+                unique.insert(model.to_ascii_lowercase()),
+                "duplicate GOAT model {model}"
+            );
+        }
+        assert!(command_code_goat_includes_model(
+            "deepseek/deepseek-v4-flash"
+        ));
+        assert!(command_code_goat_includes_model("XAI/GROK-4.6"));
+        assert!(!command_code_goat_includes_model(
+            "anthropic/claude-opus-4.1"
+        ));
+        assert!(GoatModelAccess::Goat.allows("gpt-5.6-sol"));
+        assert!(!GoatModelAccess::Goat.allows("gpt-5.6-terra"));
+        assert!(GoatModelAccess::All.allows("gpt-5.6-terra"));
+    }
+
+    #[test]
     fn singleton_and_pair_validation_is_fail_closed() {
         assert!(
             validate_account_binding(
@@ -1973,11 +2137,11 @@ mod tests {
     fn catalog_hardcodes_plans_and_keeps_unverified_offerings_unroutable() {
         assert_eq!(BUILTIN_PLANS.len(), 7);
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert!(!goat.routable);
+        assert!(goat.routable);
         assert_eq!(goat.verification_policy, VerificationPolicy::Required);
-        assert_eq!(goat.verification_runtime_availability, "unavailable");
+        assert_eq!(goat.verification_runtime_availability, "available");
         assert_eq!(goat.creation_availability, CreationAvailability::Available);
-        assert_eq!(goat.pricing_availability, "unavailable");
+        assert_eq!(goat.pricing_availability, "available");
         assert_eq!(goat.usage_availability, "unavailable");
         assert_eq!(goat.auth_schemes, &BEARER_AUTH);
         assert_eq!(goat.upstream_protocols, &GOAT_PROTOCOLS);
@@ -1986,7 +2150,7 @@ mod tests {
                 .upstream_protocols
                 .contains(&UpstreamProtocolKind::Responses)
         );
-        assert_eq!(goat.model_source, "builtin_command_code_protocol_table");
+        assert_eq!(goat.model_source, COMMAND_CODE_GOAT_MODEL_SOURCE);
         assert_eq!(
             COMMAND_CODE_GOAT_BASE_URL,
             "https://api.commandcode.ai/provider/v1"
@@ -2007,6 +2171,14 @@ mod tests {
 
         let basic = builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
         assert!(!basic.routable);
+        assert_eq!(
+            basic.creation_availability,
+            CreationAvailability::Unavailable
+        );
+        assert_eq!(
+            basic.creation_unavailable_reason,
+            Some(SCNET_CREATION_UNAVAILABLE_REASON)
+        );
         assert_eq!(
             basic.risk_notice.unwrap().acknowledgement_id,
             SCNET_RISK_ACKNOWLEDGEMENT_ID
@@ -2185,6 +2357,15 @@ mod tests {
                 plan.offering.provider_id,
                 plan.offering.offering_id
             ));
+            assert_eq!(
+                plan.creation_availability,
+                CreationAvailability::Unavailable
+            );
+            assert_eq!(
+                plan.creation_unavailable_reason,
+                Some(SCNET_CREATION_UNAVAILABLE_REASON)
+            );
+            assert!(!plan.routable);
             assert_eq!(plan.model_source, SCNET_TOKEN_PLAN_MODEL_SOURCE);
             assert_eq!(
                 scnet_token_plan_model_snapshot(
@@ -2303,7 +2484,7 @@ mod tests {
             "/v1/messages"
         );
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert_eq!(goat.model_source, "builtin_command_code_protocol_table");
+        assert_eq!(goat.model_source, COMMAND_CODE_GOAT_MODEL_SOURCE);
         assert!(
             scnet_token_plan_model_snapshot(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none()
         );
@@ -2369,14 +2550,19 @@ mod tests {
                 descriptor.card_actions.protocol_probe,
                 kind.protocol_probe_supported()
             );
-            assert!(!descriptor.verification.uses_get_models);
+            assert_eq!(
+                descriptor.verification.uses_get_models,
+                kind == ProviderAdapterKind::CommandCodeGoat
+            );
             match kind {
                 ProviderAdapterKind::OpenCodeGo
                 | ProviderAdapterKind::ZenFree
+                | ProviderAdapterKind::CommandCodeGoat
                 | ProviderAdapterKind::ConfigurableHttp => {
                     assert!(descriptor.inference.production_inference);
+                    assert!(descriptor.inference.catalog_routable);
                 }
-                ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::Scnet => {
+                ProviderAdapterKind::Scnet => {
                     assert!(!descriptor.inference.production_inference);
                     assert!(!descriptor.inference.catalog_routable);
                     assert_eq!(descriptor.verification.runtime_availability, "unavailable");
@@ -2432,7 +2618,7 @@ mod tests {
         );
         assert!(go.card_actions.usage_refresh);
         assert!(go.card_actions.protocol_probe);
-        assert!(!go.card_actions.catalog_refresh);
+        assert!(go.card_actions.catalog_refresh);
 
         let zen = ProviderRegistry::get(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID)
             .unwrap();
@@ -2463,17 +2649,15 @@ mod tests {
 
         let goat = ProviderRegistry::get(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert_eq!(goat.kind, ProviderAdapterKind::CommandCodeGoat);
-        assert!(goat.inference.loopback_test_seam_only);
+        assert!(!goat.inference.loopback_test_seam_only);
+        assert!(goat.inference.production_inference);
+        assert!(goat.inference.catalog_routable);
         assert!(!goat.inference.follow_redirects);
         assert_eq!(goat.inference.auth, InferenceAuthDescriptor::Bearer);
-        assert!(goat.usage.experimental);
-        assert!(!goat.usage.publishes_capability || goat.usage.endpoint.is_none());
-        assert!(goat.usage.publishes_capability);
-        assert_eq!(
-            goat.usage.contract,
-            UsageContractKind::ExperimentalUnavailable
-        );
-        assert!(goat.usage.manual_calibration);
+        assert!(!goat.usage.experimental);
+        assert!(!goat.usage.publishes_capability);
+        assert_eq!(goat.usage.contract, UsageContractKind::Unavailable);
+        assert!(!goat.usage.manual_calibration);
         assert!(goat.error_cooldown.generic_provider_key_cooldown);
         assert_eq!(
             goat.protocol_probe.matrix,
@@ -2485,7 +2669,13 @@ mod tests {
             StructuralProbeCeiling::Unavailable
         );
         assert!(!goat.card_actions.protocol_probe);
-        assert!(!goat.card_actions.catalog_refresh);
+        assert!(goat.card_actions.catalog_refresh);
+        assert_eq!(
+            goat.card_actions.connection_verify,
+            CardVerifyAction::AvailableThenExplicitEnable
+        );
+        assert!(goat.verification.uses_get_models);
+        assert!(goat.verification.never_auto_enable);
 
         let scnet =
             ProviderRegistry::get(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
@@ -2599,7 +2789,8 @@ mod tests {
         assert!(ConfigurableHttpAdapter::model_catalog(custom_plan).overlays_declared_ids);
         assert!(!ConfigurableHttpAdapter::inference(custom_plan).follow_redirects);
         let goat_plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert!(!CommandCodeGoatAdapter::inference(goat_plan).production_inference);
+        assert!(CommandCodeGoatAdapter::inference(goat_plan).production_inference);
+        assert!(CommandCodeGoatAdapter::verification(goat_plan).uses_get_models);
         let scnet_plan =
             builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
         assert!(!ScnetAdapter::inference(scnet_plan).production_inference);
@@ -2723,6 +2914,32 @@ mod tests {
             ProviderBindingError::from(CatalogParseError::UnknownAuthScheme("basic".into())),
             ProviderBindingError::UnknownAuthScheme(value) if value == "basic"
         ));
+    }
+
+    #[test]
+    fn command_code_models_catalog_parses_openai_list_and_rejects_empty() {
+        let parsed = parse_command_code_models_catalog(
+            br#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"},{"id":"claude-sonnet-4-6"},{"id":"deepseek/deepseek-v4-flash"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                "deepseek/deepseek-v4-flash".to_string(),
+                "claude-sonnet-4-6".to_string()
+            ]
+        );
+        assert!(parse_command_code_models_catalog(br#"["id"]"#).is_err());
+        assert!(parse_command_code_models_catalog(br#"{"data":[]}"#).is_err());
+        assert!(
+            parse_command_code_models_catalog(br#"{"models":[{"model":"gpt-5.4"}]}"#)
+                .is_ok_and(|models| models == ["gpt-5.4"])
+        );
+        assert!(ensure_offering_can_enable(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_ok());
+        assert!(
+            ensure_offering_can_enable(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
+                .is_err()
+        );
     }
 
     #[test]

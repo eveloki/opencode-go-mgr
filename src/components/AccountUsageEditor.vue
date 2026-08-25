@@ -131,9 +131,9 @@ import {
   resetsSecondFieldMax,
   resetsSecondFieldValue,
   WINDOW_FULL_MINUTES,
-} from "../views/accounts-usage.ts";
-import type { UsageKey } from "../views/accounts-usage.ts";
-import type { AccountUsageEdits, UsageLimitView } from "../views/useAccountUsage.ts";
+} from "../domain/accounts-usage.ts";
+import type { UsageKey } from "../domain/accounts-usage.ts";
+import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import { formatCost } from "../utils/format.ts";
 

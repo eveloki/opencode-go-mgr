@@ -9,11 +9,14 @@
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
+#[cfg(debug_assertions)]
+use chrono::Utc;
 
 use crate::kernel::pricing as kernel_pricing;
 use crate::pricing::{
     OfficialPricingRefresh, PricingRefreshConfirmPolicy, evaluate_official_pricing_refresh,
-    fetch_official_snapshot, prepare_multiplier_update, stamp_pricing_activation,
+    fetch_goat_pricing_snapshot, fetch_official_snapshot, latest_provider_pricing_snapshot,
+    prepare_multiplier_update, stamp_pricing_activation, store_provider_pricing_snapshot,
 };
 use crate::provider::ProviderRegistry;
 use crate::state::CoreState;
@@ -22,8 +25,12 @@ use super::types::{
     PricingAdjustment, PricingAvailability, PricingLimits, PricingModel, PricingMultiplierChange,
     PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus,
     PricingRefreshUpdate, PricingSnapshot, PricingTimeWindow, ProviderPricing,
+    ProviderPricingRefresh, ProviderPricingRefreshUpdate, ProviderPricingSnapshot,
+    ProviderPricingValue,
 };
-use super::{V3ApiError, check_pricing_expectation, parse_mutation_json};
+use super::{V3ApiError, check_expectation, check_pricing_expectation, parse_mutation_json};
+
+const UNINITIALIZED_PROVIDER_PRICING_REVISION: &str = "uninitialized";
 
 #[cfg(debug_assertions)]
 mod official_pricing_fetch {
@@ -92,6 +99,12 @@ mod official_pricing_fetch {
         }
         super::fetch_configured_official_snapshot(state).await
     }
+
+    pub(super) fn has_override(state: &CoreState) -> bool {
+        official_fetch_overrides()
+            .lock()
+            .contains_key(&state.process_generation())
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -100,26 +113,50 @@ pub use official_pricing_fetch::{
     install_official_pricing_fetch_for_tests,
 };
 
-pub(super) async fn get_pricing(State(state): State<CoreState>) -> Json<PricingSnapshot> {
-    let _settings_update = state.settings_update.lock();
-    Json(snapshot_from_state(&state))
+pub(super) async fn refresh_provider_pricing(
+    State(state): State<CoreState>,
+    Path(provider_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<ProviderPricingRefresh>, V3ApiError> {
+    let update = parse_mutation_json::<ProviderPricingRefreshUpdate>(&body)?;
+    match provider_id.as_str() {
+        crate::provider::OPENCODE_PROVIDER_ID => {
+            let refreshed = refresh_go_pricing(
+                &state,
+                PricingRefreshUpdate {
+                    expectation: update.expectation,
+                    expected_pricing_revision: update.expected_provider_pricing_revision,
+                    policy: update.policy,
+                    expected_official_content_hash: update.expected_official_content_hash,
+                },
+            )
+            .await?;
+            Ok(Json(provider_refresh_from_go(refreshed)))
+        }
+        crate::provider::COMMAND_CODE_PROVIDER_ID => {
+            refresh_goat_pricing(&state, update).await.map(Json)
+        }
+        _ => Err(V3ApiError::invalid_request_at(
+            &state,
+            "provider does not support pricing refresh",
+        )),
+    }
 }
 
-pub(super) async fn refresh_pricing(
-    State(state): State<CoreState>,
-    body: Bytes,
-) -> Result<Json<PricingRefresh>, V3ApiError> {
-    let update = parse_mutation_json::<PricingRefreshUpdate>(&body)?;
+async fn refresh_go_pricing(
+    state: &CoreState,
+    update: PricingRefreshUpdate,
+) -> Result<PricingRefresh, V3ApiError> {
     let Ok(_refresh) = state.pricing_refresh.try_lock() else {
         return Err(V3ApiError::conflict_at(
-            &state,
-            "OpenCode Go pricing refresh is already running",
+            state,
+            "provider pricing refresh is already running",
         ));
     };
     {
         let _settings_update = state.settings_update.lock();
         check_pricing_expectation(
-            &state,
+            state,
             &update.expectation,
             &update.expected_pricing_revision,
         )?;
@@ -132,23 +169,32 @@ pub(super) async fn refresh_pricing(
         }
         #[cfg(not(debug_assertions))]
         {
-            fetch_configured_official_snapshot(&state).await
+            fetch_configured_official_snapshot(state).await
         }
     };
 
     let _settings_update = state.settings_update.lock();
     check_pricing_expectation(
-        &state,
+        state,
         &update.expectation,
         &update.expected_pricing_revision,
     )?;
-    apply_refresh_locked(&state, official, update).map(Json)
+    apply_go_refresh_locked(state, official, update)
 }
 
 pub(super) async fn put_pricing_multipliers(
     State(state): State<CoreState>,
+    Path((provider_id, offering_id)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<PricingSnapshot>, V3ApiError> {
+    if provider_id != crate::provider::OPENCODE_PROVIDER_ID
+        || offering_id != crate::provider::GO_OFFERING_ID
+    {
+        return Err(V3ApiError::invalid_request_at(
+            &state,
+            "provider offering does not support pricing multipliers",
+        ));
+    }
     let update = parse_mutation_json::<PricingMultipliersUpdate>(&body)?;
     let Ok(_refresh) = state.pricing_refresh.try_lock() else {
         return Err(V3ApiError::conflict_at(
@@ -175,12 +221,15 @@ pub(super) async fn get_provider_pricing(
     let availability =
         map_availability(descriptor.pricing.availability).map_err(V3ApiError::internal)?;
     let pricing = state.pricing_snapshot();
+    let scoped = latest_provider_pricing_snapshot(&state.db.lock(), &provider_id, &offering_id)
+        .map_err(V3ApiError::internal)?;
     Ok(Json(provider_pricing_from_snapshot(
         &state,
         provider_id,
         offering_id,
         availability,
         pricing.as_ref(),
+        scoped.as_ref(),
     )))
 }
 
@@ -191,26 +240,299 @@ async fn fetch_configured_official_snapshot(
     fetch_official_snapshot(&config).await
 }
 
+async fn fetch_configured_goat_snapshot(
+    state: &CoreState,
+) -> crate::Result<crate::pricing::ProviderScopedPricingSnapshot> {
+    #[cfg(debug_assertions)]
+    if official_pricing_fetch::has_override(state) {
+        let go = official_pricing_fetch::fetch(state).await;
+        return synthetic_goat_snapshot_for_tests(go.as_ref());
+    }
+    let config = state.config();
+    fetch_goat_pricing_snapshot(&config).await
+}
+
+#[cfg(debug_assertions)]
+fn synthetic_goat_snapshot_for_tests(
+    go: Result<&kernel_pricing::PricingSnapshot, &anyhow::Error>,
+) -> crate::Result<crate::pricing::ProviderScopedPricingSnapshot> {
+    let go = go.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let first = go
+        .models
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("test Go pricing snapshot has no models"))?;
+    let value = crate::pricing::ProviderPricingValue::new(
+        first.model_id.clone(),
+        first.display_name.clone(),
+        Some(first.input),
+        Some(first.output),
+        Some(first.cache_read),
+        first.cache_write,
+        Some(70.0),
+        Some(20.0),
+        Some(10.0),
+        Some("USD".to_string()),
+        first.min_input_tokens,
+        first.max_input_tokens,
+        first.time_window,
+    )?;
+    crate::pricing::ProviderScopedPricingSnapshot::new(
+        crate::provider::COMMAND_CODE_PROVIDER_ID,
+        crate::provider::GOAT_OFFERING_ID,
+        format!("test-goat-{}", go.content_hash),
+        Utc::now().to_rfc3339(),
+        None,
+        crate::pricing::GOAT_SOURCE_URL,
+        go.content_hash.clone(),
+        crate::pricing::ProviderPricingEvidence::Verified,
+        vec![value],
+    )
+}
+
+async fn refresh_goat_pricing(
+    state: &CoreState,
+    update: ProviderPricingRefreshUpdate,
+) -> Result<ProviderPricingRefresh, V3ApiError> {
+    let Ok(_refresh) = state.pricing_refresh.try_lock() else {
+        return Err(V3ApiError::conflict_at(
+            state,
+            "provider pricing refresh is already running",
+        ));
+    };
+    {
+        let _settings_update = state.settings_update.lock();
+        check_provider_pricing_expectation(
+            state,
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            crate::provider::GOAT_OFFERING_ID,
+            &update,
+        )?;
+    }
+
+    let fetched = fetch_configured_goat_snapshot(state).await;
+
+    let _settings_update = state.settings_update.lock();
+    check_provider_pricing_expectation(
+        state,
+        crate::provider::COMMAND_CODE_PROVIDER_ID,
+        crate::provider::GOAT_OFFERING_ID,
+        &update,
+    )?;
+    let current = current_provider_pricing_revision(
+        state,
+        crate::provider::COMMAND_CODE_PROVIDER_ID,
+        crate::provider::GOAT_OFFERING_ID,
+    )?;
+    match fetched {
+        Err(error) => {
+            let error = error.to_string();
+            audit_pricing(
+                state,
+                "warn",
+                &format!("Command Code GOAT pricing refresh failed: {error}"),
+            );
+            Ok(provider_refresh_result(
+                state,
+                crate::provider::COMMAND_CODE_PROVIDER_ID,
+                vec![crate::provider::GOAT_OFFERING_ID.to_string()],
+                PricingRefreshStatus::FailedNoChange,
+                Vec::new(),
+                None,
+                Some(error),
+                current,
+            ))
+        }
+        Ok(snapshot) if snapshot.revision() == current => Ok(provider_refresh_result(
+            state,
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            vec![crate::provider::GOAT_OFFERING_ID.to_string()],
+            PricingRefreshStatus::Unchanged,
+            Vec::new(),
+            None,
+            None,
+            current,
+        )),
+        Ok(snapshot) => {
+            store_provider_pricing_snapshot(&state.db.lock(), &snapshot)
+                .map_err(V3ApiError::internal)?;
+            state.bump_settings_revision();
+            audit_pricing(
+                state,
+                "info",
+                &format!(
+                    "activated Command Code GOAT provider pricing {}",
+                    snapshot.revision()
+                ),
+            );
+            Ok(provider_refresh_result(
+                state,
+                crate::provider::COMMAND_CODE_PROVIDER_ID,
+                vec![crate::provider::GOAT_OFFERING_ID.to_string()],
+                PricingRefreshStatus::Success,
+                Vec::new(),
+                None,
+                None,
+                snapshot.revision().to_string(),
+            ))
+        }
+    }
+}
+
+fn check_provider_pricing_expectation(
+    state: &CoreState,
+    provider_id: &str,
+    offering_id: &str,
+    update: &ProviderPricingRefreshUpdate,
+) -> Result<(), V3ApiError> {
+    check_expectation(state, &update.expectation)?;
+    let current = current_provider_pricing_revision(state, provider_id, offering_id)?;
+    if update.expected_provider_pricing_revision != current {
+        Err(V3ApiError::conflict_at(
+            state,
+            "provider pricing revision changed",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn current_provider_pricing_revision(
+    state: &CoreState,
+    provider_id: &str,
+    offering_id: &str,
+) -> Result<String, V3ApiError> {
+    if provider_id == crate::provider::OPENCODE_PROVIDER_ID
+        && offering_id == crate::provider::GO_OFFERING_ID
+    {
+        return Ok(state.pricing_snapshot().revision.clone());
+    }
+    Ok(
+        latest_provider_pricing_snapshot(&state.db.lock(), provider_id, offering_id)
+            .map_err(V3ApiError::internal)?
+            .map(|snapshot| snapshot.revision().to_string())
+            .unwrap_or_else(|| UNINITIALIZED_PROVIDER_PRICING_REVISION.to_string()),
+    )
+}
+
+fn provider_refresh_from_go(refreshed: PricingRefresh) -> ProviderPricingRefresh {
+    let pricing_revision = refreshed.snapshot.pricing_revision.clone();
+    let revision = refreshed.snapshot.revision;
+    let process_generation = refreshed.snapshot.process_generation;
+    ProviderPricingRefresh {
+        provider_id: crate::provider::OPENCODE_PROVIDER_ID.to_string(),
+        offering_ids: vec![crate::provider::GO_OFFERING_ID.to_string()],
+        refresh_status: refreshed.refresh_status,
+        multiplier_changes: refreshed.multiplier_changes,
+        official_content_hash: refreshed.official_content_hash,
+        error: refreshed.error,
+        snapshot: Some(refreshed.snapshot),
+        revision,
+        process_generation,
+        pricing_revision: pricing_revision.clone(),
+        provider_pricing_revision: pricing_revision,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn provider_refresh_result(
+    state: &CoreState,
+    provider_id: &str,
+    offering_ids: Vec<String>,
+    refresh_status: PricingRefreshStatus,
+    multiplier_changes: Vec<PricingMultiplierChange>,
+    official_content_hash: Option<String>,
+    error: Option<String>,
+    provider_pricing_revision: String,
+) -> ProviderPricingRefresh {
+    ProviderPricingRefresh {
+        provider_id: provider_id.to_string(),
+        offering_ids,
+        refresh_status,
+        multiplier_changes,
+        official_content_hash,
+        error,
+        snapshot: None,
+        revision: state.settings_revision(),
+        process_generation: state.process_generation(),
+        pricing_revision: state.pricing_snapshot().revision.clone(),
+        provider_pricing_revision,
+    }
+}
+
 fn provider_pricing_from_snapshot(
     state: &CoreState,
     provider_id: String,
     offering_id: String,
     availability: PricingAvailability,
     pricing: &kernel_pricing::PricingSnapshot,
+    scoped: Option<&crate::pricing::ProviderScopedPricingSnapshot>,
 ) -> ProviderPricing {
+    let is_go = provider_id == crate::provider::OPENCODE_PROVIDER_ID;
+    let provider_pricing_revision = if is_go {
+        pricing.revision.clone()
+    } else {
+        scoped
+            .map(|snapshot| snapshot.revision().to_string())
+            .unwrap_or_else(|| UNINITIALIZED_PROVIDER_PRICING_REVISION.to_string())
+    };
     ProviderPricing {
         provider_id,
         offering_id,
         availability,
-        snapshot: (availability == PricingAvailability::Available)
+        snapshot: (availability == PricingAvailability::Available && is_go)
             .then(|| map_kernel_snapshot(state, pricing)),
+        // Go's live snapshot is already represented by `snapshot`; historical
+        // migration rows in the provider-neutral table are not a second price
+        // source and must not be exposed alongside it.
+        provider_snapshot: (!is_go)
+            .then(|| scoped.map(map_provider_snapshot))
+            .flatten(),
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
         pricing_revision: pricing.revision.clone(),
+        provider_pricing_revision,
     }
 }
 
-fn apply_refresh_locked(
+fn map_provider_snapshot(
+    snapshot: &crate::pricing::ProviderScopedPricingSnapshot,
+) -> ProviderPricingSnapshot {
+    ProviderPricingSnapshot {
+        revision: snapshot.revision().to_string(),
+        activated_at: snapshot.activated_at().to_string(),
+        document_updated_at: snapshot.document_updated_at().map(str::to_string),
+        source_url: snapshot.source_url().to_string(),
+        content_hash: snapshot.content_hash().to_string(),
+        evidence: match snapshot.evidence() {
+            crate::pricing::ProviderPricingEvidence::Verified => "verified",
+            crate::pricing::ProviderPricingEvidence::Experimental => "experimental",
+            crate::pricing::ProviderPricingEvidence::Unavailable => "unavailable",
+        }
+        .to_string(),
+        values: snapshot
+            .values()
+            .iter()
+            .map(|value| ProviderPricingValue {
+                model_id: value.model_id().to_string(),
+                display_name: value.display_name().to_string(),
+                input_per_million: value.input_per_million(),
+                output_per_million: value.output_per_million(),
+                cache_read_per_million: value.cache_read_per_million(),
+                cache_write_per_million: value.cache_write_per_million(),
+                plan_limit: value.plan_limit(),
+                model_allowance: value.model_allowance(),
+                quota_multiplier: value.quota_multiplier(),
+                paid_plan_price: value.paid_plan_price(),
+                currency: value.currency().map(str::to_string),
+                min_input_tokens: value.min_input_tokens(),
+                max_input_tokens: value.max_input_tokens(),
+                time_window: map_time_window(value.time_window()),
+            })
+            .collect(),
+    }
+}
+
+fn apply_go_refresh_locked(
     state: &CoreState,
     official: crate::Result<kernel_pricing::PricingSnapshot>,
     update: PricingRefreshUpdate,
@@ -253,7 +575,10 @@ fn apply_refresh_locked(
             audit_pricing(
                 state,
                 "info",
-                &format!("activated OpenCode Go pricing {}", snapshot.revision),
+                &format!(
+                    "activated OpenCode Go provider pricing {}",
+                    snapshot.revision
+                ),
             );
             state.bump_settings_revision();
             Ok(PricingRefresh {
@@ -435,6 +760,7 @@ mod tests {
             GO_OFFERING_ID.into(),
             PricingAvailability::Available,
             captured.as_ref(),
+            None,
         );
         assert_eq!(go.pricing_revision, captured.revision);
         assert_eq!(
@@ -449,6 +775,7 @@ mod tests {
             GOAT_OFFERING_ID.into(),
             PricingAvailability::Unavailable,
             captured.as_ref(),
+            None,
         );
         assert!(goat.snapshot.is_none());
         assert_eq!(goat.pricing_revision, captured.revision);

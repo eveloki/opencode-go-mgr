@@ -11,8 +11,8 @@ import type {
   ForwardLog as V3ForwardLog,
   ForwardLogs as V3ForwardLogs,
   GatewayLog as V3GatewayLog,
-  PricingRefresh as V3PricingRefresh,
   PricingSnapshot as V3PricingSnapshot,
+  ProviderPricingRefresh as V3ProviderPricingRefresh,
   ProxyTestResponse as V3ProxyTestResponse,
   Settings as V3Settings,
   SettingsUpdate as V3SettingsUpdate,
@@ -31,6 +31,7 @@ export type AccountSetupStep =
   | "key_verification"
   | "ready";
 export type AccountProtocol = "chat_completions" | "responses" | "messages";
+export type GoatModelAccess = "goat" | "all";
 
 export interface AccountCustomConfig {
   account_id: string;
@@ -91,6 +92,7 @@ export interface Account {
   connection_verified_at: string | null;
   verification_error: string | null;
   plan_routable: boolean;
+  goat_model_access?: GoatModelAccess | null;
   custom_config?: AccountCustomConfig | null;
   model_capabilities: AccountModelCapability[];
   acknowledgements: AccountAcknowledgement[];
@@ -415,16 +417,22 @@ export interface PricingMultiplierChange {
   official_multiplier: number;
 }
 
-export interface PricingRefreshResult extends PricingSnapshot {
+export interface ProviderPricingRefreshResult {
+  provider_id: string;
+  offering_ids: string[];
   refresh_status: "success" | "unchanged" | "needs_confirmation" | "failed_no_change";
   multiplier_changes: PricingMultiplierChange[];
   official_content_hash: string | null;
   error: string | null;
+  revision: number;
+  process_generation: number;
+  pricing_revision: string;
+  provider_pricing_revision: string;
 }
 
-export interface PricingRefreshRequest {
+export interface ProviderPricingRefreshRequest {
   policy?: "keep_current" | "use_official";
-  expected_revision?: string;
+  expected_provider_revision?: string;
   expected_official_content_hash?: string;
 }
 
@@ -488,6 +496,7 @@ export function presentAccount(value: V3Account): Account {
     connection_verified_at: value.connectionVerifiedAt,
     verification_error: value.verificationError,
     plan_routable: value.planRoutable,
+    goat_model_access: value.goatModelAccess,
     custom_config: value.customConfig === null ? null : {
       account_id: value.customConfig.accountId,
       base_url: value.customConfig.baseUrl,
@@ -668,9 +677,12 @@ export function presentPricing(value: V3PricingSnapshot): PricingSnapshot {
   };
 }
 
-export function presentPricingRefresh(value: V3PricingRefresh): PricingRefreshResult {
+export function presentProviderPricingRefresh(
+  value: V3ProviderPricingRefresh,
+): ProviderPricingRefreshResult {
   return {
-    ...presentPricing(value.snapshot),
+    provider_id: value.providerId,
+    offering_ids: [...value.offeringIds],
     refresh_status: value.refreshStatus,
     multiplier_changes: value.multiplierChanges.map((change) => ({
       model_id: change.modelId,
@@ -679,6 +691,10 @@ export function presentPricingRefresh(value: V3PricingRefresh): PricingRefreshRe
     })),
     official_content_hash: value.officialContentHash,
     error: value.error,
+    revision: value.revision,
+    process_generation: value.processGeneration,
+    pricing_revision: value.pricingRevision,
+    provider_pricing_revision: value.providerPricingRevision,
   };
 }
 

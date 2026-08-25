@@ -20,7 +20,7 @@ use crate::auth;
 use crate::browser::BrowserRuntime;
 use crate::db::Database;
 
-pub const SESSION_COOKIE: &str = "ocg_dashboard_session";
+pub(crate) const SESSION_COOKIE: &str = "ocg_dashboard_session";
 
 const FORWARDED_TRUST_HEADERS: [&str; 4] = [
     "forwarded",
@@ -30,47 +30,51 @@ const FORWARDED_TRUST_HEADERS: [&str; 4] = [
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DashboardAuthStatus {
+pub(crate) struct DashboardAuthStatus {
     pub local: bool,
     pub initialized: bool,
     pub authenticated: bool,
 }
 
 #[derive(Debug)]
-pub enum RegisterError {
+pub(crate) enum RegisterError {
     Invalid(String),
     AlreadyExists,
     Internal(String),
 }
 
 #[derive(Debug)]
-pub struct Unauthorized;
+pub(crate) struct Unauthorized;
 
 /// A validated, Argon2-hashed administrator ready for the short persistence
 /// critical section. Constructing this value is deliberately separate from
 /// persistence so password hashing never runs while a DB or control-plane
 /// mutation lock is held.
-pub struct PreparedAdmin(auth::DashboardAdmin);
+pub(crate) struct PreparedAdmin(auth::DashboardAdmin);
 
-pub fn is_local_dashboard_request(dashboard_local_mode: bool, headers: &HeaderMap) -> bool {
+pub(crate) fn is_local_dashboard_request(dashboard_local_mode: bool, headers: &HeaderMap) -> bool {
     dashboard_local_mode
         && FORWARDED_TRUST_HEADERS
             .iter()
             .all(|name| !headers.contains_key(*name))
 }
 
-pub fn has_dashboard_session(current_token: &str, headers: &HeaderMap) -> bool {
+pub(crate) fn has_dashboard_session(current_token: &str, headers: &HeaderMap) -> bool {
     session_cookie_value(headers)
         .map(|value| value == current_token)
         .unwrap_or(false)
 }
 
-pub fn is_authorized(dashboard_local_mode: bool, current_token: &str, headers: &HeaderMap) -> bool {
+pub(crate) fn is_authorized(
+    dashboard_local_mode: bool,
+    current_token: &str,
+    headers: &HeaderMap,
+) -> bool {
     is_local_dashboard_request(dashboard_local_mode, headers)
         || has_dashboard_session(current_token, headers)
 }
 
-pub fn session_cookie_value(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn session_cookie_value(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
@@ -82,12 +86,12 @@ pub fn session_cookie_value(headers: &HeaderMap) -> Option<&str> {
         })
 }
 
-pub fn is_initialized(db: &Mutex<Database>) -> Result<bool> {
+pub(crate) fn is_initialized(db: &Mutex<Database>) -> Result<bool> {
     let db = db.lock();
     Ok(auth::load_admin(&db)?.is_some())
 }
 
-pub fn status(
+pub(crate) fn status(
     dashboard_local_mode: bool,
     db: &Mutex<Database>,
     session_token: &Mutex<String>,
@@ -110,7 +114,7 @@ pub fn status(
     })
 }
 
-pub fn prepare_admin(
+pub(crate) fn prepare_admin(
     username: &str,
     password: &str,
 ) -> std::result::Result<PreparedAdmin, RegisterError> {
@@ -119,7 +123,7 @@ pub fn prepare_admin(
         .map_err(|error| RegisterError::Invalid(error.to_string()))
 }
 
-pub fn save_prepared_admin_if_absent(
+pub(crate) fn save_prepared_admin_if_absent(
     db: &Mutex<Database>,
     admin: &PreparedAdmin,
 ) -> std::result::Result<(), RegisterError> {
@@ -133,7 +137,7 @@ pub fn save_prepared_admin_if_absent(
     auth::save_admin(&db, &admin.0).map_err(|error| RegisterError::Internal(error.to_string()))
 }
 
-pub fn register_admin(
+pub(crate) fn register_admin(
     db: &Mutex<Database>,
     username: &str,
     password: &str,
@@ -142,7 +146,11 @@ pub fn register_admin(
     save_prepared_admin_if_absent(db, &admin)
 }
 
-pub fn credentials_match(db: &Mutex<Database>, username: &str, password: &str) -> Result<bool> {
+pub(crate) fn credentials_match(
+    db: &Mutex<Database>,
+    username: &str,
+    password: &str,
+) -> Result<bool> {
     let admin = {
         let db = db.lock();
         auth::load_admin(&db)?
@@ -153,12 +161,15 @@ pub fn credentials_match(db: &Mutex<Database>, username: &str, password: &str) -
         .unwrap_or(false))
 }
 
-pub async fn issue_session(browser: &BrowserRuntime, session_token: &Mutex<String>) -> String {
+pub(crate) async fn issue_session(
+    browser: &BrowserRuntime,
+    session_token: &Mutex<String>,
+) -> String {
     let _browser_operation = browser.operation().await;
     rotate_session_under_operation(browser, session_token)
 }
 
-pub async fn logout(
+pub(crate) async fn logout(
     dashboard_local_mode: bool,
     session_token: &Mutex<String>,
     browser: &BrowserRuntime,
@@ -221,7 +232,11 @@ pub(crate) fn rotate_session_if_authorized_under_operation(
     Ok(token)
 }
 
-pub fn cookie_header(value: &str, request_headers: &HeaderMap, clear: bool) -> Result<HeaderValue> {
+pub(crate) fn cookie_header(
+    value: &str,
+    request_headers: &HeaderMap,
+    clear: bool,
+) -> Result<HeaderValue> {
     let mut cookie =
         format!("{SESSION_COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/dashboard");
     if clear {

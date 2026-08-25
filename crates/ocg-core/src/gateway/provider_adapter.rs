@@ -14,11 +14,10 @@
 //! config, and request plan. They do not decrypt keys, open databases, or
 //! build HTTP clients; the Host resolver and single-attempt executor do that.
 //!
-//! Production Command Code GOAT stays fail-closed here (catalog unroutable,
-//! verification runtime unavailable). The official transport constants and
-//! [`command_code_goat_transport_spec`] prove host/path/auth construction
-//! without live network. The GOAT loopback helper substitutes a loopback
-//! origin only and still uses `/provider/v1/chat/completions`.
+//! Production Command Code GOAT uses the official Provider API origin after
+//! explicit verification. [`command_code_goat_transport_spec`] proves
+//! host/path/auth construction. The GOAT loopback helper substitutes a
+//! loopback origin only and still uses `/provider/v1/...`.
 //! Configurable HTTP is the Custom API identity, not a base class.
 
 use crate::custom::join_custom_protocol_url;
@@ -26,8 +25,8 @@ use crate::custom_http::join_inference_endpoint;
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
-    ApiFormat, RequestPlan, command_code_model_protocol, command_code_supports_upstream,
-    command_code_upstream_path, opencode_supports_upstream,
+    ApiFormat, RequestPlan, command_code_supports_upstream, command_code_upstream_path,
+    opencode_supports_upstream,
 };
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::{
@@ -43,9 +42,9 @@ use std::sync::{LazyLock, RwLock};
 
 pub(crate) use crate::gateway::attempt::UpstreamAuth;
 
-/// Deterministic official Command Code GOAT transport. Used by tests and the
-/// loopback origin substitute; production `resolve_route` still fail-closes
-/// without a loopback guard so no live account is selected.
+/// Deterministic official Command Code GOAT transport. Production inference
+/// uses this origin after an account is enabled, verified, and catalogued.
+/// Loopback substitutes exist only as a test seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandCodeGoatTransportSpec {
     pub base_url: &'static str,
@@ -69,7 +68,7 @@ pub fn command_code_goat_transport_spec() -> CommandCodeGoatTransportSpec {
         auth_scheme: UpstreamAuthScheme::Bearer,
         follow_redirects: false,
         zdr_header_name: None,
-        uses_get_models_for_verification: false,
+        uses_get_models_for_verification: true,
     }
 }
 
@@ -96,6 +95,10 @@ struct GoatLoopbackRoute {
 
 static GOAT_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, GoatLoopbackRoute>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use crate::goat::{GoatVerifyOriginGuard, install_goat_verify_origin_for_test};
 
 /// RAII guard for the integration-only GOAT seam. The production adapter has
 /// no endpoint or protocol guesses: without a live guard, GOAT is unsupported.
@@ -336,14 +339,19 @@ impl RuntimeRouteAdapter for CommandCodeGoatAdapter {
         if plan.channel != UpstreamChannel::Go {
             return Err("Command Code GOAT does not serve the Zen free channel".to_string());
         }
-        if command_code_model_protocol(&plan.model).is_none()
-            || !command_code_supports_upstream(&plan.model, plan.upstream)
-        {
+        if !command_code_supports_upstream(&plan.model, plan.upstream) {
             return Err(format!(
                 "Command Code GOAT has no verified support for model `{}` over {:?}",
                 plan.model, plan.upstream
             ));
         }
+        require_opencode_protocol_policy(
+            ProviderAdapterKind::CommandCodeGoat,
+            account,
+            plan,
+            policy,
+            "Command Code GOAT",
+        )?;
         let path = command_code_upstream_path(plan.upstream).ok_or_else(|| {
             format!(
                 "Command Code GOAT has no upstream path for {:?}",
@@ -353,12 +361,12 @@ impl RuntimeRouteAdapter for CommandCodeGoatAdapter {
         let routes = GOAT_LOOPBACK_ROUTES
             .read()
             .map_err(|_| "GOAT loopback route lock is poisoned".to_string())?;
-        let route = routes.get(&account.id).ok_or_else(|| {
-            "Command Code GOAT production inference endpoint, auth, protocol, and model catalog are not verified; route is disabled"
-                .to_string()
-        })?;
+        let base_url = routes.get(&account.id).map_or_else(
+            || COMMAND_CODE_GOAT_BASE_URL.to_string(),
+            |route| command_code_goat_loopback_base(&route.origin),
+        );
         Ok(AttemptSpec {
-            base_url: command_code_goat_loopback_base(&route.origin),
+            base_url,
             path: path.to_string(),
             upstream: plan.upstream,
             auth: descriptor_auth(descriptor.inference.auth)?,
@@ -588,9 +596,10 @@ mod tests {
     use crate::gateway::protocol::CustomRouteSpec;
     use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
     use crate::provider::{
-        ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
-        COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GO_OFFERING_ID,
-        GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID,
+        ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_BASE_URL,
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID,
+        CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID,
+        OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID,
         SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_NAME,
     };
     use bytes::Bytes;
@@ -681,7 +690,7 @@ mod tests {
         assert_eq!(spec.auth_scheme, UpstreamAuthScheme::Bearer);
         assert!(!spec.follow_redirects);
         assert_eq!(spec.zdr_header_name, None);
-        assert!(!spec.uses_get_models_for_verification);
+        assert!(spec.uses_get_models_for_verification);
         assert_eq!(
             command_code_goat_official_url(ApiFormat::ChatCompletions).unwrap(),
             "https://api.commandcode.ai/provider/v1/chat/completions"
@@ -796,7 +805,7 @@ mod tests {
             CredentialKind::ApiKey,
             QuotaScope::Key,
         );
-        let goat_err = resolve_route(
+        let official = resolve_route(
             &goat,
             &config,
             &chat_plan(
@@ -806,8 +815,27 @@ mod tests {
                 None,
             ),
         )
-        .unwrap_err();
-        assert!(goat_err.contains("not verified") || goat_err.contains("disabled"));
+        .unwrap();
+        assert_eq!(official.base_url, COMMAND_CODE_GOAT_BASE_URL);
+        assert_eq!(official.path, "/chat/completions");
+        assert_eq!(official.auth, UpstreamAuth::Bearer);
+        assert!(!official.follow_redirects);
+        assert_eq!(
+            official.proxy_routing,
+            ProxyRoutingModel::ProcessWideNoRedirect
+        );
+        let claude = resolve_route(
+            &goat,
+            &config,
+            &chat_plan(
+                "claude-sonnet-4-6",
+                UpstreamChannel::Go,
+                ApiFormat::Messages,
+                None,
+            ),
+        )
+        .unwrap();
+        assert_eq!(claude.path, "/messages");
         let _guard =
             install_goat_loopback_route_for_test(goat.id.clone(), "http://127.0.0.1:9").unwrap();
         let goat_route = resolve_route(
@@ -948,7 +976,8 @@ mod tests {
             ZenFreeAdapter::inference(zen_plan).channel,
             Some(crate::provider::InferenceChannelKind::Free)
         );
-        assert!(CommandCodeGoatAdapter::inference(goat_plan).loopback_test_seam_only);
+        assert!(CommandCodeGoatAdapter::inference(goat_plan).production_inference);
+        assert!(!CommandCodeGoatAdapter::inference(goat_plan).loopback_test_seam_only);
         assert!(!ScnetAdapter::inference(scnet_plan).production_inference);
         assert_eq!(
             ConfigurableHttpAdapter::inference(custom_plan).auth,
@@ -984,7 +1013,8 @@ mod tests {
                 ProviderAdapterKind::CommandCodeGoat => {
                     assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
                     assert!(!descriptor.inference.follow_redirects);
-                    assert!(descriptor.inference.loopback_test_seam_only);
+                    assert!(descriptor.inference.production_inference);
+                    assert!(!descriptor.inference.loopback_test_seam_only);
                 }
                 ProviderAdapterKind::Scnet => {
                     assert!(!descriptor.inference.production_inference);

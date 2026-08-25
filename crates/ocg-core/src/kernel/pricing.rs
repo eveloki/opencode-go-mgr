@@ -18,9 +18,8 @@ pub const SOURCE_URL: &str = "https://opencode.ai/docs/go/";
 
 /// Evidence level attached to a provider-scoped pricing snapshot.
 ///
-/// GOAT remains `unavailable` until a user-approved official contract is
-/// captured. `experimental` is reserved for a captured but not yet promoted
-/// contract; callers must not present it as authoritative pricing.
+/// `experimental` is reserved for a captured but not yet promoted contract;
+/// callers must not present it as authoritative pricing.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPricingEvidence {
@@ -55,10 +54,10 @@ pub fn provider_pricing_capability(
         (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => Some(ProviderPricingCapability {
             provider_id: COMMAND_CODE_PROVIDER_ID,
             offering_id: GOAT_OFFERING_ID,
-            evidence: ProviderPricingEvidence::Unavailable,
-            experimental: true,
-            source_url: None,
-            manual_refresh_available: false,
+            evidence: ProviderPricingEvidence::Verified,
+            experimental: false,
+            source_url: Some("https://commandcode.ai/docs/plans/goat"),
+            manual_refresh_available: true,
         }),
         (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
             Some(ProviderPricingCapability {
@@ -177,6 +176,62 @@ impl ProviderPricingValue {
         })
     }
 
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    pub fn input_per_million(&self) -> Option<f64> {
+        self.input_per_million
+    }
+
+    pub fn output_per_million(&self) -> Option<f64> {
+        self.output_per_million
+    }
+
+    pub fn cache_read_per_million(&self) -> Option<f64> {
+        self.cache_read_per_million
+    }
+
+    pub fn cache_write_per_million(&self) -> Option<f64> {
+        self.cache_write_per_million
+    }
+
+    pub fn plan_limit(&self) -> Option<f64> {
+        self.plan_limit
+    }
+
+    pub fn model_allowance(&self) -> Option<f64> {
+        self.model_allowance
+    }
+
+    pub fn quota_multiplier(&self) -> Option<f64> {
+        self.quota_multiplier
+    }
+
+    pub fn paid_plan_price(&self) -> Option<f64> {
+        self.paid_plan_price
+    }
+
+    pub fn currency(&self) -> Option<&str> {
+        self.currency.as_deref()
+    }
+
+    pub fn min_input_tokens(&self) -> Option<i64> {
+        self.min_input_tokens
+    }
+
+    pub fn max_input_tokens(&self) -> Option<i64> {
+        self.max_input_tokens
+    }
+
+    pub fn time_window(&self) -> PricingTimeWindow {
+        self.time_window
+    }
+
     pub(crate) fn from_wire(wire: ProviderPricingValueWire) -> Result<Self> {
         // Deliberately ignore the serialized derived value and recompute it.
         // This prevents an imported snapshot from violating the only valid
@@ -196,30 +251,6 @@ impl ProviderPricingValue {
             wire.max_input_tokens,
             wire.time_window,
         )
-    }
-
-    pub fn model_id(&self) -> &str {
-        &self.model_id
-    }
-
-    pub fn display_name(&self) -> &str {
-        &self.display_name
-    }
-
-    pub fn plan_limit(&self) -> Option<f64> {
-        self.plan_limit
-    }
-
-    pub fn model_allowance(&self) -> Option<f64> {
-        self.model_allowance
-    }
-
-    pub fn quota_multiplier(&self) -> Option<f64> {
-        self.quota_multiplier
-    }
-
-    pub fn paid_plan_price(&self) -> Option<f64> {
-        self.paid_plan_price
     }
 }
 
@@ -377,6 +408,21 @@ pub struct PricingSnapshot {
     pub limits: PricingLimits,
     pub models: Vec<PricingModel>,
     pub adjustment_policy_version: String,
+}
+
+/// Persistence-shaped provider pricing snapshot record stored by
+/// `provider_pricing_snapshots`. The value shape lives here so `db` can own
+/// storage without depending on the clocked `crate::pricing` module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderPricingSnapshot {
+    pub provider_id: String,
+    pub offering_id: String,
+    pub revision: String,
+    pub activated_at: String,
+    pub document_updated_at: Option<String>,
+    pub source_url: String,
+    pub content_hash: String,
+    pub snapshot_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

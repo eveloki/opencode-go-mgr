@@ -63,15 +63,16 @@ pub use proxy_test::{ProxyTestTargetGuard, install_proxy_test_target_for_tests};
 pub use types::{
     Account, AccountAcknowledgement, AccountAcknowledgementCreate, AccountAcknowledgementWrite,
     AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
-    AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountList, AccountManagedCreate,
-    AccountManagedKeyVerify, AccountModelCapabilitiesUpdate, AccountModelCapability,
-    AccountModelCapabilityWrite, AccountMutation, AccountOrder, AccountQuotaScope,
-    AccountSetupStep, AccountSetupUpdate, AccountType, AccountUpdate, AccountUpstreamProtocol,
-    AccountUsageUpdate, AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin,
-    AuthLogout, AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen,
-    BrowserOpenRequest, BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary,
-    CardCapabilitySummary, ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo,
-    ConnectionSubKey, ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
+    AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountGoatModelAccess,
+    AccountGoatModelAccessUpdate, AccountList, AccountManagedCreate, AccountManagedKeyVerify,
+    AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
+    AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
+    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
+    AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin, AuthLogout,
+    AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen, BrowserOpenRequest,
+    BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
+    ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey,
+    ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
     CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyCostByModel, DailyCostQuery,
     DailyModelCost, DashboardSummary, DesktopUpdate, DesktopUpdatePhase, ERROR_CONFLICT,
     ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE, ERROR_INTERNAL, ERROR_INVALID_JSON,
@@ -88,12 +89,13 @@ pub use types::{
     ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate,
     ProtocolSwitches, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
     ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
-    ProviderModelCapability, ProviderOfferingChoice, ProviderPricing, ProviderUsage,
-    ProxyListDirection, ProxyMode, ProxySupportedModel, ProxyTestRequest, ProxyTestResponse,
-    QuotaWindow, RoutingMode, Settings, SettingsUpdate, UpdateCheck, UsageAvailability,
-    UsageMutation, UsageRefresh, UsageRefreshThrottleError, UsageRefreshUpdate, UsageSyncState,
-    UsageWindow, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
-    contract_schema, contract_schema_pretty,
+    ProviderModelCapability, ProviderOfferingChoice, ProviderPricing, ProviderPricingRefresh,
+    ProviderPricingRefreshUpdate, ProviderUsage, ProxyListDirection, ProxyMode,
+    ProxySupportedModel, ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings,
+    SettingsUpdate, UpdateCheck, UsageAvailability, UsageMutation, UsageRefresh,
+    UsageRefreshThrottleError, UsageRefreshUpdate, UsageSyncState, UsageWindow, V3Error,
+    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
+    contract_schema_pretty,
 };
 pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 
@@ -126,10 +128,12 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/settings/check-update", get(updater::check_update))
         .route("/settings/update-status", get(updater::get_update_status))
         .route("/settings/install-update", post(updater::install_update))
-        .route("/pricing", get(pricing::get_pricing))
-        .route("/pricing/refresh", post(pricing::refresh_pricing))
         .route(
-            "/pricing/multipliers",
+            "/providers/{provider_id}/pricing/refresh",
+            post(pricing::refresh_provider_pricing),
+        )
+        .route(
+            "/providers/{provider_id}/{offering_id}/pricing/multipliers",
             put(pricing::put_pricing_multipliers),
         )
         .route(
@@ -184,6 +188,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             put(accounts::put_account_custom_config),
         )
         .route(
+            "/accounts/{id}/goat-model-access",
+            put(accounts::put_account_goat_model_access),
+        )
+        .route(
             "/accounts/{id}/model-capabilities",
             put(accounts::put_account_model_capabilities),
         )
@@ -223,6 +231,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/providers/zen-free/models/refresh",
             post(providers::refresh_zen_free_models),
+        )
+        .route(
+            "/providers/{provider_id}/models/refresh",
+            post(providers::refresh_provider_models),
         )
         .route(
             "/provider-contracts",

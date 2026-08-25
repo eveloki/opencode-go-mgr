@@ -321,8 +321,8 @@ fn custom_create_body() -> Value {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v27() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+fn dashboard_v3_schema_version_stays_at_v28() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
 }
 
 #[tokio::test]
@@ -480,7 +480,8 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
                 && entry["offeringId"] == GOAT_OFFERING_ID
         })
         .unwrap();
-    assert_eq!(goat["routable"], false);
+    assert_eq!(goat["routable"], true);
+    assert_eq!(goat["verificationRuntimeAvailability"], "available");
     assert_eq!(goat["modelAliases"], json!([]));
     assert_eq!(goat["keyPrefix"], Value::Null);
     assert_eq!(goat["riskNotice"], Value::Null);
@@ -509,6 +510,12 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
         assert!(scnet.iter().any(|entry| entry["offeringId"] == offering));
     }
     assert_eq!(scnet[0]["routable"], false);
+    assert_eq!(scnet[0]["creationAvailability"], "unavailable");
+    assert!(
+        scnet[0]["creationUnavailableReason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("archived") || reason.contains("unsupported"))
+    );
     assert_eq!(scnet[0]["modelAliases"], json!([]));
     assert_eq!(scnet[0]["keyPrefix"], "sk-tp-");
     assert!(scnet[0]["riskNotice"].is_object());
@@ -594,6 +601,8 @@ async fn dashboard_v3_provider_contracts_project_four_scopes_and_custom_endpoint
     assert_eq!(scnet.scope_kind, ContractScopeKind::Provider);
     assert_eq!(scnet.scope_id, SCNET_PROVIDER_ID);
     assert_eq!(scnet.offerings.len(), 3);
+    assert!(scnet.catalog.models.is_empty());
+    assert!(scnet.models.is_empty());
     assert!(parsed.custom_endpoints.is_empty());
     assert!(body["providers"][0].get("scope_kind").is_none());
     assert_eq!(body["providers"][0]["scopeKind"], "provider");
@@ -1112,6 +1121,22 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
     assert_v3_error(&unknown_scope, ERROR_NOT_FOUND);
     assert_eq!(harness.state.settings_revision(), before);
 
+    let (status, archived_scnet) = send_json(
+        &harness,
+        Method::PUT,
+        "/provider-contracts/provider/scnet/protocols/chat_completions",
+        &cas(&harness, json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{archived_scnet}");
+    assert_v3_error(&archived_scnet, ERROR_INVALID_REQUEST);
+    assert!(
+        archived_scnet["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("archived"))
+    );
+    assert_eq!(harness.state.settings_revision(), before);
+
     let (status, switched) = send_json(
         &harness,
         Method::PUT,
@@ -1243,6 +1268,6 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     assert_eq!(v3_zen["enabled"], false);
     assert!(v3_zen.get("account").is_none());
 
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
     harness.stop();
 }

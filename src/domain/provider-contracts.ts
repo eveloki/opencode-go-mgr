@@ -32,6 +32,8 @@ export const CATALOG_SOURCE_STATIC = "static";
 export const CATALOG_SOURCE_OFFICIAL_ZEN = "official_zen";
 export const CATALOG_SOURCE_CUSTOM_DISCOVERY = "custom_discovery";
 export const CATALOG_SOURCE_DECLARED = "account_declared";
+export const CATALOG_SOURCE_OPENCODE_MODELS = "opencode_get_models";
+export const CATALOG_SOURCE_COMMAND_CODE_MODELS = "command_code_get_models";
 
 export interface ProviderScopeRef {
   scope_kind: ContractScopeKind;

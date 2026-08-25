@@ -30,6 +30,7 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "AccountUpdate",
     "AccountOrder",
     "AccountSetupUpdate",
+    "AccountGoatModelAccessUpdate",
     "AccountCustomConfigUpdate",
     "AccountCustomConfigWrite",
     "AccountModelCapabilitiesUpdate",
@@ -308,7 +309,20 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[usage_refresh_start..usage_refresh_end],
         USAGE_REFRESH_CATALOG_TYPES
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_end);
+    const PROVIDER_REFRESH_CATALOG_TYPES: &[&str] = &[
+        "ProviderModelsRefreshUpdate",
+        "ProviderModels",
+        "ProviderPricingSnapshot",
+        "ProviderPricingValue",
+        "ProviderPricingRefresh",
+        "ProviderPricingRefreshUpdate",
+    ];
+    let provider_refresh_end = usage_refresh_end + PROVIDER_REFRESH_CATALOG_TYPES.len();
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[usage_refresh_end..provider_refresh_end],
+        PROVIDER_REFRESH_CATALOG_TYPES
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), provider_refresh_end);
 }
 
 #[test]
@@ -524,13 +538,16 @@ fn pricing_schema_registers_required_nulls_and_omittable_requests() {
             "offeringId",
             "availability",
             "snapshot",
+            "providerSnapshot",
             "revision",
             "processGeneration",
             "pricingRevision",
+            "providerPricingRevision",
         ]
     );
     let provider = properties(defs, "ProviderPricing");
     assert!(allows_null(&provider["snapshot"]));
+    assert!(allows_null(&provider["providerSnapshot"]));
     assert!(!provider.contains_key("snapshotJson"));
     assert_eq!(provider["revision"]["type"], "integer");
     assert_eq!(provider["pricingRevision"]["type"], "string");

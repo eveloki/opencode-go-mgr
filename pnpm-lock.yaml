@@ -11,9 +11,6 @@ importers:
       '@novnc/novnc':
         specifier: ^1.7.0
         version: 1.7.0
-      '@tauri-apps/cli':
-        specifier: ^2.11.4
-        version: 2.11.4
       '@vicons/antd':
         specifier: ^0.13.0
         version: 0.13.0
@@ -23,7 +20,13 @@ importers:
       pinia:
         specifier: ^4.0.3
         version: 4.0.3(@vue/devtools-api@8.2.1)(typescript@5.9.3)(vue@3.5.39(typescript@5.9.3))
+      vue:
+        specifier: ^3
+        version: 3.5.39(typescript@5.9.3)
     devDependencies:
+      '@tauri-apps/cli':
+        specifier: ^2.11.4
+        version: 2.11.4
       '@types/node':
         specifier: ^20
         version: 20.19.43
@@ -39,9 +42,6 @@ importers:
       vite:
         specifier: ^5
         version: 5.4.21(@types/node@20.19.43)
-      vue:
-        specifier: ^3
-        version: 3.5.39(typescript@5.9.3)
       vue-tsc:
         specifier: ^2
         version: 2.2.12(typescript@5.9.3)

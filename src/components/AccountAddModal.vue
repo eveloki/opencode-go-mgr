@@ -11,92 +11,103 @@
       <n-spin size="large" :description="t('加载中…')" />
     </div>
 
-    <div v-else-if="!catalog" class="account-add-grid">
-      <button type="button" class="account-add-option" @click="$emit('importKey')">
-        <n-icon :component="KeyOutlined" size="28" aria-hidden="true" />
-        <span class="account-add-option__title">{{ t("导入已有 Key") }}</span>
-        <span>{{ t("已有 OpenCode Go Key，直接添加并参与账号路由。") }}</span>
-      </button>
-      <n-tooltip :disabled="managedAvailable">
-        <template #trigger>
-          <button
-            type="button"
-            class="account-add-option"
-            :class="{ 'account-add-option--disabled': !managedAvailable }"
-            :disabled="!managedAvailable"
-            @click="$emit('registerManaged')"
-          >
-            <n-icon :component="UserAddOutlined" size="28" aria-hidden="true" />
-            <span class="account-add-option__title">{{ t("注册新账号（Beta）") }}</span>
-            <span>{{ t("独立 Profile：登录 → 邀请 → 支付 → 验证 Key。") }}</span>
-          </button>
-        </template>
-        {{ managedReason }}
-      </n-tooltip>
-    </div>
+    <div v-else class="account-add-layout">
+      <div class="account-add-mobile">
+        <n-select
+          :value="selectedPlanId || null"
+          :options="selectOptions"
+          :aria-label="t('选择要添加的方案')"
+          :consistent-menu-width="false"
+          @update:value="selectPlanId"
+        />
+      </div>
 
-    <div v-else class="account-add-grid">
-      <div
-        v-for="option in planOptions"
-        :key="option.plan.id"
-        class="account-add-option"
-        :class="{
-          'account-add-option--disabled': option.disabled,
-        }"
+      <aside
+        class="account-add-rail"
+        :aria-label="t('选择要添加的方案')"
+        @keydown="onRailKeydown"
       >
-        <div class="account-add-option__header">
-          <n-icon :component="planIcon(option.plan.id)" size="28" aria-hidden="true" />
-          <div class="account-add-option__titles">
-            <span class="account-add-option__title">{{ option.label }}</span>
-            <n-space v-if="planKindTag(option.plan)" :size="6">
-              <n-tag
-                v-if="planKindTag(option.plan)"
-                size="small"
-                :bordered="false"
-                :type="planKindTag(option.plan)!.type"
-              >
-                {{ planKindTag(option.plan)!.label }}
-              </n-tag>
-            </n-space>
+        <section v-for="group in groups" :key="group.id" class="account-add-group">
+          <h3 class="account-add-group__label">{{ t(group.label) }}</h3>
+          <button
+            v-for="option in group.options"
+            :id="`account-add-option-${option.plan.id}`"
+            :key="option.plan.id"
+            type="button"
+            class="account-add-item"
+            :class="{
+              'account-add-item--active': option.plan.id === selectedPlanId,
+              'account-add-item--disabled': option.disabled,
+            }"
+            :aria-pressed="option.plan.id === selectedPlanId"
+            :aria-current="option.plan.id === selectedPlanId ? 'true' : undefined"
+            @click="selectPlanId(option.plan.id)"
+          >
+            <n-icon :component="planIcon(option.plan.id)" size="16" aria-hidden="true" />
+            <span class="account-add-item__label">{{ option.label }}</span>
+          </button>
+        </section>
+      </aside>
+
+      <div v-if="selectedOption" class="account-add-detail">
+        <header class="account-add-detail__header">
+          <n-icon :component="planIcon(selectedOption.plan.id)" size="22" aria-hidden="true" />
+          <div class="account-add-detail__titles">
+            <h2>{{ selectedOption.label }}</h2>
+            <n-tag
+              v-if="planKindTag(selectedOption.plan)"
+              size="small"
+              :bordered="false"
+              :type="planKindTag(selectedOption.plan)!.type"
+            >
+              {{ planKindTag(selectedOption.plan)!.label }}
+            </n-tag>
           </div>
-        </div>
+        </header>
 
-        <span
-          v-if="planDescription(option.plan)"
-          class="account-add-option__description"
+        <p v-if="planDescription(selectedOption.plan)" class="account-add-detail__copy">
+          {{ planDescription(selectedOption.plan) }}
+        </p>
+        <p
+          v-if="selectedOption.managed"
+          class="account-add-detail__copy account-add-detail__copy--secondary"
         >
-          {{ planDescription(option.plan) }}
-        </span>
+          {{ t("独立 Profile：登录 → 邀请 → 支付 → 验证 Key。") }}
+        </p>
 
-        <n-tag
-          v-if="option.disabled"
-          size="small"
+        <n-alert
+          v-if="selectedOption.disabled"
           type="warning"
-          class="account-add-option__reason"
-        >
-          {{ option.disabledReason ? t(option.disabledReason) : "" }}
-        </n-tag>
-
-        <n-tag
-          v-else-if="option.creationHint"
-          size="small"
+          :title="selectedOption.disabledReason ? t(selectedOption.disabledReason) : ''"
+        />
+        <n-alert
+          v-else-if="selectedOption.creationHint"
           type="default"
-          class="account-add-option__reason"
+          :title="t(selectedOption.creationHint)"
+        />
+        <n-alert
+          v-if="selectedOption.managed && !managedAvailable"
+          type="warning"
+          class="account-add-hint"
         >
-          {{ option.creationHint ? t(option.creationHint) : "" }}
-        </n-tag>
+          <div class="account-add-hint__content">
+            <span>{{ managedReason }}</span>
+            <n-button v-if="inviteMissing" text type="primary" @click="$emit('openSettings')">
+              {{ t("前往设置邀请链接") }}
+            </n-button>
+          </div>
+        </n-alert>
 
-        <n-space v-if="option.managed" :size="8" class="account-add-option__actions">
-          <n-button size="small" secondary @click.stop="$emit('importKey')">
+        <n-space v-if="selectedOption.managed" :size="8" class="account-add-detail__actions">
+          <n-button secondary @click="$emit('importKey')">
             {{ t("导入已有 Key") }}
           </n-button>
           <n-tooltip :disabled="managedAvailable">
             <template #trigger>
               <n-button
-                size="small"
                 type="primary"
                 :disabled="!managedAvailable"
-                @click.stop="managedAvailable && $emit('registerManaged')"
+                @click="managedAvailable && $emit('registerManaged')"
               >
                 {{ t("注册新账号（Beta）") }}
               </n-button>
@@ -105,55 +116,54 @@
           </n-tooltip>
         </n-space>
 
-        <n-space v-else-if="!option.disabled" :size="8" class="account-add-option__actions">
+        <n-space
+          v-else-if="!selectedOption.disabled"
+          :size="8"
+          class="account-add-detail__actions"
+        >
           <n-button
-            size="small"
-            :type="option.plan.id === 'custom-endpoint' ? 'primary' : 'default'"
-            @click.stop="handleSelect(option)"
+            :type="selectedOption.plan.id === 'custom-endpoint' ? 'primary' : 'default'"
+            @click="handleSelect(selectedOption)"
           >
-            {{ t(planActionLabel(option.plan)) }}
+            {{ t(planActionLabel(selectedOption)) }}
           </n-button>
         </n-space>
       </div>
     </div>
-
-    <n-alert v-if="!catalogLoading && !catalog && !managedAvailable" type="warning" class="account-add-hint">
-      <div class="account-add-hint__content">
-        <span>{{ managedReason }}</span>
-        <n-button v-if="inviteMissing" text type="primary" @click="$emit('openSettings')">
-          {{ t("前往设置邀请链接") }}
-        </n-button>
-      </div>
-    </n-alert>
   </n-modal>
 </template>
 
 <script setup lang="ts">
-import { computed, toRef } from "vue";
+import { computed, ref, toRef, watch } from "vue";
+import type { Component } from "vue";
 import {
   NAlert,
   NButton,
   NIcon,
   NModal,
+  NSelect,
   NSpace,
   NSpin,
   NTag,
   NTooltip,
+  type SelectGroupOption,
+  type SelectOption,
 } from "naive-ui";
 import {
   KeyOutlined,
-  UserAddOutlined,
   CloudOutlined,
-  GiftOutlined,
   ApiOutlined,
   CreditCardOutlined,
   SwapOutlined,
 } from "@vicons/antd";
-import type { Component } from "vue";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
-import { buildPlanOptions, type PlanOption } from "../views/account-plan-options.ts";
-import type { PlanDefinition } from "../views/plans.ts";
+import {
+  buildPlanChooserGroups,
+  planChooserGroupId,
+  type PlanOption,
+} from "../domain/account-plan-options.ts";
+import type { PlanDefinition, PlanId } from "../domain/plans.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 
 const props = defineProps<{
@@ -175,11 +185,62 @@ const emit = defineEmits<{
 
 useLocalizedModalCloseLabel(toRef(props, "show"), "account-add-modal");
 
-const planOptions = computed(() => buildPlanOptions(props.catalog));
+const selectedPlanId = ref<PlanId | "">("");
+
+const groups = computed(() => buildPlanChooserGroups(props.catalog));
+const flatOptions = computed(() => groups.value.flatMap((group) => group.options));
+const selectedOption = computed(() => (
+  flatOptions.value.find((option) => option.plan.id === selectedPlanId.value) ?? null
+));
+
+const selectOptions = computed<Array<SelectOption | SelectGroupOption>>(() => (
+  groups.value.map((group) => ({
+    type: "group" as const,
+    key: group.id,
+    label: t(group.label),
+    children: group.options.map((option) => ({
+      label: option.label,
+      value: option.plan.id,
+    })),
+  }))
+));
+
+function defaultPlanId(): PlanId | "" {
+  return flatOptions.value.find((option) => !option.disabled)?.plan.id
+    ?? flatOptions.value[0]?.plan.id
+    ?? "";
+}
+
+function selectPlanId(value: string): void {
+  if (flatOptions.value.some((option) => option.plan.id === value)) {
+    selectedPlanId.value = value as PlanId;
+  }
+}
+
+watch(
+  () => [props.show, flatOptions.value] as const,
+  ([visible, options]) => {
+    if (!visible) return;
+    if (!options.some((option) => option.plan.id === selectedPlanId.value)) {
+      selectedPlanId.value = defaultPlanId();
+    }
+  },
+  { immediate: true },
+);
+
+function onRailKeydown(event: KeyboardEvent): void {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const ids = flatOptions.value.map((option) => option.plan.id);
+  if (ids.length === 0) return;
+  event.preventDefault();
+  const current = ids.indexOf(selectedPlanId.value as PlanId);
+  const delta = event.key === "ArrowDown" ? 1 : -1;
+  const next = ids[(current + delta + ids.length) % ids.length];
+  if (next) selectedPlanId.value = next;
+}
 
 const ICONS: Record<string, Component> = {
   "opencode-go": CloudOutlined,
-  "zen-free": GiftOutlined,
   "command-code-goat": ApiOutlined,
   scnet: CreditCardOutlined,
   "custom-endpoint": SwapOutlined,
@@ -190,6 +251,7 @@ function planIcon(planId: string): Component {
 }
 
 function planKindTag(plan: PlanDefinition): { label: string; type: "warning" | "default" } | null {
+  if (plan.id === "scnet") return { label: t("已归档"), type: "default" };
   if (plan.kind === "subscription") return { label: t("订阅制"), type: "warning" };
   if (plan.kind === "custom") return { label: t("自定义端点"), type: "default" };
   return null;
@@ -199,10 +261,8 @@ function planDescription(plan: PlanDefinition): string {
   switch (plan.id) {
     case "opencode-go":
       return t("已有 OpenCode Go Key，直接添加并参与账号路由。");
-    case "zen-free":
-      return t("Zen Free 已由系统管理，请在账号列表中启用。");
     case "scnet":
-      return t("订阅制方案：额度、计费与续费由服务商订阅条款管理。");
+      return t("SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。");
     case "custom-endpoint":
       return t("自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。");
     default:
@@ -210,9 +270,9 @@ function planDescription(plan: PlanDefinition): string {
   }
 }
 
-function planActionLabel(plan: PlanDefinition): MessageKey {
-  if (plan.id === "custom-endpoint") return "添加账号";
-  if (plan.id === "command-code-goat" || plan.id === "scnet") return "创建草稿";
+function planActionLabel(option: PlanOption): MessageKey {
+  if (option.plan.id === "custom-endpoint") return "添加账号";
+  if (planChooserGroupId(option, props.catalog) === "draft") return "创建草稿";
   return "添加账号";
 }
 
@@ -229,84 +289,136 @@ function handleSelect(option: PlanOption): void {
   min-height: 220px;
 }
 
-.account-add-grid {
+.account-add-layout {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.account-add-option {
-  display: grid;
-  align-content: start;
-  gap: 10px;
-  min-height: 180px;
-  padding: 22px;
-  border: 1px solid var(--ocg-divider);
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 280px;
+  overflow: hidden;
+  border: 1px solid var(--ocg-border);
   border-radius: 14px;
-  color: var(--ocg-muted);
-  font: inherit;
-  text-align: left;
   background: var(--ocg-surface);
-  cursor: default;
 }
 
-button.account-add-option {
+.account-add-mobile {
+  display: none;
+}
+
+.account-add-rail {
+  min-width: 0;
+  padding: 8px 0 12px;
+  overflow: auto;
+  border-right: 1px solid var(--ocg-border);
+  background: var(--ocg-canvas);
+}
+
+.account-add-group + .account-add-group {
+  margin-top: 8px;
+}
+
+.account-add-group__label {
+  margin: 0;
+  padding: 8px 12px 4px;
+  color: var(--ocg-subtle);
+  font-size: var(--ocg-font-xs);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.account-add-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 0;
+  color: var(--ocg-ink);
+  font: inherit;
+  font-size: var(--ocg-font-sm);
+  text-align: left;
+  background: transparent;
   cursor: pointer;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
-button.account-add-option:not(:disabled):hover,
-button.account-add-option:not(:disabled):focus-visible {
-  border-color: var(--ocg-primary);
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--ocg-primary) 14%, transparent);
-  transform: translateY(-1px);
+.account-add-item :deep(.n-icon) {
+  flex: none;
+  color: var(--ocg-muted);
+}
+
+.account-add-item__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-add-item:hover,
+.account-add-item:focus-visible {
+  background: var(--ocg-primary-soft);
   outline: none;
 }
 
-.account-add-option__header {
+.account-add-item--active {
+  background: var(--ocg-primary-soft);
+  font-weight: 600;
+}
+
+.account-add-item--active :deep(.n-icon) {
+  color: var(--ocg-primary);
+}
+
+.account-add-item--disabled {
+  color: var(--ocg-muted);
+}
+
+.account-add-detail {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  padding: 20px;
+}
+
+.account-add-detail__header {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
-.account-add-option__header :deep(.n-icon) {
+.account-add-detail__header :deep(.n-icon) {
   color: var(--ocg-primary);
 }
 
-.account-add-option__titles {
+.account-add-detail__titles {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
-.account-add-option__title {
+.account-add-detail__titles h2 {
+  margin: 0;
   color: var(--ocg-ink);
   font-size: var(--ocg-font-lg);
   font-weight: 700;
+  line-height: 1.3;
 }
 
-.account-add-option__description {
+.account-add-detail__copy {
+  margin: 0;
+  color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
   line-height: 1.5;
 }
 
-.account-add-option__reason {
-  justify-self: start;
+.account-add-detail__copy--secondary {
+  font-size: var(--ocg-font-xs);
 }
 
-.account-add-option__actions {
-  align-self: end;
-}
-
-.account-add-option--disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.account-add-hint {
-  margin-top: 14px;
+.account-add-detail__actions {
+  margin-top: 4px;
 }
 
 .account-add-hint__content {
@@ -318,18 +430,17 @@ button.account-add-option:not(:disabled):focus-visible {
 }
 
 @media (max-width: 640px) {
-  .account-add-grid {
-    grid-template-columns: 1fr;
+  .account-add-layout {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .account-add-option {
-    min-height: 140px;
+  .account-add-rail {
+    display: none;
   }
-}
 
-@media (prefers-reduced-motion: reduce) {
-  .account-add-option {
-    transition: none;
+  .account-add-mobile {
+    display: block;
+    padding: 12px 12px 0;
   }
 }
 </style>

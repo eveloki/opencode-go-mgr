@@ -60,14 +60,14 @@
             <n-tag v-else :type="accountStatusTagType(account, now)" size="small">
               {{ accountStatusLabel(account, now) }}
             </n-tag>
-            <n-tag v-if="!isZen && !isCustom && accountIsReady(account)" size="small" :bordered="false">
+            <n-tag v-if="(isGo || isScnet) && accountIsReady(account)" size="small" :bordered="false">
               {{ t("购买于 {date}", { date: account.purchase_date }) }}
             </n-tag>
-            <n-tag v-if="!isZen && !isCustom && accountIsReady(account)" size="small" :bordered="false">
+            <n-tag v-if="(isGo || isScnet) && accountIsReady(account)" size="small" :bordered="false">
               {{ t("到期于 {date}", { date: account.expires_on }) }}
             </n-tag>
             <n-tag
-              v-if="!isZen && !isCustom && accountIsReady(account)"
+              v-if="(isGo || isScnet) && accountIsReady(account)"
               :type="accountExpiryTagType(account, now)"
               size="small"
               :bordered="false"
@@ -241,6 +241,33 @@
         </p>
       </div>
     </div>
+    <div v-else-if="isGoat" class="goat-connection">
+      <div class="goat-connection__model-access">
+        <span>{{ t("模型") }}</span>
+        <n-radio-group
+          :value="account.goat_model_access ?? 'goat'"
+          size="small"
+          :disabled="goatModelAccessSaving"
+          :aria-label="t('模型')"
+          @update:value="emit('goat-model-access', $event as 'goat' | 'all')"
+        >
+          <n-radio-button value="goat">GOAT</n-radio-button>
+          <n-radio-button value="all">{{ t("全部") }}</n-radio-button>
+        </n-radio-group>
+      </div>
+      <p v-if="verificationCaption" class="goat-connection__status">{{ verificationCaption }}</p>
+      <n-button
+        v-if="goatVerificationOffered"
+        size="small"
+        type="primary"
+        secondary
+        :loading="verifying"
+        :aria-label="t('验证连接')"
+        @click="emit('verify')"
+      >
+        {{ t("验证连接") }}
+      </n-button>
+    </div>
     <div v-else-if="isCustom" class="custom-endpoint">
       <div class="custom-endpoint__meta">
         <span v-if="account.custom_config?.base_url" class="custom-endpoint__url">
@@ -326,6 +353,8 @@ import {
   NDropdown,
   NIcon,
   NPopover,
+  NRadioButton,
+  NRadioGroup,
   NSwitch,
   NTag,
   NTooltip,
@@ -341,9 +370,9 @@ import type { ProviderCatalogEntry } from "../api/providers.ts";
 import {
   protocolDisplayName,
   type AccountContractSummary,
-} from "../views/provider-contracts.ts";
-import { isCooling, isUsageLimitReached } from "../views/accounts-usage.ts";
-import type { UsageKey } from "../views/accounts-usage.ts";
+} from "../domain/provider-contracts.ts";
+import { isCooling, isUsageLimitReached } from "../domain/accounts-usage.ts";
+import type { UsageKey } from "../domain/accounts-usage.ts";
 import {
   accountExpiryLabel,
   accountExpiryTagType,
@@ -356,19 +385,19 @@ import {
   managedStepLabel,
   usageRefreshTooltip,
   usageSyncCaption,
-} from "../views/account-display.ts";
-import type { AccountMenuOption } from "../views/account-display.ts";
+} from "../domain/account-display.ts";
+import type { AccountMenuOption } from "../domain/account-display.ts";
 import {
   isCommandCodeGoatAccount,
   isZenFreeAccount,
-} from "../views/account-providers.ts";
+} from "../domain/account-providers.ts";
 import {
   customAccountNeedsVerification,
   customAccountToggleBlocked,
   isCustomApiAccount,
-} from "../views/custom-account.ts";
-import { accountPlanWarning, planLabel } from "../views/plans.ts";
-import type { AccountUsageEdits, UsageLimitView } from "../views/useAccountUsage.ts";
+} from "../domain/custom-account.ts";
+import { accountPlanWarning, planForAccount, planLabel } from "../domain/plans.ts";
+import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
 import UsageStrip from "./UsageStrip.vue";
@@ -388,6 +417,7 @@ const props = defineProps<{
   usageRefreshLoading: boolean;
   /** Connection verification in flight for a pending/failed Custom account. */
   verifying: boolean;
+  goatModelAccessSaving: boolean;
   quotaLimitsFailed: boolean;
   menuOptions: AccountMenuOption[];
 }>();
@@ -397,6 +427,7 @@ const emit = defineEmits<{
   "order-drag-start": [event: PointerEvent];
   toggle: [];
   verify: [];
+  "goat-model-access": [value: "goat" | "all"];
   "refresh-usage": [];
   "open-provider": [];
   "reload-usage": [];
@@ -411,6 +442,7 @@ const emit = defineEmits<{
 
 const isZen = computed(() => isZenFreeAccount(props.account));
 const isGoat = computed(() => isCommandCodeGoatAccount(props.account));
+const isScnet = computed(() => planForAccount(props.account)?.id === "scnet");
 const isGo = computed(() => (
   props.account.provider_id === "opencode" && props.account.offering_id === "go"
 ));
@@ -419,13 +451,30 @@ const plan = computed(() => props.catalog?.find((entry) => (
   entry.provider_id === props.account.provider_id
   && entry.offering_id === props.account.offering_id
 )));
+// Manual calibration display is catalog-driven: no hardcoded per-plan meters.
 const manualUsageCalibration = computed(() => (
-  plan.value?.manual_usage_calibration ?? isGoat.value
+  plan.value?.manual_usage_calibration ?? false
 ));
 const customNeedsVerification = computed(() => customAccountNeedsVerification(props.account));
+// GOAT verify is explicit and catalog-gated: the button only appears when the
+// plan requires verification and the backend says the runtime can run it.
+const goatVerificationOffered = computed(() => {
+  if (!isGoat.value) return false;
+  const status = props.account.verification_status;
+  if (status !== "pending" && status !== "failed") return false;
+  const runtime = plan.value?.verification_runtime_availability;
+  return runtime === "available" || runtime === "optional";
+});
+const goatToggleBlocked = computed(() => (
+  isGoat.value
+  && props.account.verification_status !== "verified"
+  && props.account.verification_status !== "not_required"
+));
 const toggleBlockedReason = computed(() => {
+  if (isScnet.value) return t("该方案已归档，不支持启用");
   if (!props.account.plan_routable) return t("该方案暂不可路由");
   if (customAccountToggleBlocked(props.account)) return t("验证连接成功后才能启用");
+  if (goatToggleBlocked.value) return t("验证连接成功后才能启用");
   return "";
 });
 const verificationCaption = computed(() => {
@@ -447,6 +496,11 @@ const isDraft = computed(() => (
 ));
 
 const draftDescription = computed(() => {
+  // Archived plans get an explicit sealed reason instead of draft copy that
+  // could imply pending verification, enablement, routing, or usage support.
+  if (isScnet.value) {
+    return t("SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。");
+  }
   const key = accountRoutingDraftDescription(props.account);
   return key ? t(key) : "";
 });
@@ -457,6 +511,13 @@ const verificationError = computed(() => {
 });
 
 const planWarning = computed(() => {
+  if (isScnet.value) {
+    return {
+      type: "info" as const,
+      title: t("已归档"),
+      message: t("SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。"),
+    };
+  }
   const warning = accountPlanWarning(props.account);
   if (warning === "subscription") {
     return {
@@ -570,6 +631,27 @@ const usageEditorAvailable = computed(() => {
   display: grid;
   justify-items: start;
   gap: 8px;
+}
+
+.goat-connection {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+
+.goat-connection__status {
+  margin: 0;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
+}
+
+.goat-connection__model-access {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
 }
 
 .custom-endpoint__meta {

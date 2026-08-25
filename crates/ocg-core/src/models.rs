@@ -821,6 +821,45 @@ pub enum UsageWindowKind {
     Free,
 }
 
+/// Persistence-shaped quota window record synced from official usage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuotaWindow {
+    pub account_id: String,
+    pub window_kind: String,
+    pub used: f64,
+    pub limit_value: Option<f64>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub resets_at: Option<DateTime<Utc>>,
+    pub calibration_offset: f64,
+    pub unit: String,
+    pub source: String,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Persistence-shaped credit balance record synced from official usage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreditBalance {
+    pub account_id: String,
+    pub balance_kind: String,
+    pub amount: f64,
+    pub unit: String,
+    pub source: String,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Persistence-shaped adaptive usage-sync state for one account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderUsageSyncState {
+    pub account_id: String,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub next_eligible_at: Option<DateTime<Utc>>,
+    pub failure_streak: i64,
+    pub last_expedited_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayStatus {
     pub running: bool,

@@ -61,13 +61,13 @@ map of the semantics that are easy to get wrong.
   session, browser WebSocket, inference entrypoints. The only preserved
   unversioned paths are the exact `auth/status|register|login|logout` and
   `browser/sessions/{token}/ws`.
-- `crates/ocg-core/src/dashboard.rs` still handles SPA `index`/`assets` and
-  preserves the above V2 auth and browser WS handlers; protected V2 REST
-  handlers registered there are intercepted by tombstones and cannot host
-  new features. Go/Zen protocol probing is at V3
+- `crates/ocg-core/src/dashboard.rs` now handles only SPA `index`/`assets`
+  and the preserved V2 auth and browser WS handlers; the tombstoned V2 REST
+  middleware lives in `host_router.rs`. Go/Zen protocol probing is at V3
   `POST /providers/{provider_id}/protocol-probes`. Custom account-level
-  protocol probing remains on the retired V2 account path (returns `410`
-  after authorization); do not revive V2 REST to “fill in probing”.
+  protocol probing has no V3 counterpart; the retired V2 account paths
+  return `410` after authorization. Do not revive V2 REST to “fill in
+  probing”.
 
 ## Access Keys And Auth
 
@@ -281,17 +281,18 @@ map of the semantics that are easy to get wrong.
   Sync metadata lives in `provider_usage_sync_state` (`accounts.usage_sync_*`
   is no longer used). Shared implementation includes CAS / three-window
   atomic calibration and global proxy. The public Go docs have not listed
-  this endpoint. `console_usage.rs` is frozen and deprecated; do not delete
-  until at least two minors later and there is stable real-account evidence.
-  Do not introduce CDP automation for refresh.
+  this endpoint. Do not introduce CDP automation for refresh.
 
 ## Pricing, Container, And CI Notes
 
-- Pricing is managed via protected `GET /dashboard/api/v3/pricing`,
-  `PUT /dashboard/api/v3/pricing/multipliers`, and
-  `POST /dashboard/api/v3/pricing/refresh`; it only hits
-  `https://opencode.ai/docs/go/` when the user clicks refresh, and must not
-  auto-poll.
+- Pricing is Provider-scoped: read
+  `GET /dashboard/api/v3/providers/{provider_id}/{offering_id}/pricing` and
+  refresh `POST /dashboard/api/v3/providers/{provider_id}/pricing/refresh`.
+  Go multiplier writes use
+  `PUT /dashboard/api/v3/providers/opencode/go/pricing/multipliers`. OpenCode
+  and Command Code use independent revisions and last-good snapshots. Each
+  fixed official source is fetched only when the user clicks that Provider's
+  refresh control; pricing must not auto-poll.
 - After a public GitHub Release is published,
   `.github/workflows/container.yml` builds and smoke-tests `linux/amd64` and
   `linux/arm64` images on native amd64 (`ubuntu-24.04`) and arm64

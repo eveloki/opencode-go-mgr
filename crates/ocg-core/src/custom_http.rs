@@ -12,16 +12,99 @@
 //! forbidden-header helpers.
 
 use crate::models::{AppConfig, ProxyMode};
-use crate::provider::UpstreamAuthScheme;
-use crate::provider::validate_custom_base_url;
+use crate::provider::{ProviderBindingError, UpstreamAuthScheme};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 pub use ocg_infra::inference_http::{
     InferenceHttpError, InferenceRedirectPolicy, apply_inference_request_timeout,
     join_inference_endpoint,
 };
+
+/// Structured Custom URL host taken from [`reqwest::Url::host`], not `host_str`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomUrlHost {
+    Ip(IpAddr),
+    Domain(String),
+}
+
+/// Syntactic Custom URL inspection shared by persistence and HTTP joining.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomUrlTarget {
+    pub host: CustomUrlHost,
+}
+
+/// Syntactic Custom base-URL gate. Administrators explicitly trust Custom
+/// destinations, so any http/https origin is accepted. Credentials and
+/// non-HTTP(S) schemes stay rejected; DNS / IP / hostname policy is not applied.
+pub fn validate_custom_base_url(value: &str) -> Result<String, ProviderBindingError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ProviderBindingError::InvalidCustomBaseUrl(
+            "base URL is required".to_string(),
+        ));
+    }
+    if value.len() > 2048 {
+        return Err(ProviderBindingError::InvalidCustomBaseUrl(
+            "base URL is too long".to_string(),
+        ));
+    }
+    let parsed = reqwest::Url::parse(value).map_err(|error| {
+        ProviderBindingError::InvalidCustomBaseUrl(format!("invalid base URL: {error}"))
+    })?;
+    inspect_custom_url(&parsed)?;
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ProviderBindingError::InvalidCustomBaseUrl(
+            "base URL must not include a query or fragment".to_string(),
+        ));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// Inspect scheme, credentials, and host of a Custom URL.
+///
+/// Uses [`reqwest::Url::host`] so bracketed IPv6 and IPv4-mapped literals are
+/// the parser's IP variants. `host_str().parse::<IpAddr>()` treats `[::ffff:…]`
+/// as a hostname and is the bypass this function exists to close.
+pub fn inspect_custom_url(parsed: &reqwest::Url) -> Result<CustomUrlTarget, ProviderBindingError> {
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ProviderBindingError::InvalidCustomBaseUrl(
+            "base URL must use http or https".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ProviderBindingError::InvalidCustomBaseUrl(
+            "base URL must not include credentials".to_string(),
+        ));
+    }
+    Ok(CustomUrlTarget {
+        host: custom_url_host(parsed)?,
+    })
+}
+
+fn custom_url_host(parsed: &reqwest::Url) -> Result<CustomUrlHost, ProviderBindingError> {
+    let host = parsed.host().ok_or_else(|| {
+        ProviderBindingError::InvalidCustomBaseUrl("base URL must include a host".to_string())
+    })?;
+    // `url::Host` is not a direct dependency (manifests stay frozen). IPv6
+    // Display includes brackets; strip them to recover the parsed `Ipv6Addr`.
+    let rendered = host.to_string();
+    if let Some(inside) = rendered
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    {
+        let ip = inside.parse::<Ipv6Addr>().map_err(|_| {
+            ProviderBindingError::InvalidCustomBaseUrl("base URL IPv6 host is invalid".to_string())
+        })?;
+        return Ok(CustomUrlHost::Ip(IpAddr::V6(ip)));
+    }
+    if let Ok(ip) = rendered.parse::<Ipv4Addr>() {
+        return Ok(CustomUrlHost::Ip(IpAddr::V4(ip)));
+    }
+    Ok(CustomUrlHost::Domain(rendered.to_ascii_lowercase()))
+}
 
 /// Build isolated upstream auth headers. Callers supply the configured scheme
 /// and key; this never copies dashboard or client credentials.

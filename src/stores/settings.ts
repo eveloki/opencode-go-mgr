@@ -1,18 +1,10 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
-import { dashboardV3, isRevisionConflict, type WithoutExpectation } from "../api/dashboard-v3.ts";
+import { dashboardApi, isRevisionConflict } from "../api/dashboard.ts";
 import type {
+  AppConfig,
   ClaudeDesktopModels,
-  ClaudeDesktopModelsUpdate,
-  Settings,
-  SettingsUpdate,
-} from "../api/generated/dashboard-v3.ts";
-import { useControlPlaneStore } from "./controlPlane.ts";
-import {
-  presentSettings,
-  settingsUpdateInput,
-  type AppConfig,
-} from "../api/dashboard-presenters.ts";
+} from "../api/dashboard.ts";
 
 /**
  * Application settings plus the Claude Desktop three-role mapping.
@@ -22,17 +14,15 @@ import {
  * page-local in the Settings view.
  */
 export const useSettingsStore = defineStore("settings", () => {
-  const controlPlane = useControlPlaneStore();
-
-  const settings = ref<Settings | null>(null);
+  const settings = ref<AppConfig | null>(null);
   const claudeDesktop = ref<ClaudeDesktopModels | null>(null);
   const loading = ref(false);
   const error = ref("");
 
-  async function load(): Promise<Settings> {
+  async function load(): Promise<AppConfig> {
     loading.value = true;
     try {
-      const result = await dashboardV3.getSettings();
+      const result = await dashboardApi.getSettings();
       settings.value = result;
       error.value = "";
       return result;
@@ -45,12 +35,12 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   async function loadPresented(): Promise<AppConfig> {
-    return presentSettings(await load());
+    return load();
   }
 
-  async function put(update: WithoutExpectation<SettingsUpdate>): Promise<void> {
+  async function put(update: AppConfig): Promise<void> {
     try {
-      await controlPlane.runMutation((exp) => dashboardV3.putSettings(update, exp));
+      await dashboardApi.updateSettings(update);
       await load();
     } catch (cause) {
       if (isRevisionConflict(cause)) await load();
@@ -59,21 +49,20 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   async function putPresented(update: AppConfig): Promise<AppConfig> {
-    await put(settingsUpdateInput(update));
+    await put(update);
     if (!settings.value) throw new Error("settings reload returned no resource");
-    return presentSettings(settings.value);
+    return settings.value;
   }
 
   async function loadClaudeDesktop(): Promise<ClaudeDesktopModels> {
-    const result = await dashboardV3.getClaudeDesktopModels();
+    const result = await dashboardApi.getClaudeDesktopModels();
     claudeDesktop.value = result;
     return result;
   }
 
-  async function putClaudeDesktop(models: WithoutExpectation<ClaudeDesktopModelsUpdate>): Promise<ClaudeDesktopModels> {
+  async function putClaudeDesktop(models: ClaudeDesktopModels): Promise<ClaudeDesktopModels> {
     try {
-      const result = await controlPlane.runMutation((exp) =>
-        dashboardV3.putClaudeDesktopModels(models, exp));
+      const result = await dashboardApi.updateClaudeDesktopModels(models);
       claudeDesktop.value = result;
       return result;
     } catch (cause) {

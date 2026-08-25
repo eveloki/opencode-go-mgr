@@ -61,6 +61,15 @@
           </n-button>
         </n-alert>
 
+        <n-alert
+          v-if="activeScope.provider_id === 'scnet'"
+          type="info"
+          :title="t('已归档')"
+          :show-icon="false"
+        >
+          {{ t("SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。") }}
+        </n-alert>
+
         <section class="providers-section" aria-labelledby="provider-overview-title">
           <h2 id="provider-overview-title">{{ t("概览") }}</h2>
           <dl class="providers-overview">
@@ -112,6 +121,7 @@
           </div>
         </section>
 
+        <template v-if="!scnetArchived">
         <section class="providers-section" aria-labelledby="provider-catalog-title">
           <h2 id="provider-catalog-title">{{ t("模型目录") }}</h2>
           <dl class="providers-overview providers-overview--compact">
@@ -217,6 +227,7 @@
           <h2 id="provider-pricing-title">{{ t("价格") }}</h2>
           <PricingCatalog :provider-id="activeScope.provider_id" />
         </section>
+        </template>
       </div>
     </div>
 
@@ -240,8 +251,6 @@ import type { MenuOption, SelectOption } from "naive-ui";
 import { DashboardRequestError } from "../api/dashboard";
 import {
   isCustomCatalogRefreshResponse,
-  presentCatalogEntry,
-  presentContracts,
   providerApi,
 } from "../api/providers.ts";
 import { useProvidersStore } from "../stores/providers.ts";
@@ -268,13 +277,15 @@ import {
   selectProviderScope,
   scopeAccounts,
   uniqueProtocols,
-} from "./provider-contracts.ts";
+} from "../domain/provider-contracts.ts";
 import {
   CATALOG_SOURCE_CUSTOM_DISCOVERY,
   CATALOG_SOURCE_DECLARED,
+  CATALOG_SOURCE_OPENCODE_MODELS,
+  CATALOG_SOURCE_COMMAND_CODE_MODELS,
   CATALOG_SOURCE_OFFICIAL_ZEN,
   CATALOG_SOURCE_STATIC,
-} from "./provider-contracts.ts";
+} from "../domain/provider-contracts.ts";
 
 const message = useMessage();
 const providersStore = useProvidersStore();
@@ -310,6 +321,7 @@ const activeSelection = computed(() => {
   return selectProviderScope(scopes.value, scopeKind, scopeId);
 });
 const activeScope = computed(() => activeSelection.value.scope);
+const scnetArchived = computed(() => activeScope.value?.provider_id === "scnet");
 const customProtocolReadOnly = computed(() => activeScope.value?.scope_kind === "custom_endpoint");
 const initialLoading = computed(() => loading.value && !contracts.value);
 const actionLocked = computed(() => (
@@ -325,7 +337,12 @@ const scopeSelectOptions = computed<SelectOption[]>(() => scopes.value.map((scop
 })));
 const refreshAccountOptions = computed<SelectOption[]>(() => (
   activeScope.value
-    ? scopeAccounts(activeScope.value).map((account) => ({ value: account.id, label: account.name }))
+    ? scopeAccounts(activeScope.value)
+      .filter((account) => (
+        activeScope.value?.provider_id !== "command-code"
+        || account.verification_status === "verified"
+      ))
+      .map((account) => ({ value: account.id, label: account.name }))
     : []
 ));
 const probeModelOptions = computed(() => {
@@ -346,6 +363,8 @@ function catalogSourceLabel(source: string): string {
   if (source === CATALOG_SOURCE_OFFICIAL_ZEN) return t("官方 Zen 目录");
   if (source === CATALOG_SOURCE_CUSTOM_DISCOVERY) return t("自定义发现");
   if (source === CATALOG_SOURCE_DECLARED) return t("账号声明");
+  if (source === CATALOG_SOURCE_OPENCODE_MODELS) return `OpenCode · ${t("官方来源")}`;
+  if (source === CATALOG_SOURCE_COMMAND_CODE_MODELS) return `Command Code · ${t("官方来源")}`;
   return source;
 }
 
@@ -419,8 +438,8 @@ async function loadContracts(options: { retain?: boolean } = {}): Promise<{ ok: 
   if (!options.retain) loadError.value = "";
   try {
     const [contractsResult, catalogResult] = await Promise.allSettled([
-      providersStore.loadContracts().then(presentContracts),
-      providersStore.loadCatalog().then((result) => result.entries.map(presentCatalogEntry)),
+      providersStore.loadContracts(),
+      providersStore.loadCatalog(),
     ]);
     if (catalogResult.status === "fulfilled") catalog.value = catalogResult.value;
     if (contractsResult.status === "fulfilled") {
@@ -445,7 +464,7 @@ async function updateProtocol(protocol: ProviderProtocol, enabled: boolean) {
   protocolError.value = "";
   try {
     const response = await providersStore.putProtocolSwitch(scope.scope_id, protocol, enabled);
-    contracts.value = normalizeProviderContractsResponse(presentContracts(response));
+    contracts.value = normalizeProviderContractsResponse(response);
     actionLive.value = t("协议设置已保存");
     message.success(t("协议设置已保存"));
   } catch (error) {

@@ -2,6 +2,7 @@ import type { PricingSnapshot } from "../api/dashboard";
 import type { MessageKey } from "../i18n/index.ts";
 import type {
   ProviderCatalogEntry,
+  ProviderNeutralPricingSnapshot,
   ProviderPricingResponse,
   StoredProviderPricingSnapshot,
 } from "../api/providers.ts";
@@ -22,7 +23,7 @@ export type PricingAvailability = "available" | "unavailable" | "not_applicable"
  */
 export type PlanPricingContent =
   | { kind: "opencode-go"; snapshot: PricingSnapshot | null }
-  | { kind: "goat-reference"; snapshot: null }
+  | { kind: "goat-reference"; snapshot: ProviderNeutralPricingSnapshot | null }
   | { kind: "scnet-reference"; snapshot: null }
   | { kind: "free"; snapshot: null }
   | { kind: "api-key"; snapshot: StoredProviderPricingSnapshot | null }
@@ -60,7 +61,6 @@ export type ProviderSnapshots = Partial<Record<PlanId, ProviderPricingResponse>>
 export const PRICING_PLAN_IDS = [
   "opencode-go",
   "command-code-goat",
-  "scnet",
 ] as const satisfies readonly PlanId[];
 
 const pricingPlanIdSet = new Set<PlanId>(PRICING_PLAN_IDS);
@@ -72,7 +72,7 @@ export const PRICING_PLAN_DEFINITIONS = PLAN_DEFINITIONS.filter(
 function defaultPricingAvailability(plan: PlanDefinition): PricingAvailability {
   if (plan.id === "opencode-go") return "available";
   if (plan.id === "zen-free") return "not_applicable";
-  if (plan.id === "custom-endpoint") return "unpriced";
+  if (plan.id === "custom-endpoint" || plan.id === "command-code-goat") return "unpriced";
   return "unavailable";
 }
 
@@ -87,7 +87,11 @@ function buildContent(
   }
 
   if (plan.id === "command-code-goat") {
-    return { kind: "goat-reference", snapshot: null };
+    const snapshot = providerSnapshots[plan.id]?.snapshot;
+    return {
+      kind: "goat-reference",
+      snapshot: snapshot && "values" in snapshot ? snapshot : null,
+    };
   }
 
   if (plan.id === "scnet") {
@@ -132,10 +136,17 @@ export function resolvePlanPricingDisplay(
   if (error) {
     return { state: "error", messageKey: "加载额度价格表失败: {error}", error };
   }
-  if (group.content.kind === "goat-reference" || group.content.kind === "scnet-reference") {
+  if (group.content.kind === "goat-reference") {
     return {
       state: "reference",
-      messageKey: "以下为官方套餐参考，不是 OCG Manager 实时计价或用量。",
+      messageKey: "未知价格不会参与费用估算",
+      error: null,
+    };
+  }
+  if (group.content.kind === "scnet-reference") {
+    return {
+      state: "unavailable",
+      messageKey: "实验性接入，尚未配置价格目录，不展示价格表。",
       error: null,
     };
   }
@@ -180,9 +191,9 @@ export function resolvePlanPricingDisplay(
 }
 
 /**
- * Groups the pricing page by the three paid plans users compare here. Zen Free
- * has no price and Custom API pricing belongs to its administrator, so neither
- * appears in Pricing even though both remain in the shared Plan registry.
+ * Groups the pricing page by Go and GOAT. Zen Free has no price, Custom API
+ * pricing belongs to its administrator, and archived SCNet Credits are not a
+ * pricing option, so those families stay out of the default Pricing tabs.
  *
  * The OpenCode Go group is always rendered when a Go pricing snapshot has been
  * fetched, even if the provider catalog is still loading, failed, or empty.
@@ -195,8 +206,8 @@ function groupForPlan(
   opencodeSnapshot: PricingSnapshot | null,
   providerSnapshots: ProviderSnapshots,
 ): PlanPricingGroup {
-  // For families with multiple offerings (SCNet), the catalog should list all
-  // of them with the same pricing_availability; read the first present entry.
+  // For families with multiple offerings, the catalog should list all of them
+  // with the same pricing_availability; read the first present entry.
   const entry = plan.offering_ids
     .map((offeringId) => findCatalogEntry(catalog, plan.provider_id, offeringId))
     .find(Boolean);
@@ -212,16 +223,6 @@ function groupForPlan(
     pricingAvailability,
     content: buildContent(plan, pricingAvailability, opencodeSnapshot, providerSnapshots),
   };
-}
-
-export function buildPlanPricingGroups(
-  catalog: readonly ProviderCatalogEntry[] | null | undefined,
-  opencodeSnapshot: PricingSnapshot | null,
-  providerSnapshots: ProviderSnapshots,
-): PlanPricingGroup[] {
-  return PRICING_PLAN_DEFINITIONS.map((plan) => (
-    groupForPlan(plan, catalog, opencodeSnapshot, providerSnapshots)
-  ));
 }
 
 /** Pricing groups for a single provider family, including Zen Free and Custom. */

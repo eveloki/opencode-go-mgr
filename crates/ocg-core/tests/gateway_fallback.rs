@@ -27,14 +27,11 @@ use std::time::Duration as StdDuration;
 
 #[path = "fixtures/fake_upstream.rs"]
 mod fake_upstream;
-#[path = "fixtures/legacy_dashboard.rs"]
-mod legacy_dashboard;
 
 use fake_upstream::{
     DelayedChunks, FakeCall as MockCall, FakeReply as MockReply, start_delayed_fake_upstream,
     start_fake_upstream, start_raw_disconnect_upstream,
 };
-use legacy_dashboard::LegacyDashboardHandle;
 
 const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
 const OPAQUE_ACCOUNT_KEY: &str = "opaque/account+key=42";
@@ -417,6 +414,27 @@ fn create_goat_account(
             .enabled,
         "loopback GOAT fixture must be enabled in the already-open database"
     );
+}
+
+fn persist_goat_verified_catalog(state: &Arc<CoreStateInner>, account_id: &str, models: &[&str]) {
+    let models: Vec<String> = models.iter().map(|model| (*model).to_string()).collect();
+    let db = state.db.lock();
+    let contract = db
+        .capture_goat_verification_contract(account_id)
+        .unwrap()
+        .expect("GOAT verification contract");
+    assert!(
+        db.commit_goat_verification_if_contract_matches(
+            &contract,
+            ocg_core::provider::ConnectionVerificationStatus::Verified,
+            Some(Utc::now()),
+            None,
+            Some(models.as_slice()),
+        )
+        .unwrap()
+    );
+    drop(db);
+    state.reload_provider_contracts().unwrap();
 }
 
 /// Integration-test-only SQLite poke. Production `ocg-core` rlibs have no
@@ -3113,6 +3131,11 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
     let (state, dir) = build_state(base_url.clone(), &["open-key"]);
     let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
     create_goat_account(&state, "acct-1", &goat_id, "goat-key");
+    persist_goat_verified_catalog(
+        &state,
+        &goat_id,
+        &[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM],
+    );
     state
         .db
         .lock()
@@ -3193,6 +3216,60 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
 }
 
 #[tokio::test]
+async fn disabled_goat_protocol_fails_locally_without_upstream() {
+    let replies = HashMap::from([(
+        "goat-key".to_string(),
+        VecDeque::from([MockReply {
+            status: 200,
+            body: SUCCESS_BODY,
+        }]),
+    )]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url.clone(), &["open-key"]);
+    let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
+    create_goat_account(&state, "acct-1", &goat_id, "goat-key");
+    persist_goat_verified_catalog(
+        &state,
+        &goat_id,
+        &[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM],
+    );
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .unwrap();
+    state
+        .db
+        .lock()
+        .set_protocol_switch(
+            &ocg_core::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+            ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+            false,
+            Utc::now(),
+        )
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(goat_id, base_url).unwrap();
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) = protocol_call(
+        port,
+        "/v1/chat/completions",
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "disabled GOAT protocol must fail before sending its stored Key upstream"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn unsupported_goat_model_is_skipped_before_any_upstream_attempt() {
     let replies = HashMap::from([(
         "open-key".to_string(),
@@ -3257,6 +3334,11 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
     );
     let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
     create_goat_account(&state, "acct-1", &goat_id, "goat-key");
+    persist_goat_verified_catalog(
+        &state,
+        &goat_id,
+        &[COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM],
+    );
     state
         .db
         .lock()
@@ -3391,7 +3473,7 @@ async fn enabled_goat_without_loopback_is_not_selected() {
     assert_ne!(
         status,
         StatusCode::OK,
-        "production GOAT must stay unselected without the loopback seam: {body}"
+        "enabled but unverified GOAT must stay unselected: {body}"
     );
     assert!(
         calls.lock().unwrap().is_empty(),
@@ -3405,172 +3487,114 @@ async fn enabled_goat_without_loopback_is_not_selected() {
 }
 
 #[tokio::test]
-async fn dashboard_ping_401_sets_auth_error_and_success_clears_it() {
+async fn eligible_goat_anthropic_catalog_uses_messages_and_converts_client_responses() {
     let replies = HashMap::from([(
-        OPAQUE_ACCOUNT_KEY.to_string(),
+        "goat-key".to_string(),
         VecDeque::from([
             MockReply {
-                status: 401,
-                body: ERROR_BODY_WITH_ECHOED_KEY,
+                status: 200,
+                body: MESSAGES_SUCCESS_BODY,
             },
             MockReply {
                 status: 200,
-                body: SUCCESS_BODY,
+                body: MESSAGES_SUCCESS_BODY,
             },
         ]),
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &[OPAQUE_ACCOUNT_KEY]);
-    let (_port, gateway_handle) = start_gateway(state.clone()).await;
-    let legacy = LegacyDashboardHandle::start(state.clone()).await;
-    let endpoint = legacy.url("/accounts/acct-1/test");
-
-    let first = loopback_client().post(&endpoint).send().await.unwrap();
-    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
-    let first_body = first.text().await.unwrap();
-    assert!(
-        !first_body.contains(OPAQUE_ACCOUNT_KEY),
-        "dashboard ping error leaked key: {first_body}"
-    );
-    let auth_error = state
-        .db
-        .lock()
-        .get_account("acct-1")
-        .unwrap()
-        .unwrap()
-        .auth_error
-        .expect("401 should persist an auth error");
-    assert!(auth_error.contains("401"));
-    assert!(!auth_error.contains(OPAQUE_ACCOUNT_KEY));
-
-    let second = loopback_client().post(&endpoint).send().await.unwrap();
-    assert_eq!(second.status(), StatusCode::OK);
-    assert!(
-        state
-            .db
-            .lock()
-            .get_account("acct-1")
-            .unwrap()
-            .unwrap()
-            .auth_error
-            .is_none()
-    );
-    {
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|call| call.key == OPAQUE_ACCOUNT_KEY));
-    }
-
-    legacy.stop().await;
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn dashboard_ping_marks_quota_cooldown() {
-    let replies = HashMap::from([(
-        "key-1".to_string(),
-        VecDeque::from([MockReply {
-            status: 429,
-            body: LIMITED_BODY,
-        }]),
-    )]);
-    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
-    let (state, dir) = build_state(base_url, &["key-1"]);
+    let (state, dir) = build_state(base_url.clone(), &["open-key"]);
+    let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
+    create_goat_account(&state, "acct-1", &goat_id, "goat-key");
     state
         .db
         .lock()
-        .set_account_auth_error("acct-1", Some("stale auth error"))
+        .set_goat_model_access(&goat_id, ocg_core::provider::GoatModelAccess::All)
         .unwrap();
-    let (_port, gateway_handle) = start_gateway(state.clone()).await;
-    let legacy = LegacyDashboardHandle::start(state.clone()).await;
+    persist_goat_verified_catalog(&state, &goat_id, &["claude-sonnet-4-6"]);
+    state
+        .db
+        .lock()
+        .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .unwrap();
+    let _goat_route = install_goat_loopback_route_for_test(goat_id.clone(), base_url).unwrap();
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let response = loopback_client()
-        .post(legacy.url("/accounts/acct-1/test"))
+    let models = loopback_client()
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .bearer_auth("gw-test")
         .send()
         .await
         .unwrap();
+    assert_eq!(models.status(), StatusCode::OK);
+    let models: serde_json::Value = models.json().await.unwrap();
+    let ids = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["id"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert!(
+        ids.iter().any(|id| id == "claude-sonnet-4-6"),
+        "eligible unique GOAT kebab id must be published: {ids:?}"
+    );
+    assert!(
+        !ids.iter()
+            .any(|id| id == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM),
+        "GOAT raw ids must stay unpublished: {ids:?}"
+    );
 
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let body: serde_json::Value = response.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().contains("额度"));
-
-    let stored = state.db.lock().get_account("acct-1").unwrap().unwrap();
-    let remaining = stored.cooldown_until.unwrap() - Utc::now();
-    assert!(remaining > Duration::days(2) && remaining <= Duration::days(3));
-    assert!(stored.last_error.unwrap().contains("Weekly usage limit"));
-    assert!(stored.auth_error.is_none());
-
-    {
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls[0].key, "key-1");
-        let payload: serde_json::Value = serde_json::from_str(&calls[0].body).unwrap();
-        assert_eq!(
-            payload["model"],
-            ocg_core::models::DEFAULT_ACCOUNT_TEST_MODEL
-        );
-        assert_eq!(payload["messages"][0]["content"], "ping");
+    for path in ["/v1/messages", "/v1/responses"] {
+        let (status, body) = protocol_call(port, path, "claude-sonnet-4-6").await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
     }
-
-    legacy.stop().await;
-    gateway::stop_gateway(gateway_handle);
-    let _ = stop_mock.send(());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[tokio::test]
-async fn delayed_dashboard_ping_429_does_not_cool_down_replaced_key() {
-    let (base_url, calls, stop_mock) = start_delayed_upstream(
-        StatusCode::TOO_MANY_REQUESTS,
-        "application/json",
-        vec![(StdDuration::from_millis(250), LIMITED_BODY)],
-    )
-    .await;
-    let (state, dir) = build_state(base_url, &["key-1"]);
-    let (_port, gateway_handle) = start_gateway(state.clone()).await;
-    let legacy = LegacyDashboardHandle::start(state.clone()).await;
-    let endpoint = legacy.url("/accounts/acct-1/test");
-
-    let request =
-        tokio::spawn(async move { loopback_client().post(endpoint).send().await.unwrap() });
-    tokio::time::timeout(StdDuration::from_secs(10), async {
-        while calls.load(Ordering::Relaxed) == 0 {
-            tokio::time::sleep(StdDuration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("ping should reach upstream");
-
+    let captured = calls.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2, "{captured:?}");
+    assert!(
+        captured
+            .iter()
+            .all(|call| call.authorization.as_deref() == Some("Bearer goat-key"))
+    );
     state
         .db
         .lock()
-        .update_account(
-            "acct-1",
-            &AccountUpdate {
-                name: None,
-                username: None,
-                password: None,
-                key: None,
-                enabled: None,
-                referral_code: None,
-                purchase_date: None,
-                notes: None,
-            },
-            Some("replacement-cipher"),
-            None,
+        .set_protocol_switch(
+            &ocg_core::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+            ocg_core::provider::UpstreamProtocolKind::Messages,
+            false,
+            Utc::now(),
         )
         .unwrap();
+    state.reload_provider_contracts().unwrap();
+    let models = loopback_client()
+        .get(format!("http://127.0.0.1:{port}/v1/models"))
+        .bearer_auth("gw-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(models.status(), StatusCode::OK);
+    let models: serde_json::Value = models.json().await.unwrap();
+    let ids = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !ids.contains(&"claude-sonnet-4-6"),
+        "GOAT model must leave /v1/models when its only protocol is disabled: {ids:?}"
+    );
+    assert!(
+        captured
+            .iter()
+            .all(|call| call.path == "/provider/v1/messages"),
+        "{:?}",
+        captured
+            .iter()
+            .map(|call| call.path.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(captured.iter().all(|call| call.x_api_key.is_none()));
 
-    let response = request.await.unwrap();
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let stored = state.db.lock().get_account("acct-1").unwrap().unwrap();
-    assert_eq!(stored.key_cipher, "replacement-cipher");
-    assert!(stored.auth_error.is_none());
-    assert!(stored.cooldown_until.is_none());
-    assert!(stored.last_error.is_none());
-
-    legacy.stop().await;
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
     let _ = fs::remove_dir_all(dir);

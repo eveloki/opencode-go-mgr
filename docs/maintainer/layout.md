@@ -18,9 +18,8 @@ ocg-manager/
 │   │   ├── dashboard-v3.ts            Hand-written `/dashboard/api/v3` client
 │   │   ├── generated/dashboard-v3.ts  Types generated from the frozen JSON Schema
 │   │   ├── dashboard.ts               Presenter over V3 for existing pages
-│   │   ├── dashboard-presenters.ts    Field projection (camelCase wire → page shapes)
-│   │   ├── http.ts                    Domain-neutral fetch helpers
-│   │   └── tauri.ts                   Historical name; leftover types/helpers for some tests — not Tauri invoke
+│   │   ├── providers.ts               Provider-page presenter (Zen Free, pricing, protocol switches)
+│   │   └── dashboard-presenters.ts    Field projection (camelCase wire → page shapes)
 │   ├── stores/        session, controlPlane (CAS tokens), connection, accounts, providers, settings
 │   ├── components/    Account cards, managed wizard, pricing catalog, …
 │   ├── i18n/          i18n setup + per-locale message tables + tests
@@ -48,10 +47,9 @@ the Tauri app. Current workspace version is `1.8.2`; `rust-version` is
 `1.85.0`; edition is `2024`.
 
 The live Vue data path is HTTP Dashboard V3 (`src/api/dashboard-v3.ts` and
-the presenter in `src/api/dashboard.ts`). There is no `src-tauri/src/commands/`
-module and no `tauri::generate_handler` / `#[tauri::command]` surface.
-`src/api/tauri.ts` is a leftover filename still imported by some unit tests
-for historical types; it is not `invoke()` and not the production client.
+the presenters in `src/api/dashboard.ts` / `src/api/providers.ts`). There is
+no `src-tauri/src/commands/` module and no `tauri::generate_handler` /
+`#[tauri::command]` surface. The production dashboard client is not `invoke()`.
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](layout.zh-CN.md) · [Docs index](../README.md)

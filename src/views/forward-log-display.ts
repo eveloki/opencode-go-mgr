@@ -1,5 +1,5 @@
 import type { ForwardLog } from "../api/dashboard.ts";
-import { planLabel } from "./plans.ts";
+import { planLabel } from "../domain/plans.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 
 /**

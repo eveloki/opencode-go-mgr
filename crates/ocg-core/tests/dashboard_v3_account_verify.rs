@@ -13,15 +13,18 @@ use ocg_core::custom::MAX_CUSTOM_VERIFICATION_BODY_BYTES;
 #[cfg(debug_assertions)]
 use ocg_core::dashboard_v3::install_custom_verify_probe_for_tests;
 use ocg_core::dashboard_v3::{
-    AccountMutation, AccountVerificationStatus, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
-    ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    AccountMutation, AccountVerificationStatus, ERROR_CONFLICT, ERROR_INVALID_JSON,
+    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
     ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
 };
 use ocg_core::db::CURRENT_SCHEMA_VERSION;
+use ocg_core::gateway::provider_adapter::install_goat_verify_origin_for_test;
+use ocg_core::goat::MAX_GOAT_VERIFICATION_BODY_BYTES;
 use ocg_core::models::ProxyMode;
 use ocg_core::provider::{
-    COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID,
-    SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
+    COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
+    CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, SCNET_PROVIDER_ID,
+    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -40,6 +43,9 @@ const CUSTOM_MODEL: &str = "custom-local-model";
 const CUSTOM_MODEL_2: &str = "custom-other-model";
 const SUCCESS_BODY: &str = r#"{"id":"ok","object":"json"}"#;
 const LEAKY_401_BODY: &str = r#"{"error":"rejected v3-verify-secret-key"}"#;
+const GOAT_KEY: &str = "sk-goat-verify";
+const GOAT_MODELS_BODY: &str =
+    r#"{"object":"list","data":[{"id":"deepseek/deepseek-v4-flash"},{"id":"claude-sonnet-4-6"}]}"#;
 
 #[derive(Clone, Debug)]
 struct CapturedCall {
@@ -433,6 +439,51 @@ async fn create_goat_account(harness: &V3Harness) -> String {
         .to_string()
 }
 
+fn insert_scnet_leftover(harness: &V3Harness, id: &str) {
+    let plan =
+        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
+            .unwrap();
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &ocg_core::models::Account {
+                id: id.into(),
+                provider_id: SCNET_PROVIDER_ID.into(),
+                offering_id: SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
+                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
+                quota_scope: ocg_core::provider::QuotaScope::Key,
+                name: id.into(),
+                username: None,
+                password_cipher: None,
+                key_cipher: harness.state.encrypt_key("sk-tp-verify").unwrap(),
+                enabled: false,
+                account_type: ocg_core::models::AccountType::Key,
+                setup_step: ocg_core::models::AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                notes: None,
+                created_at: now,
+                updated_at: now,
+            },
+            None,
+            &[],
+            plan.risk_notice,
+        )
+        .expect("preserved SCNet leftover draft");
+}
+
 async fn create_scnet_account(harness: &V3Harness) -> String {
     let (status, created) = send_json(
         harness,
@@ -450,11 +501,10 @@ async fn create_scnet_account(harness: &V3Harness) -> String {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{created}");
-    created["account"]["id"]
-        .as_str()
-        .expect("created SCNet account id")
-        .to_string()
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{created}");
+    let id = "scnet-leftover-verify".to_string();
+    insert_scnet_leftover(harness, &id);
+    id
 }
 
 async fn create_custom_account(
@@ -507,8 +557,8 @@ async fn create_custom_account(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v27() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+fn dashboard_v3_schema_version_stays_at_v28() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
 }
 
 #[test]
@@ -700,16 +750,6 @@ async fn goat_scnet_and_unknown_offerings_fail_closed_with_zero_upstream() {
     }
     let before = harness.state.settings_revision();
 
-    let (status, goat) = send_json(
-        &harness,
-        Method::POST,
-        &verify_path(&goat_id),
-        &cas(&harness, json!({})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{goat}");
-    assert_v3_error(&goat, ERROR_NOT_IMPLEMENTED);
-
     let (status, scnet) = send_json(
         &harness,
         Method::POST,
@@ -756,6 +796,350 @@ async fn goat_scnet_and_unknown_offerings_fail_closed_with_zero_upstream() {
         .unwrap()
         .unwrap();
     assert!(!stored.enabled);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn goat_verify_persists_catalog_without_enabling_then_explicit_enable() {
+    let harness = start_loopback("verify-goat-ok").await;
+    force_direct_proxy(&harness);
+    let origin = start_origin(StatusCode::OK, GOAT_MODELS_BODY, Duration::ZERO).await;
+    let _guard =
+        install_goat_verify_origin_for_test(harness.state.process_generation(), origin.url.clone())
+            .unwrap();
+    let id = create_goat_account(&harness).await;
+    let before_enable = harness.state.settings_revision();
+    let (status, blocked) = send_json(
+        &harness,
+        Method::PATCH,
+        &format!("/accounts/{id}"),
+        &cas(&harness, json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    assert_v3_error(&blocked, ERROR_CONFLICT);
+    assert_eq!(harness.state.settings_revision(), before_enable);
+
+    let before = harness.state.settings_revision();
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &verify_path(&id),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let account = mutation_account(&body);
+    assert!(!account.enabled);
+    assert_eq!(
+        account.verification_status,
+        AccountVerificationStatus::Verified
+    );
+    assert!(account.connection_verified_at.is_some());
+    assert!(account.verification_error.is_none());
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    assert_secret_free(&body, &[GOAT_KEY]);
+
+    let models = harness
+        .state
+        .db
+        .lock()
+        .list_goat_catalog_models(&id)
+        .unwrap();
+    assert_eq!(
+        models,
+        vec![
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.to_string(),
+            "claude-sonnet-4-6".to_string()
+        ]
+    );
+    let calls = origin.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].method, "GET");
+    assert_eq!(calls[0].path, "/provider/v1/models");
+    assert_eq!(
+        calls[0].authorization.as_deref(),
+        Some("Bearer sk-goat-verify")
+    );
+    assert!(calls[0].x_api_key.is_none());
+    assert!(calls[0].cookie.is_none());
+
+    let (status, enabled) = send_json(
+        &harness,
+        Method::PATCH,
+        &format!("/accounts/{id}"),
+        &cas(&harness, json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    let enabled = mutation_account(&enabled);
+    assert!(enabled.enabled);
+    assert_eq!(
+        enabled.verification_status,
+        AccountVerificationStatus::Verified
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn provider_model_refresh_uses_the_selected_go_or_goat_account_and_persists_last_good() {
+    let harness = start_loopback("provider-model-refresh").await;
+    force_direct_proxy(&harness);
+    let go_origin = start_origin(
+        StatusCode::OK,
+        r#"{"object":"list","data":[{"id":"glm-5.3"},{"id":"future-go-model"}]}"#,
+        Duration::ZERO,
+    )
+    .await;
+
+    let mut config = harness.state.config();
+    config.upstream_base_url = format!("{}/provider/v1", go_origin.url);
+    harness.state.set_config(config).unwrap();
+
+    let go_id = create_go_account(&harness).await;
+    let (status, go_models) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/providers/{OPENCODE_PROVIDER_ID}/models/refresh"),
+        &cas(&harness, json!({ "accountId": go_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{go_models}");
+    assert_eq!(go_models["providerId"], OPENCODE_PROVIDER_ID);
+    assert_eq!(
+        go_models["sourceUrl"],
+        format!("{}/provider/v1/models", go_origin.url)
+    );
+    assert_eq!(go_models["models"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        go_origin.calls.lock().unwrap()[0].path,
+        "/provider/v1/models"
+    );
+    assert_eq!(
+        go_origin.calls.lock().unwrap()[0].authorization.as_deref(),
+        Some("Bearer sk-go-verify")
+    );
+
+    let gateway_base = harness.v3_base.strip_suffix("/dashboard/api/v3").unwrap();
+    let listed: Value = harness
+        .client
+        .get(format!("{gateway_base}/v1/models"))
+        .bearer_auth(harness.state.config().gateway_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let listed_ids = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(listed_ids.contains(&"glm-5.3"));
+    assert!(
+        !listed_ids.contains(&"grok-4.5"),
+        "saved Go catalog is authoritative"
+    );
+    assert!(
+        !listed_ids.contains(&"future-go-model"),
+        "unknown protocols stay visible in Provider catalog but fail closed for routing"
+    );
+
+    let goat_origin = start_origin(StatusCode::OK, GOAT_MODELS_BODY, Duration::ZERO).await;
+    let _guard = install_goat_verify_origin_for_test(
+        harness.state.process_generation(),
+        goat_origin.url.clone(),
+    )
+    .unwrap();
+    let goat_id = create_goat_account(&harness).await;
+    let (status, verified) = send_json(
+        &harness,
+        Method::POST,
+        &verify_path(&goat_id),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{verified}");
+
+    let before = harness.state.settings_revision();
+    let (status, goat_models) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/providers/{COMMAND_CODE_PROVIDER_ID}/models/refresh"),
+        &cas(&harness, json!({ "accountId": goat_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{goat_models}");
+    assert_eq!(goat_models["providerId"], COMMAND_CODE_PROVIDER_ID);
+    assert_eq!(
+        goat_models["sourceUrl"],
+        format!("{}/provider/v1/models", goat_origin.url)
+    );
+    assert_eq!(goat_models["models"].as_array().unwrap().len(), 2);
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    assert_eq!(goat_origin.calls.lock().unwrap().len(), 2);
+    assert!(
+        goat_origin
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call.method == "GET" && call.path == "/provider/v1/models")
+    );
+
+    let failed = start_origin(
+        StatusCode::BAD_GATEWAY,
+        r#"{"error":"down"}"#,
+        Duration::ZERO,
+    )
+    .await;
+    let _failed_guard =
+        install_goat_verify_origin_for_test(harness.state.process_generation(), failed.url.clone())
+            .unwrap();
+    let revision_before_failure = harness.state.settings_revision();
+    let (status, failure) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/providers/{COMMAND_CODE_PROVIDER_ID}/models/refresh"),
+        &cas(&harness, json!({ "accountId": goat_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{failure}");
+    assert_eq!(harness.state.settings_revision(), revision_before_failure);
+    let persisted = harness
+        .state
+        .db
+        .lock()
+        .list_goat_catalog_models(&goat_id)
+        .unwrap();
+    assert_eq!(persisted.len(), 2);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn goat_verify_401_redirect_and_oversize_persist_failed_without_enabling() {
+    let harness = start_loopback("verify-goat-fail").await;
+    force_direct_proxy(&harness);
+
+    let unauthorized = start_origin(StatusCode::UNAUTHORIZED, LEAKY_401_BODY, Duration::ZERO).await;
+    let _guard = install_goat_verify_origin_for_test(
+        harness.state.process_generation(),
+        unauthorized.url.clone(),
+    )
+    .unwrap();
+    let id_401 = create_goat_account(&harness).await;
+    let before = harness.state.settings_revision();
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &verify_path(&id_401),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let account = mutation_account(&body);
+    assert!(!account.enabled);
+    assert_eq!(
+        account.verification_status,
+        AccountVerificationStatus::Failed
+    );
+    assert!(
+        account
+            .verification_error
+            .as_deref()
+            .is_some_and(|error| error.contains("401"))
+    );
+    assert_secret_free(&body, &[GOAT_KEY, "rejected v3-verify-secret-key"]);
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    drop(_guard);
+
+    let (redirect, second_hits) = start_redirect_origin().await;
+    let _redirect_guard = install_goat_verify_origin_for_test(
+        harness.state.process_generation(),
+        redirect.url.clone(),
+    )
+    .unwrap();
+    let id_redirect = {
+        let (status, created) = send_json(
+            &harness,
+            Method::POST,
+            "/accounts",
+            &cas(
+                &harness,
+                json!({
+                    "name": "GOAT redirect",
+                    "key": GOAT_KEY,
+                    "providerId": COMMAND_CODE_PROVIDER_ID,
+                    "offeringId": GOAT_OFFERING_ID
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        created["account"]["id"].as_str().unwrap().to_string()
+    };
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &verify_path(&id_redirect),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let account = mutation_account(&body);
+    assert_eq!(
+        account.verification_status,
+        AccountVerificationStatus::Failed
+    );
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+    drop(_redirect_guard);
+
+    let oversized = "x".repeat(MAX_GOAT_VERIFICATION_BODY_BYTES + 1);
+    let huge = start_origin(StatusCode::OK, &oversized, Duration::ZERO).await;
+    let _oversize_guard =
+        install_goat_verify_origin_for_test(harness.state.process_generation(), huge.url.clone())
+            .unwrap();
+    let id_oversize = {
+        let (status, created) = send_json(
+            &harness,
+            Method::POST,
+            "/accounts",
+            &cas(
+                &harness,
+                json!({
+                    "name": "GOAT oversize",
+                    "key": GOAT_KEY,
+                    "providerId": COMMAND_CODE_PROVIDER_ID,
+                    "offeringId": GOAT_OFFERING_ID
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        created["account"]["id"].as_str().unwrap().to_string()
+    };
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &verify_path(&id_oversize),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let account = mutation_account(&body);
+    assert!(!account.enabled);
+    assert_eq!(
+        account.verification_status,
+        AccountVerificationStatus::Failed
+    );
+    assert!(
+        account
+            .verification_error
+            .as_deref()
+            .is_some_and(|error| error.contains("byte") || error.contains("limit"))
+    );
     harness.stop();
 }
 
@@ -1143,16 +1527,14 @@ async fn v2_account_verify_coexists_and_keeps_its_shape() {
         .await
         .unwrap();
     V3Harness::assert_v2_removed(v2_goat.status(), &v2_goat.json().await.unwrap());
-
-    let (status, v3_goat) = send_json(
-        &harness,
-        Method::POST,
-        &verify_path(&goat_id),
-        &cas(&harness, json!({})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{v3_goat}");
-    assert_v3_error(&v3_goat, ERROR_NOT_IMPLEMENTED);
+    let stored_goat = harness
+        .state
+        .db
+        .lock()
+        .get_account(&goat_id)
+        .unwrap()
+        .unwrap();
+    assert!(!stored_goat.enabled);
 
     let v2_custom = harness
         .client

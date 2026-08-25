@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { PricingSnapshot } from "../api/tauri.ts";
+import type { PricingSnapshot } from "../api/dashboard.ts";
 import type { StoredProviderPricingSnapshot } from "../api/providers.ts";
 import {
-  buildPlanPricingGroups,
   buildScopedPlanPricingGroups,
   resolvePlanPricingDisplay,
   type PlanPricingContent,
@@ -126,27 +125,27 @@ test("scoped pricing groups stay on one provider and include Zen Free or Custom 
   assert.deepEqual(go.map(({ plan }) => plan.id), ["opencode-go"]);
 });
 
-test("Pricing includes only Go, GOAT, and SCNet in stable order", () => {
-  for (const catalog of [null, []]) {
-    const groups = buildPlanPricingGroups(catalog, goSnapshot(), {});
-    assert.deepEqual(groups.map(({ plan }) => plan.id), [
-      "opencode-go",
-      "command-code-goat",
-      "scnet",
-    ]);
-    assert.ok(groups.every(({ plan }) => plan.id !== "zen-free" && plan.id !== "custom-endpoint"));
-  }
+test("GOAT keeps local accounting unpriced while showing its official reference", () => {
+  const goat = buildScopedPlanPricingGroups("command-code", null, goSnapshot(), {})[0]!;
+
+  assert.equal(goat.pricingAvailability, "unpriced");
+  assert.equal(goat.content.kind, "goat-reference");
+  assert.deepEqual(resolvePlanPricingDisplay(goat), {
+    state: "reference",
+    messageKey: "未知价格不会参与费用估算",
+    error: null,
+  });
 });
 
-test("GOAT and SCNet render dated reference panels without changing runtime availability", () => {
-  const groups = buildPlanPricingGroups(null, goSnapshot(), {});
-  const goat = groups.find(({ plan }) => plan.id === "command-code-goat")!;
-  const scnet = groups.find(({ plan }) => plan.id === "scnet")!;
-
-  assert.equal(goat.pricingAvailability, "unavailable");
-  assert.equal(goat.content.kind, "goat-reference");
-  assert.equal(resolvePlanPricingDisplay(goat).state, "reference");
-  assert.equal(scnet.pricingAvailability, "unavailable");
+test("scoped SCNet stays identity-only and never becomes a Credits price table", () => {
+  const groups = buildScopedPlanPricingGroups("scnet", null, goSnapshot(), {});
+  assert.deepEqual(groups.map(({ plan }) => plan.id), ["scnet"]);
+  const scnet = groups[0]!;
   assert.equal(scnet.content.kind, "scnet-reference");
-  assert.equal(resolvePlanPricingDisplay(scnet).state, "reference");
+  assert.equal(scnet.pricingAvailability, "unavailable");
+  assert.deepEqual(resolvePlanPricingDisplay(scnet), {
+    state: "unavailable",
+    messageKey: "实验性接入，尚未配置价格目录，不展示价格表。",
+    error: null,
+  });
 });

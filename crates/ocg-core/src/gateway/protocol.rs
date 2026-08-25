@@ -16,6 +16,9 @@ pub use crate::kernel::protocol::{
     opencode_supports_upstream, supported_model_ids, supported_model_protocol_profiles,
     supported_model_protocols,
 };
+pub use ocg_domain::protocol::{
+    command_code_is_anthropic_model, command_code_preferred_format, command_code_supported_formats,
+};
 
 pub(crate) use ocg_gateway::protocol::{
     NamespaceToolMapping, decode_anthropic_thinking_block, decode_chat_reasoning,
@@ -166,7 +169,8 @@ pub struct UsageCounts {
 }
 
 /// Official Command Code relative paths. Responses and Gemini have no upstream
-/// path; client formats convert to Chat for the first supported GOAT model.
+/// path; client Chat/Responses/Messages convert through the no-I/O kernel onto
+/// Chat (OpenAI/OSS) or Messages (Anthropic).
 pub fn command_code_upstream_path(format: ApiFormat) -> Option<&'static str> {
     match format {
         ApiFormat::ChatCompletions => Some(COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH),

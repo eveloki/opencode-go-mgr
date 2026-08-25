@@ -2,7 +2,6 @@ import type {
   Account,
   AccountCredentialKind,
   AccountQuotaScope,
-  PricingLimits,
 } from "../api/dashboard";
 
 /**
@@ -30,11 +29,6 @@ export const DEFAULT_OFFERING_ID = "go";
 
 export const COMMAND_CODE_PROVIDER_ID = "command-code";
 export const COMMAND_CODE_GOAT_OFFERING_ID = "goat";
-export const COMMAND_CODE_GOAT_USAGE_LIMITS: PricingLimits = {
-  window_5h: 14,
-  window_week: 35,
-  window_month: 70,
-};
 
 /** Built-in singleton Zen Free account; created and owned by the backend. */
 export const ZEN_FREE_ACCOUNT_ID = "00000000-0000-0000-0000-000000000002";

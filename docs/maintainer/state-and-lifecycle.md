@@ -97,9 +97,8 @@ the previous baseline. Sync metadata lives in `provider_usage_sync_state`
 (the five leftover `accounts.usage_sync_*` columns are dropped in v27).
 The public Go docs have not listed this path yet.
 
-`console_usage.rs` is **frozen** deprecated compatibility code — do not
-call or extend. Remove only after ≥2 minor releases plus stable
-real-account evidence. Manual slider/PATCH calibration stays available.
+Usage sync is handled only by `usage_sync.rs`; there is no Profile
+Cookie/HTML console usage path.
 
 Zen Free is database-owned: it can be enabled, disabled, and reordered,
 but cannot be created or deleted through generic account APIs. GOAT /

@@ -11,23 +11,32 @@
 pub use ocg_gateway::alias::{
     AMBIGUOUS_MODEL_ID, AliasEntry, CUSTOM_DYNAMIC_UPSTREAM, ProviderMapping, PublishedAlias,
     ResolveError, ResolvedModel, is_published_alias, published_aliases,
-    published_routeable_aliases, published_routeable_aliases_with_zen, resolve,
-    resolve_with_custom, resolve_with_provider_models, routeable_aliases_for,
-    routeable_aliases_for_with_zen,
+    published_routeable_aliases, published_routeable_aliases_with_all_catalogs,
+    published_routeable_aliases_with_zen, resolve, resolve_with_all_catalogs,
+    resolve_with_catalogs, resolve_with_custom, resolve_with_provider_models,
+    routeable_aliases_for, routeable_aliases_for_with_zen,
 };
 
 type ResolveName = fn(&str) -> Result<ResolvedModel, ResolveError>;
 type ResolveCustom = fn(&str, &[String]) -> Result<ResolvedModel, ResolveError>;
 type ResolveProviderModels = fn(&str, &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
+type ResolveCatalogs =
+    fn(&str, &[String], &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
+type ResolveAllCatalogs =
+    fn(&str, &[String], &[String], &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
 type RouteableWithZen = fn(&str, &str, &[String]) -> Vec<String>;
 
 const _: ResolveName = resolve;
 const _: ResolveName = ocg_gateway::alias::resolve;
 const _: ResolveCustom = resolve_with_custom;
 const _: ResolveProviderModels = resolve_with_provider_models;
+const _: ResolveCatalogs = resolve_with_catalogs;
+const _: ResolveAllCatalogs = resolve_with_all_catalogs;
 const _: fn() -> Vec<String> = published_aliases;
 const _: fn() -> Vec<PublishedAlias> = published_routeable_aliases;
 const _: fn(&[String]) -> Vec<PublishedAlias> = published_routeable_aliases_with_zen;
+const _: fn(&[String], &[String], &[String]) -> Vec<PublishedAlias> =
+    published_routeable_aliases_with_all_catalogs;
 const _: fn(&str, &str) -> Vec<String> = routeable_aliases_for;
 const _: RouteableWithZen = routeable_aliases_for_with_zen;
 const _: fn(&str) -> bool = is_published_alias;

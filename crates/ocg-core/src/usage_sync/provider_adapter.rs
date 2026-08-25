@@ -234,13 +234,7 @@ mod tests {
         assert!(go.automatic_sync);
         assert!(go.authoritative_for_quota);
 
-        let goat = provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert_eq!(goat.evidence, ProviderUsageEvidence::Unavailable);
-        assert!(goat.experimental);
-        assert_eq!(goat.endpoint, None);
-        assert!(!goat.automatic_sync);
-        assert!(!goat.authoritative_for_quota);
-        assert!(!goat.affects_inference_eligibility);
+        assert!(provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none());
 
         let zen =
             provider_usage_capability(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID)
@@ -265,10 +259,7 @@ mod tests {
                     assert!(capability.authoritative_for_quota);
                 }
                 ProviderAdapterKind::CommandCodeGoat => {
-                    let capability = capability.expect("GOAT publishes an unavailable capability");
-                    assert_eq!(capability.evidence, ProviderUsageEvidence::Unavailable);
-                    assert!(capability.experimental);
-                    assert!(!capability.automatic_sync);
+                    assert!(capability.is_none());
                 }
                 ProviderAdapterKind::ZenFree => {
                     let capability = capability.expect("Zen publishes local-state usage");
@@ -302,11 +293,10 @@ mod tests {
 
         let goat_plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         let goat_usage = CommandCodeGoatAdapter::usage(goat_plan);
-        let goat = provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert!(goat_usage.experimental);
-        assert_eq!(goat.experimental, goat_usage.experimental);
-        assert_eq!(goat.endpoint, goat_usage.endpoint);
+        assert!(!goat_usage.experimental);
+        assert!(!goat_usage.publishes_capability);
         assert!(!goat_usage.automatic_sync);
+        assert!(provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none());
 
         let zen_plan =
             builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();

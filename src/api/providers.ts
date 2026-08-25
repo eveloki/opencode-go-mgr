@@ -6,11 +6,16 @@ import type {
   ProviderCatalogEntry as V3ProviderCatalogEntry,
   ProviderContracts as V3ProviderContracts,
   ProviderPricing as V3ProviderPricing,
+  ProviderPricingSnapshot as V3ProviderPricingSnapshot,
+  ProviderModels as V3ProviderModels,
   ProviderUsage as V3ProviderUsage,
   ProtocolProbeResponse as V3ProtocolProbeResponse,
   ZenFreeModels as V3ZenFreeModels,
+  ZenFreeSettings,
 } from "./generated/dashboard-v3.ts";
-import { presentAccount, presentPricing, type Account, type PricingSnapshot } from "./dashboard-presenters.ts";
+import { presentAccount, presentPricing, type Account, type AccountProtocol, type PricingSnapshot } from "./dashboard-presenters.ts";
+
+export { isRevisionConflict };
 
 /**
  * Typed wrappers for the provider-scoped dashboard endpoints. These live
@@ -62,7 +67,7 @@ export interface ProviderCatalogEntry {
   model_aliases: string[];
 }
 
-export type ProviderProtocol = "chat_completions" | "responses" | "messages";
+export type ProviderProtocol = AccountProtocol;
 
 export interface ProviderModelCapability {
   model_id: string;
@@ -72,7 +77,31 @@ export interface ProviderModelCapability {
   supported_protocols: ProviderProtocol[];
 }
 
-export type StoredProviderPricingSnapshot = PricingSnapshot | {
+export interface StoredProviderPricingValue {
+  model_id: string;
+  display_name: string;
+  input_per_million: number | null;
+  output_per_million: number | null;
+  cache_read_per_million: number | null;
+  cache_write_per_million: number | null;
+  plan_limit: number | null;
+  model_allowance: number | null;
+  quota_multiplier: number | null;
+  paid_plan_price: number | null;
+  currency: string | null;
+}
+
+export interface ProviderNeutralPricingSnapshot {
+  revision: string;
+  activated_at: string;
+  document_updated_at: string | null;
+  source_url: string;
+  content_hash: string;
+  evidence: string;
+  values: StoredProviderPricingValue[];
+}
+
+export type StoredProviderPricingSnapshot = PricingSnapshot | ProviderNeutralPricingSnapshot | {
   provider_id: string;
   offering_id: string;
   revision: string;
@@ -88,6 +117,10 @@ export interface ProviderPricingResponse {
   offering_id: string;
   availability: "available" | "unavailable" | "not_applicable" | "unpriced";
   snapshot?: StoredProviderPricingSnapshot;
+  revision: number;
+  process_generation: number;
+  pricing_revision: string;
+  provider_pricing_revision: string;
 }
 
 export interface ProviderQuotaWindow {
@@ -294,7 +327,7 @@ export interface CustomCatalogRefreshResponse {
   declared_capabilities_unchanged: boolean;
 }
 
-export type ProviderModelsRefreshResponse = ZenFreeModelsResponse | CustomCatalogRefreshResponse;
+export type ProviderModelsRefreshResponse = ZenFreeModelsResponse | CustomCatalogRefreshResponse | V3ProviderModels;
 
 export function isCustomCatalogRefreshResponse(
   value: ProviderModelsRefreshResponse,
@@ -484,7 +517,37 @@ function presentProviderPricing(value: V3ProviderPricing): ProviderPricingRespon
     provider_id: value.providerId,
     offering_id: value.offeringId,
     availability: value.availability,
-    snapshot: value.snapshot === null ? undefined : presentPricing(value.snapshot),
+    snapshot: value.providerSnapshot === null
+      ? (value.snapshot === null ? undefined : presentPricing(value.snapshot))
+      : presentProviderPricingSnapshot(value.providerSnapshot),
+    revision: value.revision,
+    process_generation: value.processGeneration,
+    pricing_revision: value.pricingRevision,
+    provider_pricing_revision: value.providerPricingRevision,
+  };
+}
+
+function presentProviderPricingSnapshot(value: V3ProviderPricingSnapshot): ProviderNeutralPricingSnapshot {
+  return {
+    revision: value.revision,
+    activated_at: value.activatedAt,
+    document_updated_at: value.documentUpdatedAt,
+    source_url: value.sourceUrl,
+    content_hash: value.contentHash,
+    evidence: value.evidence,
+    values: value.values.map((row) => ({
+      model_id: row.modelId,
+      display_name: row.displayName,
+      input_per_million: row.inputPerMillion,
+      output_per_million: row.outputPerMillion,
+      cache_read_per_million: row.cacheReadPerMillion,
+      cache_write_per_million: row.cacheWritePerMillion,
+      plan_limit: row.planLimit,
+      model_allowance: row.modelAllowance,
+      quota_multiplier: row.quotaMultiplier,
+      paid_plan_price: row.paidPlanPrice,
+      currency: row.currency,
+    })),
   };
 }
 
@@ -561,13 +624,41 @@ export const providerApi = {
     })),
   getProviderPricing: async (providerId: string, offeringId: string) =>
     presentProviderPricing(await dashboardV3.getProviderPricing(providerId, offeringId)),
+  getGoPricing: async (): Promise<PricingSnapshot> => {
+    const result = await dashboardV3.getProviderPricing("opencode", "go");
+    if (!result.snapshot) throw new Error("OpenCode Go pricing is not available");
+    return presentPricing(result.snapshot);
+  },
+  getZenFreeSettings: async (): Promise<ZenFreeSettings> => dashboardV3.getZenFreeSettings(),
+  getZenFreeModels: async (): Promise<ZenFreeModelsResponse> => presentZenModels(await dashboardV3.getZenFreeModels()),
+  setZenFreeEnabled: async (enabled: boolean): Promise<ZenFreeSettings> => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    try {
+      return await control.runMutation((expectation) => dashboardV3.patchZenFreeSettings(enabled, expectation));
+    } catch (cause) {
+      if (isRevisionConflict(cause)) await dashboardV3.getZenFreeSettings();
+      throw cause;
+    }
+  },
+  refreshZenFreeModels: async (): Promise<ZenFreeModelsResponse> => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    try {
+      return presentZenModels(await control.runMutation((expectation) => dashboardV3.refreshZenFreeModels(expectation)));
+    } catch (cause) {
+      if (isRevisionConflict(cause)) await dashboardV3.getZenFreeModels();
+      throw cause;
+    }
+  },
   getProviderUsage: async (accountId: string) =>
     presentProviderUsage(await dashboardV3.getProviderUsage(accountId)),
   updateProviderSettings: async (accountId: string, update: ProviderSettingsUpdate) => {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
     const account = await dashboardV3.getAccount(accountId);
-    if (account.providerId !== "zen-free") throw new Error("only Zen Free has provider settings");
+    // Catalog provider_id is `opencode-zen-free`; `/providers/zen-free` is only the V3 route slug.
+    if (account.providerId !== "opencode-zen-free") throw new Error("only Zen Free has provider settings");
     try {
       await control.runMutation((expectation) => dashboardV3.patchZenFreeSettings(update.enabled, expectation));
     } catch (cause) {
@@ -605,9 +696,31 @@ export const providerApi = {
     }
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
-    return presentZenModels(await control.runMutation((expectation) => dashboardV3.refreshZenFreeModels(expectation)));
+    if (account.providerId === "opencode-zen-free") {
+      return presentZenModels(await control.runMutation((expectation) => dashboardV3.refreshZenFreeModels(expectation)));
+    }
+    return control.runMutation((expectation) => dashboardV3.refreshProviderModels(
+      account.providerId,
+      accountId,
+      expectation,
+    ));
   },
   getProviderContracts: async () => presentContracts(await dashboardV3.getProviderContracts()),
+  putProviderProtocolSwitch: async (
+    scopeId: string,
+    protocol: ProviderProtocol,
+    enabled: boolean,
+  ): Promise<ProviderContractsResponse> => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    try {
+      return presentContracts(await control.runMutation((expectation) =>
+        dashboardV3.putProviderProtocolSwitch(scopeId, protocol, enabled, expectation)));
+    } catch (cause) {
+      if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
+      throw cause;
+    }
+  },
   updateProviderContractProtocol: async (
     _scopeKind: ContractScopeKind,
     scopeId: string,

@@ -12,12 +12,11 @@ use chrono::{DateTime, Utc};
 
 use crate::db::Database;
 use crate::kernel::pricing::PricingLimits;
-use crate::models::{Account as ModelAccount, UsageWindow as ModelUsageWindow, UsageWindowKind};
-use crate::provider::{
-    COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK,
-    CreditBalance as ModelCreditBalance, ProviderAdapterKind, ProviderRegistry,
-    ProviderUsageSyncState, QUOTA_WINDOW_FREE, QuotaWindow as ModelQuotaWindow,
+use crate::models::{
+    Account as ModelAccount, CreditBalance as ModelCreditBalance, ProviderUsageSyncState,
+    QuotaWindow as ModelQuotaWindow, UsageWindow as ModelUsageWindow, UsageWindowKind,
 };
+use crate::provider::{ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE};
 use crate::state::CoreState;
 
 use super::types::{
@@ -232,23 +231,9 @@ fn account_usage_limits(
     {
         return Ok((pricing.limits.clone(), Some(pricing.revision.clone())));
     }
-    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
-        .ok_or_else(|| {
-            V3ApiError::invalid_request_at(state, "account usage capability is unknown")
-        })?;
-    if !plan.manual_usage_calibration {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "manual usage calibration is unavailable for this account",
-        ));
-    }
-    Ok((
-        PricingLimits {
-            window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
-            window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
-            window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
-        },
-        None,
+    Err(V3ApiError::invalid_request_at(
+        state,
+        "manual usage calibration is unavailable for this account",
     ))
 }
 

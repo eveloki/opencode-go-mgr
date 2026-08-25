@@ -24,39 +24,39 @@ use std::time::Duration;
 #[path = "../fake_upstream.rs"]
 mod fake_upstream;
 
-pub use fake_upstream::{FakeReply, start_fake_upstream};
+pub(crate) use fake_upstream::{FakeReply, start_fake_upstream};
 
-pub const GATEWAY_KEY: &str = "gw-v3-char";
-pub const SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
-pub const SUCCESS_BODY_WITHOUT_USAGE: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
-pub const CHAT_STREAM_WITHOUT_USAGE: &str = concat!(
+pub(crate) const GATEWAY_KEY: &str = "gw-v3-char";
+pub(crate) const SUCCESS_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+pub(crate) const SUCCESS_BODY_WITHOUT_USAGE: &str = r#"{"id":"ok","object":"chat.completion","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+pub(crate) const CHAT_STREAM_WITHOUT_USAGE: &str = concat!(
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
     "data: [DONE]\n\n"
 );
-pub const CHAT_STREAM_HEAD: &str = "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n";
-pub const CHAT_STREAM_TAIL: &str = concat!(
+pub(crate) const CHAT_STREAM_HEAD: &str = "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n";
+pub(crate) const CHAT_STREAM_TAIL: &str = concat!(
     "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
     "data: [DONE]\n\n"
 );
-pub const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
-pub const FORBIDDEN_BODY: &str = r#"{"error":{"message":"forbidden key"}}"#;
+pub(crate) const LIMITED_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 3 days."}}"#;
+pub(crate) const FORBIDDEN_BODY: &str = r#"{"error":{"message":"forbidden key"}}"#;
 
-pub fn temp_data_dir(label: &str) -> PathBuf {
+pub(crate) fn temp_data_dir(label: &str) -> PathBuf {
     let mut dir = std::env::temp_dir();
     dir.push(format!("ocg-v3-char-{}-{}", label, uuid::Uuid::new_v4()));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-pub fn loopback_client() -> reqwest::Client {
+pub(crate) fn loopback_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
         .build()
         .expect("v3 test client should build")
 }
 
-pub fn build_go_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf) {
+pub(crate) fn build_go_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, PathBuf) {
     let dir = temp_data_dir("state");
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("v3-tests"));
     let db = Database::open(dir.clone()).unwrap();
@@ -103,14 +103,14 @@ pub fn build_go_state(base_url: String, keys: &[&str]) -> (Arc<CoreStateInner>, 
     (state, dir)
 }
 
-pub async fn start_gateway(state: Arc<CoreStateInner>) -> (u16, GatewayHandle) {
+pub(crate) async fn start_gateway(state: Arc<CoreStateInner>) -> (u16, GatewayHandle) {
     let handle = gateway::start_gateway_on(state, std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
     (handle.port, handle)
 }
 
-pub fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str, enabled: bool) {
+pub(crate) fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str, enabled: bool) {
     state
         .db
         .lock()
@@ -132,7 +132,7 @@ pub fn set_account_enabled(state: &Arc<CoreStateInner>, account_id: &str, enable
         .unwrap();
 }
 
-pub async fn chat(port: u16, model: &str) -> (reqwest::StatusCode, String) {
+pub(crate) async fn chat(port: u16, model: &str) -> (reqwest::StatusCode, String) {
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
         .header(
@@ -153,7 +153,7 @@ pub async fn chat(port: u16, model: &str) -> (reqwest::StatusCode, String) {
     (status, body)
 }
 
-pub async fn chat_stream(port: u16, model: &str) -> (reqwest::StatusCode, String) {
+pub(crate) async fn chat_stream(port: u16, model: &str) -> (reqwest::StatusCode, String) {
     let response = loopback_client()
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
         .header(
@@ -175,7 +175,7 @@ pub async fn chat_stream(port: u16, model: &str) -> (reqwest::StatusCode, String
 }
 
 #[derive(Clone)]
-pub struct ScriptedReply {
+pub(crate) struct ScriptedReply {
     pub status: u16,
     pub body: &'static str,
 }
@@ -189,7 +189,7 @@ struct ScriptedState {
 
 /// Loopback upstream that invokes `on_call(n)` before serving the nth scripted
 /// reply. Exhausted scripts repeat the last reply so a late retry stays offline.
-pub async fn start_scripted_upstream(
+pub(crate) async fn start_scripted_upstream(
     replies: Vec<ScriptedReply>,
     on_call: Arc<dyn Fn(usize) + Send + Sync>,
 ) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
@@ -242,7 +242,7 @@ async fn scripted_reply(
     )
 }
 
-pub async fn wait_log_status(
+pub(crate) async fn wait_log_status(
     state: &Arc<CoreStateInner>,
     timeout: Duration,
     predicate: impl Fn(&[ocg_core::models::ForwardLog]) -> bool,

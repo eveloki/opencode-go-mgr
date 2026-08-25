@@ -1,8 +1,105 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { DashboardRequestError, tauriApi } from "../api/tauri.ts";
+import { createPinia, setActivePinia } from "pinia";
+import { DashboardRequestError, dashboardV3 } from "../api/dashboard-v3.ts";
+import { dashboardApi } from "../api/dashboard.ts";
+import { useConnectionStore } from "../stores/connection.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { computeTimeRange, resolveTimeRange } from "./log-time-range.ts";
+
+interface RecordedRequest {
+  url: string;
+  method: string;
+  body: Record<string, unknown> | null;
+}
+
+function installBrowser(
+  responder: (request: RecordedRequest) => Response | object,
+): RecordedRequest[] {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { location: { pathname: "/dashboard" }, dispatchEvent() {} },
+  });
+  const requests: RecordedRequest[] = [];
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string, init: RequestInit = {}) => {
+      const request = {
+        url: input,
+        method: init.method ?? "GET",
+        body: init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null,
+      };
+      requests.push(request);
+      const result = responder(request);
+      return result instanceof Response
+        ? result
+        : new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
+    },
+  });
+  return requests;
+}
+
+function v3ForwardLogs(): object {
+  return {
+    revision: 1,
+    processGeneration: 99,
+    pricingRevision: null,
+    items: [],
+    summary: {
+      totalRequests: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      cost: 0,
+    },
+  };
+}
+
+function v3Account(id: string): object {
+  return {
+    id,
+    name: "Account",
+    username: "",
+    password: "",
+    key: "",
+    enabled: true,
+    accountType: "key",
+    setupStep: "ready",
+    providerId: "opencode",
+    offeringId: "go",
+    credentialKind: "api_key",
+    quotaScope: "key",
+    revision: 1,
+    purchaseDate: "2026-07-15",
+    expiresOn: "2026-08-15",
+    cooldownUntil: null,
+    cooldownGenericUntil: null,
+    cooldown5hUntil: null,
+    cooldownWeekUntil: null,
+    cooldownMonthUntil: null,
+    cooldownFreeUntil: null,
+    lastError: null,
+    authError: null,
+    notes: "",
+    usageSyncLastSuccessAt: null,
+    usageSyncNextAllowedAt: null,
+    createdAt: "2026-07-15T00:00:00Z",
+    updatedAt: "2026-07-15T00:00:00Z",
+    verificationStatus: "not_required",
+    connectionVerifiedAt: null,
+    verificationError: null,
+    planRoutable: true,
+    customConfig: null,
+    modelCapabilities: [],
+    acknowledgements: [],
+  };
+}
+
+function setupControlPlane(revision = 7, processGeneration = 99): void {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision, processGeneration, pricingRevision: null });
+}
 
 test("forward log API sends remote paging and filter parameters", async () => {
   let requested = "";
@@ -17,20 +114,11 @@ test("forward log API sends remote paging and filter parameters", async () => {
     configurable: true,
     value: async (input: string) => {
       requested = input;
-      return new Response(JSON.stringify({
-        items: [],
-        summary: {
-          total_requests: 0,
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          cached_tokens: 0,
-          cost: 0,
-        },
-      }), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(v3ForwardLogs()), { headers: { "Content-Type": "application/json" } });
     },
   });
 
-  await tauriApi.getForwardLogs({
+  await dashboardApi.getForwardLogs({
     limit: 20,
     offset: 40,
     status: "success",
@@ -44,10 +132,10 @@ test("forward log API sends remote paging and filter parameters", async () => {
   assert.equal(query.get("limit"), "20");
   assert.equal(query.get("offset"), "40");
   assert.equal(query.get("status"), "success");
-  assert.equal(query.get("account_id"), "account 117");
-  assert.equal(query.get("request_id"), "ocg-test id");
-  assert.equal(query.get("sort_by"), "attempt");
-  assert.equal(query.get("sort_order"), "asc");
+  assert.equal(query.get("accountId"), "account 117");
+  assert.equal(query.get("requestId"), "ocg-test id");
+  assert.equal(query.get("sortBy"), "attempt");
+  assert.equal(query.get("sortOrder"), "asc");
 });
 
 test("dashboard request errors preserve status for localized handling", async () => {
@@ -57,14 +145,14 @@ test("dashboard request errors preserve status for localized handling", async ()
   });
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
-    value: async () => new Response(JSON.stringify({ error: "raw fallback" }), {
+    value: async () => new Response(JSON.stringify({ code: "conflict", message: "raw fallback" }), {
       status: 409,
       headers: { "Content-Type": "application/json" },
     }),
   });
 
   await assert.rejects(
-    () => tauriApi.registerAdmin("admin", "password123"),
+    () => dashboardV3.registerAdmin("admin", "password123", { expectedRevision: 0, processGeneration: 0 }),
     (error) => error instanceof DashboardRequestError
       && error.status === 409
       && error.message === "raw fallback",
@@ -86,40 +174,51 @@ test("dashboard request errors preserve a non-JSON proxy response body", async (
   });
 
   await assert.rejects(
-    () => tauriApi.registerAdmin("admin", "password123"),
+    () => dashboardV3.registerAdmin("admin", "password123", { expectedRevision: 0, processGeneration: 0 }),
     (error) => error instanceof DashboardRequestError
       && error.status === 502
       && error.message === "<h1>Bad Gateway</h1>",
   );
 });
 
-test("settings API maps the loaded revision to conditional writes and returns new revisions", async () => {
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: { location: { pathname: "/dashboard" }, dispatchEvent() {} },
+test("settings update writes CAS tokens and reloads the full config", async () => {
+  setupControlPlane(7);
+  const requests = installBrowser(({ url, method }) => {
+    if (method === "PUT" && url.endsWith("/settings")) {
+      return { revision: 8, processGeneration: 99 };
+    }
+    if (method === "GET" && url.endsWith("/settings")) {
+      return {
+        revision: 8,
+        processGeneration: 99,
+        pricingRevision: null,
+        gatewayPort: 9042,
+        upstreamBaseUrl: "https://opencode.ai/zen/go",
+        proxyMode: "auto",
+        proxyUrl: "",
+        proxyListDirection: "whitelist",
+        proxyListModels: [],
+        proxySupportedModels: [],
+        opencodeInviteUrl: "https://opencode.ai/go?ref=68XPB6NP8V",
+        clientRootUrl: "",
+        clientRootUrlFromEnv: false,
+        autoStart: false,
+        autoStartSupported: false,
+        showDockIcon: true,
+        dockVisibilitySupported: false,
+        connectTimeoutSecs: 30,
+        nonStreamTimeoutSecs: 900,
+        streamIdleTimeoutSecs: 300,
+        routingMode: "strict-priority",
+        conversationSticky: false,
+      };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
   });
 
-  const requests: Array<{ url: string; body: Record<string, unknown> | null }> = [];
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string, init: RequestInit = {}) => {
-      requests.push({
-        url: input,
-        body: init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null,
-      });
-      const response = input.endsWith("/regenerate-gateway-key")
-        ? { key: "ocg-new-key", revision: 9 }
-        : { revision: 8 };
-      return new Response(JSON.stringify(response), {
-        headers: { "Content-Type": "application/json" },
-      });
-    },
-  });
-
-  const result = await tauriApi.updateSettings({
+  const result = await dashboardApi.updateSettings({
     revision: 7,
     gateway_port: 9042,
-    gateway_key: "ocg-old-key",
     upstream_base_url: "https://opencode.ai/zen/go",
     proxy_mode: "auto",
     proxy_url: "",
@@ -139,172 +238,139 @@ test("settings API maps the loaded revision to conditional writes and returns ne
     routing_mode: "strict-priority",
     conversation_sticky: false,
   });
-  const regenerated = await tauriApi.regenerateGatewayKey();
 
-  assert.deepEqual(result, { revision: 8 });
-  assert.deepEqual(regenerated, { key: "ocg-new-key", revision: 9 });
-  assert.equal(requests[0]?.body?.expected_revision, 7);
+  assert.equal(requests[0]?.body?.expectedRevision, 7);
+  assert.equal(requests[0]?.body?.processGeneration, 99);
   assert.equal("revision" in (requests[0]?.body ?? {}), false);
+  assert.equal(result.revision, 8);
+  assert.equal(result.gateway_port, 9042);
+});
+
+test("primary key regeneration reloads plaintext from the connection endpoint", async () => {
+  setupControlPlane(7);
+  let primaryKey = "ocg-old-key";
+  const requests = installBrowser(({ url, method }) => {
+    if (method === "POST" && url.endsWith("/keys/primary/regenerate")) {
+      primaryKey = "ocg-new-key";
+      return { revision: 8, processGeneration: 99 };
+    }
+    if (method === "GET" && url.endsWith("/connection")) {
+      return {
+        revision: 8,
+        processGeneration: 99,
+        gatewayPort: 9042,
+        clientRootUrl: "http://127.0.0.1:9042",
+        upstreamBaseUrl: "https://opencode.ai/zen/go",
+        primaryKey,
+        subKeys: [],
+      };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
+  });
+
+  const store = useConnectionStore();
+  const regenerated = await store.regeneratePrimaryKey();
+
+  assert.equal(regenerated, "ocg-new-key");
+  assert.deepEqual(
+    requests.filter(({ method }) => method === "POST").map(({ body }) => body),
+    [{ expectedRevision: 7, processGeneration: 99 }],
+  );
 });
 
 test("account API sends purchase dates and the complete reorder payload", async () => {
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: { location: { pathname: "/dashboard" }, dispatchEvent() {} },
+  setupControlPlane(1);
+  const requests = installBrowser(({ url, method }) => {
+    if (method === "POST" && url.endsWith("/accounts")) {
+      return { account: v3Account("account-2"), revision: 1, processGeneration: 99 };
+    }
+    if (method === "PUT" && url.endsWith("/accounts/order")) {
+      return { accounts: [v3Account("account-2")], revision: 1, processGeneration: 99 };
+    }
+    throw new Error(`unexpected request ${method} ${url}`);
   });
 
-  const requests: Array<{ url: string; method: string; body: unknown }> = [];
-  const account = {
-    id: "account-2",
-    name: "Second",
-    username: "",
-    password: "",
-    key: "",
-    enabled: true,
-    purchase_date: "2026-07-15",
-    expires_on: "2026-08-15",
-    cooldown_until: null,
-    last_error: null,
-    created_at: "2026-07-15T00:00:00Z",
-    updated_at: "2026-07-15T00:00:00Z",
-  };
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string, init: RequestInit = {}) => {
-      requests.push({
-        url: input,
-        method: init.method ?? "GET",
-        body: init.body ? JSON.parse(String(init.body)) : null,
-      });
-      const response = input.endsWith("/accounts/order") ? [account] : account;
-      return new Response(JSON.stringify(response), {
-        headers: { "Content-Type": "application/json" },
-      });
-    },
-  });
-
-  const created = await tauriApi.createAccount({
+  const created = await dashboardApi.createAccount({
     name: "Second",
     key: "sk-test",
     purchase_date: "2026-07-15",
   });
-  const reordered = await tauriApi.reorderAccounts(["account-2", "account-1"]);
+  const reordered = await dashboardApi.reorderAccounts(["account-2", "account-1"]);
 
   assert.equal(created.purchase_date, "2026-07-15");
   assert.equal(created.expires_on, "2026-08-15");
   assert.equal(reordered[0]?.id, "account-2");
   assert.deepEqual(requests, [
     {
-      url: "/dashboard/api/accounts",
+      url: "/dashboard/api/v3/accounts",
       method: "POST",
-      body: { name: "Second", key: "sk-test", purchase_date: "2026-07-15" },
+      body: {
+        name: "Second",
+        key: "sk-test",
+        purchaseDate: "2026-07-15",
+        expectedRevision: 1,
+        processGeneration: 99,
+      },
     },
     {
-      url: "/dashboard/api/accounts/order",
+      url: "/dashboard/api/v3/accounts/order",
       method: "PUT",
-      body: { account_ids: ["account-2", "account-1"] },
+      body: { accountIds: ["account-2", "account-1"], expectedRevision: 1, processGeneration: 99 },
     },
   ]);
 });
 
-test("account model test sends the selected model and protocol", async () => {
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: { location: { pathname: "/dashboard" }, dispatchEvent() {} },
-  });
-  let request: { url: string; method: string; body: unknown } | null = null;
-  Object.defineProperty(globalThis, "fetch", {
-    configurable: true,
-    value: async (input: string, init: RequestInit = {}) => {
-      request = {
-        url: input,
-        method: init.method ?? "GET",
-        body: init.body ? JSON.parse(String(init.body)) : null,
-      };
-      return new Response(JSON.stringify({
-        message: "ok",
-        model_id: "gpt-5.6-luna",
-        protocol: "responses",
-      }), { headers: { "Content-Type": "application/json" } });
-    },
-  });
-
-  const result = await tauriApi.testAccount("account-1", {
-    model_id: "gpt-5.6-luna",
-    protocol: "responses",
-  });
-
-  assert.deepEqual(request, {
-    url: "/dashboard/api/accounts/account-1/test",
-    method: "POST",
-    body: { model_id: "gpt-5.6-luna", protocol: "responses" },
-  });
-  assert.equal(result.protocol, "responses");
-});
-
 test("managed account API uses ordered setup, browser targets, and profile reset routes", async () => {
+  setupControlPlane(1);
+  const requests: RecordedRequest[] = [];
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: { location: { pathname: "/dashboard" }, dispatchEvent() {} },
   });
-  const requests: Array<{ url: string; method: string; body: unknown }> = [];
-  const account = {
-    id: "managed-1",
-    name: "Managed",
-    username: "note@example.com",
-    account_type: "managed",
-    setup_step: "google_account",
-  };
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (input: string, init: RequestInit = {}) => {
-      requests.push({
+      const request = {
         url: input,
         method: init.method ?? "GET",
-        body: init.body ? JSON.parse(String(init.body)) : null,
-      });
+        body: init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null,
+      };
+      requests.push(request);
+      let result: object;
       if (input.endsWith("/browser/capabilities")) {
-        return new Response(JSON.stringify({ mode: "remote" }), {
-          headers: { "Content-Type": "application/json" },
-        });
+        result = { mode: "remote", reason: null, revision: 1, processGeneration: 99, pricingRevision: null };
+      } else if (input.endsWith("/browser-profile")) {
+        result = { account: v3Account("managed-1"), revision: 1, processGeneration: 99 };
+      } else if (input.endsWith("/browser")) {
+        result = { mode: "remote", sessionToken: "session-1", revision: 1, processGeneration: 99, pricingRevision: null };
+      } else {
+        result = { account: v3Account("managed-1"), revision: 1, processGeneration: 99 };
       }
-      if (input.endsWith("/browser-profile")) {
-        return new Response(JSON.stringify(account), {
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      if (input.endsWith("/browser")) {
-        return new Response(JSON.stringify({ mode: "remote", session_token: "session-1" }), {
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify(account), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
     },
   });
 
-  await tauriApi.createManagedAccount({ name: "Managed", username: "note@example.com" });
-  await tauriApi.advanceAccountSetup("managed-1", "opencode_registration");
-  await tauriApi.verifyManagedAccountKey("managed-1", "sk-secret");
-  assert.deepEqual(await tauriApi.getBrowserCapabilities(), { mode: "remote" });
-  assert.deepEqual(await tauriApi.openAccountBrowser("managed-1", "invite"), {
+  await dashboardApi.createManagedAccount({ name: "Managed", username: "note@example.com" });
+  await dashboardApi.advanceAccountSetup("managed-1", "opencode_registration");
+  await dashboardApi.verifyManagedAccountKey("managed-1", "sk-secret");
+  assert.deepEqual(await dashboardApi.getBrowserCapabilities(), { mode: "remote", reason: null });
+  assert.deepEqual(await dashboardApi.openAccountBrowser("managed-1", "invite"), {
     mode: "remote",
     session_token: "session-1",
   });
-  await tauriApi.resetAccountBrowserProfile("managed-1");
+  await dashboardApi.resetAccountBrowserProfile("managed-1");
 
   assert.deepEqual(requests.map(({ url, method, body }) => ({
     path: new URL(url, "http://localhost").pathname,
     method,
     body,
   })), [
-    { path: "/dashboard/api/accounts/managed", method: "POST", body: { name: "Managed", username: "note@example.com" } },
-    { path: "/dashboard/api/accounts/managed-1/setup", method: "PATCH", body: { setup_step: "opencode_registration" } },
-    { path: "/dashboard/api/accounts/managed-1/setup/verify-key", method: "POST", body: { key: "sk-secret" } },
-    { path: "/dashboard/api/browser/capabilities", method: "GET", body: null },
-    { path: "/dashboard/api/accounts/managed-1/browser", method: "POST", body: { target: "invite" } },
-    { path: "/dashboard/api/accounts/managed-1/browser-profile", method: "DELETE", body: null },
+    { path: "/dashboard/api/v3/accounts/managed", method: "POST", body: { name: "Managed", username: "note@example.com", expectedRevision: 1, processGeneration: 99 } },
+    { path: "/dashboard/api/v3/accounts/managed-1/setup", method: "PATCH", body: { setupStep: "opencode_registration", expectedRevision: 1, processGeneration: 99 } },
+    { path: "/dashboard/api/v3/accounts/managed-1/setup/verify-key", method: "POST", body: { key: "sk-secret", expectedRevision: 1, processGeneration: 99 } },
+    { path: "/dashboard/api/v3/browser/capabilities", method: "GET", body: null },
+    { path: "/dashboard/api/v3/accounts/managed-1/browser", method: "POST", body: { target: "invite", expectedRevision: 1, processGeneration: 99 } },
+    { path: "/dashboard/api/v3/accounts/managed-1/browser-profile", method: "DELETE", body: { expectedRevision: 1, processGeneration: 99 } },
   ]);
 });
 

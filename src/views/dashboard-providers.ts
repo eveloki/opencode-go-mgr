@@ -1,6 +1,6 @@
 import type { Account } from "../api/dashboard.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
-import { planLabel } from "./plans.ts";
+import { planLabel } from "../domain/plans.ts";
 
 export type ProviderCostState = "known" | "free" | "unknown";
 

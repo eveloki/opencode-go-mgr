@@ -2,16 +2,16 @@
 
 use chrono::{Duration, Utc};
 use ocg_core::dashboard_v3::{
-    AccountMutation, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
-    ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, ProviderUsage, UsageMutation,
-    UsageWindow, install_official_pricing_fetch_error_for_tests,
+    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
+    ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, ProviderUsage, UsageWindow,
+    install_official_pricing_fetch_error_for_tests,
 };
 use ocg_core::db::{AccountUsageCalibrationSnapshot, CURRENT_SCHEMA_VERSION};
+use ocg_core::models::CreditBalance;
 use ocg_core::models::UsageWindowKind;
 use ocg_core::provider::{
-    COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
-    CUSTOM_PROVIDER_ID, CreditBalance, GOAT_OFFERING_ID, SCNET_PROVIDER_ID,
-    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
+    COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID,
+    SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -170,10 +170,6 @@ fn parse_usage(body: &Value) -> UsageWindow {
     serde_json::from_value(body.clone()).unwrap_or_else(|_| panic!("UsageWindow JSON: {body}"))
 }
 
-fn parse_mutation(body: &Value) -> UsageMutation {
-    serde_json::from_value(body.clone()).unwrap_or_else(|_| panic!("UsageMutation JSON: {body}"))
-}
-
 fn parse_provider_usage(body: &Value) -> ProviderUsage {
     serde_json::from_value(body.clone()).unwrap_or_else(|_| panic!("ProviderUsage JSON: {body}"))
 }
@@ -253,8 +249,8 @@ fn seed_credit_balance(harness: &V3Harness, account_id: &str) {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v27() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+fn dashboard_v3_schema_version_stays_at_v28() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
 }
 
 #[test]
@@ -433,11 +429,10 @@ async fn dashboard_v3_go_usage_uses_live_pricing_limits_for_seeded_windows() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_goat_5h_calibration_uses_manual_quotas_and_does_not_bump() {
+async fn dashboard_v3_goat_usage_calibration_is_unavailable_and_does_not_bump() {
     let harness = start_loopback("usage-goat-5h").await;
     let goat_id = create_goat(&harness).await;
     let before = harness.state.settings_revision();
-    let generation = harness.state.process_generation();
 
     let (status, body) = send_json(
         &harness,
@@ -453,43 +448,15 @@ async fn dashboard_v3_goat_5h_calibration_uses_manual_quotas_and_does_not_bump()
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let mutation = parse_mutation(&body);
-    assert_eq!(mutation.revision, before);
-    assert_eq!(mutation.process_generation, generation);
-    assert!((mutation.usage.window_5h - COMMAND_CODE_GOAT_QUOTA_5H * 0.5).abs() < 1e-9);
-    assert_eq!(mutation.usage.window_5h, 7.0);
-    assert!(mutation.usage.pricing_revision.is_none());
-    let reset = mutation
-        .usage
-        .resets_in_5h
-        .as_deref()
-        .expect("5h reset should be set");
-    let remaining_min = (chrono::DateTime::parse_from_rfc3339(reset)
-        .unwrap()
-        .with_timezone(&Utc)
-        - Utc::now())
-    .num_minutes();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_v3_error(&body, ERROR_INVALID_REQUEST);
     assert!(
-        (175..=185).contains(&remaining_min),
-        "expected ~180min remaining, got {remaining_min}"
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("manual usage calibration is unavailable")
     );
     assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(body["usage"]["window5h"], 7.0);
-    assert_eq!(body["usage"]["pricingRevision"], Value::Null);
-    assert_usage_shape(&body["usage"], &harness);
-
-    let (status, renamed) = send_json(
-        &harness,
-        Method::PATCH,
-        &format!("/accounts/{goat_id}"),
-        &cas(&harness, json!({ "name": "GOAT renamed" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{renamed}");
-    let renamed: AccountMutation = serde_json::from_value(renamed).unwrap();
-    assert_eq!(renamed.account.unwrap().name, "GOAT renamed");
-    assert_eq!(harness.state.settings_revision(), before + 1);
 
     harness.stop();
 }
@@ -591,14 +558,56 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{scnet}");
-    let scnet_id = scnet["account"]["id"].as_str().unwrap().to_string();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet}");
+    let scnet_id = "scnet-usage-leftover".to_string();
+    let plan =
+        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
+            .unwrap();
+    let now = Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &ocg_core::models::Account {
+                id: scnet_id.clone(),
+                provider_id: SCNET_PROVIDER_ID.into(),
+                offering_id: SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
+                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
+                quota_scope: ocg_core::provider::QuotaScope::Key,
+                name: "SCNet".into(),
+                username: None,
+                password_cipher: None,
+                key_cipher: harness.state.encrypt_key("sk-tp-basic").unwrap(),
+                enabled: false,
+                account_type: ocg_core::models::AccountType::Key,
+                setup_step: ocg_core::models::AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                notes: None,
+                created_at: now,
+                updated_at: now,
+            },
+            None,
+            &[],
+            plan.risk_notice,
+        )
+        .expect("preserved SCNet leftover draft");
 
     for id in [&goat_id, &custom_id, &scnet_id] {
         seed_credit_balance(&harness, id);
     }
 
-    for (id, experimental) in [(&goat_id, true), (&custom_id, false), (&scnet_id, false)] {
+    for (id, experimental) in [(&goat_id, false), (&custom_id, false), (&scnet_id, false)] {
         let (status, body) = harness
             .get_json(&format!("{}/accounts/{id}/provider-usage", harness.v3_base))
             .await;
@@ -639,13 +648,13 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
 #[tokio::test]
 async fn dashboard_v3_usage_patch_clamps_percent_and_parses_resets() {
     let harness = start_loopback("usage-validate").await;
-    let goat_id = create_goat(&harness).await;
+    let go_id = create_go(&harness).await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
         &harness,
         Method::PATCH,
-        &format!("/accounts/{goat_id}/usage"),
+        &format!("/accounts/{go_id}/usage"),
         &cas(&harness, json!({ "window": "invalid", "percent": 50.0 })),
     )
     .await;
@@ -656,7 +665,7 @@ async fn dashboard_v3_usage_patch_clamps_percent_and_parses_resets() {
     let (status, body) = send_json(
         &harness,
         Method::PATCH,
-        &format!("/accounts/{goat_id}/usage"),
+        &format!("/accounts/{go_id}/usage"),
         &cas(&harness, json!({ "window": "window_5h", "percent": -0.1 })),
     )
     .await;
@@ -666,7 +675,7 @@ async fn dashboard_v3_usage_patch_clamps_percent_and_parses_resets() {
     let (status, body) = send_json(
         &harness,
         Method::PATCH,
-        &format!("/accounts/{goat_id}/usage"),
+        &format!("/accounts/{go_id}/usage"),
         &cas(&harness, json!({ "window": "window_5h", "percent": 100.1 })),
     )
     .await;
@@ -681,7 +690,7 @@ async fn dashboard_v3_usage_patch_clamps_percent_and_parses_resets() {
         let (status, body) = send_json(
             &harness,
             Method::PATCH,
-            &format!("/accounts/{goat_id}/usage"),
+            &format!("/accounts/{go_id}/usage"),
             &cas(
                 &harness,
                 json!({
@@ -697,7 +706,7 @@ async fn dashboard_v3_usage_patch_clamps_percent_and_parses_resets() {
     }
 
     let (status, body) = harness
-        .get_json(&format!("{}/accounts/{goat_id}/usage", harness.v3_base))
+        .get_json(&format!("{}/accounts/{go_id}/usage", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["window5h"], 0.0);
@@ -709,7 +718,7 @@ async fn dashboard_v3_usage_patch_clamps_percent_and_parses_resets() {
 #[tokio::test]
 async fn dashboard_v3_stale_revision_or_generation_does_not_write_usage() {
     let harness = start_loopback("usage-stale-cas").await;
-    let goat_id = create_goat(&harness).await;
+    let go_id = create_go(&harness).await;
     let revision = harness.state.settings_revision();
     let generation = harness.state.process_generation();
 
@@ -721,7 +730,7 @@ async fn dashboard_v3_stale_revision_or_generation_does_not_write_usage() {
     let (status, body) = send_json(
         &harness,
         Method::PATCH,
-        &format!("/accounts/{goat_id}/usage"),
+        &format!("/accounts/{go_id}/usage"),
         &stale_revision,
     )
     .await;
@@ -736,7 +745,7 @@ async fn dashboard_v3_stale_revision_or_generation_does_not_write_usage() {
     let (status, body) = send_json(
         &harness,
         Method::PATCH,
-        &format!("/accounts/{goat_id}/usage"),
+        &format!("/accounts/{go_id}/usage"),
         &stale_generation,
     )
     .await;
@@ -744,7 +753,7 @@ async fn dashboard_v3_stale_revision_or_generation_does_not_write_usage() {
     assert_v3_error(&body, ERROR_REVISION_CONFLICT);
 
     let (status, body) = harness
-        .get_json(&format!("{}/accounts/{goat_id}/usage", harness.v3_base))
+        .get_json(&format!("{}/accounts/{go_id}/usage", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["window5h"], 0.0);
@@ -756,8 +765,8 @@ async fn dashboard_v3_stale_revision_or_generation_does_not_write_usage() {
 #[tokio::test]
 async fn dashboard_v3_usage_mutations_reject_unknown_and_missing_fields() {
     let harness = start_loopback("usage-json").await;
-    let goat_id = create_goat(&harness).await;
-    let path = format!("/accounts/{goat_id}/usage");
+    let go_id = create_go(&harness).await;
+    let path = format!("/accounts/{go_id}/usage");
     let before = harness.state.settings_revision();
 
     let (status, body) = send_raw(
@@ -848,7 +857,7 @@ async fn dashboard_v3_usage_coexists_with_v2_and_does_not_mount_legacy_aliases()
     let (status, patched) = send_json(
         &harness,
         Method::PATCH,
-        &format!("/accounts/{goat_id}/usage"),
+        &format!("/accounts/{go_id}/usage"),
         &cas(
             &harness,
             json!({
@@ -860,13 +869,13 @@ async fn dashboard_v3_usage_coexists_with_v2_and_does_not_mount_legacy_aliases()
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{patched}");
-    assert_eq!(patched["usage"]["window5h"], 7.0);
+    assert!(patched["usage"]["window5h"].as_f64().unwrap() > 0.0);
 
     let (status, v3) = harness
-        .get_json(&format!("{}/accounts/{goat_id}/usage", harness.v3_base))
+        .get_json(&format!("{}/accounts/{go_id}/usage", harness.v3_base))
         .await;
     assert_eq!(status, StatusCode::OK, "{v3}");
-    assert_eq!(v3["window5h"], 7.0);
+    assert!(v3["window5h"].as_f64().unwrap() > 0.0);
     assert!(v3.get("window_5h").is_none());
 
     harness
@@ -938,7 +947,6 @@ async fn dashboard_v3_usage_coexists_with_v2_and_does_not_mount_legacy_aliases()
 async fn dashboard_v3_usage_reads_do_not_call_official_pricing_fetch() {
     let harness = start_loopback("usage-no-outbound").await;
     let go_id = create_go(&harness).await;
-    let goat_id = create_goat(&harness).await;
     let _guard = install_official_pricing_fetch_error_for_tests(
         harness.state.process_generation(),
         "usage slice must not fetch official pricing",
@@ -958,7 +966,7 @@ async fn dashboard_v3_usage_reads_do_not_call_official_pricing_fetch() {
     let (status, _) = send_json(
         &harness,
         Method::PATCH,
-        &format!("/accounts/{goat_id}/usage"),
+        &format!("/accounts/{go_id}/usage"),
         &cas(&harness, json!({ "window": "window_5h", "percent": 10.0 })),
     )
     .await;

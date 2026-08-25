@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
-import { dashboardV3, isRevisionConflict } from "../api/dashboard-v3.ts";
-import { presentConnection, type ConnectionInfo, type ConnectionSubKey } from "../api/dashboard-presenters.ts";
+import { dashboardApi, isRevisionConflict } from "../api/dashboard.ts";
+import type { ConnectionInfo, ConnectionSubKey } from "../api/dashboard.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
 
 /**
@@ -22,7 +22,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function load(): Promise<ConnectionInfo> {
     loading.value = true;
     try {
-      const connection = presentConnection(await dashboardV3.getConnection());
+      const connection = await dashboardApi.getConnection();
       info.value = connection;
       error.value = "";
       return connection;
@@ -36,7 +36,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   /** Refresh after a key mutation; the mutation ack has no plaintext. */
   async function reloadAfterMutation(): Promise<ConnectionInfo> {
-    const connection = presentConnection(await dashboardV3.getConnection());
+    const connection = await dashboardApi.getConnection();
     info.value = connection;
     error.value = "";
     return connection;
@@ -54,7 +54,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function createKey(name: string): Promise<ConnectionSubKey> {
     const before = info.value ?? await load();
     const previousIds = new Set(before.sub_keys.map((key) => key.id));
-    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardV3.createKey(name, exp)));
+    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardApi.createKey(name, exp)));
     const connection = await reloadAfterMutation();
     const created = connection.sub_keys.filter((key) => !previousIds.has(key.id));
     if (created.length !== 1) {
@@ -64,17 +64,17 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function updateKey(id: string, update: { name?: string; enabled?: boolean }): Promise<void> {
-    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardV3.updateKey(id, update, exp)));
+    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardApi.updateKey(id, update, exp)));
     await reloadAfterMutation();
   }
 
   async function deleteKey(id: string): Promise<void> {
-    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardV3.deleteKey(id, exp)));
+    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardApi.deleteKey(id, exp)));
     await reloadAfterMutation();
   }
 
   async function regenerateKey(id: string): Promise<ConnectionSubKey> {
-    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardV3.regenerateKey(id, exp)));
+    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardApi.regenerateKey(id, exp)));
     const connection = await reloadAfterMutation();
     const regenerated = connection.sub_keys.find((key) => key.id === id);
     if (!regenerated) throw new Error("重新生成后找不到对应 Key，请刷新后重试");
@@ -82,8 +82,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function regeneratePrimaryKey(): Promise<string> {
-    await runKeyMutation(() => controlPlane.runMutation((exp) => dashboardV3.regeneratePrimaryKey(exp)));
-    return (await reloadAfterMutation()).primary_key;
+    return runKeyMutation(() => controlPlane.runMutation((exp) => dashboardApi.regeneratePrimaryKey(exp)));
   }
 
   /** Drop all plaintext Key material held in memory (401 / logout). */

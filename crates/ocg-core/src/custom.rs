@@ -31,6 +31,12 @@ use std::time::Duration;
 /// Canonical definition: [`crate::kernel::ids::custom_model_id_matches`].
 pub use crate::kernel::ids::custom_model_id_matches;
 
+/// Custom destination URL trust policy lives with the outbound boundary in
+/// [`crate::custom_http`]; re-exported here for the Custom runtime surface.
+pub use crate::custom_http::{
+    CustomUrlHost, CustomUrlTarget, inspect_custom_url, validate_custom_base_url,
+};
+
 /// Upper bound for a Custom verification response. The probe only needs a 2xx
 /// JSON object; anything larger is rejected without certifying the account.
 pub const MAX_CUSTOM_VERIFICATION_BODY_BYTES: usize = 64 * 1024;
@@ -594,6 +600,149 @@ impl CustomHttpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProviderBindingError;
+    use std::net::IpAddr;
+
+    #[test]
+    fn custom_base_url_trusts_administrator_http_origins_and_rejects_credentials() {
+        use crate::provider::validate_custom_model_id;
+
+        assert!(validate_custom_base_url("https://api.example.com/v1").is_ok());
+        assert!(validate_custom_base_url("http://127.0.0.1:8080/v1").is_ok());
+        assert!(validate_custom_base_url("http://localhost:3000").is_ok());
+        assert!(validate_custom_base_url("http://app.localhost/v1").is_ok());
+        assert!(validate_custom_base_url("http://api.example.com/v1").is_ok());
+        assert!(validate_custom_base_url("https://192.168.1.8/v1").is_ok());
+        assert!(validate_custom_base_url("http://10.0.0.1:9000/v1").is_ok());
+        assert!(validate_custom_base_url("https://169.254.169.254/latest").is_ok());
+        assert!(validate_custom_base_url("http://metadata.google.internal/").is_ok());
+        assert!(validate_custom_base_url("https://[::ffff:169.254.169.254]/").is_ok());
+        assert!(validate_custom_base_url("https://[2001:db8::1]/v1").is_ok());
+        assert!(validate_custom_base_url("https://user:pass@api.example.com").is_err());
+        assert!(validate_custom_base_url("https://api.example.com/v1?x=1").is_err());
+        assert!(validate_custom_base_url("https://api.example.com/v1#frag").is_err());
+        assert!(validate_custom_base_url("javascript:alert(1)").is_err());
+        assert!(validate_custom_base_url("ftp://api.example.com/v1").is_err());
+        assert_eq!(
+            validate_custom_model_id("deepseek/deepseek-v4-flash").unwrap(),
+            "deepseek/deepseek-v4-flash"
+        );
+        assert!(validate_custom_model_id("").is_err());
+        assert_eq!(
+            custom_endpoint_relative_path(UpstreamProtocolKind::ChatCompletions),
+            "chat/completions"
+        );
+        assert_eq!(
+            custom_endpoint_relative_path(UpstreamProtocolKind::Responses),
+            "responses"
+        );
+        assert_eq!(
+            custom_endpoint_relative_path(UpstreamProtocolKind::Messages),
+            "messages"
+        );
+    }
+
+    #[test]
+    fn custom_url_host_uses_url_host_not_bracketed_host_str() {
+        assert!(validate_custom_base_url("http://[::ffff:127.0.0.1]/v1").is_ok());
+        assert!(validate_custom_base_url("http://[::1]/v1").is_ok());
+        let mapped_loopback = validate_custom_base_url("http://[::ffff:127.0.0.1]/v1").unwrap();
+        let parsed = reqwest::Url::parse(&mapped_loopback).unwrap();
+        match inspect_custom_url(&parsed).unwrap().host {
+            CustomUrlHost::Ip(ip) => {
+                assert_eq!(ip, "::ffff:127.0.0.1".parse::<IpAddr>().unwrap());
+            }
+            CustomUrlHost::Domain(domain) => {
+                panic!("mapped loopback must stay an IP host, got {domain}")
+            }
+        }
+        let metadata = validate_custom_base_url("https://[::ffff:169.254.169.254]/latest").unwrap();
+        let parsed = reqwest::Url::parse(&metadata).unwrap();
+        match inspect_custom_url(&parsed).unwrap().host {
+            CustomUrlHost::Ip(_) => {}
+            CustomUrlHost::Domain(domain) => {
+                panic!("mapped metadata IP must stay an IP host, got {domain}")
+            }
+        }
+    }
+
+    #[test]
+    fn custom_base_url_normalizes_decimal_loopback_literals() {
+        assert_eq!(
+            validate_custom_base_url("http://127.1:8080/v1").unwrap(),
+            "http://127.0.0.1:8080/v1"
+        );
+        assert_eq!(
+            validate_custom_base_url("http://127.0.1/v1").unwrap(),
+            "http://127.0.0.1/v1"
+        );
+        let parsed = reqwest::Url::parse("http://127.1/v1").unwrap();
+        match inspect_custom_url(&parsed).unwrap().host {
+            CustomUrlHost::Ip(ip) => assert_eq!(ip, "127.0.0.1".parse::<IpAddr>().unwrap()),
+            CustomUrlHost::Domain(domain) => panic!("127.1 must not stay a domain: {domain}"),
+        }
+    }
+
+    #[test]
+    fn custom_base_url_errors_keep_existing_variants_and_messages() {
+        assert_eq!(
+            validate_custom_base_url("").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl("base URL is required".to_string())
+        );
+        assert_eq!(
+            validate_custom_base_url("   ").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl("base URL is required".to_string())
+        );
+        let too_long = format!("https://api.example.com/{}", "a".repeat(2048));
+        assert_eq!(
+            validate_custom_base_url(&too_long).unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl("base URL is too long".to_string())
+        );
+        let parsed_err = validate_custom_base_url("not a url").unwrap_err();
+        match parsed_err {
+            ProviderBindingError::InvalidCustomBaseUrl(message) => {
+                assert!(message.starts_with("invalid base URL: "), "{message}");
+            }
+            other => panic!("expected InvalidCustomBaseUrl, got {other:?}"),
+        }
+        assert_eq!(
+            validate_custom_base_url("https://api.example.com/v1?x=1").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl(
+                "base URL must not include a query or fragment".to_string()
+            )
+        );
+        assert_eq!(
+            validate_custom_base_url("https://api.example.com/v1#frag").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl(
+                "base URL must not include a query or fragment".to_string()
+            )
+        );
+        assert_eq!(
+            validate_custom_base_url("ftp://api.example.com/v1").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl(
+                "base URL must use http or https".to_string()
+            )
+        );
+        assert_eq!(
+            validate_custom_base_url("javascript:alert(1)").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl(
+                "base URL must use http or https".to_string()
+            )
+        );
+        assert_eq!(
+            validate_custom_base_url("https://user:pass@api.example.com").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl(
+                "base URL must not include credentials".to_string()
+            )
+        );
+        let hostless = reqwest::Url::parse("file:///tmp").unwrap();
+        assert_eq!(
+            inspect_custom_url(&hostless).unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl(
+                "base URL must use http or https".to_string()
+            )
+        );
+    }
 
     #[test]
     fn custom_runtime_identity_is_configurable_http_not_a_base_class() {

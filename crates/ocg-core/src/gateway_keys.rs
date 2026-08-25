@@ -1,4 +1,8 @@
-//! Database-owned access keys and the in-memory credential snapshot.
+//! Access-keys lifecycle implementation: database-owned `access_keys` rows
+//! and the in-memory credential snapshot.
+//!
+//! This module is not a facade: it owns every `access_keys` mutation entry
+//! point, the value-uniqueness gate, and the snapshot refresh.
 //!
 //! Two credential tiers share one auth surface and one `access_keys` table
 //! (schema v27):

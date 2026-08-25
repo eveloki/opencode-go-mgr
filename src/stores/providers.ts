@@ -1,15 +1,16 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
-import { dashboardV3, isRevisionConflict } from "../api/dashboard-v3.ts";
+import { isRevisionConflict } from "../api/dashboard.ts";
+import { providerApi } from "../api/providers.ts";
 import type {
-  PricingSnapshot,
-  ProviderCatalog,
-  ProviderContracts,
+  ProviderCatalogEntry,
+  ProviderContractsResponse,
   ProviderModelCapability,
-  ZenFreeModels,
-  ZenFreeSettings,
-} from "../api/generated/dashboard-v3.ts";
-import { useControlPlaneStore } from "./controlPlane.ts";
+  ProviderProtocol,
+  ZenFreeModelsResponse,
+} from "../api/providers.ts";
+import type { PricingSnapshot } from "../api/dashboard-presenters.ts";
+import type { ZenFreeSettings } from "../api/generated/dashboard-v3.ts";
 
 /**
  * Provider registry state: the built-in Plan catalog, Go protocol-table
@@ -21,42 +22,40 @@ import { useControlPlaneStore } from "./controlPlane.ts";
  * and its components; this store only holds the loaded control-plane data.
  */
 export const useProvidersStore = defineStore("providers", () => {
-  const controlPlane = useControlPlaneStore();
-
-  const catalog = ref<ProviderCatalog | null>(null);
+  const catalog = ref<ProviderCatalogEntry[] | null>(null);
   const modelCapabilities = ref<ProviderModelCapability[]>([]);
   const zenFree = ref<ZenFreeSettings | null>(null);
-  const zenModels = ref<ZenFreeModels | null>(null);
-  const contracts = ref<ProviderContracts | null>(null);
+  const zenModels = ref<ZenFreeModelsResponse | null>(null);
+  const contracts = ref<ProviderContractsResponse | null>(null);
   const pricing = ref<PricingSnapshot | null>(null);
   const loading = ref(false);
   const error = ref("");
 
-  async function loadCatalog(): Promise<ProviderCatalog> {
-    const result = await dashboardV3.getProviders();
+  async function loadCatalog(): Promise<ProviderCatalogEntry[]> {
+    const result = await providerApi.getProviderCatalog();
     catalog.value = result;
     return result;
   }
 
   async function loadModelCapabilities(): Promise<ProviderModelCapability[]> {
-    const result = await dashboardV3.getProviderModelCapabilities();
+    const result = await providerApi.getProviderModelCapabilities();
     modelCapabilities.value = result;
     return result;
   }
 
   async function loadZenFree(): Promise<void> {
     const [settings, models] = await Promise.all([
-      dashboardV3.getZenFreeSettings(),
-      dashboardV3.getZenFreeModels(),
+      providerApi.getZenFreeSettings(),
+      providerApi.getZenFreeModels(),
     ]);
     zenFree.value = settings;
     zenModels.value = models;
   }
 
-  async function loadContracts(): Promise<ProviderContracts> {
+  async function loadContracts(): Promise<ProviderContractsResponse> {
     loading.value = true;
     try {
-      const result = await dashboardV3.getProviderContracts();
+      const result = await providerApi.getProviderContracts();
       contracts.value = result;
       error.value = "";
       return result;
@@ -69,15 +68,14 @@ export const useProvidersStore = defineStore("providers", () => {
   }
 
   async function loadPricing(): Promise<PricingSnapshot> {
-    const result = await dashboardV3.getPricing();
+    const result = await providerApi.getGoPricing();
     pricing.value = result;
     return result;
   }
 
   async function setZenFreeEnabled(enabled: boolean): Promise<ZenFreeSettings> {
     try {
-      const result = await controlPlane.runMutation((exp) =>
-        dashboardV3.patchZenFreeSettings(enabled, exp));
+      const result = await providerApi.setZenFreeEnabled(enabled);
       zenFree.value = result;
       return result;
     } catch (cause) {
@@ -87,10 +85,9 @@ export const useProvidersStore = defineStore("providers", () => {
   }
 
   /** Explicit admin-triggered catalog refresh; the only upstream catalog call. */
-  async function refreshZenModels(): Promise<ZenFreeModels> {
+  async function refreshZenModels(): Promise<ZenFreeModelsResponse> {
     try {
-      const result = await controlPlane.runMutation((exp) =>
-        dashboardV3.refreshZenFreeModels(exp));
+      const result = await providerApi.refreshZenFreeModels();
       zenModels.value = result;
       return result;
     } catch (cause) {
@@ -99,13 +96,12 @@ export const useProvidersStore = defineStore("providers", () => {
     }
   }
 
-  async function putProtocolSwitch(scopeId: string, protocol: string, enabled: boolean): Promise<ProviderContracts> {
-    if (contracts.value?.customEndpoints.some((scope) => scope.scopeId === scopeId)) {
+  async function putProtocolSwitch(scopeId: string, protocol: ProviderProtocol, enabled: boolean): Promise<ProviderContractsResponse> {
+    if (contracts.value?.custom_endpoints.some((scope) => scope.scope_id === scopeId)) {
       throw new Error("Custom API 协议变更尚未纳入 Dashboard V3 合同，请在账号配置中保持创建时协议");
     }
     try {
-      const result = await controlPlane.runMutation((exp) =>
-        dashboardV3.putProviderProtocolSwitch(scopeId, protocol, enabled, exp));
+      const result = await providerApi.putProviderProtocolSwitch(scopeId, protocol, enabled);
       contracts.value = result;
       return result;
     } catch (cause) {

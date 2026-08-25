@@ -4,6 +4,7 @@ import type {
   AccountAcknowledgementCreate,
   AccountCreate,
   AccountCustomConfigUpdate,
+  AccountGoatModelAccessUpdate,
   AccountList,
   AccountManagedCreate,
   AccountManagedKeyVerify,
@@ -42,8 +43,6 @@ import type {
   MutationAck,
   MutationExpectation,
   PricingMultipliersUpdate,
-  PricingRefresh,
-  PricingRefreshUpdate,
   PricingSnapshot,
   ProtocolProbeRequest,
   ProtocolProbeResponse,
@@ -51,7 +50,11 @@ import type {
   ProviderCatalog,
   ProviderContracts,
   ProviderModelCapability,
+  ProviderModels,
+  ProviderModelsRefreshUpdate,
   ProviderPricing,
+  ProviderPricingRefresh,
+  ProviderPricingRefreshUpdate,
   ProviderUsage,
   ProxyTestRequest,
   ProxyTestResponse,
@@ -402,17 +405,19 @@ export const dashboardV3 = {
     }),
 
   // --- pricing ---
-  getPricing: () => requestV3<PricingSnapshot>("/pricing"),
-  refreshPricing: (refresh: WithoutExpectation<PricingRefreshUpdate>, expectation: MutationExpectation) =>
-    requestV3<PricingRefresh>("/pricing/refresh", {
-      method: "POST",
-      body: withExpectation(refresh, expectation),
-    }),
+  refreshProviderPricing: (
+    providerId: string,
+    refresh: WithoutExpectation<ProviderPricingRefreshUpdate>,
+    expectation: MutationExpectation,
+  ) => requestV3<ProviderPricingRefresh>(`/providers/${encode(providerId)}/pricing/refresh`, {
+    method: "POST",
+    body: withExpectation(refresh, expectation),
+  }),
   putPricingMultipliers: (
     update: WithoutExpectation<PricingMultipliersUpdate>,
     expectation: MutationExpectation,
   ) =>
-    requestV3<PricingSnapshot>("/pricing/multipliers", {
+    requestV3<PricingSnapshot>("/providers/opencode/go/pricing/multipliers", {
       method: "PUT",
       body: withExpectation(update, expectation),
     }),
@@ -472,6 +477,14 @@ export const dashboardV3 = {
       method: "PUT",
       body: withExpectation(config, expectation),
     }),
+  putAccountGoatModelAccess: (
+    id: string,
+    modelAccess: WithoutExpectation<AccountGoatModelAccessUpdate>["modelAccess"],
+    expectation: MutationExpectation,
+  ) => requestV3<AccountMutation>(`/accounts/${encode(id)}/goat-model-access`, {
+    method: "PUT",
+    body: withExpectation({ modelAccess } satisfies WithoutExpectation<AccountGoatModelAccessUpdate>, expectation),
+  }),
   putAccountModelCapabilities: (id: string, update: WithoutExpectation<AccountModelCapabilitiesUpdate>, expectation: MutationExpectation) =>
     requestV3<AccountMutation>(`/accounts/${encode(id)}/model-capabilities`, {
       method: "PUT",
@@ -519,6 +532,14 @@ export const dashboardV3 = {
   getProviders: () => requestV3<ProviderCatalog>("/providers"),
   getProviderModelCapabilities: () =>
     requestV3<ProviderModelCapability[]>("/providers/model-capabilities"),
+  refreshProviderModels: (
+    providerId: string,
+    accountId: WithoutExpectation<ProviderModelsRefreshUpdate>["accountId"],
+    expectation: MutationExpectation,
+  ) => requestV3<ProviderModels>(`/providers/${encode(providerId)}/models/refresh`, {
+    method: "POST",
+    body: withExpectation({ accountId } satisfies WithoutExpectation<ProviderModelsRefreshUpdate>, expectation),
+  }),
   getZenFreeSettings: () => requestV3<ZenFreeSettings>("/providers/zen-free"),
   patchZenFreeSettings: (enabled: boolean, expectation: MutationExpectation) =>
     requestV3<ZenFreeSettings>("/providers/zen-free", {

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Account } from "../api/tauri.ts";
+import type { Account } from "../api/dashboard.ts";
 import { buildNeedsAttention } from "./dashboard-attention.ts";
 import { accountPlanKey, accountStatusKey, filterAccounts, plansInUse } from "./account-filters.ts";
-import { PLAN_DEFINITIONS } from "./plans.ts";
+import { PLAN_DEFINITIONS } from "../domain/plans.ts";
 
 const NOW = Date.parse("2026-08-21T12:00:00Z");
 

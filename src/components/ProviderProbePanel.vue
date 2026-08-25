@@ -93,7 +93,7 @@ import type {
   ProviderProtocol,
 } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
-import { PROVIDER_PROTOCOLS, protocolDisplayName, uniqueProtocols } from "../views/provider-contracts.ts";
+import { PROVIDER_PROTOCOLS, protocolDisplayName, uniqueProtocols } from "../domain/provider-contracts.ts";
 
 const props = defineProps<{
   unavailable: boolean;

@@ -1,12 +1,15 @@
 use crate::crypto::KeyCipher;
+use crate::custom::validate_custom_base_url;
 use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
-use crate::kernel::pricing::{PricingLimits, PricingSnapshot, SEED_LIMITS};
+use crate::kernel::pricing::{
+    PricingLimits, PricingSnapshot, ProviderPricingSnapshot, SEED_LIMITS,
+};
 use crate::models::*;
 use crate::provider::*;
 use crate::provider_contracts::{
-    CATALOG_SOURCE_OFFICIAL_ZEN, ContractEvidenceSource, ContractScope, PersistedContracts,
-    PersistedModelProtocol, PersistedScopeRow, ProbeResultKind, ProtocolSwitches,
-    SCOPE_KIND_CUSTOM_ENDPOINT,
+    CATALOG_SOURCE_COMMAND_CODE_MODELS, CATALOG_SOURCE_OFFICIAL_ZEN, ContractEvidenceSource,
+    ContractScope, PersistedContracts, PersistedModelProtocol, PersistedScopeRow, ProbeResultKind,
+    ProtocolSwitches, SCOPE_KIND_CUSTOM_ENDPOINT,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
@@ -57,7 +60,8 @@ pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// v26 and before any v27 write. Not created for a brand-new empty database.
 pub const PRE_V3_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v3.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 27;
+pub const CURRENT_SCHEMA_VERSION: i32 = 28;
+pub const V27_SCHEMA_VERSION: i32 = 27;
 /// Schema the v27 rewrite expects as its committed source. Historical databases
 /// always migrate through this version first.
 pub const V26_SCHEMA_VERSION: i32 = 26;
@@ -1171,7 +1175,7 @@ fn migrate_to_v27(
 ) -> Result<()> {
     for _ in 0..V27_WRITER_RACE_RETRIES {
         let version = schema_version_on(conn)?;
-        if version >= CURRENT_SCHEMA_VERSION {
+        if version >= V27_SCHEMA_VERSION {
             return Ok(());
         }
         anyhow::ensure!(
@@ -1194,7 +1198,7 @@ fn migrate_to_v27(
         let migrated = with_foreign_keys_off(conn, || {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
             let version_locked = schema_version_on(&tx)?;
-            if version_locked >= CURRENT_SCHEMA_VERSION {
+            if version_locked >= V27_SCHEMA_VERSION {
                 tx.rollback()?;
                 return Ok(true);
             }
@@ -1210,7 +1214,7 @@ fn migrate_to_v27(
             migrate_v27_body(&tx)?;
             v27_fault(V27MigrationFault::BeforeSchemaVersion)?;
             tx.execute_batch(&format!(
-                "INSERT OR REPLACE INTO schema_version (version) VALUES ({CURRENT_SCHEMA_VERSION});"
+                "INSERT OR REPLACE INTO schema_version (version) VALUES ({V27_SCHEMA_VERSION});"
             ))?;
             v27_fault(V27MigrationFault::BeforeCommit)?;
             tx.commit()?;
@@ -1244,6 +1248,32 @@ fn v27_fault(point: V27MigrationFault) -> Result<()> {
     Ok(())
 }
 
+fn migrate_to_v28(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= CURRENT_SCHEMA_VERSION {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        version == V27_SCHEMA_VERSION,
+        "v28 requires a canonical schema v27 source, found {version}"
+    );
+    let tx = conn.unchecked_transaction()?;
+    ensure_column(
+        &tx,
+        "accounts",
+        "goat_model_access",
+        "TEXT NOT NULL DEFAULT 'goat'",
+    )?;
+    tx.execute(
+        "UPDATE accounts SET goat_model_access = 'goat'
+         WHERE goat_model_access NOT IN ('goat', 'all')",
+        [],
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (28);")?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod v27_test_hooks {
     use super::V27MigrationFault;
@@ -1258,26 +1288,26 @@ mod v27_test_hooks {
         static RACE_DURING_VACUUM: Cell<bool> = const { Cell::new(false) };
     }
 
-    pub fn inject(point: V27MigrationFault) -> anyhow::Result<()> {
+    pub(crate) fn inject(point: V27MigrationFault) -> anyhow::Result<()> {
         if FAULT.get() == Some(point) {
             anyhow::bail!("injected v27 fault at {point:?}");
         }
         Ok(())
     }
 
-    pub struct VacuumRace {
+    pub(crate) struct VacuumRace {
         join: Option<JoinHandle<()>>,
     }
 
     impl VacuumRace {
-        pub fn finish(mut self) {
+        pub(crate) fn finish(mut self) {
             if let Some(join) = self.join.take() {
                 let _ = join.join();
             }
         }
     }
 
-    pub fn install_vacuum_race(db_path: &Path, backup_path: &Path) -> Option<VacuumRace> {
+    pub(crate) fn install_vacuum_race(db_path: &Path, backup_path: &Path) -> Option<VacuumRace> {
         if !RACE_DURING_VACUUM.get() {
             return None;
         }
@@ -1310,15 +1340,15 @@ mod v27_test_hooks {
         Some(VacuumRace { join: Some(join) })
     }
 
-    pub fn set_fault(point: Option<V27MigrationFault>) {
+    pub(crate) fn set_fault(point: Option<V27MigrationFault>) {
         FAULT.set(point);
     }
 
-    pub fn set_race_during_vacuum(enabled: bool) {
+    pub(crate) fn set_race_during_vacuum(enabled: bool) {
         RACE_DURING_VACUUM.set(enabled);
     }
 
-    pub fn reset() {
+    pub(crate) fn reset() {
         FAULT.set(None);
         RACE_DURING_VACUUM.set(false);
     }
@@ -1436,6 +1466,101 @@ fn mark_required_verification_stale_on(conn: &Connection, account_id: &str) -> R
              updated_at = ?2
          WHERE id = ?1 AND verification_status <> 'not_required'",
         params![account_id, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn persist_goat_catalog_on(
+    conn: &Connection,
+    account_id: &str,
+    models: &[String],
+    verified_at: Option<DateTime<Utc>>,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM account_model_capabilities
+         WHERE account_id = ?1 AND source = ?2",
+        params![account_id, COMMAND_CODE_GOAT_MODELS_SOURCE],
+    )?;
+    let verified = verified_at.map(|value| value.to_rfc3339());
+    let mut seen = HashSet::new();
+    for model in models {
+        let model_id = validate_custom_model_id(model)?;
+        let key = model_id.to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        let protocol = match ocg_domain::protocol::command_code_preferred_format(&model_id) {
+            Some(ocg_domain::protocol::ApiFormat::Messages) => UpstreamProtocolKind::Messages,
+            _ => UpstreamProtocolKind::ChatCompletions,
+        };
+        conn.execute(
+            "INSERT INTO account_model_capabilities
+             (account_id, model_id, protocol, verified_at, source)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                account_id,
+                model_id,
+                protocol.as_str(),
+                verified,
+                COMMAND_CODE_GOAT_MODELS_SOURCE,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn refresh_goat_provider_catalog_on(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT c.model_id
+         FROM account_model_capabilities c
+         INNER JOIN accounts a ON a.id = c.account_id
+         WHERE a.provider_id = ?1 AND a.offering_id = ?2
+           AND c.source = ?3
+           AND a.verification_status = 'verified'
+         ORDER BY a.sort_order ASC, a.created_at ASC, a.id ASC, c.rowid ASC",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            COMMAND_CODE_PROVIDER_ID,
+            GOAT_OFFERING_ID,
+            COMMAND_CODE_GOAT_MODELS_SOURCE
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for row in rows {
+        let model = row?;
+        let key = model.to_ascii_lowercase();
+        if seen.insert(key) {
+            models.push(model);
+        }
+    }
+    let now = Utc::now();
+    conn.execute(
+        "INSERT INTO provider_model_catalogs
+         (provider_id, offering_id, models_json, refreshed_at, source_url)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(provider_id, offering_id) DO UPDATE SET
+             models_json = excluded.models_json,
+             refreshed_at = excluded.refreshed_at,
+             source_url = excluded.source_url",
+        params![
+            COMMAND_CODE_PROVIDER_ID,
+            GOAT_OFFERING_ID,
+            serde_json::to_string(&models)?,
+            now.to_rfc3339(),
+            COMMAND_CODE_GOAT_BASE_URL,
+        ],
+    )?;
+    upsert_contract_catalog_on(
+        conn,
+        &ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+        &models,
+        Some(now),
+        CATALOG_SOURCE_COMMAND_CODE_MODELS,
+        COMMAND_CODE_GOAT_BASE_URL,
+        now,
     )?;
     Ok(())
 }
@@ -1694,6 +1819,7 @@ impl Database {
         let db = Self { conn };
         db.migrate()?;
         migrate_to_v27(&db.conn, &db_path, cipher, is_fresh)?;
+        migrate_to_v28(&db.conn)?;
         Ok(db)
     }
 
@@ -2863,7 +2989,7 @@ impl Database {
         // reported a higher schema_version number without these fields. v27
         // drops these leftovers in favor of `provider_usage_sync_state`; never
         // resurrect them on a v27+ database.
-        if version < CURRENT_SCHEMA_VERSION {
+        if version < V27_SCHEMA_VERSION {
             ensure_column(&tx, "accounts", "usage_sync_last_success_at", "TEXT")?;
             ensure_column(&tx, "accounts", "usage_sync_last_attempt_at", "TEXT")?;
             ensure_column(&tx, "accounts", "usage_sync_next_eligible_at", "TEXT")?;
@@ -2928,9 +3054,8 @@ impl Database {
         // lack `enabled` even after additive column backstops, so skip rather
         // than fail the open. Go/Zen and unknown pairs are not in this set.
         disable_unroutable_catalog_accounts(&tx)?;
-        // Unverified GOAT rows from the first v23 contract slice stay pending.
-        // Verified leftovers keep their verification snapshot; enablement is
-        // handled above.
+        // Historical v23 leftovers that never received a verification status
+        // stay pending. Failed and verified GOAT rows keep their snapshots.
         if table_has_column(&tx, "accounts", "provider_id")?
             && table_has_column(&tx, "accounts", "offering_id")?
             && table_has_column(&tx, "accounts", "verification_status")?
@@ -2938,7 +3063,7 @@ impl Database {
             tx.execute(
                 "UPDATE accounts SET verification_status = 'pending', verification_error = NULL
                  WHERE provider_id = ?1 AND offering_id = ?2
-                   AND verification_status <> 'verified'",
+                   AND verification_status = 'not_required'",
                 params![COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
             )?;
         }
@@ -3518,6 +3643,17 @@ impl Database {
                 requires_verification,
             ],
         )?;
+        if key_replaced
+            && requires_verification
+            && is_command_code_goat(&existing.provider_id, &existing.offering_id)
+        {
+            tx.execute(
+                "DELETE FROM account_model_capabilities
+                 WHERE account_id = ?1 AND source = ?2",
+                params![id, COMMAND_CODE_GOAT_MODELS_SOURCE],
+            )?;
+            refresh_goat_provider_catalog_on(&tx)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -3917,6 +4053,230 @@ impl Database {
             });
         }
         Ok(runtimes)
+    }
+
+    pub fn list_goat_account_runtimes(&self) -> Result<Vec<crate::goat::GoatAccountRuntime>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, enabled, verification_status, setup_step, key_cipher, goat_model_access
+             FROM accounts
+             WHERE provider_id = ?1 AND offering_id = ?2
+             ORDER BY sort_order ASC, created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID], |row| {
+            let account_id: String = row.get(0)?;
+            let enabled = row.get::<_, i32>(1)? != 0;
+            let status_value = row.get::<_, String>(2)?;
+            let verification_status = ConnectionVerificationStatus::try_from(status_value.as_str())
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+                })?;
+            let setup_value = row.get::<_, String>(3)?;
+            let setup_step = AccountSetupStep::try_from(setup_value.as_str()).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    Type::Text,
+                    Box::new(std::io::Error::other(error)),
+                )
+            })?;
+            let key_cipher: String = row.get(4)?;
+            let access_value: String = row.get(5)?;
+            let model_access =
+                GoatModelAccess::try_from(access_value.as_str()).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        Type::Text,
+                        Box::new(std::io::Error::other(error)),
+                    )
+                })?;
+            Ok((
+                account_id,
+                enabled,
+                verification_status,
+                setup_step.is_ready(),
+                !key_cipher.is_empty(),
+                model_access,
+            ))
+        })?;
+        let mut runtimes = Vec::new();
+        for row in rows {
+            let (account_id, enabled, verification_status, setup_ready, has_key, model_access) =
+                row?;
+            let models = self.list_goat_catalog_models(&account_id)?;
+            runtimes.push(crate::goat::GoatAccountRuntime {
+                account_id,
+                enabled,
+                verification_status,
+                setup_ready,
+                has_key,
+                model_access,
+                models,
+            });
+        }
+        Ok(runtimes)
+    }
+
+    pub fn goat_model_access(&self, account_id: &str) -> Result<Option<GoatModelAccess>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT goat_model_access FROM accounts
+                 WHERE id = ?1 AND provider_id = ?2 AND offering_id = ?3",
+                params![account_id, COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value
+            .map(|value| GoatModelAccess::try_from(value.as_str()).map_err(anyhow::Error::msg))
+            .transpose()
+    }
+
+    pub fn set_goat_model_access(
+        &self,
+        account_id: &str,
+        model_access: GoatModelAccess,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE accounts SET goat_model_access = ?2, updated_at = ?3
+             WHERE id = ?1 AND provider_id = ?4 AND offering_id = ?5",
+            params![
+                account_id,
+                model_access.as_str(),
+                Utc::now().to_rfc3339(),
+                COMMAND_CODE_PROVIDER_ID,
+                GOAT_OFFERING_ID,
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "Command Code GOAT account not found");
+        Ok(())
+    }
+
+    pub fn list_goat_catalog_models(&self, account_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model_id FROM account_model_capabilities
+             WHERE account_id = ?1 AND source = ?2
+             ORDER BY rowid ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![account_id, crate::provider::COMMAND_CODE_GOAT_MODELS_SOURCE],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut models = Vec::new();
+        let mut seen = HashSet::new();
+        for row in rows {
+            let model = row?;
+            let key = model.to_ascii_lowercase();
+            if seen.insert(key) {
+                models.push(model);
+            }
+        }
+        Ok(models)
+    }
+
+    pub fn capture_goat_verification_contract(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<crate::goat::GoatVerificationContract>> {
+        Ok(self.custom_verification_row_identity(account_id)?.map(
+            |(updated_at, key_cipher, _status)| crate::goat::GoatVerificationContract {
+                account_id: account_id.to_string(),
+                account_updated_at: updated_at,
+                key_cipher,
+            },
+        ))
+    }
+
+    pub fn commit_goat_verification_if_contract_matches(
+        &self,
+        contract: &crate::goat::GoatVerificationContract,
+        status: ConnectionVerificationStatus,
+        verified_at: Option<DateTime<Utc>>,
+        error: Option<&str>,
+        models: Option<&[String]>,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let matches = tx.query_row(
+            "SELECT COUNT(*) FROM accounts
+                 WHERE id = ?1
+                   AND verification_status IN ('pending', 'failed')
+                   AND updated_at = ?2
+                   AND key_cipher = ?3",
+            params![
+                contract.account_id,
+                contract.account_updated_at,
+                contract.key_cipher
+            ],
+            |row| row.get::<_, i64>(0),
+        )? == 1;
+        if !matches {
+            return Ok(false);
+        }
+        if status == ConnectionVerificationStatus::Verified {
+            let models = models.ok_or_else(|| {
+                anyhow::anyhow!("verified Command Code GOAT commit requires a model snapshot")
+            })?;
+            persist_goat_catalog_on(&tx, &contract.account_id, models, verified_at)?;
+        }
+        let changed = tx.execute(
+            "UPDATE accounts
+             SET verification_status = ?2,
+                 connection_verified_at = ?3,
+                 verification_error = ?4,
+                 updated_at = ?5
+             WHERE id = ?1
+               AND verification_status IN ('pending', 'failed')
+               AND updated_at = ?6
+               AND key_cipher = ?7",
+            params![
+                contract.account_id,
+                status.as_str(),
+                verified_at.map(|value| value.to_rfc3339()),
+                error,
+                Utc::now().to_rfc3339(),
+                contract.account_updated_at,
+                contract.key_cipher,
+            ],
+        )?;
+        if changed != 1 {
+            return Ok(false);
+        }
+        if status == ConnectionVerificationStatus::Verified {
+            refresh_goat_provider_catalog_on(&tx)?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn refresh_goat_catalog_if_contract_matches(
+        &self,
+        contract: &crate::goat::GoatVerificationContract,
+        models: &[String],
+        refreshed_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let matches = tx.query_row(
+            "SELECT COUNT(*) FROM accounts
+             WHERE id = ?1
+               AND provider_id = ?2
+               AND offering_id = ?3
+               AND verification_status = 'verified'
+               AND updated_at = ?4
+               AND key_cipher = ?5",
+            params![
+                contract.account_id,
+                COMMAND_CODE_PROVIDER_ID,
+                GOAT_OFFERING_ID,
+                contract.account_updated_at,
+                contract.key_cipher,
+            ],
+            |row| row.get::<_, i64>(0),
+        )? == 1;
+        if !matches {
+            return Ok(false);
+        }
+        persist_goat_catalog_on(&tx, &contract.account_id, models, Some(refreshed_at))?;
+        refresh_goat_provider_catalog_on(&tx)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn replace_account_model_capabilities(
@@ -6866,6 +7226,10 @@ mod tests {
         )
         .expect("access_keys should reverse into sub_gateway_keys");
         restore_usage_sync_account_columns(&conn);
+        if table_has_column(&conn, "accounts", "goat_model_access").unwrap() {
+            conn.execute_batch("ALTER TABLE accounts DROP COLUMN goat_model_access;")
+                .expect("v28 GOAT model access should reverse out of the v26 fixture");
+        }
         conn.execute_batch(
             "DELETE FROM schema_version;
              INSERT INTO schema_version (version) VALUES (26);
@@ -11099,7 +11463,7 @@ mod tests {
         db.conn
             .execute_batch(
                 "DELETE FROM schema_version;
-                 INSERT INTO schema_version (version) VALUES (28);",
+                 INSERT INTO schema_version (version) VALUES (29);",
             )
             .unwrap();
         drop(db);
@@ -11113,7 +11477,7 @@ mod tests {
             "{error}"
         );
         let conn = Connection::open(dir.join("data.sqlite")).unwrap();
-        assert_eq!(schema_version_on(&conn).unwrap(), 28);
+        assert_eq!(schema_version_on(&conn).unwrap(), 29);
         drop(conn);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -12409,7 +12773,6 @@ mod tests {
                 .map(|plan| (plan.offering.provider_id, plan.offering.offering_id))
                 .collect::<Vec<_>>(),
             vec![
-                (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
                 (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
                 (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID),
                 (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID),
@@ -12541,41 +12904,32 @@ mod tests {
         assert_eq!(unknown_after, unknown_before);
 
         let goat_pending_after = sanitation_snapshot(&db, "goat-pending");
-        assert!(!goat_pending_after.enabled);
-        assert_eq!(goat_pending_after.name, goat_pending_before.name);
-        assert_eq!(goat_pending_after.notes, goat_pending_before.notes);
-        assert_eq!(
-            goat_pending_after.updated_at,
-            goat_pending_before.updated_at
-        );
+        assert_eq!(goat_pending_after, goat_pending_before);
+        assert!(goat_pending_after.enabled);
         assert_eq!(
             goat_pending_after.verification,
             ConnectionVerificationStatus::Pending
         );
 
         let goat_verified_after = sanitation_snapshot(&db, "goat-verified");
-        assert!(!goat_verified_after.enabled);
-        assert_eq!(goat_verified_after.name, goat_verified_before.name);
-        assert_eq!(goat_verified_after.notes, goat_verified_before.notes);
-        assert_eq!(
-            goat_verified_after.updated_at,
-            goat_verified_before.updated_at
-        );
+        assert_eq!(goat_verified_after, goat_verified_before);
+        assert!(goat_verified_after.enabled);
         assert_eq!(
             goat_verified_after.verification,
             ConnectionVerificationStatus::Verified
         );
 
         let goat_failed_after = sanitation_snapshot(&db, "goat-failed");
-        assert!(!goat_failed_after.enabled);
-        assert_eq!(goat_failed_after.name, goat_failed_before.name);
-        assert_eq!(goat_failed_after.notes, goat_failed_before.notes);
-        assert_eq!(goat_failed_after.updated_at, goat_failed_before.updated_at);
+        assert_eq!(goat_failed_after, goat_failed_before);
+        assert!(goat_failed_after.enabled);
         assert_eq!(
             goat_failed_after.verification,
-            ConnectionVerificationStatus::Pending
+            ConnectionVerificationStatus::Failed
         );
-        assert_eq!(goat_failed_after.verification_error, None);
+        assert_eq!(
+            goat_failed_after.verification_error.as_deref(),
+            Some("boom")
+        );
 
         for plan in unroutable.iter().filter(|plan| {
             !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
@@ -12853,6 +13207,36 @@ mod tests {
             );
         }
         drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v27_to_v28_adds_goat_model_access_without_replaying_v27() {
+        let dir = temp_data_dir("v27-v28-migrate");
+        populate_v26_source(&dir);
+        let db_path = dir.join("data.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        let cipher = test_host_cipher();
+        migrate_to_v27(&conn, &db_path, Some(cipher.as_ref()), false).unwrap();
+        assert_eq!(schema_version_on(&conn).unwrap(), V27_SCHEMA_VERSION);
+        assert!(!table_has_column(&conn, "accounts", "goat_model_access").unwrap());
+
+        migrate_to_v28(&conn).unwrap();
+        assert_eq!(schema_version_on(&conn).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert!(table_has_column(&conn, "accounts", "goat_model_access").unwrap());
+        let default_value: String = conn
+            .query_row(
+                "SELECT goat_model_access FROM accounts WHERE id = 'v26-account'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default_value, "goat");
+        for column in USAGE_SYNC_ACCOUNT_COLUMNS {
+            assert!(!table_has_column(&conn, "accounts", column).unwrap());
+        }
+
+        drop(conn);
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -53,7 +53,6 @@ mod dependency_guard {
         "custom_http",
         "auth",
         "browser",
-        "console_usage",
         "go_usage",
         "usage_sync",
         "gateway_keys",
@@ -385,7 +384,7 @@ mod dependency_guard {
     }
 
     #[test]
-    fn upstream_limit_is_a_pure_dag_leaf_consumed_by_dashboard_without_gateway() {
+    fn upstream_limit_is_a_pure_dag_leaf_consumed_by_dashboard_v3_without_gateway() {
         let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let path = src_root.join("upstream_limit.rs");
         let production = production_source(&read_to_string(&path));
@@ -439,14 +438,16 @@ mod dependency_guard {
             );
         }
 
-        let dashboard = production_source(&read_to_string(&src_root.join("dashboard.rs")));
+        let dashboard = production_source(&read_to_string(
+            &src_root.join("dashboard_v3/managed_key_verify.rs"),
+        ));
         assert!(
             crate_path_roots(&dashboard).contains("upstream_limit"),
-            "dashboard production source must consume crate::upstream_limit directly"
+            "dashboard_v3 managed-key verification must consume crate::upstream_limit directly"
         );
         assert!(
             !dashboard.contains("gateway::limit"),
-            "dashboard must not reach limit parsers through crate::gateway"
+            "dashboard_v3 must not reach limit parsers through crate::gateway"
         );
         for line in dashboard.lines() {
             let trimmed = line.trim();
@@ -454,7 +455,7 @@ mod dependency_guard {
                 assert!(
                     !trimmed.contains("gateway::limit")
                         && !trimmed.starts_with("use crate::gateway::limit"),
-                    "dashboard imports gateway limit parsers: {trimmed}"
+                    "dashboard_v3 imports gateway limit parsers: {trimmed}"
                 );
             }
         }
@@ -488,8 +489,8 @@ mod dependency_guard {
             "db production source must not reference gateway_keys"
         );
         assert!(
-            db_source.contains("CURRENT_SCHEMA_VERSION: i32 = 27"),
-            "schema version must remain 27"
+            db_source.contains("CURRENT_SCHEMA_VERSION: i32 = 28"),
+            "schema version must remain 28"
         );
 
         let graph = production_graph(&src_root, &modules);
@@ -674,9 +675,9 @@ mod dependency_guard {
         );
         assert!(
             graph
-                .get("dashboard")
+                .get("dashboard_v3")
                 .is_some_and(|edges| edges.contains("upstream_limit")),
-            "dashboard must consume upstream_limit without a gateway parser edge"
+            "dashboard_v3 must consume upstream_limit without a gateway parser edge"
         );
         assert!(
             graph
@@ -949,7 +950,7 @@ mod dependency_guard {
             "state must not import the host rebind adapter"
         );
         assert!(
-            runtime.contains("pub trait GatewayRebindHost")
+            runtime.contains("pub(crate) trait GatewayRebindHost")
                 && runtime.contains("pub struct GatewayHandle")
                 && crate_path_roots(&runtime).is_empty(),
             "gateway_runtime must stay a crate-level DAG leaf, roots={:?}",

@@ -1165,8 +1165,8 @@ test("settings expose the downstream display root and bounded request timeouts",
   assert.match(dashboard, /computed\(\(\) => connectionStore\.info \?\? EMPTY_CONNECTION\)/);
   assert.doesNotMatch(dashboard, /ref<AppConfig>/);
   assert.doesNotMatch(settings, /PricingCatalog/);
-  assert.match(api, /getPricing: async \(\) => presentPricing\(await dashboardV3\.getPricing\(\)\)/);
-  assert.match(api, /refreshPricing: async \(refresh: PricingRefreshRequest = \{\}\)/);
+  assert.match(api, /dashboardV3\.getProviderPricing\("opencode", "go"\)/);
+  assert.match(api, /refreshProviderPricing: async/);
   assert.match(api, /expectedPricingRevision/);
   assert.match(api, /official_content_hash\?: string/);
   assert.match(api, /expected_official_content_hash\?: string/);
@@ -1175,7 +1175,7 @@ test("settings expose the downstream display root and bounded request timeouts",
 });
 
 test("accounts derive quota limits from the active pricing snapshot", async () => {
-  const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+  const usage = await readFile(new URL("../domain/useAccountUsage.ts", import.meta.url), "utf8");
   assert.match(usage, /quotaLimits = ref<PricingLimits \| null>\(null\)/);
   assert.match(usage, /quotaLimits\.value = \(await dashboardApi\.getPricing\(\)\)\.limits/);
   assert.doesNotMatch(usage, /window_5h:\s*12|window_week:\s*30|window_month:\s*60/);

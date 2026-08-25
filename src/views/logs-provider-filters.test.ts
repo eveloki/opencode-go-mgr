@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { tauriApi } from "../api/tauri.ts";
+import { dashboardApi } from "../api/dashboard.ts";
 
 const logs = readFileSync(new URL("./Logs.vue", import.meta.url), "utf8");
-const api = readFileSync(new URL("../api/tauri.ts", import.meta.url), "utf8");
+const presenters = readFileSync(new URL("../api/dashboard-presenters.ts", import.meta.url), "utf8");
 
 test("forward log API sends the provider attribution filters as exact query params", async () => {
   Object.defineProperty(globalThis, "window", {
@@ -17,19 +17,22 @@ test("forward log API sends the provider attribution filters as exact query para
     value: async (input: string) => {
       requested = input;
       return new Response(JSON.stringify({
+        revision: 1,
+        processGeneration: 99,
+        pricingRevision: null,
         items: [],
         summary: {
-          total_requests: 0,
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          cached_tokens: 0,
+          totalRequests: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          cachedTokens: 0,
           cost: 0,
         },
       }), { headers: { "Content-Type": "application/json" } });
     },
   });
 
-  await tauriApi.getForwardLogs({
+  await dashboardApi.getForwardLogs({
     limit: 20,
     offset: 40,
     provider_id: "opencode",
@@ -39,10 +42,10 @@ test("forward log API sends the provider attribution filters as exact query para
   });
 
   const query = new URL(requested, "http://localhost").searchParams;
-  assert.equal(query.get("provider_id"), "opencode");
-  assert.equal(query.get("offering_id"), "go");
-  assert.equal(query.get("route_account_id"), "route 1");
-  assert.equal(query.get("credential_account_id"), "cred 2");
+  assert.equal(query.get("providerId"), "opencode");
+  assert.equal(query.get("offeringId"), "go");
+  assert.equal(query.get("routeAccountId"), "route 1");
+  assert.equal(query.get("credentialAccountId"), "cred 2");
   assert.equal(query.get("limit"), "20");
   assert.equal(query.get("offset"), "40");
 });
@@ -60,7 +63,7 @@ test("forward log DTO declares nullable provider attribution and cost fields", (
     "native_cost_unit",
     "native_cost_currency",
   ]) {
-    assert.match(api, new RegExp(`${field}\\?: [^;]*\\| null`));
+    assert.match(presenters, new RegExp(`${field}: [^;]*\\| null`));
   }
 });
 

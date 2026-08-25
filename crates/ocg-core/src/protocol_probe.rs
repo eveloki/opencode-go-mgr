@@ -18,10 +18,11 @@ use crate::state::CoreState;
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 
-pub const CEILING_SKIP_MESSAGE: &str = "probe combination is outside the adapter safety ceiling";
+pub(crate) const CEILING_SKIP_MESSAGE: &str =
+    "probe combination is outside the adapter safety ceiling";
 
 #[derive(Debug, Clone)]
-pub struct ProtocolProbeOutcome {
+pub(crate) struct ProtocolProbeOutcome {
     pub protocol: UpstreamProtocolKind,
     pub success: bool,
     pub skipped: bool,
@@ -30,13 +31,13 @@ pub struct ProtocolProbeOutcome {
 }
 
 #[derive(Debug)]
-pub enum ProtocolProbeRunError {
+pub(crate) enum ProtocolProbeRunError {
     Evidence(String),
     Apply(String),
     Persist(String),
 }
 
-pub struct ProtocolProbeContext<'a> {
+pub(crate) struct ProtocolProbeContext<'a> {
     pub state: &'a CoreState,
     pub config: &'a AppConfig,
     pub account: &'a Account,
@@ -46,7 +47,9 @@ pub struct ProtocolProbeContext<'a> {
     pub now: DateTime<Utc>,
 }
 
-pub fn require_unique_probe_protocols(protocols: &[UpstreamProtocolKind]) -> Result<(), String> {
+pub(crate) fn require_unique_probe_protocols(
+    protocols: &[UpstreamProtocolKind],
+) -> Result<(), String> {
     let mut seen = HashSet::new();
     for protocol in protocols {
         if !seen.insert(*protocol) {
@@ -56,7 +59,7 @@ pub fn require_unique_probe_protocols(protocols: &[UpstreamProtocolKind]) -> Res
     Ok(())
 }
 
-pub async fn run_protocol_probes<L, P>(
+pub(crate) async fn run_protocol_probes<L, P>(
     ctx: &ProtocolProbeContext<'_>,
     scope: &ContractScope,
     protocols: &[UpstreamProtocolKind],
@@ -108,7 +111,7 @@ where
     Ok(results)
 }
 
-pub async fn execute_protocol_probe(
+pub(crate) async fn execute_protocol_probe(
     ctx: &ProtocolProbeContext<'_>,
     protocol: UpstreamProtocolKind,
 ) -> Result<(), String> {

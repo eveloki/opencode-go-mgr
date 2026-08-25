@@ -1,13 +1,12 @@
-//! Provider catalog compatibility facade plus Custom URL inspection and
-//! persistence-shaped quota, credit, pricing, and usage-sync records.
+//! Provider catalog compatibility facade.
 //!
 //! Pure catalog, adapter, registry, and binding types live in
 //! [`ocg_domain::provider`] and are re-exported here item-by-item so
-//! `ocg_core::provider::*` paths stay stable.
-
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+//! `ocg_core::provider::*` paths stay stable. Host-specific records live with
+//! their owners: Custom URL validation in [`crate::custom_http`] (re-exported
+//! via [`crate::custom`]), quota/credit and usage-sync records in
+//! [`crate::models`], pricing storage records in [`crate::pricing`], and GOAT
+//! runtime records in [`crate::goat`].
 
 pub use crate::kernel::catalog::{
     CatalogParseError, CredentialKind, QuotaScope, UpstreamAuthScheme, UpstreamProtocolKind,
@@ -24,18 +23,19 @@ pub use crate::kernel::ids::{
 pub use ocg_domain::provider::{
     BUILTIN_OFFERINGS, BUILTIN_PLANS, BuiltinOffering, BuiltinPlan, COMMAND_CODE_GOAT_BASE_URL,
     COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_HOST,
-    COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, COMMAND_CODE_GOAT_QUOTA_5H,
-    COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK, CardActionsDescriptor,
-    CardCapabilities, CardVerifyAction, CommandCodeGoatAdapter, ConfigurableHttpAdapter,
-    ConnectionVerificationStatus, CreationAvailability, ErrorCooldownDescriptor,
-    ErrorPolicyAdapter, InferenceAdapter, InferenceAuthDescriptor, InferenceChannelKind,
-    InferenceOriginKind, InferenceRoutingDescriptor, ModelCatalogAdapter, ModelCatalogDescriptor,
-    ModelCatalogKind, OPENCODE_CONSTRUCTABLE_PROTOCOLS, OpenCodeGoAdapter,
-    PROTOCOL_FALLBACK_CHAT_MESSAGES, PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES, PlanFormField,
-    PlanRiskNotice, PricingAdapter, PricingDescriptor, ProtocolMatrixKind, ProtocolProbeAdapter,
-    ProtocolProbeDescriptor, ProviderAdapterKind, ProviderBindingError, ProviderCapabilities,
-    ProviderDescriptor, ProviderRegistry, QUOTA_WINDOW_FIVE_HOURS, QUOTA_WINDOW_FREE,
-    QUOTA_WINDOW_MONTH, QUOTA_WINDOW_WEEK, SCNET_RISK_ACKNOWLEDGEMENT_BODY,
+    COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS, COMMAND_CODE_GOAT_MESSAGES_PATH,
+    COMMAND_CODE_GOAT_MODEL_SOURCE, COMMAND_CODE_GOAT_MODELS_PATH, COMMAND_CODE_GOAT_MODELS_SOURCE,
+    CardActionsDescriptor, CardCapabilities, CardVerifyAction, CommandCodeGoatAdapter,
+    ConfigurableHttpAdapter, ConnectionVerificationStatus, CreationAvailability,
+    ErrorCooldownDescriptor, ErrorPolicyAdapter, GoatModelAccess, InferenceAdapter,
+    InferenceAuthDescriptor, InferenceChannelKind, InferenceOriginKind, InferenceRoutingDescriptor,
+    ModelCatalogAdapter, ModelCatalogDescriptor, ModelCatalogKind,
+    OPENCODE_CONSTRUCTABLE_PROTOCOLS, OpenCodeGoAdapter, PROTOCOL_FALLBACK_CHAT_MESSAGES,
+    PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES, PlanFormField, PlanRiskNotice, PricingAdapter,
+    PricingDescriptor, ProtocolMatrixKind, ProtocolProbeAdapter, ProtocolProbeDescriptor,
+    ProviderAdapterKind, ProviderBindingError, ProviderCapabilities, ProviderDescriptor,
+    ProviderRegistry, QUOTA_WINDOW_FIVE_HOURS, QUOTA_WINDOW_FREE, QUOTA_WINDOW_MONTH,
+    QUOTA_WINDOW_WEEK, SCNET_CREATION_UNAVAILABLE_REASON, SCNET_RISK_ACKNOWLEDGEMENT_BODY,
     SCNET_RISK_ACKNOWLEDGEMENT_CONTENT_HASH, SCNET_RISK_ACKNOWLEDGEMENT_ID,
     SCNET_RISK_ACKNOWLEDGEMENT_SOURCE_URL, SCNET_RISK_ACKNOWLEDGEMENT_VERSION,
     SCNET_TOKEN_PLAN_ANTHROPIC_BASE_URL, SCNET_TOKEN_PLAN_CHAT_COMPLETIONS_PATH,
@@ -50,145 +50,14 @@ pub use ocg_domain::provider::{
     ScnetTokenPlanModelSnapshot, ScnetTokenPlanUsageRestrictions, StructuralProbeCeiling,
     UsageAdapter, UsageContractKind, UsageDescriptor, VerificationAdapter, VerificationDescriptor,
     VerificationPolicy, ZenFreeAdapter, acknowledgement_content_hash, builtin_offering,
-    builtin_plan, custom_endpoint_relative_path, default_credential_kind, default_offering_id,
-    default_provider_id, default_quota_scope, default_verification_status,
-    ensure_enabled_offering_is_routable, ensure_offering_can_enable, is_command_code_goat,
-    is_custom_api, is_scnet_token_plan, offering_allows_enablement, plan_allows_enablement,
-    plan_requires_custom_config, scnet_token_plan_model_snapshot,
-    scnet_token_plan_official_offering_name, validate_account_binding, validate_custom_model_id,
-    validate_plan_key,
+    builtin_plan, command_code_goat_includes_model, custom_endpoint_relative_path,
+    default_credential_kind, default_offering_id, default_provider_id, default_quota_scope,
+    default_verification_status, ensure_enabled_offering_is_routable, ensure_offering_can_enable,
+    is_command_code_goat, is_custom_api, is_scnet_token_plan, offering_allows_enablement,
+    parse_command_code_models_catalog, plan_allows_enablement, plan_requires_custom_config,
+    scnet_token_plan_model_snapshot, scnet_token_plan_official_offering_name,
+    validate_account_binding, validate_custom_model_id, validate_plan_key,
 };
-
-/// Structured Custom URL host taken from [`reqwest::Url::host`], not `host_str`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CustomUrlHost {
-    Ip(IpAddr),
-    Domain(String),
-}
-
-/// Syntactic Custom URL inspection shared by persistence and HTTP joining.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CustomUrlTarget {
-    pub host: CustomUrlHost,
-}
-
-/// Syntactic Custom base-URL gate. Administrators explicitly trust Custom
-/// destinations, so any http/https origin is accepted. Credentials and
-/// non-HTTP(S) schemes stay rejected; DNS / IP / hostname policy is not applied.
-pub fn validate_custom_base_url(value: &str) -> Result<String, ProviderBindingError> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL is required".to_string(),
-        ));
-    }
-    if value.len() > 2048 {
-        return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL is too long".to_string(),
-        ));
-    }
-    let parsed = reqwest::Url::parse(value).map_err(|error| {
-        ProviderBindingError::InvalidCustomBaseUrl(format!("invalid base URL: {error}"))
-    })?;
-    inspect_custom_url(&parsed)?;
-    if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL must not include a query or fragment".to_string(),
-        ));
-    }
-    Ok(parsed.as_str().trim_end_matches('/').to_string())
-}
-
-/// Inspect scheme, credentials, and host of a Custom URL.
-///
-/// Uses [`reqwest::Url::host`] so bracketed IPv6 and IPv4-mapped literals are
-/// the parser's IP variants. `host_str().parse::<IpAddr>()` treats `[::ffff:…]`
-/// as a hostname and is the bypass this function exists to close.
-pub fn inspect_custom_url(parsed: &reqwest::Url) -> Result<CustomUrlTarget, ProviderBindingError> {
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL must use http or https".to_string(),
-        ));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL must not include credentials".to_string(),
-        ));
-    }
-    Ok(CustomUrlTarget {
-        host: custom_url_host(parsed)?,
-    })
-}
-
-fn custom_url_host(parsed: &reqwest::Url) -> Result<CustomUrlHost, ProviderBindingError> {
-    let host = parsed.host().ok_or_else(|| {
-        ProviderBindingError::InvalidCustomBaseUrl("base URL must include a host".to_string())
-    })?;
-    // `url::Host` is not a direct dependency (manifests stay frozen). IPv6
-    // Display includes brackets; strip them to recover the parsed `Ipv6Addr`.
-    let rendered = host.to_string();
-    if let Some(inside) = rendered
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-    {
-        let ip = inside.parse::<Ipv6Addr>().map_err(|_| {
-            ProviderBindingError::InvalidCustomBaseUrl("base URL IPv6 host is invalid".to_string())
-        })?;
-        return Ok(CustomUrlHost::Ip(IpAddr::V6(ip)));
-    }
-    if let Ok(ip) = rendered.parse::<Ipv4Addr>() {
-        return Ok(CustomUrlHost::Ip(IpAddr::V4(ip)));
-    }
-    Ok(CustomUrlHost::Domain(rendered.to_ascii_lowercase()))
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct QuotaWindow {
-    pub account_id: String,
-    pub window_kind: String,
-    pub used: f64,
-    pub limit_value: Option<f64>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub resets_at: Option<DateTime<Utc>>,
-    pub calibration_offset: f64,
-    pub unit: String,
-    pub source: String,
-    pub observed_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CreditBalance {
-    pub account_id: String,
-    pub balance_kind: String,
-    pub amount: f64,
-    pub unit: String,
-    pub source: String,
-    pub observed_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderPricingSnapshot {
-    pub provider_id: String,
-    pub offering_id: String,
-    pub revision: String,
-    pub activated_at: String,
-    pub document_updated_at: Option<String>,
-    pub source_url: String,
-    pub content_hash: String,
-    pub snapshot_json: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderUsageSyncState {
-    pub account_id: String,
-    pub last_success_at: Option<DateTime<Utc>>,
-    pub last_attempt_at: Option<DateTime<Utc>>,
-    pub next_eligible_at: Option<DateTime<Utc>>,
-    pub failure_streak: i64,
-    pub last_expedited_at: Option<DateTime<Utc>>,
-}
 
 #[cfg(test)]
 mod tests {
@@ -275,11 +144,11 @@ mod tests {
     fn catalog_hardcodes_plans_and_keeps_unverified_offerings_unroutable() {
         assert_eq!(BUILTIN_PLANS.len(), 7);
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert!(!goat.routable);
+        assert!(goat.routable);
         assert_eq!(goat.verification_policy, VerificationPolicy::Required);
-        assert_eq!(goat.verification_runtime_availability, "unavailable");
+        assert_eq!(goat.verification_runtime_availability, "available");
         assert_eq!(goat.creation_availability, CreationAvailability::Available);
-        assert_eq!(goat.pricing_availability, "unavailable");
+        assert_eq!(goat.pricing_availability, "available");
         assert_eq!(goat.usage_availability, "unavailable");
         assert_eq!(goat.auth_schemes, &[UpstreamAuthScheme::Bearer]);
         assert_eq!(
@@ -294,7 +163,7 @@ mod tests {
                 .upstream_protocols
                 .contains(&UpstreamProtocolKind::Responses)
         );
-        assert_eq!(goat.model_source, "builtin_command_code_protocol_table");
+        assert_eq!(goat.model_source, COMMAND_CODE_GOAT_MODEL_SOURCE);
         assert_eq!(
             COMMAND_CODE_GOAT_BASE_URL,
             "https://api.commandcode.ai/provider/v1"
@@ -398,84 +267,6 @@ mod tests {
         assert!(plan_allows_enablement(zen));
         let go = builtin_plan(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
         assert!(plan_allows_enablement(go));
-    }
-
-    #[test]
-    fn custom_base_url_trusts_administrator_http_origins_and_rejects_credentials() {
-        assert!(validate_custom_base_url("https://api.example.com/v1").is_ok());
-        assert!(validate_custom_base_url("http://127.0.0.1:8080/v1").is_ok());
-        assert!(validate_custom_base_url("http://localhost:3000").is_ok());
-        assert!(validate_custom_base_url("http://app.localhost/v1").is_ok());
-        assert!(validate_custom_base_url("http://api.example.com/v1").is_ok());
-        assert!(validate_custom_base_url("https://192.168.1.8/v1").is_ok());
-        assert!(validate_custom_base_url("http://10.0.0.1:9000/v1").is_ok());
-        assert!(validate_custom_base_url("https://169.254.169.254/latest").is_ok());
-        assert!(validate_custom_base_url("http://metadata.google.internal/").is_ok());
-        assert!(validate_custom_base_url("https://[::ffff:169.254.169.254]/").is_ok());
-        assert!(validate_custom_base_url("https://[2001:db8::1]/v1").is_ok());
-        assert!(validate_custom_base_url("https://user:pass@api.example.com").is_err());
-        assert!(validate_custom_base_url("https://api.example.com/v1?x=1").is_err());
-        assert!(validate_custom_base_url("https://api.example.com/v1#frag").is_err());
-        assert!(validate_custom_base_url("javascript:alert(1)").is_err());
-        assert!(validate_custom_base_url("ftp://api.example.com/v1").is_err());
-        assert_eq!(
-            validate_custom_model_id("deepseek/deepseek-v4-flash").unwrap(),
-            "deepseek/deepseek-v4-flash"
-        );
-        assert!(validate_custom_model_id("").is_err());
-        assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::ChatCompletions),
-            "chat/completions"
-        );
-        assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::Responses),
-            "responses"
-        );
-        assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::Messages),
-            "messages"
-        );
-    }
-
-    #[test]
-    fn custom_url_host_uses_url_host_not_bracketed_host_str() {
-        assert!(validate_custom_base_url("http://[::ffff:127.0.0.1]/v1").is_ok());
-        assert!(validate_custom_base_url("http://[::1]/v1").is_ok());
-        let mapped_loopback = validate_custom_base_url("http://[::ffff:127.0.0.1]/v1").unwrap();
-        let parsed = reqwest::Url::parse(&mapped_loopback).unwrap();
-        match inspect_custom_url(&parsed).unwrap().host {
-            CustomUrlHost::Ip(ip) => {
-                assert_eq!(ip, "::ffff:127.0.0.1".parse::<IpAddr>().unwrap());
-            }
-            CustomUrlHost::Domain(domain) => {
-                panic!("mapped loopback must stay an IP host, got {domain}")
-            }
-        }
-        let metadata = validate_custom_base_url("https://[::ffff:169.254.169.254]/latest").unwrap();
-        let parsed = reqwest::Url::parse(&metadata).unwrap();
-        match inspect_custom_url(&parsed).unwrap().host {
-            CustomUrlHost::Ip(_) => {}
-            CustomUrlHost::Domain(domain) => {
-                panic!("mapped metadata IP must stay an IP host, got {domain}")
-            }
-        }
-    }
-
-    #[test]
-    fn custom_base_url_normalizes_decimal_loopback_literals() {
-        assert_eq!(
-            validate_custom_base_url("http://127.1:8080/v1").unwrap(),
-            "http://127.0.0.1:8080/v1"
-        );
-        assert_eq!(
-            validate_custom_base_url("http://127.0.1/v1").unwrap(),
-            "http://127.0.0.1/v1"
-        );
-        let parsed = reqwest::Url::parse("http://127.1/v1").unwrap();
-        match inspect_custom_url(&parsed).unwrap().host {
-            CustomUrlHost::Ip(ip) => assert_eq!(ip, "127.0.0.1".parse::<IpAddr>().unwrap()),
-            CustomUrlHost::Domain(domain) => panic!("127.1 must not stay a domain: {domain}"),
-        }
     }
 
     #[test]
@@ -645,7 +436,7 @@ mod tests {
             "/v1/messages"
         );
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert_eq!(goat.model_source, "builtin_command_code_protocol_table");
+        assert_eq!(goat.model_source, COMMAND_CODE_GOAT_MODEL_SOURCE);
         assert!(
             scnet_token_plan_model_snapshot(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none()
         );
@@ -711,14 +502,19 @@ mod tests {
                 descriptor.card_actions.protocol_probe,
                 kind.protocol_probe_supported()
             );
-            assert!(!descriptor.verification.uses_get_models);
+            assert_eq!(
+                descriptor.verification.uses_get_models,
+                kind == ProviderAdapterKind::CommandCodeGoat
+            );
             match kind {
                 ProviderAdapterKind::OpenCodeGo
                 | ProviderAdapterKind::ZenFree
+                | ProviderAdapterKind::CommandCodeGoat
                 | ProviderAdapterKind::ConfigurableHttp => {
                     assert!(descriptor.inference.production_inference);
+                    assert!(descriptor.inference.catalog_routable);
                 }
-                ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::Scnet => {
+                ProviderAdapterKind::Scnet => {
                     assert!(!descriptor.inference.production_inference);
                     assert!(!descriptor.inference.catalog_routable);
                     assert_eq!(descriptor.verification.runtime_availability, "unavailable");
@@ -781,7 +577,7 @@ mod tests {
         );
         assert!(go.card_actions.usage_refresh);
         assert!(go.card_actions.protocol_probe);
-        assert!(!go.card_actions.catalog_refresh);
+        assert!(go.card_actions.catalog_refresh);
 
         let zen = ProviderRegistry::get(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID)
             .unwrap();
@@ -812,17 +608,14 @@ mod tests {
 
         let goat = ProviderRegistry::get(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert_eq!(goat.kind, ProviderAdapterKind::CommandCodeGoat);
-        assert!(goat.inference.loopback_test_seam_only);
+        assert!(!goat.inference.loopback_test_seam_only);
+        assert!(goat.inference.production_inference);
         assert!(!goat.inference.follow_redirects);
         assert_eq!(goat.inference.auth, InferenceAuthDescriptor::Bearer);
-        assert!(goat.usage.experimental);
-        assert!(!goat.usage.publishes_capability || goat.usage.endpoint.is_none());
-        assert!(goat.usage.publishes_capability);
-        assert_eq!(
-            goat.usage.contract,
-            UsageContractKind::ExperimentalUnavailable
-        );
-        assert!(goat.usage.manual_calibration);
+        assert!(!goat.usage.experimental);
+        assert!(!goat.usage.publishes_capability);
+        assert_eq!(goat.usage.contract, UsageContractKind::Unavailable);
+        assert!(!goat.usage.manual_calibration);
         assert!(goat.error_cooldown.generic_provider_key_cooldown);
         assert_eq!(
             goat.protocol_probe.matrix,
@@ -834,7 +627,12 @@ mod tests {
             StructuralProbeCeiling::Unavailable
         );
         assert!(!goat.card_actions.protocol_probe);
-        assert!(!goat.card_actions.catalog_refresh);
+        assert!(goat.card_actions.catalog_refresh);
+        assert_eq!(
+            goat.card_actions.connection_verify,
+            CardVerifyAction::AvailableThenExplicitEnable
+        );
+        assert!(goat.verification.uses_get_models);
 
         let scnet =
             ProviderRegistry::get(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
@@ -948,7 +746,8 @@ mod tests {
         assert!(ConfigurableHttpAdapter::model_catalog(custom_plan).overlays_declared_ids);
         assert!(!ConfigurableHttpAdapter::inference(custom_plan).follow_redirects);
         let goat_plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert!(!CommandCodeGoatAdapter::inference(goat_plan).production_inference);
+        assert!(CommandCodeGoatAdapter::inference(goat_plan).production_inference);
+        assert!(CommandCodeGoatAdapter::verification(goat_plan).uses_get_models);
         let scnet_plan =
             builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
         assert!(!ScnetAdapter::inference(scnet_plan).production_inference);
@@ -956,66 +755,6 @@ mod tests {
             builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();
         assert!(ZenFreeAdapter::protocol_probe(zen_plan).unknown_zen_free_defaults_to_chat);
         assert!(ZenFreeAdapter::card_capabilities(zen_plan).fetch_zen_models);
-    }
-    #[test]
-    fn custom_base_url_errors_keep_existing_variants_and_messages() {
-        assert_eq!(
-            validate_custom_base_url("").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl("base URL is required".to_string())
-        );
-        assert_eq!(
-            validate_custom_base_url("   ").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl("base URL is required".to_string())
-        );
-        let too_long = format!("https://api.example.com/{}", "a".repeat(2048));
-        assert_eq!(
-            validate_custom_base_url(&too_long).unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl("base URL is too long".to_string())
-        );
-        let parsed_err = validate_custom_base_url("not a url").unwrap_err();
-        match parsed_err {
-            ProviderBindingError::InvalidCustomBaseUrl(message) => {
-                assert!(message.starts_with("invalid base URL: "), "{message}");
-            }
-            other => panic!("expected InvalidCustomBaseUrl, got {other:?}"),
-        }
-        assert_eq!(
-            validate_custom_base_url("https://api.example.com/v1?x=1").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must not include a query or fragment".to_string()
-            )
-        );
-        assert_eq!(
-            validate_custom_base_url("https://api.example.com/v1#frag").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must not include a query or fragment".to_string()
-            )
-        );
-        assert_eq!(
-            validate_custom_base_url("ftp://api.example.com/v1").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must use http or https".to_string()
-            )
-        );
-        assert_eq!(
-            validate_custom_base_url("javascript:alert(1)").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must use http or https".to_string()
-            )
-        );
-        assert_eq!(
-            validate_custom_base_url("https://user:pass@api.example.com").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must not include credentials".to_string()
-            )
-        );
-        let hostless = reqwest::Url::parse("file:///tmp").unwrap();
-        assert_eq!(
-            inspect_custom_url(&hostless).unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must use http or https".to_string()
-            )
-        );
     }
 
     #[test]
@@ -1044,12 +783,12 @@ mod tests {
             "ocg_domain::provider::BuiltinPlan"
         );
         assert_eq!(
-            std::any::type_name::<CustomUrlHost>(),
-            "ocg_core::provider::CustomUrlHost"
+            std::any::type_name::<crate::custom::CustomUrlHost>(),
+            "ocg_core::custom_http::CustomUrlHost"
         );
         assert_eq!(
-            std::any::type_name::<QuotaWindow>(),
-            "ocg_core::provider::QuotaWindow"
+            std::any::type_name::<crate::models::QuotaWindow>(),
+            "ocg_core::models::QuotaWindow"
         );
     }
 }

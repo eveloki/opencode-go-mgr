@@ -407,11 +407,11 @@ import { t } from "../i18n/index.ts";
 import { formatCost, formatNumber, useClipboard } from "../utils/format.ts";
 import { userFacingError } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
-import { daysUntilDate, expiryTagType } from "./account-lifecycle";
+import { daysUntilDate, expiryTagType } from "../domain/account-lifecycle.ts";
 import {
   accountRoutingDraftDescription,
   accountRoutingDraftLabel,
-} from "./account-display.ts";
+} from "../domain/account-display.ts";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
 import {
   buildProviderOverviews,

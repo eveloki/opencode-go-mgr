@@ -13,6 +13,33 @@ ocg-cli     -> ocg-core
 src-tauri   -> ocg-core
 ```
 
+```text
+  ocg-domain                      ocg-infra
+  IDs, BUILTIN_PLANS,             crypto, proxy HTTP,
+  MODEL_PROTOCOLS, Zen            inference HTTP, log SQL
+       ^                               ^
+       |                               |
+  ocg-gateway                          |
+  alias, AttemptSpec,                  |
+  classify, selector,                  |
+  JSON convert (no I/O)                |
+       ^                               |
+       |                               |
+       +---------------+---------------+
+                       |
+                    ocg-core
+           SQLite, CoreState, Dashboard V3,
+           GatewayExecutor, adapters, host_router
+                       |
+             +---------+----------+
+             |                    |
+          ocg-cli             src-tauri
+       ocg-manager-cli        ocg-manager (tray)
+
+  aside: ocg-browser-worker   独立进程，不依赖 ocg-*
+         Vue SPA in src/      静态资源；只走 HTTP V3
+```
+
 `ocg-domain` 与 `ocg-infra` 都不依赖内部 `ocg-*` crate。 `ocg-browser-worker` 是独立进程，不依赖任何内部 crate。
 
 | Crate | 负责 | 不持有 |
@@ -37,6 +64,40 @@ src-tauri   -> ocg-core
 - `gateway_keys.rs` 拥有 `access_keys` 表与内存凭据快照。具体 `KeyStore` / `KeyHost` 实现在 `state`。
 - `control/observability.rs` 是与 HTTP 无关的本地读取逻辑，供遗留 V2 适配器与 V3 共用。它不发出站 HTTP。
 
+```text
+                    127.0.0.1:9042
+                            |
+              host_router.rs（HTTP 组合根）
+                            |
+      +----------+----------+----------+----------+
+      |          |          |          |          |
+      v          v          v          v          v
+  推理入口     Dash V3    V2 REST    保留的      SPA
+  /v1 ...     /dashboard 墓碑       V2 auth +   /dashboard
+              /api/v3    /dashboard browser WS  /assets
+                         /api
+                             |
+                     匿名 -> 401
+                     会话 -> 410 dashboardV2Removed
+
+  推理入口
+    POST /v1/chat/completions
+    POST /v1/responses
+    POST /v1/messages
+    GET  /v1/models                  本地；不访问上游
+    POST /v1beta|/v1/models/{model}:*
+    POST /claude-desktop/v1/messages
+    GET  /claude-desktop/v1/models   只公布三个角色别名
+
+  保留的未版本化 /dashboard/api
+    auth/status | register | login | logout
+    browser/sessions/{token}/ws
+  SPA 鉴权走 /dashboard/api/v3/auth/...
+```
+
+同一节点的用户向文字图：[架构图](../user/architecture.zh-CN.md)。
+路径表：[HTTP 路由](http-routes.zh-CN.md)。
+
 ## Gateway 执行
 
 客户端推理在 `crates/ocg-core/src/gateway/`。Axum + Tokio + reqwest，默认绑定 `127.0.0.1:9042`。鉴权前请求体上限 16 MiB。
@@ -48,6 +109,41 @@ src-tauri   -> ocg-core
 3. **`provider_adapter.rs`** — 对封闭的 `ProviderAdapterKind` 穷尽匹配。返回纯数据的 `AttemptSpec`（URL、路径、上游协议、鉴权方案、重定向策略、不透明 `CredentialHandle`、`ProxyRoutingModel`）。适配器接收账号、配置与请求 plan。它们 **不** 解密 Key、不打开数据库、不构建 HTTP 客户端。
 4. **`forwarder.rs` / `forward_once`** — 每次调用恰好一次上游 `.send()`。只负责传输选择与超时。`forward_once` 内没有策略、没有重试、没有回退。
 5. **宿主 `CredentialResolver`** — 在外层循环已经选中账号之后再解密 handle。
+
+```text
+  handler.rs
+    1. x-ocg-request-id ；鉴权前请求体上限 16 MiB
+    2. Key vs credential_snapshot
+       Bearer / x-api-key / x-goog-api-key（按头顺序首次命中归因）
+    3. 解析客户端协议
+    4. Claude Desktop 角色改写（仅该入口）
+    5. Alias 解析（kebab / 原始 ID / Custom overlay）
+         未知 -> 400
+         重叠 -> 400 ambiguous_model_id   （不调用上游）
+                    |
+                    v
+  GatewayExecutor     入口冻结：
+                      价格 revision、ForwardRouteSet、
+                      合约集、Alias 解析
+    6. 物化候选
+    7. 过滤卡片 + ocg-gateway::selector
+       StrictPriority / StickyGlobal / RoundRobin
+       回退迭代重新读取账号、Custom、Zen 冷却
+    8. provider_adapter -> AttemptSpec
+       （不解密、不开 DB、不建 HTTP 客户端）
+    9. CredentialResolver 解密已选 handle
+   10. forward_once = 恰好一次上游 .send()
+   11. classify  （不在 forward_once 内）
+         建连失败     -> 同一账号重试一次
+         403 / Go 429 -> 下一张卡
+         Free 429     -> 冷却共享 free 通道
+         OpenCode 401 -> 原样返回（不换号、不写 auth_error）
+         Custom 401   -> 换号并持久化 auth_error
+         408 / 5xx / 响应体超时 / 流中断 -> 不重放
+   12. 转换响应；写入 forward_logs
+       requested_model、resolved_alias、upstream_model
+       （没有 requested_alias 字段）
+```
 
 鉴权收集 Bearer / `x-api-key` / `x-goog-api-key` 全部非空候选头。任一命中 `CoreStateInner.credential_snapshot`（主 Key 与启用子 Key）即通过；按候选头顺序首次命中归因。该快照也是转发日志名称来源。客户端凭据在出站前剥离，只注入所选账号已配置的方案。Gemini 或 Anthropic 客户端凭据不会透传到上游 offering；Command Code / GOAT 不会被别名到 OpenCode，其 Key 也不会发往 OpenCode endpoint。
 
@@ -63,7 +159,7 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 
 选择器：宿主 `gateway/selector.rs` 按能力、enabled/ready、凭据有效性、冷却与本次已失败账号过滤卡片，然后无密钥的 `ocg-gateway::selector` 状态机按该顺序行走（`StrictPriority` / `StickyGlobal` / `RoundRobin`）。设计不包含模型路由页或按模型额度池。Zen free 额度按出口 IP 共享：任一有效 `cooldown_free_until` 即视为整条 free 通道耗尽（不换 Key）。
 
-价格快照不可变且按供应商分范围。刷新只在用户点击时发生。对 OpenCode Go，月额度只用来推导账号额度扣减倍率（`月额度 / Usage`），它不是可路由额度池。官方表中 Input/Output/Usage 全是 `-` 的行（目前 Ox Alpha Free / `ox-alpha-free`）按无价格的 Go 促销跳过。官方倍率与当前值不同时，先返回不激活的差异预览；后续请求同时绑定当前 revision 与刚预览的官方 content hash。抓取器仅允许 OpenCode Go HTTPS 主机和同主机重定向，总时限 20 秒、响应体上限 2 MiB。MiniMax 长上下文、priority 和 high-speed 调整是本地策略。
+价格快照不可变且按供应商分范围。刷新只在用户点击时发生。Provider 路径只抓取并启用该 Provider 自己有价格的 offering；OpenCode 与 Command Code 使用独立 revision 和最后成功状态，一个来源失败不能否决另一个。对 OpenCode Go，月额度只用来推导账号额度扣减倍率（`月额度 / Usage`），它不是可路由额度池。官方表中 Input/Output/Usage 全是 `-` 的行（目前 Ox Alpha Free / `ox-alpha-free`）按无价格的 Go 促销跳过。官方倍率与当前值不同时，先返回不激活的差异预览；后续请求同时绑定当前 revision 与刚预览的官方 content hash。抓取器仅允许 OpenCode Go HTTPS 主机和同主机重定向，总时限 20 秒、响应体上限 2 MiB。MiniMax 长上下文、priority 和 high-speed 调整是本地策略。
 
 回退 / 重试（executor + classify，**不是** `forward_once`）：
 
@@ -82,6 +178,31 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 
 全局出站代理是进程级（`AppConfig`）：自动 / 手动 HTTP / 强制直连 / List。 List 模式使用 `proxy_list_direction` 与 `proxy_list_models`。名单内模型走方向例外段（白名单→代理 / 黑名单→直连）；名单外模型与非模型出站（验证、 Zen 刷新、用量、价格、升级下载）走方向默认段。名单成员校验只在 dashboard `update_settings` 写闸口执行（非空、精确已知 id、去重）；加载路径容忍旧值。构造在 `ocg-infra::http`；`ocg-core::http_client` 在精确匹配前折叠目录别名。请求从入口持有一份 `ForwardRouteSet`；并发设置切换只影响之后启动的请求。
 
+```text
+  AppConfig  （进程级）
+    自动 | 手动 HTTP | 强制直连 | List
+
+  List 模式
+    名单内模型 id  -> 例外段
+      白名单: 代理
+      黑名单: 直连
+    名单外模型，以及非模型出站
+      （验证、Zen 刷新、用量、价格、升级）
+      -> 默认段
+      白名单: 直连
+      黑名单: 代理
+
+  名单成员只在 dashboard PUT /settings 校验
+  （非空、精确已知 id、去重）；加载容忍旧值
+
+  在飞请求保持入口那份 ForwardRouteSet
+
+  AttemptSpec.proxy_routing
+    RequestEntrySnapshot     Go / Zen ；跟随重定向
+    IsolatedTrustedAdmin     Custom ；不跟随重定向 ；不转发客户端头
+    ProcessWideNoRedirect    仅 GOAT 回环测试
+```
+
 ## Plan 目录
 
 `BUILTIN_PLANS` 与 `ProviderAdapterKind` 在 `ocg-domain::provider`（门面 `ocg_core::provider`）。五个家族：
@@ -99,6 +220,100 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 Custom API（`custom.rs` + `custom_http.rs`）：接受任意语法合法的 HTTP 或 HTTPS 源（含局域网、回环与自选目的地）；拒绝 URL 内嵌凭据、query 与 fragment。不会跟随重定向；不会转发 dashboard 或客户端鉴权；只构造已配置的 Bearer 或 `x-api-key`。拼接 endpoint 必须保持 scheme、host、port 与 base-path 前缀。超时把 `connect_timeout_secs` 夹到 5–60 秒。创建/更新后仍为禁用 `pending`。验证对第一个声明模型发一次协议正确的最小非流式请求；只有 `2xx` JSON object 成功；不发现或改写能力，不会自动启用。验证成功后需显式启用。Key、base URL 或能力变更会使验证失效并禁用账号；协议与鉴权方案创建后固定不变。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
 
 SCNet 官方可用模型快照 `2026-08-21`（大小写与顺序与代码保持一致，只作适配器输入，不会作为 `model_aliases`）：`GLM-5.2`、`GLM-5`、`GLM-5.1`、`Kimi-K3`、 `Kimi-K2.7-Code`、`Kimi-K2.6`、`Kimi-K2.5`、`DeepSeek-V4-Flash`、 `DeepSeek-V3.2`、`MiniMax-M3`、`MiniMax-M2.7`、`MiniMax-M2.5`、 `MiMo-V2.5-Pro`。价格表 / FAQ 里 **不在** 该表的额外名称：`DeepSeek-V4-Pro`、 `DeepSeek-V4-Flash-0731`、`Qwen3.8-max`、`Qwen3-235B-A22B`。文档记载的 base 是 `https://api.scnet.cn/api/llm/v1` 与 `https://api.scnet.cn/api/llm/anthropic`。风险确认 id `scnet-token-plan-restrictions`，版本 `2026-08-21`。本 crate 不会对 Token Plan 发真实请求。
+
+## 控制面
+
+Vue SPA 是当前唯一的面板客户端，走 HTTP Dashboard V3。CLI 调用同一组变更服务，argv 上没有 CAS 令牌。没有 Tauri `invoke` 路径。
+
+```text
+  Vue 3  （七个视图，KeepAlive）
+    Pinia: session / controlPlane / connection
+           accounts / providers / settings
+           |
+           |  src/api/dashboard-v3.ts
+           |  src/api/dashboard.ts
+           |  src/api/providers.ts
+           v
+  /dashboard/api/v3
+    公开:  /auth/status|register|login|logout
+    其余:  dashboard 会话
+           回环默认跳过登录（带转发头则仍要登录）
+           |
+           |  CAS expectedRevision + processGeneration
+           |  价格写还要 expectedPricingRevision
+           |  GET /contract = 进程内实时 token，不是契约导出
+           |  GET /connection = 唯一带 Key 明文的 V3 DTO
+           v
+  account_control / gateway_keys / settings / ...
+           |
+           v
+  SQLite schema v27
+           ^
+           |
+  ocg-manager-cli  同一组服务，无 argv CAS
+```
+
+409 `revisionConflict` 会刷新 token；SPA 不会自动重放该变更。CAS 细节：[Dashboard API](dashboard-api.zh-CN.md)。
+
+## 持久化地图
+
+权威 schema 是 v27。`sub_gateway_keys` 只出现在迁到 v27 之前的历史库，迁完即丢弃。GUI 数据目录在 Windows 为 `%USERPROFILE%\.ocg-mgr`，在 macOS/Linux 为 `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
+
+```text
+  data.sqlite                         CURRENT_SCHEMA_VERSION = 27
+    access_keys                       主 Key id PRIMARY_KEY_ID
+                                      主 Key 不可禁用/删除
+                                      子 Key 活跃上限 64
+    accounts                          一张卡 = 一个 Plan
+    settings                          AppConfig（gateway_key 存成 ""）
+    forward_logs                      requested_model、resolved_alias、
+                                      upstream_model、route、provider_id
+    gateway_logs
+    provider_pricing_snapshots
+    provider_usage_sync_state         官方 Go 用量元数据
+    provider_model_catalogs
+    provider_contract_scopes
+    provider_contract_model_protocols
+    account_custom_configs
+    account_model_capabilities
+    account_acknowledgements
+
+  既有非空库：任何 v27 写入前
+    同目录不覆盖的 data.sqlite.pre-v3.<UTC>.bak + .sha256
+  全新空库：直接建 v27，不写这份拷贝
+
+  Key 经混淆存储；ConnectionInfo 是唯一带明文 Key 的 V3 DTO
+```
+
+升级、备份哈希与回滚：[存储与迁移](storage-migration.zh-CN.md)。
+
+## 用量校准
+
+官方 Go 用量是周期性校准基线。上次成功校准之后，本地 `forward_logs` 仍做实时估算。额度条不会停流量。
+
+```text
+  官方    GET https://opencode.ai/zen/go/v1/usage
+          校准基线（SPA 不会自动轮询）
+
+  本地    上次成功之后的 forward_logs
+          账号卡上的实时估算
+
+  后台（Gateway 启动时 spawn；CoreState drop 退出）
+    ready+enabled 且近 24h 有本地活动  ~ 每小时
+    ready+enabled 且空闲               ~ 每天
+    禁用 / 非 ready / 空 Key           不自动刷新
+    本地 Go 用量 >= 80%                加速，最少间隔 15 分钟
+    推理 429                           约 1–2 分钟后调度官方对账
+                                       （不 inline；官方失败
+                                        永不写推理冷却）
+    失败退避  5m -> 15m -> 1h -> 6h
+    全局并发 1；启动带抖动，不轰鸣
+
+  手动  POST /dashboard/api/v3/accounts/{id}/usage/refresh
+        15 秒节流（成功/失败都算）
+```
+
+锁、时钟与凭据快照：[状态、凭据与生命周期](state-and-lifecycle.zh-CN.md)。
 
 ---
 

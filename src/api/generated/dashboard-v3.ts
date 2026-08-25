@@ -28,6 +28,7 @@ export type DashboardApiV3 =
   | AccountUpdate
   | AccountOrder
   | AccountSetupUpdate
+  | AccountGoatModelAccessUpdate
   | AccountCustomConfigUpdate
   | AccountCustomConfigWrite
   | AccountModelCapabilitiesUpdate
@@ -119,7 +120,13 @@ export type DashboardApiV3 =
   | AccountManagedKeyVerify
   | UsageRefresh
   | UsageRefreshUpdate
-  | UsageRefreshThrottleError;
+  | UsageRefreshThrottleError
+  | ProviderModelsRefreshUpdate
+  | ProviderModels
+  | ProviderPricingSnapshot
+  | ProviderPricingValue
+  | ProviderPricingRefresh
+  | ProviderPricingRefreshUpdate;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -148,6 +155,7 @@ export type AccountAuthScheme = "bearer" | "x-api-key";
  * Custom/upstream protocol. Wire values match V2 snake_case.
  */
 export type AccountUpstreamProtocol = "chat_completions" | "responses" | "messages";
+export type AccountGoatModelAccess = "goat" | "all";
 /**
  * Wire identity matching V2 `key` / `egress-ip`.
  */
@@ -370,6 +378,7 @@ export interface Account {
   customConfig: AccountCustomConfig | null;
   enabled: boolean;
   expiresOn: string;
+  goatModelAccess: AccountGoatModelAccess | null;
   id: string;
   lastError: string | null;
   modelCapabilities: AccountModelCapability[];
@@ -522,6 +531,14 @@ export interface AccountSetupUpdate {
   expectedRevision: number;
   processGeneration: number;
   setupStep: AccountSetupStep;
+}
+/**
+ * PUT `/accounts/{id}/goat-model-access` body.
+ */
+export interface AccountGoatModelAccessUpdate {
+  expectedRevision: number;
+  modelAccess: AccountGoatModelAccess;
+  processGeneration: number;
 }
 /**
  * PUT `/accounts/{id}/custom-config` body. Protocol and auth scheme are
@@ -952,8 +969,39 @@ export interface ProviderPricing {
   pricingRevision: string;
   processGeneration: number;
   providerId: string;
+  providerPricingRevision: string;
+  providerSnapshot: ProviderPricingSnapshot | null;
   revision: number;
   snapshot: PricingSnapshot | null;
+}
+/**
+ * Provider-neutral immutable pricing snapshot. GOAT uses this display-only
+ * shape; it never enters the local Go quota debit calculation.
+ */
+export interface ProviderPricingSnapshot {
+  activatedAt: string;
+  contentHash: string;
+  documentUpdatedAt: string | null;
+  evidence: string;
+  revision: string;
+  sourceUrl: string;
+  values: ProviderPricingValue[];
+}
+export interface ProviderPricingValue {
+  cacheReadPerMillion: number | null;
+  cacheWritePerMillion: number | null;
+  currency: string | null;
+  displayName: string;
+  inputPerMillion: number | null;
+  maxInputTokens: number | null;
+  minInputTokens: number | null;
+  modelAllowance: number | null;
+  modelId: string;
+  outputPerMillion: number | null;
+  paidPlanPrice: number | null;
+  planLimit: number | null;
+  quotaMultiplier: number | null;
+  timeWindow: PricingTimeWindow;
 }
 /**
  * Secret-free gateway listener view. The plaintext Key lives only on
@@ -1232,7 +1280,7 @@ export interface CreditBalance {
   updatedAt: string;
 }
 /**
- * One live or synthetic quota window. Distinct from `provider::QuotaWindow`.
+ * One live or synthetic quota window. Distinct from `models::QuotaWindow`.
  */
 export interface QuotaWindow {
   accountId: string;
@@ -1491,4 +1539,56 @@ export interface UsageRefreshThrottleError {
   message: string;
   nextAllowedAt: string;
   processGeneration: number | null;
+}
+/**
+ * Provider-scoped model-directory refresh. The selected account supplies the
+ * credential; the saved result belongs to the Provider scope.
+ */
+export interface ProviderModelsRefreshUpdate {
+  accountId: string;
+  expectedRevision: number;
+  processGeneration: number;
+}
+export interface ProviderModels {
+  accountId: string;
+  models: string[];
+  pricingRevision: string;
+  processGeneration: number;
+  providerId: string;
+  refreshedAt: string;
+  revision: number;
+  sourceUrl: string;
+}
+/**
+ * Result of refreshing every priced offering owned by one Provider. Provider
+ * failures are isolated: this response never represents a cross-Provider
+ * transaction.
+ */
+export interface ProviderPricingRefresh {
+  error: string | null;
+  multiplierChanges: PricingMultiplierChange[];
+  offeringIds: string[];
+  officialContentHash: string | null;
+  pricingRevision: string;
+  processGeneration: number;
+  providerId: string;
+  providerPricingRevision: string;
+  refreshStatus: PricingRefreshStatus;
+  revision: number;
+  /**
+   * The refreshed Go snapshot. Provider-neutral plans expose their active
+   * snapshot through the provider pricing read endpoint instead.
+   */
+  snapshot: PricingSnapshot | null;
+}
+/**
+ * POST Provider pricing-refresh body. The Provider-local pricing revision is
+ * distinct from the global Go `pricingRevision` control token.
+ */
+export interface ProviderPricingRefreshUpdate {
+  expectedOfficialContentHash?: string | null;
+  expectedProviderPricingRevision: string;
+  expectedRevision: number;
+  policy?: PricingRefreshPolicy | null;
+  processGeneration: number;
 }

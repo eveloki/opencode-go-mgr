@@ -10,13 +10,17 @@ export type * from "./dashboard-presenters.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { isVersionAtLeast } from "../utils/version.ts";
 import type {
+  AccountAcknowledgementCreate,
   AccountCustomConfigUpdate,
   AccountManagedCreate,
   AccountModelCapabilitiesUpdate,
   AccountSetupStep,
   AccountUsageUpdate,
+  AuthStatus,
   ClaudeDesktopModelsUpdate,
   ForwardLogQuery as V3ForwardLogQuery,
+  KeyUpdate,
+  MutationExpectation,
   ProxyTestRequest,
 } from "./generated/dashboard-v3.ts";
 import {
@@ -31,6 +35,7 @@ import {
   UNATTRIBUTED_KEY_FILTER,
   browserSessionWebSocketUrl,
   dashboardV3,
+  isRevisionConflict,
   type WithoutExpectation,
 } from "./dashboard-v3.ts";
 import {
@@ -39,12 +44,13 @@ import {
   presentAccount,
   presentBrowserCapabilities,
   presentBrowserOpen,
+  presentConnection,
   presentDailyModelCost,
   presentDashboardSummary,
   presentForwardLogs,
   presentGatewayLog,
   presentPricing,
-  presentPricingRefresh,
+  presentProviderPricingRefresh,
   presentProxyTest,
   presentSettings,
   settingsUpdateInput,
@@ -59,11 +65,13 @@ import {
   type AccountUpdate,
   type AppConfig,
   type BrowserTarget,
+  type ConnectionInfo,
   type CustomModelDiscoveryInput,
   type ForwardLogQuery,
+  type GoatModelAccess,
   type ManagedAccountInput,
   type PricingMultiplierUpdate,
-  type PricingRefreshRequest,
+  type ProviderPricingRefreshRequest,
 } from "./dashboard-presenters.ts";
 
 export {
@@ -77,6 +85,7 @@ export {
   PRIMARY_KEY_ID,
   UNATTRIBUTED_KEY_FILTER,
   browserSessionWebSocketUrl,
+  isRevisionConflict,
   isVersionAtLeast,
 };
 
@@ -115,6 +124,35 @@ function forwardLogQuery(value: ForwardLogQuery): V3ForwardLogQuery {
 }
 
 export const dashboardApi = {
+  getAuthStatus: async (): Promise<AuthStatus> => dashboardV3.getAuthStatus(),
+  registerAdmin: (username: string, password: string, expectation: MutationExpectation): Promise<AuthStatus> =>
+    dashboardV3.registerAdmin(username, password, expectation),
+  loginAdmin: (username: string, password: string, expectation: MutationExpectation): Promise<AuthStatus> =>
+    dashboardV3.loginAdmin(username, password, expectation),
+  logoutAdmin: (expectation: MutationExpectation): Promise<AuthStatus> =>
+    dashboardV3.logoutAdmin(expectation),
+
+  getConnection: async (): Promise<ConnectionInfo> => presentConnection(await dashboardV3.getConnection()),
+  createKey: async (name: string, expectation: MutationExpectation): Promise<void> => {
+    await dashboardV3.createKey(name, expectation);
+  },
+  updateKey: async (id: string, update: { name?: string; enabled?: boolean }, expectation: MutationExpectation): Promise<void> => {
+    const body: WithoutExpectation<KeyUpdate> = {};
+    if (update.name !== undefined) body.name = update.name;
+    if (update.enabled !== undefined) body.enabled = update.enabled;
+    await dashboardV3.updateKey(id, body, expectation);
+  },
+  deleteKey: async (id: string, expectation: MutationExpectation): Promise<void> => {
+    await dashboardV3.deleteKey(id, expectation);
+  },
+  regenerateKey: async (id: string, expectation: MutationExpectation): Promise<void> => {
+    await dashboardV3.regenerateKey(id, expectation);
+  },
+  regeneratePrimaryKey: async (expectation: MutationExpectation): Promise<string> => {
+    await dashboardV3.regeneratePrimaryKey(expectation);
+    return (await dashboardV3.getConnection()).primaryKey;
+  },
+
   getAccounts: async (): Promise<Account[]> =>
     (await dashboardV3.listAccounts()).accounts.map(presentAccount),
 
@@ -153,6 +191,14 @@ export const dashboardApi = {
   verifyAccountConnection: (id: string, _ignoredRevision?: number): Promise<Account> =>
     mutatedAccount(withCas((expectation) => dashboardV3.verifyAccount(id, expectation))),
 
+  updateGoatModelAccess: (
+    id: string,
+    modelAccess: GoatModelAccess,
+    _ignoredRevision?: number,
+  ): Promise<Account> => mutatedAccount(withCas((expectation) => (
+    dashboardV3.putAccountGoatModelAccess(id, modelAccess, expectation)
+  ))),
+
   updateAccountCustomConfig: (
     id: string,
     config: { base_url: string; upstream_protocol: AccountProtocol; auth_scheme: "bearer" | "x-api-key" },
@@ -174,6 +220,12 @@ export const dashboardApi = {
       source: capability.source,
     })),
   } satisfies WithoutExpectation<AccountModelCapabilitiesUpdate>, expectation))),
+
+  createAccountAcknowledgement: (id: string, acknowledgementId: string, version: string): Promise<Account> =>
+    mutatedAccount(withCas((expectation) => dashboardV3.createAccountAcknowledgement(id, {
+      acknowledgementId,
+      version,
+    } satisfies WithoutExpectation<AccountAcknowledgementCreate>, expectation))),
 
   discoverCustomModels: async (input: CustomModelDiscoveryInput) => {
     const result = await dashboardV3.discoverCustomModels({
@@ -221,23 +273,29 @@ export const dashboardApi = {
     proxyListDirection: input.proxy_list_direction,
   } satisfies ProxyTestRequest)),
 
-  getPricing: async () => presentPricing(await dashboardV3.getPricing()),
-  refreshPricing: async (refresh: PricingRefreshRequest = {}) => {
+  getPricing: async () => {
+    const result = await dashboardV3.getProviderPricing("opencode", "go");
+    if (!result.snapshot) throw new Error("OpenCode Go pricing is not available");
+    return presentPricing(result.snapshot);
+  },
+  refreshProviderPricing: async (
+    providerId: string,
+    refresh: ProviderPricingRefreshRequest = {},
+  ) => {
     const controlPlane = useControlPlaneStore();
-    if (!controlPlane.hasTokens() || !controlPlane.pricingRevision) await controlPlane.refresh();
-    const expectedPricingRevision = refresh.expected_revision ?? controlPlane.pricingRevision;
-    if (!expectedPricingRevision) throw new Error("pricing revision is not loaded yet");
-    const result = await controlPlane.runMutation((expectation) => dashboardV3.refreshPricing({
-      expectedPricingRevision,
-      policy: refresh.policy,
-      expectedOfficialContentHash: refresh.expected_official_content_hash,
-    }, expectation));
-    // PricingRefresh carries the next control/pricing tokens in its typed
-    // nested snapshot rather than at the response root. Publish that exact
-    // snapshot explicitly; requestV3 intentionally does not recursively walk
-    // arbitrary response bodies for token-shaped objects.
-    controlPlane.sync(result.snapshot);
-    return presentPricingRefresh(result);
+    if (!controlPlane.hasTokens()) await controlPlane.refresh();
+    const expectedProviderPricingRevision = refresh.expected_provider_revision;
+    if (!expectedProviderPricingRevision) {
+      throw new Error("provider pricing revision is not loaded yet");
+    }
+    const result = await controlPlane.runMutation((expectation) => (
+      dashboardV3.refreshProviderPricing(providerId, {
+        expectedProviderPricingRevision,
+        policy: refresh.policy,
+        expectedOfficialContentHash: refresh.expected_official_content_hash,
+      }, expectation)
+    ));
+    return presentProviderPricingRefresh(result);
   },
   updatePricingMultipliers: async (expectedPricingRevision: string, multipliers: PricingMultiplierUpdate[]) => {
     const controlPlane = useControlPlaneStore();

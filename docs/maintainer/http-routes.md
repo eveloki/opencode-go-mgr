@@ -2,6 +2,9 @@
 
 # HTTP Routes
 
+One-port composition map (inference, Dashboard V3, V2 tombstone, SPA):
+[Architecture](architecture.md).
+
 ## Inference (unchanged paths)
 
 | Method | Path | Notes |
@@ -21,9 +24,10 @@ Public: `/auth/status`, `/auth/register`, `/auth/login`, `/auth/logout`.
 Session-protected (non-exhaustive; see `dashboard_v3/mod.rs`):
 `/contract`, `/connection`, `/settings`, `/settings/test-proxy`,
 `/claude-desktop/models`, `/settings/check-update`,
-`/settings/update-status`, `/settings/install-update`, `/pricing`,
-`/pricing/refresh`, `/pricing/multipliers`,
-`/providers/{provider_id}/{offering_id}/pricing`, `/keys`,
+`/settings/update-status`, `/settings/install-update`,
+`/providers/{provider_id}/{offering_id}/pricing`,
+`/providers/{provider_id}/pricing/refresh`,
+`/providers/opencode/go/pricing/multipliers`, `/keys`,
 `/keys/primary/regenerate`, `/keys/{id}`, `/keys/{id}/regenerate`,
 `/accounts`, `/accounts/managed`, `/accounts/order`, `/accounts/{id}`,
 `/accounts/{id}/toggle`, `/accounts/{id}/browser`,
@@ -34,7 +38,8 @@ Session-protected (non-exhaustive; see `dashboard_v3/mod.rs`):
 `/accounts/{id}/usage/refresh`, `/accounts/{id}/provider-usage`,
 `/accounts/{id}/verify`, `/providers`, `/providers/model-capabilities`,
 `/providers/zen-free`, `/providers/zen-free/models`,
-`/providers/zen-free/models/refresh`, `/provider-contracts`,
+`/providers/zen-free/models/refresh`,
+`/providers/{provider_id}/models/refresh`, `/provider-contracts`,
 `/provider-contracts/provider/{scope_id}/protocols/{protocol}`,
 `/providers/{provider_id}/protocol-probes`, `/browser/capabilities`,
 `/browser/sessions/{token}/ws`, `/gateway/status`,

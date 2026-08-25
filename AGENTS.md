@@ -8,7 +8,7 @@ User guides live under `docs/user/` (landing: `docs/USER.md` / `docs/USER.zh-CN.
 
 - Product: OCG Manager, a local multi-Plan operations console. Routable: OpenCode Go, Zen Free, and Custom API (trusted-admin destination). Command Code GOAT and all SCNet Token Plans are disabled `pending` drafts (verify `501`, not routable); never describe them as live routes.
 - Workspace crates: `ocg-domain` (identity/catalog/protocol tables, sealed Provider registry), `ocg-infra` (key obfuscation, outbound/inference HTTP, SQLite log statements), `ocg-gateway` (no-I/O alias, selector, protocol conversion), `ocg-core` (process host: SQLite, gateway execution, Dashboard V3, V2 tombstones, usage sync, Custom adapter). Host binaries: `crates/ocg-cli`, `crates/ocg-browser-worker`, `src-tauri` (package `ocg-manager`). Not a dynamic plugin architecture; the Provider registry is static and sealed (unknown `provider_id` + `offering_id` pairs fail-closed).
-- Frontend: Vue 3 + TypeScript + naive-ui in `src/`; the production SPA talks HTTP `/dashboard/api/v3` only. `src/api/tauri.ts` and `src/api/http.ts` are legacy V2 shapes, not the current dashboard data path and not Tauri `invoke()`.
+- Frontend: Vue 3 + TypeScript + naive-ui in `src/`; the production SPA talks HTTP `/dashboard/api/v3` only. The dashboard data path is `src/api/dashboard-v3.ts` (transport) + `src/api/dashboard.ts` / `src/api/providers.ts` (presentation) + `src/api/generated/dashboard-v3.ts` (contract types); shared view/component logic lives in `src/domain/`.
 - Dashboard views (sidebar order, seven pages, fixed): Dashboard / Access Keys / Accounts / Providers / Applications / Logs / Settings. `browser` is a managed-session overlay page. Access credentials are shown as **Key** (never “Gateway Key”); the design system is governed by `DESIGN.md` + `src/theme.ts`.
 - One default port `127.0.0.1:9042` (composition root `crates/ocg-core/src/host_router.rs`) merges inference entrypoints (OpenAI Chat Completions / Responses, Anthropic Messages, Gemini `generateContent`, Claude Desktop aliases), Dashboard V3, V2 REST tombstones, preserved V2 auth + browser WebSocket, and `/dashboard` static assets.
 - Dashboard V3 control-plane writes require CAS (`expectedRevision` / `processGeneration`); the frozen contract is `schema/dashboard-api-v3.schema.json`. Tombstoned V2 REST returns `410` after auth; never add handlers there.
@@ -21,22 +21,22 @@ User guides live under `docs/user/` (landing: `docs/USER.md` / `docs/USER.zh-CN.
 - `crates/ocg-domain/src/provider.rs`: sealed `ProviderRegistry`, `BUILTIN_PLANS`, adapter identities, SCNet official snapshots, and interactive-use limits.
 - `crates/ocg-domain/src/protocol.rs`: `MODEL_PROTOCOLS` and client/upstream protocol identities.
 - `crates/ocg-domain/src/ids.rs`: `PRIMARY_KEY_ID` and Plan/account identity constants.
-- `crates/ocg-gateway/src/alias.rs`: client Alias registry and raw-ID resolution (`ocg-core` `alias.rs` is the facade).
+- `crates/ocg-gateway/src/alias.rs`: client Alias registry and raw-ID resolution (`ocg-core` `alias.rs` is the facade; it re-exports `resolve_with_catalogs`, `resolve_with_all_catalogs`, and `published_routeable_aliases_with_all_catalogs`).
 - `crates/ocg-gateway/src/protocol.rs` / `selector.rs`: no-I/O whole-document conversion and selector state machines.
 - `crates/ocg-infra/src/http.rs`: `ForwardRouteSet`, default + exception segments, `client_for` routing.
 - `crates/ocg-infra/src/crypto.rs`: Key obfuscation implementation (`ocg-core` `crypto.rs` is the facade).
 - `crates/ocg-core/src/host_router.rs`: HTTP composition root for inference + V3 + V2 tombstones + static assets.
 - `crates/ocg-core/src/dashboard_v3/`: `/dashboard/api/v3` used by the current Vue dashboard.
-- `crates/ocg-core/src/dashboard.rs`: SPA static assets, preserved V2 auth/browser WS, tombstoned V2 REST legacy implementation.
+- `crates/ocg-core/src/dashboard.rs`: SPA static assets, preserved V2 auth/browser WS. The tombstoned V2 REST middleware lives in `host_router.rs`.
 - `crates/ocg-core/src/gateway/`: OpenAI / Anthropic / Gemini client protocol routes and conversions, Claude Desktop alias rewriting, forwarding, cooldown, and cost accounting. `materialize.rs` parses the client protocol first, then materializes candidates by Alias mapping; adapters must not use billable paths to probe protocols.
-- `crates/ocg-core/src/provider.rs`: domain catalog compatibility facade + Custom URL checks.
+- `crates/ocg-core/src/provider.rs`: domain catalog compatibility facade.
 - `crates/ocg-core/src/provider_contracts.rs`: provider contract scopes, protocol switches, and model protocol evidence.
-- `crates/ocg-core/src/custom.rs` / `custom_http.rs`: Custom eligible runtime, verification probe, declared-model matching, and outbound boundaries.
-- `crates/ocg-core/src/gateway_keys.rs`: `access_keys` lifecycle facade, credential snapshot, `PRIMARY_KEY_ID`, cross-layer value-uniqueness gate.
+- `crates/ocg-core/src/goat.rs`: GOAT verification contract and account runtime types (GOAT is disabled `pending`; verify `501`).
+- `crates/ocg-core/src/custom.rs` / `custom_http.rs`: Custom eligible runtime, URL validation/inspection, verification probe, declared-model matching, and outbound boundaries.
+- `crates/ocg-core/src/gateway_keys.rs`: `access_keys` lifecycle implementation, credential snapshot, `PRIMARY_KEY_ID`, cross-layer value-uniqueness gate.
 - `crates/ocg-core/src/http_client.rs`: maps `AppConfig` to `ocg_infra::http`.
 - `crates/ocg-core/src/go_usage.rs`: official Go usage client (`/zen/go/v1/usage`).
 - `crates/ocg-core/src/usage_sync.rs`: adaptive official usage sync. Background loop starts/stops with `CoreState` (spawned on Gateway start, exits when CoreState drops).
-- `crates/ocg-core/src/console_usage.rs`: frozen, deprecated Profile Cookie/HTML console usage implementation; do not call or extend.
 - `crates/ocg-core/src/db.rs`: SQLite schema, migrations, queries; `CURRENT_SCHEMA_VERSION = 27`.
 - `crates/ocg-core/src/models.rs`: shared serde types and `AppConfig` (includes `DEFAULT_OPENCODE_INVITE_URL`).
 - `crates/ocg-core/src/pricing.rs` + `kernel/pricing.rs`: OpenCode Go price snapshot, multipliers, and quota estimation.
@@ -45,7 +45,8 @@ User guides live under `docs/user/` (landing: `docs/USER.md` / `docs/USER.zh-CN.
 - `src-tauri/src/host/`: desktop Host capabilities (gateway lifecycle, native browser, desktop settings).
 - `src-tauri/src/updater.rs`: signed desktop updater bridge; triggered by protected dashboard HTTP API.
 - `src-tauri/src/tray.rs`: tray menu and dashboard-open logic.
-- `src/api/dashboard-v3.ts` / `dashboard.ts` / `generated/dashboard-v3.ts`: current dashboard HTTP client and contract types.
+- `src/api/dashboard-v3.ts` / `dashboard.ts` / `providers.ts` / `generated/dashboard-v3.ts`: current dashboard HTTP client (transport), presenters, and contract types. `dashboardApi` covers auth/keys/acknowledgements; `providerApi` covers Zen-free/pricing/protocol-switch methods.
+- `src/domain/`: shared domain helpers used by both views and components (plans, account-*, pricing-*, provider-contracts, accounts-usage, custom-account, managed-account, etc.).
 - `src/views/`: Dashboard / Keys / Accounts / Providers / Applications / Logs / Settings.
 - `src/components/ManagedAccountWizard.vue`: managed registration wizard (step back, Google/GitHub).
 - `src/views/application-guides.ts`: 16-app tutorial registry and `APPLICATION_MODEL_METADATA` capability table (when changing count/protocol/redaction/capabilities, sync tests and the USER capability table in `docs/user/applications.md`; the README only keeps recommended-protocol groups).
@@ -101,7 +102,6 @@ Before developing, quit the release tray app to release the single-instance lock
 - `/embeddings` and Gemini `embedContent` are not implemented; Gemini `countTokens` returns `501`, allowing Gemini CLI to fall back to local estimation.
 - Gemini `generateContent` / `streamGenerateContent` are implemented, but non-empty `safetySettings`, `cachedContent`, `fileData`, Google Search, `urlContext`, and unsupported non-empty `generationConfig` fields return `400`. `topK` and `thinkingConfig` can only be treated as cross-protocol compatibility hints; do not promise semantic equivalence with the Gemini native backend.
 - Streaming usage depends on the upstream usage chunk; Chat streaming requests set `stream_options.include_usage`. When no chunk is present it is recorded as `success_no_usage`.
-- `dashboard.rs` still contains tombstoned V2 REST implementations alongside V3; do not broadly remove them now unless you also migrate the missing behavior to V3 and add validation. Same for `src/api/tauri.ts`: not a production path.
-- Custom account-level protocol probing has no V3 counterpart endpoint; historical V2 `POST /dashboard/api/accounts/{id}/protocol-probes` returns `410` for authorized sessions. Go/Zen probing uses the Providers-page V3 path.
+- Custom account-level protocol probing has no V3 counterpart endpoint; historical V2 `POST /dashboard/api/accounts/{id}/protocol-probes` and `POST /dashboard/api/accounts/{id}/test` were removed with the V2 REST surface and return `410` via the tombstone middleware. Go/Zen probing uses the Providers-page V3 path.
 - Windows/Linux ARM64, 32-bit x86, RPM, Snap, and app-store packages are not currently shipped; there is no Windows Authenticode formal signing or Apple notarization. Installed desktop versions can complete signed upgrades from the Settings page. See `docs/maintainer/release-artifacts.md` for artifact details.
 - Command Code GOAT and all SCNet Token Plans remain disabled pending / not routable / verify `501`. SCNet Token Plan Keys are restricted to interactive use inside AI tools; sharing accounts or using them as custom backends/automation/non-interactive batch calling is prohibited. Custom API is a live route; see the trusted-admin boundary in `docs/maintainer/runtime-invariants.md`. Do not mix the two framings.

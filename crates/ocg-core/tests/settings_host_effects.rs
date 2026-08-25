@@ -201,18 +201,14 @@ fn v2_payload(config: &ocg_core::models::AppConfig, expected_revision: Option<u6
 }
 
 #[test]
-fn v2_and_v3_settings_updates_share_the_core_state_host_path() {
+fn v3_settings_updates_use_the_core_state_host_path() {
     let state_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/state.rs"));
-    let v2_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/dashboard.rs"));
     let v3_src = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/dashboard_v3/settings.rs"
     ));
     let lib_src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
     let state_production = production_prefix(state_src);
-    // dashboard.rs has #[cfg(test)] helpers before update_settings; inspect
-    // the full file so the shared call site is not skipped.
-    let v2_production = v2_src;
     let v3_production = production_prefix(v3_src);
     let lib_production = production_prefix(lib_src);
 
@@ -271,16 +267,12 @@ fn v2_and_v3_settings_updates_share_the_core_state_host_path() {
     assert!(listener_production.contains("schedule_dashboard_trust_recompute"));
     assert!(listener_production.contains("recompute_dashboard_trust"));
     assert!(listener_production.contains("stop_and_wait(handle)"));
-    assert!(v2_production.contains("apply_host_settings"));
     assert!(v3_production.contains("apply_host_settings"));
-    assert!(v2_production.contains("lock_settings_host_effects"));
     assert!(v3_production.contains("lock_settings_host_effects"));
-    assert!(v2_production.contains("rebind_listener_after_settings_commit"));
     assert!(v3_production.contains("rebind_listener_after_settings_commit"));
-    assert!(v2_production.contains("map_host_settings_error"));
     assert!(v3_production.contains("map_host_settings_error"));
 
-    for adapter in [v2_production, v3_production] {
+    for adapter in [v3_production] {
         assert!(
             !adapter.contains("failed to synchronize desktop settings"),
             "adapters must not keep the host rollback policy"

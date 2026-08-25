@@ -31,7 +31,7 @@ schema v16 给账号增加 `account_type`（`key | managed`）与 `setup_step` �
 
 官方 Go usage（`go_usage.rs`，`https://opencode.ai/zen/go/v1/usage`）是校准基线，由 `usage_sync.rs` 协调。手动 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` 与后台对账共用同一条 fetch + key CAS + 三窗口校准路径。ready+enabled 且近 24h 有本地活动的账号约每小时对账，无活动约每天；禁用 / 非 ready / 空 Key 排除。启动时避免轰鸣：全局并发 1、节奏控制、有界抖动，并提供可注入 clock/jitter/fetch 缝。手动刷新在任何尝试后有 15 秒每账号节流、并发去重与 Retry-After / `nextAllowedAt`。本地最大 Go 用量 ≥80% 时最多每 15 分钟加速一次。真实推理 `429` 仍写现有 cooldown/selector，并额外调度约 1–2 分钟后的官方同步（不是 inline）。官方失败或 `status=rate-limited` 不会写推理冷却。成功后按最早 `resetsAt`（有界抖动）调度，同时尊重活跃/非活跃节奏。失败退避：5m → 15m → 1h → 6h；last-success 与上次基线不会被清除。sync 元数据在 `provider_usage_sync_state`（v27 删除遗留的五列 `accounts.usage_sync_*`）。公开 Go docs 尚未列出该路径。
 
-`console_usage.rs` **已冻结** 弃用——V3 实现不会调用或扩展它；至少两个 minor 且有稳定真号证据后再删。手工滑块 / PATCH 校准仍然可用。
+用量同步仅由 `usage_sync.rs` 处理；不存在 Profile Cookie/HTML 控制台用量路径。
 
 Zen Free 由数据库持有：可启用、停用、排序，但不能通过通用账号 API 创建或删除。GOAT / SCNet 草稿保持禁用且不可路由。Custom 在验证后显式启用即可路由。
 

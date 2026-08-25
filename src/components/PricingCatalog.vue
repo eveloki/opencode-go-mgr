@@ -44,7 +44,7 @@
                 :bordered="false"
               >{{ t("免费 · 出口 IP 共享") }}</n-tag>
               <n-tag
-                v-else-if="group.plan.kind === 'subscription'"
+                v-else-if="group.plan.kind === 'subscription' && group.content.kind !== 'scnet-reference'"
                 type="info"
                 size="small"
                 :bordered="false"
@@ -60,21 +60,21 @@
             <p v-else>{{ t(pricingDisplay(group).messageKey) }}</p>
           </div>
           <div
-            v-if="group.content.kind === 'opencode-go'"
+            v-if="group.content.kind === 'opencode-go' || group.content.kind === 'goat-reference'"
             class="pricing-actions"
           >
             <n-button
-              v-if="snapshot"
+              v-if="pricingSourceUrl(group)"
               tag="a"
               text
-              :href="snapshot.source_url"
+              :href="pricingSourceUrl(group)"
               target="_blank"
               rel="noopener noreferrer"
             >{{ t("官方来源") }}</n-button>
             <n-button
               type="primary"
               :loading="refreshing"
-              :disabled="loading || refreshing || savingModelId !== null || confirmationOpen"
+              :disabled="loading || refreshing || savingModelId !== null || confirmationOpen || (Boolean(providerId) && !providerRefreshRevision)"
               @click="requestPricingRefresh"
             >{{ refreshing ? t("正在刷新…") : t("刷新价格表") }}</n-button>
           </div>
@@ -133,6 +133,12 @@
         <ProviderPricingReference
           v-else-if="group.content.kind === 'goat-reference'"
           kind="goat"
+          :snapshot="group.content.snapshot"
+        />
+        <n-alert
+          v-if="group.content.kind === 'goat-reference' && refreshError"
+          type="warning"
+          :title="t('刷新额度价格表失败: {error}', { error: refreshError })"
         />
 
         <ProviderPricingReference
@@ -205,19 +211,18 @@ import {
   effectivePricingRate,
   formatPricingMultiplier,
   formatPricingRate,
-} from "../views/pricing-view";
-import type { PricingTableRow } from "../views/pricing-view";
-import type { PlanId } from "../views/plans.ts";
+} from "../domain/pricing-view.ts";
+import type { PricingTableRow } from "../domain/pricing-view.ts";
+import type { PlanId } from "../domain/plans.ts";
 import {
-  buildPlanPricingGroups,
   buildScopedPlanPricingGroups,
   PRICING_PLAN_DEFINITIONS,
   resolvePlanPricingDisplay,
-} from "../views/pricing-plans.ts";
-import type { PlanPricingGroup, ProviderSnapshots } from "../views/pricing-plans.ts";
+} from "../domain/pricing-plans.ts";
+import type { PlanPricingGroup, ProviderSnapshots } from "../domain/pricing-plans.ts";
 
 const props = defineProps<{
-  providerId?: string | null;
+  providerId: string;
 }>();
 
 const message = useMessage();
@@ -246,10 +251,15 @@ const tableRows = computed(() => buildPricingTableRows(snapshot.value?.models ??
 }));
 
 const planGroups = computed<PlanPricingGroup[]>(() => (
-  props.providerId
-    ? buildScopedPlanPricingGroups(props.providerId, catalog.value, snapshot.value, providerSnapshots.value)
-    : buildPlanPricingGroups(catalog.value, snapshot.value, providerSnapshots.value)
+  buildScopedPlanPricingGroups(props.providerId, catalog.value, snapshot.value, providerSnapshots.value)
 ));
+
+const providerRefreshRevision = computed<string | undefined>(() => {
+  if (props.providerId === "opencode") return snapshot.value?.revision;
+  const group = planGroups.value.find(({ plan }) => plan.id === activePlanId.value)
+    ?? planGroups.value[0];
+  return group ? providerSnapshots.value[group.plan.id]?.provider_pricing_revision : undefined;
+});
 
 function pricingError(group: PlanPricingGroup): string | null {
   if (group.plan.id === "opencode-go") return !snapshot.value ? loadError.value || null : null;
@@ -258,6 +268,12 @@ function pricingError(group: PlanPricingGroup): string | null {
 
 function pricingDisplay(group: PlanPricingGroup) {
   return resolvePlanPricingDisplay(group, pricingError(group));
+}
+
+function pricingSourceUrl(group: PlanPricingGroup): string {
+  if (group.content.kind === "opencode-go") return snapshot.value?.source_url ?? "";
+  if (group.content.kind === "goat-reference") return group.content.snapshot?.source_url ?? "";
+  return "";
 }
 
 function retryGroupPricing(group: PlanPricingGroup) {
@@ -297,7 +313,9 @@ async function loadProviderSnapshots(catalogValue: ProviderCatalogEntry[]) {
       .find(Boolean);
     return { plan, entry };
   }).filter(({ plan, entry }) => (
-    plan.id !== "opencode-go" && entry?.pricing_availability === "available"
+    plan.id !== "opencode-go"
+    && plan.id !== "scnet"
+    && entry?.pricing_availability === "available"
   ));
 
   const results = await Promise.allSettled(
@@ -439,7 +457,12 @@ function discardMultiplierDraft(modelId: string) {
 
 async function reloadPricingAfterRevisionChange(): Promise<string | null> {
   try {
-    snapshot.value = await dashboardApi.getPricing();
+    if (props.providerId !== "opencode") {
+      if (!catalog.value) await loadProviderCatalog();
+      if (catalog.value) await loadProviderSnapshots(catalog.value);
+    } else {
+      snapshot.value = await dashboardApi.getPricing();
+    }
     message.warning(t("价格表已在其他位置更新，已重新加载"));
     return null;
   } catch (error) {
@@ -663,16 +686,16 @@ function requestPricingRefresh() {
 
 async function performPricingRefresh(
   policy?: MultiplierPolicy,
-  expectedRevision = snapshot.value?.revision,
+  expectedRevision = providerRefreshRevision.value,
   expectedOfficialContentHash?: string,
 ) {
   if (refreshing.value) return;
   refreshing.value = true;
   refreshError.value = "";
   try {
-    const result = await dashboardApi.refreshPricing({
+    const result = await dashboardApi.refreshProviderPricing(props.providerId, {
       policy,
-      expected_revision: expectedRevision,
+      expected_provider_revision: expectedRevision,
       expected_official_content_hash: expectedOfficialContentHash,
     });
     if (result.refresh_status === "needs_confirmation") {
@@ -686,14 +709,16 @@ async function performPricingRefresh(
         result.official_content_hash,
       );
     } else if (result.refresh_status === "success") {
-      snapshot.value = result;
+      if (props.providerId === "opencode") await loadPricing();
+      if (catalog.value) await loadProviderSnapshots(catalog.value);
       message.success(policy === "keep_current"
         ? t("价格表已更新，已保留当前倍率")
         : policy === "use_official"
           ? t("价格表已更新，已采用最新官方倍率")
           : t("价格表已更新"));
     } else if (result.refresh_status === "unchanged") {
-      snapshot.value = result;
+      if (props.providerId === "opencode") await loadPricing();
+      if (catalog.value) await loadProviderSnapshots(catalog.value);
       message.info(t("价格表没有变化"));
     } else {
       refreshError.value = result.error || t("价格表刷新失败，详见页面提示");
@@ -718,17 +743,17 @@ async function performPricingRefresh(
 }
 
 watch(planGroups, (groups) => {
-  if (props.providerId && groups[0] && !groups.some((group) => group.plan.id === activePlanId.value)) {
+  if (groups[0] && !groups.some((group) => group.plan.id === activePlanId.value)) {
     activePlanId.value = groups[0].plan.id;
   }
 });
 
 watch(() => props.providerId, (id) => {
-  if ((!id || id === "opencode") && !snapshot.value && !loading.value) void loadPricing();
+  if (id === "opencode" && !snapshot.value && !loading.value) void loadPricing();
 });
 
 onMounted(() => {
-  if (!props.providerId || props.providerId === "opencode") void loadPricing();
+  if (props.providerId === "opencode") void loadPricing();
 });
 onMounted(() => void loadProviderCatalog());
 </script>

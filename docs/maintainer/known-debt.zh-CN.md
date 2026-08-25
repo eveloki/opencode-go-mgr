@@ -5,8 +5,6 @@
 ## 已知缺口
 
 - 服务端的 409 错误码是 `revisionConflict`，但 `src/api/dashboard-v3.ts` 仍检查 `revision_conflict`，对应前端测试也模拟了旧拼写。因此真实冲突不会触发预期的 token / 资源刷新；修复前需要用户手动刷新并重新提交。
-- `dashboard.rs` 仍包含墓碑后面的已退役 V2 REST 处理器，以及仍然存活的 V2 鉴权与 V2 浏览器 WebSocket。这些处理器不是现行面板契约。新的 JSON 属于 `dashboard_v3`。
-- 部分前端单测仍从 `src/api/tauri.ts` 导入历史类型。生产页面使用 `dashboard-v3.ts` / `dashboard.ts`。不会新增 `invoke()` 路径；`tauri.ts` 也不作为现行客户端使用。
 - `auto_start` 受能力门控：只有 Windows release / 已安装的 Tauri 进程注入注册表同步钩子。开发构建、CLI、Docker、macOS、Linux 面板不暴露该开关。Dock 可见性仅 macOS Tauri。
 - 生成的 Tauri schema 文件会让 diff 变吵；只在 Tauri 配置确实改动时才需要修改它们。
 - 流式用量仅在上游发出 usage chunk 时精确；Chat 流式请求会设置 `stream_options.include_usage`。没有 chunk 时 Go 行记为 `success_no_usage`； Zen 无 usage 的成功仍为 `success` / `free`。
@@ -16,7 +14,6 @@
 - Claude Desktop 只公布三个固定 Claude 别名，再映射到受支持的实际模型；它不代表 OCG Manager 提供了原生 Claude 4.6 模型或完整 Anthropic Models API。
 - Command Code GOAT 与 SCNet Token Plans 只是 schema/UI 草稿。它们创建禁用的 `pending` 账号；验证为 `501`；Alias 路由不会选中它们。SCNet 官方可用模型表与 endpoint 快照只作适配器输入，不会作为客户端别名公布。这些家族不是已上线支持。Custom API 已在受信管理员边界下上线（`custom.rs` + `custom_http.rs`）；GOAT/SCNet 防滥用口径不包含这条路径。
 - Custom 的供应商范围协议探测不在 V3；V2 账号侧探测路径已 410。Custom 验证与模型发现是现行操作路径。
-- `console_usage.rs` 保持冻结。当前 V3 实现不会调用、扩展或删除它。
 
 ## 明确非目标
 

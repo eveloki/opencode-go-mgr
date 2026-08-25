@@ -230,9 +230,11 @@ pub async fn gemini_model_action(
 /// GET /v1/models — authenticated local Alias registry list.
 ///
 /// Returns OpenAI list JSON for routeable published client aliases union
-/// eligible enabled+verified Custom capability IDs, de-duplicated, in
-/// deterministic order. Does not call upstream `/v1/models`. Zero eligible
-/// Custom accounts returns the published alias list unchanged.
+/// eligible enabled+verified Custom capability IDs and eligible Command Code
+/// GOAT catalog IDs, de-duplicated, in deterministic order. Does not call
+/// upstream `/v1/models`. Zero eligible Custom/GOAT accounts returns the
+/// published alias list unchanged. GOAT IDs never steal already-published
+/// Go/Zen aliases.
 pub async fn models(
     State(state): State<CoreState>,
     headers: HeaderMap,
@@ -251,10 +253,24 @@ pub async fn models(
 fn published_alias_models_response(state: &CoreState) -> axum::response::Response {
     let zen_catalog = state.zen_free_model_catalog();
     let contracts = state.provider_contracts();
-    let published = alias::published_routeable_aliases_with_zen(&zen_catalog.models);
+    let go_ids = provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
+    let goat_ids = eligible_goat_model_ids(state);
+    let published = crate::alias::published_routeable_aliases_with_all_catalogs(
+        &go_ids,
+        &zen_catalog.models,
+        &goat_ids,
+    );
     let mut data: Vec<serde_json::Value> = published
         .iter()
-        .filter(|item| published_alias_has_enabled_protocol(item, &zen_catalog.models, &contracts))
+        .filter(|item| {
+            published_alias_has_enabled_protocol(
+                item,
+                &go_ids,
+                &zen_catalog.models,
+                &goat_ids,
+                &contracts,
+            )
+        })
         .map(|item| {
             serde_json::json!({
                 "id": item.alias,
@@ -265,23 +281,35 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
         })
         .collect();
     let custom_ids = eligible_custom_model_ids(state, &contracts);
-    for id in custom_ids {
-        if published
+    for id in custom_ids.into_iter().chain(
+        goat_ids
             .iter()
-            .any(|item| crate::custom::custom_model_id_matches(&item.alias, &id))
-            || data.iter().any(|item| {
-                item.get("id")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|existing| crate::custom::custom_model_id_matches(existing, &id))
+            .filter(|id| !ocg_domain::ids::looks_raw_shaped(id))
+            .filter(|id| {
+                model_has_enabled_protocol(id, &go_ids, &zen_catalog.models, &goat_ids, &contracts)
             })
+            .cloned(),
+    ) {
+        let owned_by = if goat_ids
+            .iter()
+            .any(|goat| crate::custom::custom_model_id_matches(goat, &id))
         {
+            crate::provider::COMMAND_CODE_PROVIDER_ID
+        } else {
+            crate::provider::CUSTOM_PROVIDER_ID
+        };
+        if data.iter().any(|item| {
+            item.get("id")
+                .and_then(|value| value.as_str())
+                .is_some_and(|existing| crate::custom::custom_model_id_matches(existing, &id))
+        }) {
             continue;
         }
         data.push(serde_json::json!({
             "id": id,
             "object": "model",
             "created": 0,
-            "owned_by": crate::provider::CUSTOM_PROVIDER_ID
+            "owned_by": owned_by
         }));
     }
     axum::Json(serde_json::json!({
@@ -293,10 +321,22 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
 
 fn published_alias_has_enabled_protocol(
     item: &alias::PublishedAlias,
+    go_ids: &[String],
     zen_models: &[String],
+    goat_ids: &[String],
     contracts: &crate::provider_contracts::EffectiveContractSet,
 ) -> bool {
-    match alias::resolve_with_provider_models(&item.alias, zen_models, &[]) {
+    model_has_enabled_protocol(&item.alias, go_ids, zen_models, goat_ids, contracts)
+}
+
+fn model_has_enabled_protocol(
+    model: &str,
+    go_ids: &[String],
+    zen_models: &[String],
+    goat_ids: &[String],
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+) -> bool {
+    match crate::alias::resolve_with_all_catalogs(model, go_ids, zen_models, &[], goat_ids) {
         Ok(alias::ResolvedModel::Alias { mappings, .. }) => mappings
             .iter()
             .any(|mapping| mapping.routeable && contracts.mapping_has_enabled_protocol(mapping)),
@@ -305,6 +345,28 @@ fn published_alias_has_enabled_protocol(
         }
         Err(_) => false,
     }
+}
+
+fn provider_catalog_model_ids(
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+    provider_id: &str,
+) -> Vec<String> {
+    contracts
+        .providers
+        .get(provider_id)
+        .filter(|scope| {
+            provider_id != crate::provider::OPENCODE_PROVIDER_ID
+                || scope.catalog.source == crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS
+        })
+        .map(|scope| scope.catalog.models.clone())
+        .unwrap_or_default()
+}
+
+fn eligible_goat_model_ids(state: &CoreState) -> Vec<String> {
+    let Ok(runtimes) = state.db.lock().list_goat_account_runtimes() else {
+        return Vec::new();
+    };
+    crate::goat::eligible_goat_model_ids(&runtimes)
 }
 
 fn eligible_custom_model_ids(
@@ -399,12 +461,17 @@ async fn proxy_handler_inner(
         parsed.requested_model.clone()
     };
     let contracts = state.provider_contracts();
+    let go_model_ids =
+        provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
     let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
+    let goat_model_ids = eligible_goat_model_ids(&state);
     let zen_catalog = state.zen_free_model_catalog();
-    let resolved = match alias::resolve_with_provider_models(
+    let resolved = match crate::alias::resolve_with_all_catalogs(
         &routing_model,
+        &go_model_ids,
         &zen_catalog.models,
         &custom_model_ids,
+        &goat_model_ids,
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -497,12 +564,17 @@ async fn gemini_proxy_handler(
     let client_model = parsed.requested_model.clone();
     let routing_model = parsed.requested_model.clone();
     let contracts = state.provider_contracts();
+    let go_model_ids =
+        provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
     let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
+    let goat_model_ids = eligible_goat_model_ids(&state);
     let zen_catalog = state.zen_free_model_catalog();
-    let resolved = match alias::resolve_with_provider_models(
+    let resolved = match crate::alias::resolve_with_all_catalogs(
         &routing_model,
+        &go_model_ids,
         &zen_catalog.models,
         &custom_model_ids,
+        &goat_model_ids,
     ) {
         Ok(resolved) => resolved,
         Err(error) => {

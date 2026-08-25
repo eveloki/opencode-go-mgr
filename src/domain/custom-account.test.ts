@@ -7,7 +7,7 @@ import {
   customBaseUrlIssue,
   isCustomApiAccount,
 } from "./custom-account.ts";
-import type { Account } from "../api/tauri.ts";
+import type { Account } from "../api/dashboard.ts";
 
 function customAccount(verification_status: Account["verification_status"]) {
   return { provider_id: "custom", offering_id: "api", verification_status };

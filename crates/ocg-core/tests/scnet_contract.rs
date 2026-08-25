@@ -26,11 +26,8 @@ use std::sync::Arc;
 
 #[path = "fixtures/v2/harness.rs"]
 mod harness;
-#[path = "fixtures/legacy_dashboard.rs"]
-mod legacy_dashboard;
 
 use harness::*;
-use legacy_dashboard::LegacyDashboardHandle;
 
 const SNAPSHOT_FIXTURE: &str =
     include_str!("fixtures/scnet/token_plan_usable_models_2026-08-21.json");
@@ -179,6 +176,12 @@ async fn catalog_identifies_snapshot_with_empty_aliases() {
             .unwrap_or_else(|| panic!("catalog must include scnet/{offering_id}"));
         assert_eq!(entry["model_source"], SCNET_TOKEN_PLAN_MODEL_SOURCE);
         assert_eq!(entry["routable"], false);
+        assert_eq!(entry["creation_availability"], "unavailable");
+        assert!(
+            entry["creation_unavailable_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("archived") || reason.contains("unsupported"))
+        );
         assert_eq!(entry["verification_runtime_availability"], "unavailable");
         assert_eq!(entry["pricing_availability"], "unavailable");
         assert_eq!(entry["usage_availability"], "unavailable");
@@ -204,7 +207,6 @@ async fn catalog_identifies_snapshot_with_empty_aliases() {
 #[tokio::test]
 async fn create_stays_disabled_pending_and_lifecycle_fail_closed() {
     let harness = V2Harness::start_with_chat_success(&[SCNET_ACCOUNT_KEY]).await;
-    let legacy = LegacyDashboardHandle::start(harness.state.clone()).await;
     let catalog = harness.catalog().await;
 
     for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
@@ -236,11 +238,59 @@ async fn create_stays_disabled_pending_and_lifecycle_fail_closed() {
                 "acknowledgements": matching_acknowledgements(notice)
             }))
             .await;
-        assert_eq!(status, StatusCode::OK, "{draft}");
-        assert_eq!(draft["enabled"], false, "{draft}");
-        assert_eq!(draft["verification_status"], "pending", "{draft}");
-        assert_eq!(draft["plan_routable"], false, "{draft}");
-        let id = draft["id"].as_str().expect("draft id").to_string();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "archived SCNet creation must fail closed: {draft}"
+        );
+        assert!(
+            draft["message"].as_str().is_some_and(
+                |message| message.contains("archived") || message.contains("unsupported")
+            ),
+            "{draft}"
+        );
+        let id = format!("scnet-leftover-{offering_id}");
+        let now = Utc::now();
+        harness
+            .state
+            .db
+            .lock()
+            .create_account_with_contract(
+                &Account {
+                    id: id.clone(),
+                    provider_id: SCNET_PROVIDER_ID.into(),
+                    offering_id: offering_id.to_string(),
+                    credential_kind: ocg_core::provider::CredentialKind::ApiKey,
+                    quota_scope: ocg_core::provider::QuotaScope::Key,
+                    name: id.clone(),
+                    username: None,
+                    password_cipher: None,
+                    key_cipher: harness.state.encrypt_key(SCNET_ACCOUNT_KEY).unwrap(),
+                    enabled: false,
+                    account_type: AccountType::Key,
+                    setup_step: AccountSetupStep::Ready,
+                    referral_code: None,
+                    purchase_date: String::new(),
+                    expires_on: String::new(),
+                    cooldown_until: None,
+                    cooldown_generic_until: None,
+                    cooldown_5h_until: None,
+                    cooldown_week_until: None,
+                    cooldown_month_until: None,
+                    cooldown_free_until: None,
+                    last_error: None,
+                    auth_error: None,
+                    notes: None,
+                    created_at: now,
+                    updated_at: now,
+                },
+                None,
+                &[],
+                ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, offering_id)
+                    .unwrap()
+                    .risk_notice,
+            )
+            .expect("preserved SCNet leftover draft");
 
         let (status, body) = harness
             .post_json(
@@ -264,21 +314,6 @@ async fn create_stays_disabled_pending_and_lifecycle_fail_closed() {
             status,
             StatusCode::NOT_IMPLEMENTED,
             "verify must stay 501: {body}"
-        );
-
-        let response = harness
-            .client
-            .post(legacy.url(&format!("/accounts/{id}/test")))
-            .json(&json!({}))
-            .send()
-            .await
-            .unwrap();
-        let status = response.status();
-        let body: Value = response.json().await.unwrap();
-        assert_eq!(
-            status,
-            StatusCode::CONFLICT,
-            "test must fail closed without a live Token Plan client: {body}"
         );
 
         let (status, usage) = harness
@@ -315,7 +350,6 @@ async fn create_stays_disabled_pending_and_lifecycle_fail_closed() {
         "Token Plan lifecycle must not call upstream: {:?}",
         harness.fake_call_keys()
     );
-    legacy.stop().await;
     harness.shutdown();
 }
 
@@ -370,7 +404,11 @@ async fn alias_adapter_and_selector_do_not_expose_token_plans() {
             "acknowledgements": matching_acknowledgements(&standard["risk_notice"])
         }))
         .await;
-    assert_eq!(status, StatusCode::OK, "{draft}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "archived SCNet creation must fail closed: {draft}"
+    );
 
     let (status, body) = harness.chat("GLM-5.2").await;
     assert_ne!(

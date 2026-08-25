@@ -28,6 +28,7 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "AccountUpdate",
     "AccountOrder",
     "AccountSetupUpdate",
+    "AccountGoatModelAccessUpdate",
     "AccountCustomConfigUpdate",
     "AccountCustomConfigWrite",
     "AccountModelCapabilitiesUpdate",

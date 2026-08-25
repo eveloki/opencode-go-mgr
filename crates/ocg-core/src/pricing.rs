@@ -13,18 +13,19 @@ use crate::kernel::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID,
     OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, is_free_model,
 };
-use crate::provider::ProviderPricingSnapshot as StoredProviderPricingSnapshot;
 
 pub use crate::kernel::ids::normalize_model_name;
 use crate::kernel::pricing::ProviderPricingValueWire;
 pub use crate::kernel::pricing::{
     PricingAdjustment, PricingEstimate, PricingLimits, PricingModel, PricingSnapshot,
     PricingTimeWindow, ProviderCostEstimate, ProviderCostState, ProviderPricingCapability,
-    ProviderPricingEvidence, ProviderPricingValue, SEED_LIMITS, SOURCE_URL,
-    provider_pricing_capability, quota_multiplier, seed_snapshot,
+    ProviderPricingEvidence, ProviderPricingSnapshot, ProviderPricingValue, SEED_LIMITS,
+    SOURCE_URL, provider_pricing_capability, quota_multiplier, seed_snapshot,
 };
 
 const SOURCE_HOST: &str = "opencode.ai";
+pub const GOAT_SOURCE_URL: &str = "https://commandcode.ai/docs/plans/goat";
+const GOAT_SOURCE_HOST: &str = "commandcode.ai";
 const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
 const ADJUSTMENT_POLICY_VERSION: &str = "local-v4";
 
@@ -174,8 +175,24 @@ impl ProviderScopedPricingSnapshot {
         &self.values
     }
 
-    pub fn to_storage_record(&self) -> Result<StoredProviderPricingSnapshot> {
-        Ok(StoredProviderPricingSnapshot {
+    pub fn activated_at(&self) -> &str {
+        &self.activated_at
+    }
+
+    pub fn document_updated_at(&self) -> Option<&str> {
+        self.document_updated_at.as_deref()
+    }
+
+    pub fn source_url(&self) -> &str {
+        &self.source_url
+    }
+
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
+    pub fn to_storage_record(&self) -> Result<ProviderPricingSnapshot> {
+        Ok(ProviderPricingSnapshot {
             provider_id: self.provider_id.clone(),
             offering_id: self.offering_id.clone(),
             revision: self.revision.clone(),
@@ -187,7 +204,7 @@ impl ProviderScopedPricingSnapshot {
         })
     }
 
-    pub fn from_storage_record(record: &StoredProviderPricingSnapshot) -> Result<Self> {
+    pub fn from_storage_record(record: &ProviderPricingSnapshot) -> Result<Self> {
         if let Ok(wire) =
             serde_json::from_str::<ProviderScopedPricingSnapshotWire>(&record.snapshot_json)
         {
@@ -228,7 +245,7 @@ impl ProviderScopedPricingSnapshot {
         )
     }
 
-    fn ensure_matches_record(&self, record: &StoredProviderPricingSnapshot) -> Result<()> {
+    fn ensure_matches_record(&self, record: &ProviderPricingSnapshot) -> Result<()> {
         if self.provider_id != record.provider_id
             || self.offering_id != record.offering_id
             || self.revision != record.revision
@@ -246,7 +263,6 @@ impl ProviderScopedPricingSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderPricingRefreshError {
     UnknownOffering,
-    ExperimentalContractUnavailable,
     NotApplicable,
     FetchFailed,
 }
@@ -255,9 +271,6 @@ impl fmt::Display for ProviderPricingRefreshError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownOffering => f.write_str("unknown provider pricing offering"),
-            Self::ExperimentalContractUnavailable => f.write_str(
-                "experimental GOAT pricing is unavailable because no verified official contract is configured",
-            ),
             Self::NotApplicable => {
                 f.write_str("this provider offering has no paid pricing snapshot")
             }
@@ -283,14 +296,304 @@ pub async fn fetch_provider_pricing_manual(
             ProviderScopedPricingSnapshot::from_opencode_go(&snapshot)
                 .map_err(|_| ProviderPricingRefreshError::FetchFailed)
         }
-        (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => {
-            Err(ProviderPricingRefreshError::ExperimentalContractUnavailable)
-        }
+        (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => fetch_goat_pricing_snapshot(config)
+            .await
+            .map_err(|_| ProviderPricingRefreshError::FetchFailed),
         (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
             Err(ProviderPricingRefreshError::NotApplicable)
         }
         _ => Err(ProviderPricingRefreshError::UnknownOffering),
     }
+}
+
+pub async fn fetch_goat_pricing_snapshot(
+    config: &crate::models::AppConfig,
+) -> Result<ProviderScopedPricingSnapshot> {
+    let client = crate::http_client::configured_builder(config)?
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .redirect(Policy::custom(same_goat_source_redirect))
+        .build()
+        .context("build Command Code GOAT pricing client")?;
+    let response = client
+        .get(GOAT_SOURCE_URL)
+        .send()
+        .await
+        .context("fetch Command Code GOAT pricing page")?
+        .error_for_status()
+        .context("Command Code GOAT pricing page returned an error")?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_DOCUMENT_BYTES as u64)
+    {
+        bail!("Command Code GOAT pricing page exceeds 2 MiB");
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read Command Code GOAT pricing page")?;
+        if bytes.len() + chunk.len() > MAX_DOCUMENT_BYTES {
+            bail!("Command Code GOAT pricing page exceeds 2 MiB");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let html = String::from_utf8(bytes).context("Command Code GOAT pricing page is not UTF-8")?;
+    parse_goat_html(&html)
+}
+
+fn same_goat_source_redirect(attempt: Attempt<'_>) -> reqwest::redirect::Action {
+    if attempt.previous().len() >= 5 {
+        return attempt.error("too many Command Code GOAT pricing redirects");
+    }
+    let url = attempt.url();
+    if url.scheme() == "https"
+        && url.host_str() == Some(GOAT_SOURCE_HOST)
+        && url.port_or_known_default() == Some(443)
+    {
+        attempt.follow()
+    } else {
+        attempt.error("Command Code GOAT pricing redirect left the approved HTTPS host")
+    }
+}
+
+pub fn parse_goat_html(html: &str) -> Result<ProviderScopedPricingSnapshot> {
+    let plain = collapse_whitespace(&strip_tags(html));
+    let included_count = parse_count_before(&plain, "All plans")?;
+    let monthly_price = parse_first_dollar_after(&plain, "for $")?;
+    let window_5h = parse_first_dollar_after(&plain, "5-hour limit - $")?;
+    let window_week = parse_first_dollar_after(&plain, "Weekly limit - $")?;
+    let window_month = parse_first_dollar_after(&plain, "Monthly limit - $")?;
+    if included_count == 0
+        || monthly_price <= 0.0
+        || window_5h <= 0.0
+        || window_week <= 0.0
+        || window_month <= 0.0
+    {
+        bail!("Command Code GOAT plan summary is invalid");
+    }
+
+    let tables = extract_tables(html)?;
+    let rates = tables
+        .iter()
+        .find(|table| {
+            has_headers(
+                table,
+                &[
+                    "model",
+                    "context",
+                    "intelligence",
+                    "tok/s",
+                    "input",
+                    "output",
+                    "cache read",
+                    "cache write",
+                    "caps",
+                ],
+            )
+        })
+        .ok_or_else(|| {
+            let headers = tables
+                .iter()
+                .filter_map(|table| table.first())
+                .map(|row| row.join(" | "))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow!("Command Code GOAT model pricing table was not found; headers: {headers}")
+        })?;
+
+    let mut allowances = HashMap::<String, f64>::new();
+    for table in tables.iter().filter(|table| {
+        has_headers(
+            table,
+            &[
+                "model",
+                "input",
+                "output",
+                "cache read",
+                "cache write",
+                "monthly credits",
+            ],
+        )
+    }) {
+        for row in table.iter().skip(1) {
+            if row.len() != 6 {
+                bail!("Command Code GOAT monthly-credit table contains an incomplete row");
+            }
+            let name = clean_goat_model_name(&row[0]);
+            let allowance = parse_goat_money(&row[5])?
+                .ok_or_else(|| anyhow!("{name} is missing a monthly allowance"))?;
+            if allowances
+                .insert(canonical_display_name(&name), allowance)
+                .is_some()
+            {
+                bail!("Command Code GOAT monthly-credit table contains duplicate model {name}");
+            }
+        }
+    }
+
+    let older = parse_older_goat_models(&plain);
+    let mut values = Vec::new();
+    let mut seen = HashSet::new();
+    for row in rates.iter().skip(1) {
+        if row.len() != 9 {
+            bail!("Command Code GOAT model pricing table contains an incomplete row");
+        }
+        let display_name = clean_goat_model_name(&row[0]);
+        let identity = canonical_display_name(&display_name);
+        if identity.is_empty() || !seen.insert(identity.clone()) {
+            bail!("Command Code GOAT model pricing table contains an invalid or duplicate model");
+        }
+        let input = parse_goat_money(&row[4])?;
+        let output = parse_goat_money(&row[5])?;
+        let cache_read = parse_goat_money(&row[6])?;
+        let cache_write = parse_goat_money(&row[7])?;
+        let allowance = allowances
+            .get(&identity)
+            .copied()
+            .or_else(|| older.contains(&identity).then_some(window_month.min(20.0)));
+        let model_id = goat_reference_model_id(&display_name);
+        values.push(ProviderPricingValue::new(
+            model_id,
+            display_name,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            Some(window_month),
+            allowance,
+            Some(monthly_price),
+            Some("USD".to_string()),
+            None,
+            None,
+            PricingTimeWindow::Always,
+        )?);
+    }
+    if values.len() != included_count {
+        bail!(
+            "Command Code GOAT declared {included_count} included models but parsed {} rows",
+            values.len()
+        );
+    }
+    let priced_allowances = values
+        .iter()
+        .filter(|value| value.input_per_million().is_some())
+        .filter(|value| value.model_allowance().is_some())
+        .count();
+    if priced_allowances + 2 != included_count {
+        bail!("Command Code GOAT monthly allowances are incomplete");
+    }
+    values.sort_by(|left, right| left.display_name().cmp(right.display_name()));
+    let content_hash = format!("{:x}", Sha256::digest(html.as_bytes()));
+    let revision = format!("goat-{}", content_hash.chars().take(16).collect::<String>());
+    ProviderScopedPricingSnapshot::new(
+        COMMAND_CODE_PROVIDER_ID,
+        GOAT_OFFERING_ID,
+        revision,
+        Utc::now().to_rfc3339(),
+        None,
+        GOAT_SOURCE_URL,
+        content_hash,
+        ProviderPricingEvidence::Verified,
+        values,
+    )
+}
+
+fn parse_count_before(plain: &str, marker: &str) -> Result<usize> {
+    let index = plain
+        .find(marker)
+        .ok_or_else(|| anyhow!("Command Code GOAT page is missing {marker}"))?;
+    plain[..index]
+        .split_whitespace()
+        .next_back()
+        .ok_or_else(|| anyhow!("Command Code GOAT page is missing its included-model count"))?
+        .parse::<usize>()
+        .context("invalid Command Code GOAT included-model count")
+}
+
+fn parse_first_dollar_after(plain: &str, marker: &str) -> Result<f64> {
+    let start = plain
+        .find(marker)
+        .ok_or_else(|| anyhow!("Command Code GOAT page is missing {marker}"))?;
+    let tail = &plain[start + marker.len() - 1..];
+    let token = dollar_numeric_token(tail)
+        .ok_or_else(|| anyhow!("Command Code GOAT page is missing a USD value after {marker}"))?;
+    parse_dollar(token, false)?
+        .ok_or_else(|| anyhow!("Command Code GOAT page is missing a USD value after {marker}"))
+}
+
+fn clean_goat_model_name(value: &str) -> String {
+    let mut value = value.trim().to_string();
+    for marker in [" Off-peak shown", " -98%", " -99%", " -50%", " Free"] {
+        if let Some(index) = value.find(marker) {
+            value.truncate(index);
+        }
+    }
+    value.trim().to_string()
+}
+
+fn parse_goat_money(value: &str) -> Result<Option<f64>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("free") || matches!(value, "-" | "—" | "–") {
+        return Ok(None);
+    }
+    let dollars = value
+        .match_indices('$')
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let start = dollars
+        .last()
+        .copied()
+        .ok_or_else(|| anyhow!("expected GOAT USD value, got {value}"))?;
+    let token = dollar_numeric_token(&value[start..])
+        .ok_or_else(|| anyhow!("expected GOAT USD value, got {value}"))?;
+    parse_dollar(token, false)
+}
+
+fn parse_older_goat_models(plain: &str) -> HashSet<String> {
+    let marker = "Older models also available";
+    let Some(start) = plain.find(marker) else {
+        return HashSet::new();
+    };
+    let tail = plain[start + marker.len()..].trim_start_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '-' | '—' | ':')
+    });
+    let end = tail.find("all at").unwrap_or(tail.len());
+    tail[..end]
+        .trim_end_matches(|character: char| {
+            character.is_whitespace() || matches!(character, '-' | '—')
+        })
+        .replace(", and ", ", ")
+        .replace(" and ", ", ")
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(canonical_display_name)
+        .collect()
+}
+
+fn dollar_numeric_token(value: &str) -> Option<&str> {
+    let rest = value.strip_prefix('$')?;
+    let length = rest
+        .char_indices()
+        .take_while(|(_, character)| character.is_ascii_digit() || matches!(character, '.' | ','))
+        .map(|(index, character)| index + character.len_utf8())
+        .last()?;
+    Some(&value[..length + 1])
+}
+
+fn goat_reference_model_id(display_name: &str) -> String {
+    let mut result = String::new();
+    let mut dash = false;
+    for character in display_name.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            result.push(character);
+            dash = false;
+        } else if !dash && !result.is_empty() {
+            result.push('-');
+            dash = true;
+        }
+    }
+    result.trim_end_matches('-').to_string()
 }
 
 pub fn store_provider_pricing_snapshot(
@@ -1146,7 +1449,12 @@ fn has_headers(table: &[Vec<String>], expected: &[&str]) -> bool {
     table.first().is_some_and(|row| {
         let actual = row
             .iter()
-            .map(|cell| cell.trim().to_ascii_lowercase())
+            .map(|cell| {
+                cell.trim()
+                    .trim_end_matches('↕')
+                    .trim()
+                    .to_ascii_lowercase()
+            })
             .collect::<Vec<_>>();
         actual == expected
     })
@@ -1273,17 +1581,16 @@ fn collapse_whitespace(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderCostEstimate, ProviderCostState, ProviderPricingEvidence,
-        ProviderPricingRefreshError, ProviderPricingValue, ProviderScopedPricingSnapshot,
+        GOAT_SOURCE_URL, ProviderCostEstimate, ProviderCostState, ProviderPricingEvidence,
+        ProviderPricingSnapshot, ProviderPricingValue, ProviderScopedPricingSnapshot,
         embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage,
-        fetch_official_snapshot, fetch_provider_pricing_manual, latest_provider_pricing_snapshot,
+        fetch_official_snapshot, latest_provider_pricing_snapshot,
         legacy_policy_needs_multiplier_repair, parse_official_html, provider_pricing_capability,
         quota_multiplier, store_provider_pricing_snapshot,
     };
     use chrono::{DateTime, Utc};
 
     use crate::db::Database;
-    use crate::models::AppConfig;
     use crate::provider::{COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID};
 
     #[test]
@@ -1429,7 +1736,7 @@ mod tests {
         assert_eq!(loaded.evidence(), ProviderPricingEvidence::Verified);
         assert_eq!(loaded.values().len(), legacy.models.len());
 
-        let legacy_record = crate::provider::ProviderPricingSnapshot {
+        let legacy_record = ProviderPricingSnapshot {
             provider_id: "opencode".to_string(),
             offering_id: "go".to_string(),
             revision: legacy.revision.clone(),
@@ -1493,25 +1800,14 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[tokio::test]
-    async fn goat_manual_pricing_refresh_is_explicitly_unavailable() {
+    #[test]
+    fn goat_manual_pricing_refresh_uses_the_verified_official_source() {
         let capability =
             provider_pricing_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert_eq!(capability.evidence, ProviderPricingEvidence::Unavailable);
-        assert!(capability.experimental);
-        assert_eq!(capability.source_url, None);
-        assert!(!capability.manual_refresh_available);
-        let error = fetch_provider_pricing_manual(
-            &AppConfig::default(),
-            COMMAND_CODE_PROVIDER_ID,
-            GOAT_OFFERING_ID,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error,
-            ProviderPricingRefreshError::ExperimentalContractUnavailable
-        );
+        assert_eq!(capability.evidence, ProviderPricingEvidence::Verified);
+        assert!(!capability.experimental);
+        assert_eq!(capability.source_url, Some(GOAT_SOURCE_URL));
+        assert!(capability.manual_refresh_available);
     }
 
     #[test]

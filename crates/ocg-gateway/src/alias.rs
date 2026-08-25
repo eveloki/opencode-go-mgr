@@ -8,12 +8,13 @@
 //! when it uniquely selects one provider mapping; ambiguity returns
 //! [`ResolveError::Ambiguous`] with code [`AMBIGUOUS_MODEL_ID`].
 //!
-//! Command Code GOAT has one official non-routeable mapping:
+//! Command Code GOAT has one official mapping:
 //! Alias `deepseek-v4-flash` → raw `deepseek/deepseek-v4-flash`. The kebab
-//! alias stays Go-owned and published; the unique slash raw ID pins to GOAT
-//! and is not production-selectable. SCNet stays fail-closed. Eligible
-//! Custom capabilities overlay published aliases and resolve otherwise
-//! unknown IDs without stealing Go/Zen mappings.
+//! alias stays Go-owned and published; the unique slash raw ID pins to GOAT.
+//! Eligible verified GOAT catalogs overlay unique IDs without stealing
+//! Go/Zen aliases. SCNet stays fail-closed. Eligible Custom capabilities
+//! overlay published aliases and resolve otherwise unknown IDs without
+//! stealing Go/Zen mappings.
 //! Later host adapters consume [`ProviderMapping`]: parse the client protocol
 //! once, then materialize model / protocol / endpoint / auth per candidate.
 //! Adapters must not probe a billable inference path to discover protocol
@@ -199,7 +200,7 @@ fn build_registry(zen_free_models: &[String]) -> Registry {
     registry
 }
 
-fn go_mapping(upstream_model: &'static str) -> ProviderMapping {
+fn go_mapping(upstream_model: &str) -> ProviderMapping {
     ProviderMapping {
         provider_id: OPENCODE_PROVIDER_ID,
         offering_id: GO_OFFERING_ID,
@@ -209,12 +210,39 @@ fn go_mapping(upstream_model: &'static str) -> ProviderMapping {
 }
 
 fn goat_deepseek_v4_flash_mapping() -> ProviderMapping {
+    goat_mapping(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, false)
+}
+
+fn goat_mapping(upstream_model: &str, routeable: bool) -> ProviderMapping {
     ProviderMapping {
         provider_id: COMMAND_CODE_PROVIDER_ID,
         offering_id: GOAT_OFFERING_ID,
-        upstream_model: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.to_string(),
-        routeable: false,
+        upstream_model: upstream_model.to_string(),
+        routeable,
     }
+}
+
+fn goat_catalog_hit(goat_model_ids: &[String], requested: &str) -> Option<String> {
+    goat_model_ids
+        .iter()
+        .find(|id| custom_model_id_matches(id, requested))
+        .cloned()
+}
+
+fn goat_catalog_hit_for_resolved(
+    goat_model_ids: &[String],
+    resolved: &ResolvedModel,
+) -> Option<String> {
+    goat_catalog_hit(goat_model_ids, resolved.requested()).or_else(|| match resolved {
+        ResolvedModel::Alias { mappings, .. } => mappings
+            .iter()
+            .filter(|mapping| mapping.is_command_code_goat())
+            .find_map(|mapping| goat_catalog_hit(goat_model_ids, &mapping.upstream_model)),
+        ResolvedModel::PinnedRaw { mapping, .. } if mapping.is_command_code_goat() => {
+            goat_catalog_hit(goat_model_ids, &mapping.upstream_model)
+        }
+        _ => None,
+    })
 }
 
 fn go_alias_mappings(upstream_model: &'static str) -> Vec<ProviderMapping> {
@@ -380,25 +408,103 @@ pub fn resolve_with_provider_models(
     zen_free_models: &[String],
     custom_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
-    let registry = build_registry(zen_free_models);
-    resolve_with_custom_in(&registry, requested, custom_model_ids)
+    resolve_with_catalogs(requested, zen_free_models, custom_model_ids, &[])
 }
 
-fn resolve_with_custom_in(
-    registry: &Registry,
+/// Resolve against Zen, Custom, and eligible Command Code GOAT catalog IDs.
+/// GOAT overlays never steal publication ownership from Go/Zen aliases, but a
+/// verified GOAT mapping may join the same Alias as a backup candidate. Unique
+/// kebab IDs become GOAT-owned aliases and raw slash IDs pin to GOAT.
+/// Overlapping raw IDs stay [`ResolveError::Ambiguous`].
+pub fn resolve_with_catalogs(
     requested: &str,
+    zen_free_models: &[String],
+    custom_model_ids: &[String],
+    goat_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    resolve_with_all_catalogs(
+        requested,
+        &[],
+        zen_free_models,
+        custom_model_ids,
+        goat_model_ids,
+    )
+}
+
+/// Resolve against the persisted OpenCode Go and Zen catalogs plus eligible
+/// Custom and GOAT account catalogs. An empty Go catalog preserves the static
+/// built-in registry; a non-empty catalog can add future Go model IDs without
+/// code changes while provider contracts remain the routing gate.
+pub fn resolve_with_all_catalogs(
+    requested: &str,
+    go_model_ids: &[String],
+    zen_free_models: &[String],
+    custom_model_ids: &[String],
+    goat_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    let registry = build_registry(zen_free_models);
+    let go_resolved = match resolve_in(&registry, requested) {
+        Ok(resolved) => overlay_go_catalog(resolved, go_model_ids),
+        Err(ResolveError::Unknown { requested }) => overlay_unknown_go(requested, go_model_ids),
+        other => other,
+    };
+    let custom_resolved = match go_resolved {
+        Ok(resolved) => overlay_custom_catalog(resolved, custom_model_ids),
+        Err(ResolveError::Unknown { requested })
+            if custom_model_ids
+                .iter()
+                .any(|id| custom_model_id_matches(id, &requested)) =>
+        {
+            Ok(ResolvedModel::PinnedRaw {
+                requested,
+                mapping: custom_mapping(CUSTOM_DYNAMIC_UPSTREAM),
+            })
+        }
+        other => other,
+    };
+    match custom_resolved {
+        Ok(resolved) => overlay_goat_catalog(resolved, goat_model_ids),
+        Err(ResolveError::Unknown { requested }) => overlay_unknown_goat(requested, goat_model_ids),
+        other => other,
+    }
+}
+
+fn overlay_go_catalog(
+    resolved: ResolvedModel,
+    go_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    let Some(canonical) = provider_catalog_hit_for_resolved(go_model_ids, &resolved, |mapping| {
+        mapping.is_opencode_go()
+    }) else {
+        return Ok(resolved);
+    };
+    overlay_known_provider(resolved, canonical, go_mapping)
+}
+
+fn overlay_unknown_go(
+    requested: String,
+    go_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    overlay_unknown_provider(requested, go_model_ids, go_mapping)
+}
+
+fn overlay_custom_catalog(
+    resolved: ResolvedModel,
     custom_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
     let custom_hit = custom_model_ids
         .iter()
-        .any(|id| custom_model_id_matches(id, requested));
-    match resolve_in(registry, requested) {
-        Ok(ResolvedModel::Alias {
+        .any(|id| custom_model_id_matches(id, resolved.requested()));
+    if !custom_hit {
+        return Ok(resolved);
+    }
+    match resolved {
+        ResolvedModel::Alias {
             requested,
             alias,
             mut mappings,
-        }) => {
-            if custom_hit && !mappings.iter().any(|mapping| mapping.is_custom_api()) {
+        } => {
+            if !mappings.iter().any(|mapping| mapping.is_custom_api()) {
                 mappings.push(custom_mapping(&alias));
             }
             Ok(ResolvedModel::Alias {
@@ -407,20 +513,186 @@ fn resolve_with_custom_in(
                 mappings,
             })
         }
-        Ok(ResolvedModel::PinnedRaw { requested, mapping }) => {
-            if custom_hit && !mapping.is_custom_api() {
-                return Err(ResolveError::Ambiguous {
+        ResolvedModel::PinnedRaw { requested, mapping } if !mapping.is_custom_api() => {
+            Err(ResolveError::Ambiguous {
+                requested,
+                mappings: vec![mapping, custom_mapping(CUSTOM_DYNAMIC_UPSTREAM)],
+            })
+        }
+        other => Ok(other),
+    }
+}
+
+fn provider_catalog_hit_for_resolved(
+    model_ids: &[String],
+    resolved: &ResolvedModel,
+    owns_mapping: impl Fn(&ProviderMapping) -> bool,
+) -> Option<String> {
+    provider_catalog_hit(model_ids, resolved.requested()).or_else(|| match resolved {
+        ResolvedModel::Alias { mappings, .. } => mappings
+            .iter()
+            .filter(|mapping| owns_mapping(mapping))
+            .find_map(|mapping| provider_catalog_hit(model_ids, &mapping.upstream_model)),
+        ResolvedModel::PinnedRaw { mapping, .. } if owns_mapping(mapping) => {
+            provider_catalog_hit(model_ids, &mapping.upstream_model)
+        }
+        _ => None,
+    })
+}
+
+fn provider_catalog_hit(model_ids: &[String], requested: &str) -> Option<String> {
+    model_ids
+        .iter()
+        .find(|id| custom_model_id_matches(id, requested))
+        .cloned()
+}
+
+fn overlay_unknown_provider(
+    requested: String,
+    model_ids: &[String],
+    mapping: impl Fn(&str) -> ProviderMapping,
+) -> Result<ResolvedModel, ResolveError> {
+    let Some(canonical) = provider_catalog_hit(model_ids, &requested) else {
+        return Err(ResolveError::Unknown { requested });
+    };
+    if looks_raw_shaped(&requested) || looks_raw_shaped(&canonical) {
+        return Ok(ResolvedModel::PinnedRaw {
+            requested,
+            mapping: mapping(&canonical),
+        });
+    }
+    Ok(ResolvedModel::Alias {
+        requested,
+        alias: canonical.clone(),
+        mappings: vec![mapping(&canonical)],
+    })
+}
+
+fn overlay_known_provider(
+    resolved: ResolvedModel,
+    canonical: String,
+    mapping: impl Fn(&str) -> ProviderMapping,
+) -> Result<ResolvedModel, ResolveError> {
+    match resolved {
+        ResolvedModel::Alias {
+            requested,
+            alias,
+            mut mappings,
+        } => {
+            if let Some(existing) = mappings.iter_mut().find(|existing| {
+                let replacement = mapping(&canonical);
+                existing.provider_id == replacement.provider_id
+                    && existing.offering_id == replacement.offering_id
+            }) {
+                *existing = mapping(&canonical);
+            } else {
+                mappings.push(mapping(&canonical));
+            }
+            Ok(ResolvedModel::Alias {
+                requested,
+                alias,
+                mappings,
+            })
+        }
+        ResolvedModel::PinnedRaw {
+            requested,
+            mapping: existing,
+        } => {
+            let replacement = mapping(&canonical);
+            if existing.provider_id == replacement.provider_id
+                && existing.offering_id == replacement.offering_id
+            {
+                Ok(ResolvedModel::PinnedRaw {
                     requested,
-                    mappings: vec![mapping, custom_mapping(CUSTOM_DYNAMIC_UPSTREAM)],
+                    mapping: replacement,
+                })
+            } else {
+                Err(ResolveError::Ambiguous {
+                    requested,
+                    mappings: vec![existing, replacement],
+                })
+            }
+        }
+    }
+}
+
+fn overlay_goat_catalog(
+    resolved: ResolvedModel,
+    goat_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    let Some(canonical) = goat_catalog_hit_for_resolved(goat_model_ids, &resolved) else {
+        return Ok(match resolved {
+            ResolvedModel::PinnedRaw { requested, mapping }
+                if mapping.is_command_code_goat() && mapping.routeable =>
+            {
+                ResolvedModel::PinnedRaw {
+                    requested,
+                    mapping: goat_mapping(&mapping.upstream_model, false),
+                }
+            }
+            other => other,
+        });
+    };
+    overlay_known_goat(resolved, canonical)
+}
+
+fn overlay_unknown_goat(
+    requested: String,
+    goat_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    let Some(canonical) = goat_catalog_hit(goat_model_ids, &requested) else {
+        return Err(ResolveError::Unknown { requested });
+    };
+    if looks_raw_shaped(&requested) || looks_raw_shaped(&canonical) {
+        return Ok(ResolvedModel::PinnedRaw {
+            requested,
+            mapping: goat_mapping(&canonical, true),
+        });
+    }
+    Ok(ResolvedModel::Alias {
+        requested,
+        alias: canonical.clone(),
+        mappings: vec![goat_mapping(&canonical, true)],
+    })
+}
+
+fn overlay_known_goat(
+    resolved: ResolvedModel,
+    canonical: String,
+) -> Result<ResolvedModel, ResolveError> {
+    match resolved {
+        ResolvedModel::Alias {
+            requested,
+            alias,
+            mut mappings,
+        } => {
+            if let Some(existing) = mappings
+                .iter_mut()
+                .find(|mapping| mapping.is_command_code_goat())
+            {
+                existing.routeable = true;
+                existing.upstream_model = canonical;
+            } else {
+                mappings.push(goat_mapping(&canonical, true));
+            }
+            Ok(ResolvedModel::Alias {
+                requested,
+                alias,
+                mappings,
+            })
+        }
+        ResolvedModel::PinnedRaw { requested, mapping } => {
+            if mapping.is_command_code_goat() {
+                return Ok(ResolvedModel::PinnedRaw {
+                    requested,
+                    mapping: goat_mapping(&canonical, true),
                 });
             }
-            Ok(ResolvedModel::PinnedRaw { requested, mapping })
+            Err(ResolveError::Ambiguous {
+                requested,
+                mappings: vec![mapping, goat_mapping(&canonical, true)],
+            })
         }
-        Err(ResolveError::Unknown { requested }) if custom_hit => Ok(ResolvedModel::PinnedRaw {
-            requested,
-            mapping: custom_mapping(CUSTOM_DYNAMIC_UPSTREAM),
-        }),
-        other => other,
     }
 }
 
@@ -498,6 +770,49 @@ pub fn published_routeable_aliases_with_zen(zen_free_models: &[String]) -> Vec<P
     published_routeable_in(&build_registry(zen_free_models))
 }
 
+/// Routeable aliases from Go/Zen plus unique eligible GOAT kebab catalog IDs
+/// that do not steal already-published Go/Zen names. Raw slash IDs stay raw.
+pub fn published_routeable_aliases_with_catalogs(
+    zen_free_models: &[String],
+    goat_model_ids: &[String],
+) -> Vec<PublishedAlias> {
+    published_routeable_aliases_with_all_catalogs(&[], zen_free_models, goat_model_ids)
+}
+
+pub fn published_routeable_aliases_with_all_catalogs(
+    go_model_ids: &[String],
+    zen_free_models: &[String],
+    goat_model_ids: &[String],
+) -> Vec<PublishedAlias> {
+    let mut published = published_routeable_aliases_with_zen(zen_free_models);
+    append_catalog_aliases(&mut published, go_model_ids, OPENCODE_PROVIDER_ID);
+    append_catalog_aliases(&mut published, goat_model_ids, COMMAND_CODE_PROVIDER_ID);
+    published.sort_by(|left, right| left.alias.cmp(&right.alias));
+    published
+}
+
+fn append_catalog_aliases(
+    published: &mut Vec<PublishedAlias>,
+    model_ids: &[String],
+    owned_by: &'static str,
+) {
+    for id in model_ids {
+        if looks_raw_shaped(id) {
+            continue;
+        }
+        if published
+            .iter()
+            .any(|item| custom_model_id_matches(&item.alias, id))
+        {
+            continue;
+        }
+        published.push(PublishedAlias {
+            alias: id.clone(),
+            owned_by,
+        });
+    }
+}
+
 fn published_routeable_in(registry: &Registry) -> Vec<PublishedAlias> {
     registry
         .aliases
@@ -557,14 +872,19 @@ pub fn is_published_alias(name: &str) -> bool {
 type ResolveName = fn(&str) -> Result<ResolvedModel, ResolveError>;
 type ResolveCustom = fn(&str, &[String]) -> Result<ResolvedModel, ResolveError>;
 type ResolveProviderModels = fn(&str, &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
+type ResolveCatalogs =
+    fn(&str, &[String], &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
 type RouteableWithZen = fn(&str, &str, &[String]) -> Vec<String>;
 
 const _: ResolveName = resolve;
 const _: ResolveCustom = resolve_with_custom;
 const _: ResolveProviderModels = resolve_with_provider_models;
+const _: ResolveCatalogs = resolve_with_catalogs;
 const _: fn() -> Vec<String> = published_aliases;
 const _: fn() -> Vec<PublishedAlias> = published_routeable_aliases;
 const _: fn(&[String]) -> Vec<PublishedAlias> = published_routeable_aliases_with_zen;
+const _: fn(&[String], &[String]) -> Vec<PublishedAlias> =
+    published_routeable_aliases_with_catalogs;
 const _: fn(&str, &str) -> Vec<String> = routeable_aliases_for;
 const _: RouteableWithZen = routeable_aliases_for_with_zen;
 const _: fn(&str) -> bool = is_published_alias;
@@ -613,6 +933,7 @@ mod tests {
         let _: ResolveName = resolve;
         let _: ResolveCustom = resolve_with_custom;
         let _: ResolveProviderModels = resolve_with_provider_models;
+        let _: ResolveCatalogs = resolve_with_catalogs;
         let _: fn() -> Vec<String> = published_aliases;
         let _: fn() -> Vec<PublishedAlias> = published_routeable_aliases;
         let _: fn(&[String]) -> Vec<PublishedAlias> = published_routeable_aliases_with_zen;
@@ -916,6 +1237,88 @@ mod tests {
         assert!(!is_published_alias(
             COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
         ));
+    }
+
+    #[test]
+    fn eligible_goat_catalog_overlays_unique_ids_without_stealing_go() {
+        let goat_ids = vec![
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.to_string(),
+            "claude-sonnet-4-6".into(),
+        ];
+        match resolve_with_catalogs(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            &[],
+            &[],
+            &goat_ids,
+        )
+        .unwrap()
+        {
+            ResolvedModel::PinnedRaw { mapping, .. } => {
+                assert!(mapping.is_command_code_goat());
+                assert!(mapping.routeable);
+            }
+            other => panic!("expected routeable GOAT pin, got {other:?}"),
+        }
+        match resolve_with_catalogs("claude-sonnet-4-6", &[], &[], &goat_ids).unwrap() {
+            ResolvedModel::Alias {
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, "claude-sonnet-4-6");
+                assert_eq!(mappings.len(), 1);
+                assert!(mappings[0].is_command_code_goat());
+                assert!(mappings[0].routeable);
+            }
+            other => panic!("expected unique GOAT alias, got {other:?}"),
+        }
+        match resolve_with_catalogs(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+            &[],
+            &[],
+            &goat_ids,
+        )
+        .unwrap()
+        {
+            ResolvedModel::Alias { mappings, .. } => {
+                assert!(
+                    mappings
+                        .iter()
+                        .any(|mapping| mapping.routeable && mapping.is_opencode_go())
+                );
+                assert!(
+                    mappings
+                        .iter()
+                        .any(|mapping| mapping.routeable && mapping.is_command_code_goat())
+                );
+            }
+            other => panic!("GOAT must not steal Go kebab alias, got {other:?}"),
+        }
+        let published = published_routeable_aliases_with_catalogs(&[], &goat_ids);
+        assert!(
+            published
+                .iter()
+                .any(|item| item.alias == "claude-sonnet-4-6"
+                    && item.owned_by == COMMAND_CODE_PROVIDER_ID)
+        );
+        assert!(
+            published
+                .iter()
+                .find(|item| item.alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS)
+                .is_some_and(|item| item.owned_by == OPENCODE_PROVIDER_ID)
+        );
+        assert!(
+            !published
+                .iter()
+                .any(|item| item.alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
+        );
+        match resolve_with_catalogs(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, &[], &[], &[])
+            .unwrap()
+        {
+            ResolvedModel::PinnedRaw { mapping, .. } => {
+                assert!(mapping.is_command_code_goat());
+                assert!(!mapping.routeable);
+            }
+            other => panic!("empty GOAT catalog must keep the static pin closed, got {other:?}"),
+        }
         assert!(
             !published_aliases().iter().any(|alias| alias.contains('/')
                 || *alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
@@ -1208,5 +1611,39 @@ mod tests {
             resolve_with_custom("definitely-not-a-model", &[]),
             Err(ResolveError::Unknown { .. })
         ));
+    }
+
+    #[test]
+    fn refreshed_go_catalog_adds_future_models_without_stealing_or_hiding_conflicts() {
+        let go = vec!["future-go-model".to_string(), "vendor/raw-go".to_string()];
+        match resolve_with_all_catalogs("future-go-model", &go, &[], &[], &[]).unwrap() {
+            ResolvedModel::Alias {
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, "future-go-model");
+                assert_eq!(mappings.len(), 1);
+                assert!(mappings[0].is_opencode_go());
+                assert_eq!(mappings[0].upstream_model, "future-go-model");
+            }
+            other => panic!("expected dynamic Go alias, got {other:?}"),
+        }
+        match resolve_with_all_catalogs("vendor/raw-go", &go, &[], &[], &[]).unwrap() {
+            ResolvedModel::PinnedRaw { mapping, .. } => {
+                assert!(mapping.is_opencode_go());
+                assert_eq!(mapping.upstream_model, "vendor/raw-go");
+            }
+            other => panic!("expected dynamic raw Go pin, got {other:?}"),
+        }
+
+        let published = published_routeable_aliases_with_all_catalogs(&go, &[], &[]);
+        assert!(published.iter().any(|item| {
+            item.alias == "future-go-model" && item.owned_by == OPENCODE_PROVIDER_ID
+        }));
+        assert!(!published.iter().any(|item| item.alias == "vendor/raw-go"));
+
+        let goat = vec!["vendor/raw-go".to_string()];
+        let overlap = resolve_with_all_catalogs("vendor/raw-go", &go, &[], &[], &goat)
+            .expect_err("overlapping raw provider IDs must remain ambiguous");
+        assert_eq!(overlap.code(), Some(AMBIGUOUS_MODEL_ID));
     }
 }

@@ -64,6 +64,7 @@ const MUSE_SPARK_EFFORT_ALIASES: &[(&str, &str)] = &[("max", "xhigh")];
 // 5/5 HTTP OK on every paid model that accepted its preferred endpoint.
 const CHAT_ONLY: &[ApiFormat] = &[ApiFormat::ChatCompletions];
 const RESPONSES_ONLY: &[ApiFormat] = &[ApiFormat::Responses];
+const MESSAGES_ONLY: &[ApiFormat] = &[ApiFormat::Messages];
 const CHAT_AND_RESPONSES: &[ApiFormat] = &[ApiFormat::ChatCompletions, ApiFormat::Responses];
 const CHAT_AND_MESSAGES: &[ApiFormat] = &[ApiFormat::ChatCompletions, ApiFormat::Messages];
 const ALL_THREE: &[ApiFormat] = &[
@@ -327,6 +328,10 @@ pub fn opencode_supports_upstream(model: &str, upstream: ApiFormat) -> bool {
 /// Lookup is exact (case-insensitive) on the upstream raw ID. Slash IDs are
 /// never folded onto kebab OpenCode aliases, so `deepseek/deepseek-v4-flash`
 /// cannot steal Go's `deepseek-v4-flash` protocol row.
+///
+/// Models outside this seed table still follow the official split: Anthropic
+/// IDs use Messages; OpenAI and open-source IDs use Chat Completions. There is
+/// no Responses upstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandCodeModelProtocol {
     pub alias: &'static str,
@@ -358,9 +363,50 @@ pub fn command_code_protocol_profiles() -> impl Iterator<Item = &'static Command
     COMMAND_CODE_MODEL_PROTOCOLS.iter()
 }
 
+/// Official Command Code family split: Anthropic models speak Messages;
+/// everything else speaks Chat Completions.
+pub fn command_code_is_anthropic_model(model: &str) -> bool {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let leaf = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    leaf.starts_with("claude") || lower.starts_with("anthropic/")
+}
+
+/// Preferred upstream for a Command Code model ID. Seed-table rows win;
+/// unknown non-empty IDs follow the Anthropic/Chat family rule.
+pub fn command_code_preferred_format(model: &str) -> Option<ApiFormat> {
+    if let Some(profile) = command_code_model_protocol(model) {
+        return Some(profile.preferred);
+    }
+    if model.trim().is_empty() {
+        return None;
+    }
+    Some(if command_code_is_anthropic_model(model) {
+        ApiFormat::Messages
+    } else {
+        ApiFormat::ChatCompletions
+    })
+}
+
+pub fn command_code_supported_formats(model: &str) -> &'static [ApiFormat] {
+    if let Some(profile) = command_code_model_protocol(model) {
+        return profile.supported_upstream;
+    }
+    if model.trim().is_empty() {
+        return &[];
+    }
+    if command_code_is_anthropic_model(model) {
+        MESSAGES_ONLY
+    } else {
+        CHAT_ONLY
+    }
+}
+
 pub fn command_code_supports_upstream(model: &str, upstream: ApiFormat) -> bool {
-    command_code_model_protocol(model)
-        .is_some_and(|profile| profile.supported_upstream.contains(&upstream))
+    command_code_supported_formats(model).contains(&upstream)
 }
 
 /// Returns (id, preferred protocol) for every known OpenCode catalog model;
@@ -393,4 +439,56 @@ pub fn model_protocol(model: &str) -> Option<&'static ModelProtocol> {
     MODEL_PROTOCOLS
         .iter()
         .find(|profile| profile.id == normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_code_family_rules_split_anthropic_from_chat() {
+        assert!(command_code_is_anthropic_model("claude-sonnet-4-6"));
+        assert!(command_code_is_anthropic_model("anthropic/claude-opus-4-6"));
+        assert!(command_code_is_anthropic_model("Claude-Haiku-4-5"));
+        assert!(!command_code_is_anthropic_model(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM
+        ));
+        assert!(!command_code_is_anthropic_model("gpt-5.4"));
+        assert_eq!(
+            command_code_preferred_format("claude-sonnet-4-6"),
+            Some(ApiFormat::Messages)
+        );
+        assert_eq!(
+            command_code_preferred_format(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM),
+            Some(ApiFormat::ChatCompletions)
+        );
+        assert!(command_code_supports_upstream(
+            "claude-sonnet-4-6",
+            ApiFormat::Messages
+        ));
+        assert!(!command_code_supports_upstream(
+            "claude-sonnet-4-6",
+            ApiFormat::ChatCompletions
+        ));
+        assert!(command_code_supports_upstream(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            ApiFormat::ChatCompletions
+        ));
+        assert!(!command_code_supports_upstream(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+            ApiFormat::Responses
+        ));
+        assert!(command_code_supports_upstream(
+            "minimax-m2.7",
+            ApiFormat::ChatCompletions
+        ));
+        assert!(!command_code_supports_upstream(
+            "",
+            ApiFormat::ChatCompletions
+        ));
+        assert!(
+            command_code_model_protocol(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS).is_none(),
+            "kebab Go aliases must not resolve through the Command Code seed table"
+        );
+    }
 }

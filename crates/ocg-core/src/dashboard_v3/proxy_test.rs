@@ -15,15 +15,13 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
-use crate::models::{
-    AppConfig, ProxyListDirection as AppProxyListDirection, ProxyMode as AppProxyMode,
-    normalize_proxy_url,
-};
+use crate::models::{AppConfig, ProxyListDirection as AppProxyListDirection, normalize_proxy_url};
 use crate::redaction::{redact_known_secret, redact_text};
 use crate::state::CoreState;
 
 use super::V3ApiError;
-use super::types::{ProxyListDirection, ProxyMode, ProxyTestRequest, ProxyTestResponse, V3Error};
+use super::settings::app_proxy_mode;
+use super::types::{ProxyListDirection, ProxyTestRequest, ProxyTestResponse, V3Error};
 
 /// Safe public HTTPS origin used by the production diagnostic GET.
 pub const PROXY_TEST_TARGET: &str = "https://opencode.ai/zen/go";
@@ -296,15 +294,6 @@ fn strip_url_userinfo(text: &str) -> String {
     }
     output.push_str(rest);
     output
-}
-
-fn app_proxy_mode(mode: ProxyMode) -> AppProxyMode {
-    match mode {
-        ProxyMode::Auto => AppProxyMode::Auto,
-        ProxyMode::Manual => AppProxyMode::Manual,
-        ProxyMode::Direct => AppProxyMode::Direct,
-        ProxyMode::List => AppProxyMode::List,
-    }
 }
 
 fn app_proxy_list_direction(direction: ProxyListDirection) -> AppProxyListDirection {

@@ -1,103 +1,144 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { tauriApi } from "./tauri.ts";
+import { createPinia, setActivePinia } from "pinia";
+import { dashboardApi } from "./dashboard.ts";
+import { useControlPlaneStore } from "../stores/controlPlane.ts";
 
-/**
- * Route-shape contract for the Custom API account endpoints:
- * - POST /accounts/{id}/verify with an optional revision guard returns the
- *   Account (verification never enables);
- * - PUT /accounts/{id}/custom-config sends the flattened config plus the
- *   revision guard;
- * - PUT /accounts/{id}/model-capabilities sends `{ capabilities }` plus the
- *   revision guard.
- */
+interface RecordedRequest {
+  url: string;
+  method: string;
+  body: Record<string, unknown> | null;
+}
 
-function mockDashboardFetch(
-  handler: (url: string, init: RequestInit) => unknown,
-): Array<{ url: string; method: string; body: Record<string, unknown> | null }> {
+function v3Account(id: string): Record<string, unknown> {
+  return {
+    id,
+    name: "Custom",
+    username: "",
+    password: "",
+    key: "",
+    enabled: false,
+    accountType: "key",
+    setupStep: "ready",
+    providerId: "custom",
+    offeringId: "api",
+    credentialKind: "api_key",
+    quotaScope: "key",
+    revision: 1,
+    purchaseDate: "",
+    expiresOn: "",
+    cooldownUntil: null,
+    cooldownGenericUntil: null,
+    cooldown5hUntil: null,
+    cooldownWeekUntil: null,
+    cooldownMonthUntil: null,
+    cooldownFreeUntil: null,
+    lastError: null,
+    authError: null,
+    notes: "",
+    usageSyncLastSuccessAt: null,
+    usageSyncNextAllowedAt: null,
+    createdAt: "2026-08-21T00:00:00Z",
+    updatedAt: "2026-08-21T00:00:00Z",
+    verificationStatus: "verified",
+    connectionVerifiedAt: null,
+    verificationError: null,
+    planRoutable: true,
+    customConfig: null,
+    modelCapabilities: [],
+    acknowledgements: [],
+  };
+}
+
+function installBrowser(
+  responder: (request: RecordedRequest) => Response | object,
+): RecordedRequest[] {
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: { location: { pathname: "/dashboard" }, dispatchEvent() {} },
   });
-  const requests: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+  const requests: RecordedRequest[] = [];
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (input: string, init: RequestInit = {}) => {
-      requests.push({
+      const request = {
         url: input,
         method: init.method ?? "GET",
         body: init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null,
-      });
-      return new Response(JSON.stringify(handler(input, init)), {
-        headers: { "Content-Type": "application/json" },
-      });
+      };
+      requests.push(request);
+      const result = responder(request);
+      return result instanceof Response
+        ? result
+        : new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
     },
   });
   return requests;
 }
 
-test("verify posts to the verify route with the revision guard", async () => {
-  const requests = mockDashboardFetch(() => ({ id: "custom-1", verification_status: "verified" }));
+function setupControlPlane(revision = 7, processGeneration = 99): void {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision, processGeneration, pricingRevision: null });
+}
 
-  await tauriApi.verifyAccountConnection("custom-1", 7);
+test("verify posts to the verify route with CAS tokens", async () => {
+  setupControlPlane(7);
+  const requests = installBrowser(() => ({ account: v3Account("custom-1") }));
 
-  assert.equal(requests[0]?.url, "/dashboard/api/accounts/custom-1/verify");
+  await dashboardApi.verifyAccountConnection("custom-1");
+
+  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/verify");
   assert.equal(requests[0]?.method, "POST");
-  assert.deepEqual(requests[0]?.body, { expected_revision: 7 });
+  assert.deepEqual(requests[0]?.body, { expectedRevision: 7, processGeneration: 99 });
 });
 
-test("verify omits the body when no revision is known", async () => {
-  const requests = mockDashboardFetch(() => ({ id: "custom-1" }));
+test("custom config PUT sends the flattened config with CAS tokens", async () => {
+  setupControlPlane(9);
+  const requests = installBrowser(() => ({ account: v3Account("custom-1") }));
 
-  await tauriApi.verifyAccountConnection("custom-1");
-
-  assert.equal(requests[0]?.url, "/dashboard/api/accounts/custom-1/verify");
-  assert.equal(requests[0]?.method, "POST");
-  assert.equal(requests[0]?.body, null);
-});
-
-test("custom config PUT sends the flattened config with the revision guard", async () => {
-  const requests = mockDashboardFetch(() => ({ id: "custom-1" }));
-
-  await tauriApi.updateAccountCustomConfig("custom-1", {
+  await dashboardApi.updateAccountCustomConfig("custom-1", {
     base_url: "http://192.168.1.10:8080/v1",
     upstream_protocol: "chat_completions",
     auth_scheme: "bearer",
-  }, 9);
+  });
 
-  assert.equal(requests[0]?.url, "/dashboard/api/accounts/custom-1/custom-config");
+  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/custom-config");
   assert.equal(requests[0]?.method, "PUT");
   assert.deepEqual(requests[0]?.body, {
-    base_url: "http://192.168.1.10:8080/v1",
-    upstream_protocol: "chat_completions",
-    auth_scheme: "bearer",
-    expected_revision: 9,
+    baseUrl: "http://192.168.1.10:8080/v1",
+    upstreamProtocol: "chat_completions",
+    authScheme: "bearer",
+    expectedRevision: 9,
+    processGeneration: 99,
   });
 });
 
 test("model capabilities PUT wraps the list and keeps exact model IDs and order", async () => {
-  const requests = mockDashboardFetch(() => ({ id: "custom-1" }));
+  setupControlPlane(10);
+  const requests = installBrowser(() => ({ account: v3Account("custom-1") }));
 
-  await tauriApi.updateAccountModelCapabilities("custom-1", [
+  await dashboardApi.updateAccountModelCapabilities("custom-1", [
     { model_id: "Org/Model-B", protocol: "chat_completions", source: "manual" },
     { model_id: "custom_model.a", protocol: "chat_completions", source: "manual" },
-  ], 10);
+  ]);
 
-  assert.equal(requests[0]?.url, "/dashboard/api/accounts/custom-1/model-capabilities");
+  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/model-capabilities");
   assert.equal(requests[0]?.method, "PUT");
   assert.deepEqual(requests[0]?.body, {
     capabilities: [
-      { model_id: "Org/Model-B", protocol: "chat_completions", source: "manual" },
-      { model_id: "custom_model.a", protocol: "chat_completions", source: "manual" },
+      { modelId: "Org/Model-B", protocol: "chat_completions", source: "manual" },
+      { modelId: "custom_model.a", protocol: "chat_completions", source: "manual" },
     ],
-    expected_revision: 10,
+    expectedRevision: 10,
+    processGeneration: 99,
   });
 });
 
 test("model discovery posts only the transient form fields to its protected route", async () => {
-  const requests = mockDashboardFetch(() => ({ models: ["model-a"], truncated: false }));
+  setupControlPlane(1);
+  const requests = installBrowser(() => ({ models: ["model-a"], truncated: false }));
 
-  await tauriApi.discoverCustomModels({
+  await dashboardApi.discoverCustomModels({
     base_url: "https://api.example.com/v1",
     upstream_protocol: "messages",
     auth_scheme: "x-api-key",
@@ -105,13 +146,13 @@ test("model discovery posts only the transient form fields to its protected rout
     account_id: "custom-1",
   });
 
-  assert.equal(requests[0]?.url, "/dashboard/api/custom/models/discover");
+  assert.equal(requests[0]?.url, "/dashboard/api/v3/custom/models/discover");
   assert.equal(requests[0]?.method, "POST");
   assert.deepEqual(requests[0]?.body, {
-    base_url: "https://api.example.com/v1",
-    upstream_protocol: "messages",
-    auth_scheme: "x-api-key",
-    api_key: "new-key",
-    account_id: "custom-1",
+    baseUrl: "https://api.example.com/v1",
+    upstreamProtocol: "messages",
+    authScheme: "x-api-key",
+    apiKey: "new-key",
+    accountId: "custom-1",
   });
 });

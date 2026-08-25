@@ -82,6 +82,7 @@ pub struct CoreStateInner {
     pub pricing_refresh: tokio::sync::Mutex<()>,
     zen_free_models: RwLock<Arc<crate::kernel::zen::ZenFreeModelCatalog>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
+    pub provider_models_refresh: tokio::sync::Mutex<()>,
     provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
     pub routing: RoutingRuntime,
     pub browser: crate::browser::BrowserRuntime,
@@ -266,6 +267,7 @@ impl CoreStateInner {
             pricing_refresh: tokio::sync::Mutex::new(()),
             zen_free_models: RwLock::new(Arc::new(zen_free_models)),
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
+            provider_models_refresh: tokio::sync::Mutex::new(()),
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
             routing: RoutingRuntime::new(),
             browser: crate::browser::BrowserRuntime::new(),
@@ -1069,7 +1071,7 @@ impl crate::usage_sync::UsageSyncStore for Database {
     fn account_usage_sync_state(
         &self,
         account_id: &str,
-    ) -> anyhow::Result<Option<crate::provider::ProviderUsageSyncState>> {
+    ) -> anyhow::Result<Option<crate::models::ProviderUsageSyncState>> {
         Database::account_usage_sync_state(self, account_id)
     }
     fn pull_account_usage_sync_next_eligible(

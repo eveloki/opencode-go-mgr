@@ -9,14 +9,6 @@
   frontend test also mocks the obsolete spelling, so real conflicts do not
   trigger the intended token/resource refresh. Until fixed, users must refresh
   and re-apply the mutation manually.
-- `dashboard.rs` still contains the retired V2 REST handlers behind the 410
-  tombstone, plus live V2 auth and the V2 browser WebSocket. Do not treat
-  those handlers as the live dashboard contract. New JSON belongs on
-  `dashboard_v3`.
-- Some frontend unit tests still import historical types from
-  `src/api/tauri.ts`. Production pages use `dashboard-v3.ts` /
-  `dashboard.ts`. Do not add new `invoke()` usage; do not document
-  `tauri.ts` as the live client.
 - Auto-start is capability-gated: only Windows release/installed Tauri
   processes inject the registry sync hook. Development builds, the CLI,
   Docker, macOS, and Linux dashboards do not expose the switch. Dock
@@ -55,8 +47,6 @@
 - Custom provider-scope protocol probes are not on V3; the V2 account-owned
   probe path is 410. Custom verify and model discovery are the live Custom
   operational paths.
-- `console_usage.rs` remains frozen. Do not call, extend, or delete it in the
-  current V3 implementation.
 
 ## Deliberate Non-Goals
 

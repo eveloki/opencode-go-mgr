@@ -221,8 +221,8 @@ fn key_mutation_routes(id: &str) -> Vec<(Method, String)> {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v27() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+fn dashboard_v3_schema_version_stays_at_v28() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
 }
 
 #[test]

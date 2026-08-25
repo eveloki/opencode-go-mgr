@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Account } from "../api/tauri.ts";
+import type { Account } from "../api/dashboard.ts";
 import {
   applyCustomAccountEditPlan,
   CustomCapabilityError,
   executeCustomAccountEdit,
   planCustomAccountEdit,
-} from "./custom-account.ts";
+} from "../domain/custom-account.ts";
 
 function customAccount(overrides: Partial<Account> = {}): Account {
   return {

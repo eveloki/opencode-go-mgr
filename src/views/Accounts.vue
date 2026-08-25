@@ -109,12 +109,14 @@
           :usage-load-error="usageLoadErrors[account.id] ?? null"
           :usage-refresh-loading="!!usageRefreshLoading[account.id]"
           :verifying="!!verifying[account.id]"
+          :goat-model-access-saving="!!goatModelAccessSaving[account.id]"
           :quota-limits-failed="!!quotaLimitsError"
           :menu-options="accountMenuOptions(account, now)"
           @order-keydown="handleOrderKeydown($event, account.id)"
           @order-drag-start="startAccountDrag($event, account.id)"
           @toggle="toggleAccount(account.id)"
           @verify="verifyCustomAccount(account.id)"
+          @goat-model-access="updateGoatModelAccess(account.id, $event)"
           @refresh-usage="refreshAccountUsage(account.id)"
           @reload-usage="loadAccountUsage(account.id)"
           @open-provider="openProvider(account)"
@@ -266,17 +268,17 @@ import type {
   BrowserCapabilities,
   BrowserTarget,
 } from "../api/dashboard";
-import { isCooling } from "./accounts-usage.ts";
-import { accountIsReady, accountMenuOptions } from "./account-display.ts";
+import { isCooling } from "../domain/accounts-usage.ts";
+import { accountIsReady, accountMenuOptions } from "../domain/account-display.ts";
 import {
   isCommandCodeGoatAccount,
   isZenFreeAccount,
-} from "./account-providers.ts";
+} from "../domain/account-providers.ts";
 import {
   executeCustomAccountEdit,
   isCustomApiAccount,
-} from "./custom-account.ts";
-import { useAccountUsage } from "./useAccountUsage.ts";
+} from "../domain/custom-account.ts";
+import { useAccountUsage } from "../domain/useAccountUsage.ts";
 import { useAccountOrder } from "./useAccountOrder.ts";
 import {
   filterAccounts,
@@ -289,7 +291,7 @@ import {
   PLAN_DEFINITIONS,
   planFamilyLabel,
   type PlanDefinition,
-} from "./plans.ts";
+} from "../domain/plans.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -302,12 +304,12 @@ import {
   DEFAULT_OPENCODE_INVITE_URL,
   browserViewUrl,
   normalizeOpenCodeInviteUrl,
-} from "./managed-account";
+} from "../domain/managed-account.ts";
 import AccountAddModal from "../components/AccountAddModal.vue";
 import AccountCard from "../components/AccountCard.vue";
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
-import { accountContractSummary, accountProviderScope } from "./provider-contracts.ts";
+import { accountContractSummary, accountProviderScope } from "../domain/provider-contracts.ts";
 
 const emit = defineEmits<{
   navigate: [view: string, extras?: { scope_kind: string; scope_id: string }];
@@ -320,6 +322,7 @@ const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
 const verifying = ref<Record<string, boolean>>({});
+const goatModelAccessSaving = ref<Record<string, boolean>>({});
 const providerSettingsSaving = ref<Record<string, boolean>>({});
 /** Settings revision from `GET /settings`, used for conditional Zen writes. */
 const settingsRevision = ref<number | null>(null);
@@ -714,12 +717,12 @@ function removeAccountState(id: string): void {
   delete usageLoading.value[id];
   delete usageLoadErrors.value[id];
   delete verifying.value[id];
+  delete goatModelAccessSaving.value[id];
   delete providerSettingsSaving.value[id];
 }
 
 function accountHasUsageDisplay(account: Account): boolean {
-  return isCommandCodeGoatAccount(account)
-    || (account.provider_id === "opencode" && account.offering_id === "go");
+  return account.provider_id === "opencode" && account.offering_id === "go";
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -762,18 +765,12 @@ async function loadAccounts() {
     accounts.value = loaded;
     settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
     // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
-    if (quotaLimits.value || loaded.some(isCommandCodeGoatAccount)) {
+    if (quotaLimits.value) {
       await mapWithConcurrency(
         loaded.filter((account) => (
           accountIsReady(account)
-          && (
-            isCommandCodeGoatAccount(account)
-            || (
-              !!quotaLimits.value
-              && account.provider_id === "opencode"
-              && account.offering_id === "go"
-            )
-          )
+          && account.provider_id === "opencode"
+          && account.offering_id === "go"
         )),
         4,
         (account) => loadAccountUsage(account.id),
@@ -897,8 +894,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       message.success(t("账号已添加"));
       addAccount(created);
       settingsRevision.value = created.revision ?? settingsRevision.value;
-      // OpenCode Go reads authoritative usage; GOAT keeps a manual display
-      // because the provider exposes no machine-readable usage endpoint.
+      // Only OpenCode Go has an authoritative quota display.
       if (accountHasUsageDisplay(created) && accountIsReady(created)) {
         await loadAccountUsage(created.id);
       }
@@ -913,20 +909,27 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
 }
 
 /**
- * Billable protocol-correct connection check for Custom API accounts. The
- * backend returns the account with a refreshed verification state and never
+ * Billable protocol-correct connection check for Custom API and GOAT accounts.
+ * The backend returns the account with a refreshed verification state and never
  * enables it — enabling stays an explicit toggle action after verification.
  */
 async function verifyCustomAccount(id: string) {
   const account = accounts.value.find((item) => item.id === id);
-  if (!account || !isCustomApiAccount(account) || verifying.value[id]) return;
+  if (!account || verifying.value[id]) return;
+  if (!isCustomApiAccount(account) && !isCommandCodeGoatAccount(account)) return;
   verifying.value[id] = true;
   try {
     const updated = await runWithFreshSettingsRevision((revision) => (
       dashboardApi.verifyAccountConnection(id, revision)
     ));
     replaceAccount(updated);
-    message.success(t("连接验证成功，账号保持禁用，可手动启用。"));
+    if (updated.verification_status === "failed") {
+      message.error(t("连接验证失败: {error}", {
+        error: updated.verification_error?.trim() || t("验证失败"),
+      }));
+    } else {
+      message.success(t("连接验证成功，账号保持禁用，可手动启用。"));
+    }
   } catch (e) {
     if (await recoverAccountMutationConflict(e)) return;
     message.error(t("连接验证失败: {error}", { error: dashboardErrorDetail(e) }));
@@ -938,6 +941,26 @@ async function verifyCustomAccount(id: string) {
     }
   } finally {
     verifying.value[id] = false;
+  }
+}
+
+async function updateGoatModelAccess(id: string, modelAccess: "goat" | "all"): Promise<void> {
+  const account = accounts.value.find((item) => item.id === id);
+  if (!account || !isCommandCodeGoatAccount(account) || goatModelAccessSaving.value[id]) return;
+  if ((account.goat_model_access ?? "goat") === modelAccess) return;
+  goatModelAccessSaving.value[id] = true;
+  try {
+    const updated = await runWithFreshSettingsRevision((revision) => (
+      dashboardApi.updateGoatModelAccess(id, modelAccess, revision)
+    ));
+    replaceAccount(updated);
+    message.success(t("设置已保存"));
+  } catch (error) {
+    if (!(await recoverAccountMutationConflict(error))) {
+      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
+    }
+  } finally {
+    goatModelAccessSaving.value[id] = false;
   }
 }
 

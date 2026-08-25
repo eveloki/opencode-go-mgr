@@ -27,7 +27,7 @@
 import { NSwitch } from "naive-ui";
 import type { ProviderProtocol, ProtocolSwitches } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
-import { PROVIDER_PROTOCOLS, protocolDisplayName } from "../views/provider-contracts.ts";
+import { PROVIDER_PROTOCOLS, protocolDisplayName } from "../domain/provider-contracts.ts";
 
 defineProps<{
   switches: ProtocolSwitches;

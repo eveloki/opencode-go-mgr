@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub struct V3Harness {
+pub(crate) struct V3Harness {
     pub state: Arc<CoreStateInner>,
     pub dir: PathBuf,
     pub handle: GatewayHandle,
@@ -23,7 +23,7 @@ pub struct V3Harness {
     pub v3_base: String,
 }
 
-pub fn temp_data_dir(label: &str) -> PathBuf {
+pub(crate) fn temp_data_dir(label: &str) -> PathBuf {
     let mut dir = std::env::temp_dir();
     dir.push(format!(
         "ocg-dashboard-v3-{}-{}",
@@ -34,25 +34,25 @@ pub fn temp_data_dir(label: &str) -> PathBuf {
     dir
 }
 
-pub fn loopback_client() -> reqwest::Client {
+pub(crate) fn loopback_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
         .build()
         .expect("dashboard v3 test client should build")
 }
 
-pub fn state(label: &str) -> Arc<CoreStateInner> {
+pub(crate) fn state(label: &str) -> Arc<CoreStateInner> {
     let dir = temp_data_dir(label);
     let db = Database::open(dir.clone()).unwrap();
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("v3-contract"));
     Arc::new(CoreStateInner::new(db, dir, cipher).unwrap())
 }
 
-pub async fn start_loopback(label: &str) -> V3Harness {
+pub(crate) async fn start_loopback(label: &str) -> V3Harness {
     start_on(label, SocketAddr::from(([127, 0, 0, 1], 0))).await
 }
 
-pub async fn start_public(label: &str) -> V3Harness {
+pub(crate) async fn start_public(label: &str) -> V3Harness {
     start_on(label, SocketAddr::from(([0, 0, 0, 0], 0))).await
 }
 
@@ -74,14 +74,14 @@ async fn start_on(label: &str, addr: SocketAddr) -> V3Harness {
 }
 
 impl V3Harness {
-    pub async fn get_json(&self, url: &str) -> (StatusCode, Value) {
+    pub(crate) async fn get_json(&self, url: &str) -> (StatusCode, Value) {
         let response = self.client.get(url).send().await.unwrap();
         let status = response.status();
         let body = response.json().await.unwrap_or(Value::Null);
         (status, body)
     }
 
-    pub fn assert_v2_removed(status: StatusCode, body: &Value) {
+    pub(crate) fn assert_v2_removed(status: StatusCode, body: &Value) {
         assert_eq!(status, StatusCode::GONE, "{body}");
         assert_eq!(
             body,
@@ -92,7 +92,7 @@ impl V3Harness {
         );
     }
 
-    pub async fn assert_v2_path_removed(
+    pub(crate) async fn assert_v2_path_removed(
         &self,
         method: reqwest::Method,
         path: &str,
@@ -110,7 +110,7 @@ impl V3Harness {
         Self::assert_v2_removed(status, &body);
     }
 
-    pub fn stop(self) {
+    pub(crate) fn stop(self) {
         gateway::stop_gateway(self.handle);
         let _ = fs::remove_dir_all(self.dir);
     }

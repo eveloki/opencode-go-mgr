@@ -3,7 +3,7 @@ import type { Ref } from "vue";
 import { useMessage } from "naive-ui";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard";
 import type { Account } from "../api/dashboard";
-import { moveItem } from "./account-lifecycle.ts";
+import { moveItem } from "../domain/account-lifecycle.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 

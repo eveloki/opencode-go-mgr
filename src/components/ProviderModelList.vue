@@ -49,7 +49,7 @@ import {
   PROVIDER_PROTOCOLS,
   protocolDisplayName,
   protocolEvidenceStatus,
-} from "../views/provider-contracts.ts";
+} from "../domain/provider-contracts.ts";
 
 const props = defineProps<{
   models: readonly EffectiveModelContract[];

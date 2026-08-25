@@ -26,7 +26,7 @@ fn official_base_path_auth_and_gate_stay_closed() {
     assert_eq!(spec.auth_scheme.as_str(), "bearer");
     assert!(!spec.follow_redirects);
     assert_eq!(spec.zdr_header_name, None);
-    assert!(!spec.uses_get_models_for_verification);
+    assert!(spec.uses_get_models_for_verification);
     assert_eq!(
         command_code_goat_official_url(ApiFormat::ChatCompletions).unwrap(),
         "https://api.commandcode.ai/provider/v1/chat/completions"
@@ -34,8 +34,8 @@ fn official_base_path_auth_and_gate_stay_closed() {
     assert!(command_code_goat_official_url(ApiFormat::Responses).is_err());
 
     let plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-    assert!(!plan.routable);
-    assert_eq!(plan.verification_runtime_availability, "unavailable");
+    assert!(plan.routable);
+    assert_eq!(plan.verification_runtime_availability, "available");
 }
 
 #[test]
@@ -64,7 +64,10 @@ fn slash_raw_pin_is_chat_only_and_not_an_opencode_protocol_row() {
     match resolve(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).unwrap() {
         ResolvedModel::PinnedRaw { mapping, .. } => {
             assert!(mapping.is_command_code_goat());
-            assert!(!mapping.routeable);
+            assert!(
+                !mapping.routeable,
+                "static registry pin stays closed until a verified catalog overlay"
+            );
         }
         other => panic!("expected unique GOAT pin, got {other:?}"),
     }

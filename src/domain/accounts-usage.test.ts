@@ -153,7 +153,7 @@ test("shows a live reset countdown below a quota progress bar during cooldown", 
 test("shows a distinct account authentication breaker instead of disguising it as cooldown", async () => {
   const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
   const display = await readFile(new URL("./account-display.ts", import.meta.url), "utf8");
-  const dashboard = await readFile(new URL("./Dashboard.vue", import.meta.url), "utf8");
+  const dashboard = await readFile(new URL("../views/Dashboard.vue", import.meta.url), "utf8");
   assert.match(card, /account\.auth_error \|\| isCooling\(account, now\)/);
   assert.match(display, /account\.enabled[\s\S]*t\("认证失效（401 熔断）"\)[\s\S]*t\("已禁用"\)/);
   assert.match(display, /if \(account\.auth_error\) return "error"/);
@@ -173,7 +173,7 @@ test("maps each usage window to its cooldown reset deadline", () => {
 });
 
 test("keeps account cards compact with metadata tags and popover calibration", async () => {
-  const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const accounts = await readFile(new URL("../views/Accounts.vue", import.meta.url), "utf8");
   const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
   const editor = await readFile(new URL("../components/AccountUsageEditor.vue", import.meta.url), "utf8");
   const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
@@ -189,9 +189,9 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   );
 
   assert.ok(header.indexOf("accountStatusLabel(account, now)") < header.indexOf('t("购买于 {date}"'));
-  // Custom accounts have no purchase/expiry fields, so the tags skip them.
-  assert.match(header, /<n-tag v-if="!isZen && !isCustom && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
-  assert.match(header, /<n-tag v-if="!isZen && !isCustom && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
+  // Only plans with purchase/expiry metadata show these tags. GOAT and Custom skip them.
+  assert.match(header, /<n-tag v-if="\(isGo \|\| isScnet\) && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
+  assert.match(header, /<n-tag v-if="\(isGo \|\| isScnet\) && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
   assert.match(card, /<n-popover[\s\S]*?trigger="click"[\s\S]*?placement="bottom-end"[\s\S]*?:width="320"[\s\S]*?@update:show="\(show: boolean\) => show && emit\('usage-editor-open'\)"/);
   assert.match(editor, /class="usage-editor-popover"/);
   assert.doesNotMatch(card, /:flip="false"/);
@@ -390,7 +390,7 @@ test("bounded concurrency rejects invalid limits instead of dropping work", asyn
 });
 
 test("accounts render before per-account usage and expose failed loads for retry", async () => {
-  const accounts = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const accounts = await readFile(new URL("../views/Accounts.vue", import.meta.url), "utf8");
   const usage = await readFile(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
   const load = accounts.slice(accounts.indexOf("async function loadAccounts"), accounts.indexOf("async function onFormSave"));
 
@@ -402,7 +402,7 @@ test("accounts render before per-account usage and expose failed loads for retry
 });
 
 test("editing an account refreshes usage after purchase-date window changes", async () => {
-  const source = await readFile(new URL("./Accounts.vue", import.meta.url), "utf8");
+  const source = await readFile(new URL("../views/Accounts.vue", import.meta.url), "utf8");
   const save = source.slice(source.indexOf("async function onFormSave"), source.indexOf("async function verifyCustomAccount"));
 
   const update = save.indexOf("const saved = await runWithFreshSettingsRevision");
@@ -426,7 +426,7 @@ test("manual editor writes on commit events instead of each value update", async
 });
 
 test("account drag keeps receiving touch pointers after keyed cards move", async () => {
-  const order = await readFile(new URL("./useAccountOrder.ts", import.meta.url), "utf8");
+  const order = await readFile(new URL("../views/useAccountOrder.ts", import.meta.url), "utf8");
 
   assert.match(order, /window\.addEventListener\("pointermove", previewAccountDrag, \{ passive: false \}\)/);
   assert.match(order, /window\.addEventListener\("pointerup", finishAccountDrag\)/);
@@ -436,13 +436,19 @@ test("account drag keeps receiving touch pointers after keyed cards move", async
 });
 
 test("usage API sends the selected window and percent with PATCH", async () => {
-  const source = await readFile(new URL("../api/tauri.ts", import.meta.url), "utf8");
-  const update = source.slice(source.indexOf("updateAccountUsage"), source.indexOf("resetAccountCooldown"));
+  const dashboardSource = await readFile(new URL("../api/dashboard.ts", import.meta.url), "utf8");
+  const v3Source = await readFile(new URL("../api/dashboard-v3.ts", import.meta.url), "utf8");
+  const update = dashboardSource.slice(
+    dashboardSource.indexOf("updateAccountUsage"),
+    dashboardSource.indexOf("refreshAccountUsage"),
+  );
 
-  assert.match(update, /method: "PATCH"/);
-  assert.match(update, /jsonBody\(\{ window, percent, resets_in_minutes/);
-  assert.match(update, /refreshAccountUsage: \(id: string\) =>/);
-  assert.match(update, /`\/accounts\/\$\{id\}\/usage\/refresh`/);
-  assert.match(update, /method: "POST"/);
-  assert.doesNotMatch(update, /refreshManagedAccountUsage/);
+  assert.match(update, /patchAccountUsage/);
+  assert.match(update, /resetsInMinutes/);
+  assert.match(v3Source, /patchAccountUsage: \(id: string, update: WithoutExpectation<AccountUsageUpdate>, expectation: MutationExpectation\)/);
+  assert.match(v3Source, /method: "PATCH"/);
+  assert.match(v3Source, /refreshAccountUsage: \(id: string, expectation: MutationExpectation\)/);
+  assert.match(v3Source, /`\/accounts\/\$\{encode\(id\)\}\/usage\/refresh`/);
+  assert.match(v3Source, /method: "POST"/);
+  assert.doesNotMatch(dashboardSource, /refreshManagedAccountUsage/);
 });

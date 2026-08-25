@@ -4,11 +4,14 @@ import test from "node:test";
 
 const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
 const api = readFileSync(new URL("../api/dashboard.ts", import.meta.url), "utf8");
+const providers = readFileSync(new URL("../api/providers.ts", import.meta.url), "utf8");
 
 test("zen card has one enabled switch backed by the dedicated provider-settings write", () => {
   assert.match(accounts, /providerApi\.updateProviderSettings\(account\.id, \{/);
   assert.match(accounts, /saveZenProviderSettings\(account, !account\.enabled\)/);
   assert.doesNotMatch(accounts, /toggleZenFreeAlias|toggle-free-alias|free_alias_enabled/);
+  // Guard against the plan-id / route-slug (`zen-free`) being used as providerId.
+  assert.match(providers, /account\.providerId !== "opencode-zen-free"/);
 });
 
 test("zen provider settings send the settings revision guard and reload on 409", () => {
@@ -48,4 +51,16 @@ test("the generic account patch no longer carries the zen free alias", () => {
   assert.doesNotMatch(accounts, /setAccountFreeAlias/);
   assert.doesNotMatch(api, /setAccountFreeAlias/);
   assert.doesNotMatch(api, /setAccountFreeAlias|free_alias_enabled/);
+});
+
+test("GOAT account card switches between included and full saved model catalogs", () => {
+  const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
+  const transport = readFileSync(new URL("../api/dashboard-v3.ts", import.meta.url), "utf8");
+  assert.match(card, /account\.goat_model_access \?\? 'goat'/);
+  assert.match(card, /n-radio-button value="goat"/);
+  assert.match(card, /n-radio-button value="all"/);
+  assert.match(card, /goatModelAccessSaving/);
+  assert.match(accounts, /dashboardApi\.updateGoatModelAccess\(id, modelAccess, revision\)/);
+  assert.match(accounts, /recoverAccountMutationConflict\(error\)/);
+  assert.match(transport, /\/accounts\/\$\{encode\(id\)\}\/goat-model-access/);
 });

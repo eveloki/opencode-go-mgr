@@ -16,7 +16,7 @@
 - Dashboard V3 挂载在 `/dashboard/api/v3`。控制面变更需要 CAS（`expectedRevision`，以及 `processGeneration`；价格写入还需要 `expectedPricingRevision`）。`ConnectionInfo` 是唯一允许返回明文 Key 的 V3 响应 DTO；Key 变更响应不包含明文，客户端会重新 `GET /connection`。
 - `GET /contract` 返回当前进程的 live revision / generation token，不是契约导出端点。
 - 旧版受保护 V2 REST（`/dashboard/api/...`，不含 V3）向已授权面板会话返回结构化 `410`（`code=dashboardV2Removed`）；匿名请求先返回 `401`。以下语义与墓碑相互独立，不得混淆：V2/V3 认证与会话、browser WebSocket、推理入口。唯一保留的无版本路径是精确的 `auth/status|register|login|logout` 与 `browser/sessions/{token}/ws`。
-- `crates/ocg-core/src/dashboard.rs` 仍处理 SPA `index`/`assets`，并保留上述 V2 认证与 browser WS 处理器；在那里注册的受保护 V2 REST 处理器会被墓碑拦截，不能承载新功能。Go/Zen 协议探测在 V3 路径 `POST /providers/{provider_id}/protocol-probes`。Custom 账号级协议探测仍保留在已退役的 V2 account 路径（授权后返回 `410`）；不要复活 V2 REST 来“补全探测”。
+- `crates/ocg-core/src/dashboard.rs` 现在只处理 SPA `index`/`assets` 与保留的 V2 认证、browser WS 处理器；已退役 V2 REST 的墓碑中间件位于 `host_router.rs`。Go/Zen 协议探测在 V3 路径 `POST /providers/{provider_id}/protocol-probes`。Custom 账号级协议探测没有 V3 对应端点；已退役 V2 account 路径授权后返回 `410`。不要复活 V2 REST 来“补全探测”。
 
 ## 访问 Key 与认证
 
@@ -61,11 +61,11 @@
 
 ## 用量同步
 
-- 已完成账号的配额：官方 `https://opencode.ai/zen/go/v1/usage`（`go_usage.rs`）是周期性校准基线；本地 `forward_logs` 在上次成功校准后仍做实时估算。`usage_sync.rs` 协调手动与后台路径：ready+enabled 且最近约 24h 内有本地活动的账号约每小时对账一次，不活跃的约每天一次；disabled/not-ready/空 Key 账号不自动刷新。全局并发 1，带 jitter 与可注入 clock/jitter/fetch seams；无启动惊群。手动 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` 仍可用；服务端限流为每账号 15s（无论成功失败都计入），带并发去重，返回 Retry-After / `next_allowed_at`；失败保留上次基线与上次成功。本地最大 Go 用量 ≥80% 时，加速对账至多每 15 分钟一次。真实推理 429 仍写入现有冷却/选择器，并额外安排约 1–2 分钟后官方对账（非内联）；官方失败或 `status=rate-limited` 从不写入推理冷却。成功后按最早 `resetsAt`（加有界 jitter）重新调度，尊重活跃/不活跃节奏。失败退避：5m → 15m → 1h → 6h。同步元数据位于 `provider_usage_sync_state`（`accounts.usage_sync_*` 不再使用）。共享实现包括 CAS / 三窗原子校准与全局代理。官方 Go 文档未列出该端点。`console_usage.rs` 已冻结并废弃；至少两个 minor 版本内且有稳定真实账号证据前不要删除。不要引入 CDP 自动化刷新。
+- 已完成账号的配额：官方 `https://opencode.ai/zen/go/v1/usage`（`go_usage.rs`）是周期性校准基线；本地 `forward_logs` 在上次成功校准后仍做实时估算。`usage_sync.rs` 协调手动与后台路径：ready+enabled 且最近约 24h 内有本地活动的账号约每小时对账一次，不活跃的约每天一次；disabled/not-ready/空 Key 账号不自动刷新。全局并发 1，带 jitter 与可注入 clock/jitter/fetch seams；无启动惊群。手动 `POST /dashboard/api/v3/accounts/{id}/usage/refresh` 仍可用；服务端限流为每账号 15s（无论成功失败都计入），带并发去重，返回 Retry-After / `next_allowed_at`；失败保留上次基线与上次成功。本地最大 Go 用量 ≥80% 时，加速对账至多每 15 分钟一次。真实推理 429 仍写入现有冷却/选择器，并额外安排约 1–2 分钟后官方对账（非内联）；官方失败或 `status=rate-limited` 从不写入推理冷却。成功后按最早 `resetsAt`（加有界 jitter）重新调度，尊重活跃/不活跃节奏。失败退避：5m → 15m → 1h → 6h。同步元数据位于 `provider_usage_sync_state`（`accounts.usage_sync_*` 不再使用）。共享实现包括 CAS / 三窗原子校准与全局代理。官方 Go 文档未列出该端点。不要引入 CDP 自动化刷新。
 
 ## 定价、容器与 CI 说明
 
-- 定价通过受保护 `GET /dashboard/api/v3/pricing`、`PUT /dashboard/api/v3/pricing/multipliers` 与 `POST /dashboard/api/v3/pricing/refresh` 管理；仅在用户点击刷新时命中 `https://opencode.ai/docs/go/`，不得自动轮询。
+- 定价按 Provider 独立管理：读取 `GET /dashboard/api/v3/providers/{provider_id}/{offering_id}/pricing`，刷新 `POST /dashboard/api/v3/providers/{provider_id}/pricing/refresh`；Go 倍率写入使用 `PUT /dashboard/api/v3/providers/opencode/go/pricing/multipliers`。OpenCode 与 Command Code 各自维护修订号和最后一次成功快照；只有用户点击对应 Provider 的刷新按钮时才访问其固定官方来源，禁止自动轮询。
 - 公开 GitHub Release 发布后，`.github/workflows/container.yml` 在原生 amd64（`ubuntu-24.04`）与 arm64（`ubuntu-24.04-arm`）runner 上构建并冒烟测试 `linux/amd64` 与 `linux/arm64` 镜像，按 digest 推送各架构，再合并为同一标签下的多架构 OCI index，发布到 `ghcr.io/klarkxy/opencode-go-mgr`。Compose 默认使用该镜像；本地源码构建需 `OCG_IMAGE=ocg-manager:local` 后 `docker compose up -d --build`。
 - `.github/workflows/quality.yml` 在 PR / `main` 上分为三个并行 job：Web（含 `pnpm run contract:v3:check`、前端测试/类型/lint）、Linux workspace Rust 测试/Clippy（stub `dist/`，编译包含 Tauri crate）与 Windows Tauri 目标测试（stub `dist/`，不运行 Vite）。`release.yml` 手动候选（即使选择 tag ref）始终未签名，且可能只构建所选平台；只有 `v*` tag push 事件才会构建全部三个平台并读取仓库签名密钥。tag push 被视为单维护者显式发版授权：工作流逐个校验附件集合与组装产物名称匹配（数量由产物推导，非硬编码）、升级器签名、公钥连续性，以及 GitHub 服务端摘要，然后自动发布同一未改动草稿。
 - 容器以固定 UID/GID `10001` 运行，包含 `LICENSE`；Compose 透传可选 `OCG_MANAGER_ENCRYPTION_KEY` 以支持显式 Key 恢复，但正常部署仍倾向于在卷中保留 `.encryption-key`。

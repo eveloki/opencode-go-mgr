@@ -300,7 +300,7 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { computeTimeRange, resolveTimeRange, timePresetValues } from "./log-time-range.ts";
 import type { TimePreset } from "./log-time-range.ts";
 import { gatewayLogMessage } from "./gateway-log-message.ts";
-import { providerOfferingLabel } from "./account-providers.ts";
+import { providerOfferingLabel } from "../domain/account-providers.ts";
 import { providerApi, type ProviderCatalogEntry } from "../api/providers.ts";
 import {
   forwardLogAlias,

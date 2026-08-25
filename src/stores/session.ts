@@ -3,8 +3,8 @@ import { defineStore } from "pinia";
 import {
   DashboardConflictError,
   DashboardRequestError,
-  dashboardV3,
-} from "../api/dashboard-v3.ts";
+  dashboardApi,
+} from "../api/dashboard.ts";
 import type { AuthStatus } from "../api/generated/dashboard-v3.ts";
 import { useConnectionStore } from "./connection.ts";
 import { useControlPlaneStore } from "./controlPlane.ts";
@@ -41,7 +41,7 @@ export const useSessionStore = defineStore("session", () => {
 
   async function loadStatus(): Promise<AuthStatus> {
     phase.value = "checking";
-    const next = await dashboardV3.getAuthStatus();
+    const next = await dashboardApi.getAuthStatus();
     applyStatus(next);
     suppressAuthRequired.value = false;
     return next;
@@ -55,7 +55,7 @@ export const useSessionStore = defineStore("session", () => {
 
   async function login(username: string, password: string): Promise<void> {
     try {
-      applyStatus(await dashboardV3.loginAdmin(username, password, await authExpectation()));
+      applyStatus(await dashboardApi.loginAdmin(username, password, await authExpectation()));
     } catch (error) {
       if (error instanceof DashboardConflictError) await loadStatus();
       throw error;
@@ -65,7 +65,7 @@ export const useSessionStore = defineStore("session", () => {
 
   async function register(username: string, password: string): Promise<void> {
     try {
-      applyStatus(await dashboardV3.registerAdmin(username, password, await authExpectation()));
+      applyStatus(await dashboardApi.registerAdmin(username, password, await authExpectation()));
     } catch (error) {
       if (error instanceof DashboardConflictError) await loadStatus();
       throw error;
@@ -76,7 +76,7 @@ export const useSessionStore = defineStore("session", () => {
   async function logout(): Promise<void> {
     suppressAuthRequired.value = true;
     try {
-      await dashboardV3.logoutAdmin(await authExpectation());
+      await dashboardApi.logoutAdmin(await authExpectation());
     } catch (error) {
       if (error instanceof DashboardConflictError) {
         await loadStatus();

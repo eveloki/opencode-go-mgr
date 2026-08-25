@@ -150,7 +150,7 @@ import type {
 } from "../api/dashboard";
 import { t } from "../i18n/index.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
-import { MANAGED_SETUP_STEPS, setupStepIndex } from "../views/managed-account";
+import { MANAGED_SETUP_STEPS, setupStepIndex } from "../domain/managed-account.ts";
 
 const props = defineProps<{
   show: boolean;

@@ -18,9 +18,8 @@ ocg-manager/
 │   │   ├── dashboard-v3.ts            Hand-written `/dashboard/api/v3` client
 │   │   ├── generated/dashboard-v3.ts  Types generated from the frozen JSON Schema
 │   │   ├── dashboard.ts               Presenter over V3 for existing pages
-│   │   ├── dashboard-presenters.ts    Field projection (camelCase wire → page shapes)
-│   │   ├── http.ts                    Domain-neutral fetch helpers
-│   │   └── tauri.ts                   Historical name; leftover types/helpers for some tests — not Tauri invoke
+│   │   ├── providers.ts               Provider-page presenter (Zen Free, pricing, protocol switches)
+│   │   └── dashboard-presenters.ts    Field projection (camelCase wire → page shapes)
 │   ├── stores/        session, controlPlane (CAS tokens), connection, accounts, providers, settings
 │   ├── components/    Account cards, managed wizard, pricing catalog, …
 │   ├── i18n/          i18n setup + per-locale message tables + tests
@@ -43,7 +42,7 @@ ocg-manager/
 
 Workspace 成员在根目录 `Cargo.toml` 声明：`ocg-domain`、`ocg-gateway`、 `ocg-infra`、`ocg-core`、`ocg-cli`、`ocg-browser-worker`、`src-tauri`（包名 `ocg-manager`）。二进制名：`ocg-manager-cli` 与 Tauri 应用。当前 workspace 版本为 `1.8.2`；`rust-version` 为 `1.85.0`；edition 为 `2024`。
 
-Vue 的主数据路径是 HTTP Dashboard V3（`src/api/dashboard-v3.ts` 以及 `src/api/dashboard.ts` 的 presenter）。不存在 `src-tauri/src/commands/` 模块，也没有 `tauri::generate_handler` / `#[tauri::command]` 表面。 `src/api/tauri.ts` 是遗留文件名，部分单测仍用来导入历史类型；它不是 `invoke()`，也不是生产客户端。
+Vue 的主数据路径是 HTTP Dashboard V3（`src/api/dashboard-v3.ts` 以及 `src/api/dashboard.ts` / `src/api/providers.ts` 的 presenter）。不存在 `src-tauri/src/commands/` 模块，也没有 `tauri::generate_handler` / `#[tauri::command]` 表面。生产客户端不是 `invoke()`。
 
 ---
 

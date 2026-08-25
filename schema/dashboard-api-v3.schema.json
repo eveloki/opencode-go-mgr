@@ -84,6 +84,16 @@
         "expiresOn": {
           "type": "string"
         },
+        "goatModelAccess": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccountGoatModelAccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "id": {
           "type": "string"
         },
@@ -199,6 +209,7 @@
         "connectionVerifiedAt",
         "verificationError",
         "planRoutable",
+        "goatModelAccess",
         "customConfig",
         "modelCapabilities",
         "acknowledgements"
@@ -473,6 +484,38 @@
         "baseUrl",
         "upstreamProtocol",
         "authScheme"
+      ],
+      "type": "object"
+    },
+    "AccountGoatModelAccess": {
+      "enum": [
+        "goat",
+        "all"
+      ],
+      "type": "string"
+    },
+    "AccountGoatModelAccessUpdate": {
+      "additionalProperties": false,
+      "description": "PUT `/accounts/{id}/goat-model-access` body.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modelAccess": {
+          "$ref": "#/$defs/AccountGoatModelAccess"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "modelAccess"
       ],
       "type": "object"
     },
@@ -3678,6 +3721,78 @@
       ],
       "type": "object"
     },
+    "ProviderModels": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "refreshedAt": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sourceUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providerId",
+        "accountId",
+        "models",
+        "refreshedAt",
+        "sourceUrl",
+        "revision",
+        "processGeneration",
+        "pricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderModelsRefreshUpdate": {
+      "additionalProperties": false,
+      "description": "Provider-scoped model-directory refresh. The selected account supplies the\ncredential; the saved result belongs to the Provider scope.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "accountId"
+      ],
+      "type": "object"
+    },
     "ProviderOfferingChoice": {
       "additionalProperties": false,
       "description": "One offering under a provider scope, with current account cards.",
@@ -3727,6 +3842,19 @@
         "providerId": {
           "type": "string"
         },
+        "providerPricingRevision": {
+          "type": "string"
+        },
+        "providerSnapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderPricingSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0,
@@ -3748,9 +3876,279 @@
         "offeringId",
         "availability",
         "snapshot",
+        "providerSnapshot",
         "revision",
         "processGeneration",
-        "pricingRevision"
+        "pricingRevision",
+        "providerPricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderPricingRefresh": {
+      "additionalProperties": false,
+      "description": "Result of refreshing every priced offering owned by one Provider. Provider\nfailures are isolated: this response never represents a cross-Provider\ntransaction.",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "multiplierChanges": {
+          "items": {
+            "$ref": "#/$defs/PricingMultiplierChange"
+          },
+          "type": "array"
+        },
+        "offeringIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "officialContentHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pricingRevision": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "providerPricingRevision": {
+          "type": "string"
+        },
+        "refreshStatus": {
+          "$ref": "#/$defs/PricingRefreshStatus"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The refreshed Go snapshot. Provider-neutral plans expose their active\nsnapshot through the provider pricing read endpoint instead."
+        }
+      },
+      "required": [
+        "providerId",
+        "offeringIds",
+        "refreshStatus",
+        "multiplierChanges",
+        "officialContentHash",
+        "error",
+        "snapshot",
+        "revision",
+        "processGeneration",
+        "pricingRevision",
+        "providerPricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderPricingRefreshUpdate": {
+      "additionalProperties": false,
+      "description": "POST Provider pricing-refresh body. The Provider-local pricing revision is\ndistinct from the global Go `pricingRevision` control token.",
+      "properties": {
+        "expectedOfficialContentHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedProviderPricingRevision": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingRefreshPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "expectedProviderPricingRevision"
+      ],
+      "type": "object"
+    },
+    "ProviderPricingSnapshot": {
+      "additionalProperties": false,
+      "description": "Provider-neutral immutable pricing snapshot. GOAT uses this display-only\nshape; it never enters the local Go quota debit calculation.",
+      "properties": {
+        "activatedAt": {
+          "type": "string"
+        },
+        "contentHash": {
+          "type": "string"
+        },
+        "documentUpdatedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "sourceUrl": {
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "$ref": "#/$defs/ProviderPricingValue"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "activatedAt",
+        "documentUpdatedAt",
+        "sourceUrl",
+        "contentHash",
+        "evidence",
+        "values"
+      ],
+      "type": "object"
+    },
+    "ProviderPricingValue": {
+      "additionalProperties": false,
+      "properties": {
+        "cacheReadPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cacheWritePerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "currency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "inputPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "maxInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modelAllowance": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "outputPerMillion": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "paidPlanPrice": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "planLimit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "quotaMultiplier": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "timeWindow": {
+          "$ref": "#/$defs/PricingTimeWindow"
+        }
+      },
+      "required": [
+        "modelId",
+        "displayName",
+        "inputPerMillion",
+        "outputPerMillion",
+        "cacheReadPerMillion",
+        "cacheWritePerMillion",
+        "planLimit",
+        "modelAllowance",
+        "quotaMultiplier",
+        "paidPlanPrice",
+        "currency",
+        "minInputTokens",
+        "maxInputTokens",
+        "timeWindow"
       ],
       "type": "object"
     },
@@ -3939,7 +4337,7 @@
     },
     "QuotaWindow": {
       "additionalProperties": false,
-      "description": "One live or synthetic quota window. Distinct from `provider::QuotaWindow`.",
+      "description": "One live or synthetic quota window. Distinct from `models::QuotaWindow`.",
       "properties": {
         "accountId": {
           "type": "string"
@@ -4783,6 +5181,9 @@
       "$ref": "#/$defs/AccountSetupUpdate"
     },
     {
+      "$ref": "#/$defs/AccountGoatModelAccessUpdate"
+    },
+    {
       "$ref": "#/$defs/AccountCustomConfigUpdate"
     },
     {
@@ -5057,6 +5458,24 @@
     },
     {
       "$ref": "#/$defs/UsageRefreshThrottleError"
+    },
+    {
+      "$ref": "#/$defs/ProviderModelsRefreshUpdate"
+    },
+    {
+      "$ref": "#/$defs/ProviderModels"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricingSnapshot"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricingValue"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricingRefresh"
+    },
+    {
+      "$ref": "#/$defs/ProviderPricingRefreshUpdate"
     }
   ],
   "title": "DashboardApiV3"

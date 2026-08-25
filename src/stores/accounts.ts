@@ -1,22 +1,16 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
-import { dashboardV3, isRevisionConflict, type WithoutExpectation } from "../api/dashboard-v3.ts";
+import { dashboardApi, isRevisionConflict } from "../api/dashboard.ts";
+import { providerApi } from "../api/providers.ts";
+import type { ProviderUsageResponse } from "../api/providers.ts";
 import type {
   Account,
-  AccountCreate,
-  AccountCustomConfigUpdate,
-  AccountManagedCreate,
-  AccountModelCapabilitiesUpdate,
-  AccountMutation,
-  AccountSetupStep,
+  AccountInput,
+  AccountModelCapabilityInput,
+  AccountProtocol,
   AccountUpdate,
-  AccountUsageUpdate,
-  MutationExpectation,
-  ProviderUsage,
   UsageWindow,
-} from "../api/generated/dashboard-v3.ts";
-import { useControlPlaneStore } from "./controlPlane.ts";
-import { presentAccount, presentUsage, type Account as PresentedAccount, type UsageWindow as PresentedUsageWindow } from "../api/dashboard-presenters.ts";
+} from "../api/dashboard.ts";
 
 /**
  * Local accounts control plane: the account list plus per-account usage
@@ -27,14 +21,12 @@ import { presentAccount, presentUsage, type Account as PresentedAccount, type Us
  * rejected writes are never replayed automatically.
  */
 export const useAccountsStore = defineStore("accounts", () => {
-  const controlPlane = useControlPlaneStore();
-
   const accounts = ref<Account[]>([]);
   const loaded = ref(false);
   const loading = ref(false);
   const error = ref("");
   const usageById = ref<Record<string, UsageWindow>>({});
-  const providerUsageById = ref<Record<string, ProviderUsage>>({});
+  const providerUsageById = ref<Record<string, ProviderUsageResponse>>({});
 
   const byId = computed(() => {
     const map = new Map<string, Account>();
@@ -45,11 +37,11 @@ export const useAccountsStore = defineStore("accounts", () => {
   async function load(): Promise<Account[]> {
     loading.value = true;
     try {
-      const list = await dashboardV3.listAccounts();
-      accounts.value = list.accounts;
+      const list = await dashboardApi.getAccounts();
+      accounts.value = list;
       loaded.value = true;
       error.value = "";
-      return list.accounts;
+      return list;
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
       throw e;
@@ -58,50 +50,40 @@ export const useAccountsStore = defineStore("accounts", () => {
     }
   }
 
-  async function loadPresented(): Promise<PresentedAccount[]> {
-    return (await load()).map(presentAccount);
+  async function loadPresented(): Promise<Account[]> {
+    return load();
   }
 
-  function applyMutation(result: AccountMutation): Account | null {
-    if (result.account === null) {
-      return null;
-    }
-    const index = accounts.value.findIndex((account) => account.id === result.account?.id);
-    if (index >= 0) accounts.value.splice(index, 1, result.account);
-    else accounts.value.push(result.account);
-    return result.account;
+  function applyAccount(account: Account): Account {
+    const index = accounts.value.findIndex((item) => item.id === account.id);
+    if (index >= 0) accounts.value.splice(index, 1, account);
+    else accounts.value.push(account);
+    return account;
   }
 
-  async function mutate(
-    run: (exp: MutationExpectation) => Promise<AccountMutation>,
-  ): Promise<Account | null> {
+  async function mutate<T>(run: () => Promise<T>, onConflict?: () => Promise<unknown>): Promise<T> {
     try {
-      return applyMutation(await controlPlane.runMutation(run));
+      return await run();
     } catch (error) {
-      if (isRevisionConflict(error)) await load();
+      if (isRevisionConflict(error)) await (onConflict ?? load)();
       throw error;
     }
   }
 
-  async function create(input: WithoutExpectation<AccountCreate>): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.createAccount(input, exp));
+  async function create(input: AccountInput): Promise<Account> {
+    return mutate(() => dashboardApi.createAccount(input).then(applyAccount));
   }
 
-  async function createManaged(input: WithoutExpectation<AccountManagedCreate>): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.createManagedAccount(input, exp));
+  async function createManaged(input: { name: string; username?: string; notes?: string }): Promise<Account> {
+    return mutate(() => dashboardApi.createManagedAccount(input).then(applyAccount));
   }
 
-  async function update(id: string, update: WithoutExpectation<AccountUpdate>): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.updateAccount(id, update, exp));
+  async function update(id: string, update: AccountUpdate): Promise<Account> {
+    return mutate(() => dashboardApi.updateAccount(id, update).then(applyAccount));
   }
 
   async function remove(id: string): Promise<void> {
-    try {
-      await controlPlane.runMutation((exp) => dashboardV3.deleteAccount(id, exp));
-    } catch (error) {
-      if (isRevisionConflict(error)) await load();
-      throw error;
-    }
+    await mutate(() => dashboardApi.deleteAccount(id));
     accounts.value = accounts.value.filter((account) => account.id !== id);
     const { [id]: _usage, ...usageRest } = usageById.value;
     usageById.value = usageRest;
@@ -110,82 +92,76 @@ export const useAccountsStore = defineStore("accounts", () => {
   }
 
   async function reorder(accountIds: string[]): Promise<void> {
-    try {
-      const list = await controlPlane.runMutation((exp) => dashboardV3.reorderAccounts(accountIds, exp));
-      accounts.value = list.accounts;
-    } catch (error) {
-      if (isRevisionConflict(error)) await load();
-      throw error;
-    }
+    const list = await mutate(() => dashboardApi.reorderAccounts(accountIds));
+    accounts.value = list;
   }
 
-  async function toggle(id: string): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.toggleAccount(id, exp));
+  async function toggle(id: string): Promise<Account> {
+    return mutate(() => dashboardApi.toggleAccount(id).then(applyAccount));
   }
 
-  async function resetCooldown(id: string): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.resetAccountCooldown(id, exp));
+  async function resetCooldown(id: string): Promise<Account> {
+    return mutate(() => dashboardApi.resetAccountCooldown(id).then(applyAccount));
   }
 
-  async function advanceSetup(id: string, setupStep: AccountSetupStep): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.advanceAccountSetup(id, setupStep, exp));
+  async function advanceSetup(id: string, setupStep: "google_account" | "opencode_registration" | "payment" | "key_verification" | "ready"): Promise<Account> {
+    return mutate(() => dashboardApi.advanceAccountSetup(id, setupStep).then(applyAccount));
   }
 
-  async function verifyManagedKey(id: string, key: string): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.verifyManagedAccountKey(id, key, exp));
+  async function verifyManagedKey(id: string, key: string): Promise<Account> {
+    return mutate(() => dashboardApi.verifyManagedAccountKey(id, key).then(applyAccount));
   }
 
-  async function verifyConnection(id: string): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.verifyAccount(id, exp));
+  async function verifyConnection(id: string): Promise<Account> {
+    return mutate(() => dashboardApi.verifyAccountConnection(id).then(applyAccount));
   }
 
-  async function putCustomConfig(id: string, config: WithoutExpectation<AccountCustomConfigUpdate>): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.putAccountCustomConfig(id, config, exp));
+  async function putCustomConfig(id: string, config: { base_url: string; upstream_protocol: AccountProtocol; auth_scheme: "bearer" | "x-api-key" }): Promise<Account> {
+    return mutate(() => dashboardApi.updateAccountCustomConfig(id, config).then(applyAccount));
   }
 
-  async function putModelCapabilities(id: string, update: WithoutExpectation<AccountModelCapabilitiesUpdate>): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.putAccountModelCapabilities(id, update, exp));
+  async function putModelCapabilities(id: string, capabilities: AccountModelCapabilityInput[]): Promise<Account> {
+    return mutate(() => dashboardApi.updateAccountModelCapabilities(id, capabilities).then(applyAccount));
   }
 
-  async function acknowledge(id: string, acknowledgementId: string, version: string): Promise<Account | null> {
-    return mutate((exp) => dashboardV3.createAccountAcknowledgement(id, { acknowledgementId, version }, exp));
+  async function acknowledge(id: string, acknowledgementId: string, version: string): Promise<Account> {
+    return mutate(() => dashboardApi.createAccountAcknowledgement(id, acknowledgementId, version).then(applyAccount));
   }
 
   async function loadUsage(id: string): Promise<UsageWindow> {
-    const usage = await dashboardV3.getAccountUsage(id);
+    const usage = await dashboardApi.getAccountUsage(id);
     usageById.value = { ...usageById.value, [id]: usage };
     return usage;
   }
 
-  async function loadPresentedUsage(id: string): Promise<PresentedUsageWindow> {
-    return presentUsage(await loadUsage(id));
+  async function loadPresentedUsage(id: string): Promise<UsageWindow> {
+    return loadUsage(id);
   }
 
-  async function patchUsage(id: string, update: WithoutExpectation<AccountUsageUpdate>): Promise<UsageWindow> {
-    try {
-      const result = await controlPlane.runMutation((exp) => dashboardV3.patchAccountUsage(id, update, exp));
-      usageById.value = { ...usageById.value, [id]: result.usage };
-      return result.usage;
-    } catch (error) {
-      if (isRevisionConflict(error)) await loadUsage(id);
-      throw error;
-    }
+  async function patchUsage(
+    id: string,
+    update: { window: "window_5h" | "window_week" | "window_month"; percent: number; resetsInMinutes?: number | null },
+  ): Promise<UsageWindow> {
+    const result = await mutate(
+      () => dashboardApi.updateAccountUsage(id, update.window, update.percent, update.resetsInMinutes ?? null),
+      () => loadUsage(id),
+    );
+    usageById.value = { ...usageById.value, [id]: result };
+    return result;
   }
 
   /** Official Go usage calibration; 429 surfaces as DashboardThrottledError. */
   async function refreshUsage(id: string) {
-    try {
-      const result = await controlPlane.runMutation((exp) => dashboardV3.refreshAccountUsage(id, exp));
-      usageById.value = { ...usageById.value, [id]: result.usage };
-      return result;
-    } catch (error) {
-      if (isRevisionConflict(error)) await loadUsage(id);
-      throw error;
-    }
+    const result = await mutate(
+      () => dashboardApi.refreshAccountUsage(id),
+      () => loadUsage(id),
+    );
+    usageById.value = { ...usageById.value, [id]: result.usage };
+    return result;
   }
 
-  async function loadProviderUsage(id: string): Promise<ProviderUsage> {
-    const usage = await dashboardV3.getProviderUsage(id);
+  async function loadProviderUsage(id: string): Promise<ProviderUsageResponse> {
+    const usage = await providerApi.getProviderUsage(id);
     providerUsageById.value = { ...providerUsageById.value, [id]: usage };
     return usage;
   }

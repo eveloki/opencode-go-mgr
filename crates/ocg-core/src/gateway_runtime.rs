@@ -22,7 +22,7 @@ pub struct GatewayHandle {
 
 /// Listener-only rebind port. The host composition adapter implements this
 /// for `CoreState`; `state` calls it without naming `gateway`.
-pub trait GatewayRebindHost: Sync {
+pub(crate) trait GatewayRebindHost: Sync {
     fn rebind(&self, addr: SocketAddr) -> impl Future<Output = anyhow::Result<u16>> + Send;
 
     fn rebind_from_serving_request(

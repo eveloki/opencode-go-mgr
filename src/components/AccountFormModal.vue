@@ -263,23 +263,23 @@ import { dashboardApi, type Account, type AccountInput } from "../api/dashboard"
 import type { ProviderCatalogEntry, ProviderCatalogFormField } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
-import { localDateString } from "../views/account-lifecycle";
-import { findCatalogEntry, findPlanDefinition, planFamilyLabel } from "../views/plans.ts";
-import type { PlanDefinition } from "../views/plans.ts";
+import { localDateString } from "../domain/account-lifecycle.ts";
+import { findCatalogEntry, findPlanDefinition, planFamilyLabel } from "../domain/plans.ts";
+import type { PlanDefinition } from "../domain/plans.ts";
 import {
   accountFormFieldIsImmutable,
   resolveAccountFormFields,
-} from "../views/account-form-fields.ts";
+} from "../domain/account-form-fields.ts";
 import {
   accountCreatePayloadErrorKey,
   buildCreateAccountPayload,
   type AccountCreateCapability,
   type AccountCreateFormValues,
-} from "../views/account-create-payload.ts";
+} from "../domain/account-create-payload.ts";
 import {
   CUSTOM_BASE_URL_ISSUE_KEYS,
   customBaseUrlIssue,
-} from "../views/custom-account.ts";
+} from "../domain/custom-account.ts";
 
 export type AccountFormPayload = {
   name: string;

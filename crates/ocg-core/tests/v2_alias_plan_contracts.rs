@@ -2,9 +2,10 @@
 //!
 //! These tests drive public Gateway and dashboard HTTP/JSON. They are the
 //! independent acceptance slice for the accepted unified-alias / multi-Plan
-//! contracts. POST `/accounts/{id}/verify` stays 501 for GOAT/SCNet. Custom
-//! is catalog-routable with an available verification runtime; live Custom
-//! network coverage lives in `custom_trusted_admin.rs`.
+//! contracts. POST `/accounts/{id}/verify` stays 501 for SCNet. GOAT verify
+//! uses GET `/models`. Custom is catalog-routable with an available
+//! verification runtime; live Custom network coverage lives in
+//! `custom_trusted_admin.rs`.
 //!
 //! Requirement map: `fixtures/v2/requirement_map.md`.
 //!
@@ -635,15 +636,16 @@ async fn goat_and_scnet_create_disabled_pending_drafts() {
             "acknowledgements": matching_acknowledgements(notice)
         }))
         .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], false,
-        "SCNet must save as a disabled draft: {body}"
+        status,
+        StatusCode::BAD_REQUEST,
+        "archived SCNet creation must fail closed: {body}"
     );
-    assert_eq!(
-        body["verification_status"].as_str(),
-        Some("pending"),
-        "SCNet draft verification_status: {body}"
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("archived") || message.contains("unsupported")),
+        "{body}"
     );
 
     let (status, body) = harness
@@ -723,7 +725,7 @@ async fn disabled_draft_is_not_selected_for_alias_routing() {
     harness.shutdown();
 }
 
-/// POST `/accounts/{id}/verify` is intentionally unavailable in this slice.
+/// POST `/accounts/{id}/verify` for SCNet stays 501; GOAT uses GET `/models`.
 #[tokio::test]
 async fn verify_runtime_unavailable_leaves_draft_unchanged() {
     let harness = V2Harness::start().await;
@@ -743,17 +745,67 @@ async fn verify_runtime_unavailable_leaves_draft_unchanged() {
         Some("pending"),
         "{draft}"
     );
-    let id = draft["id"].as_str().expect("draft id").to_string();
+    let goat_id = draft["id"].as_str().expect("draft id").to_string();
+    let catalog = harness.catalog().await;
+    let goat = catalog_entry(&catalog, COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+    assert_eq!(
+        goat["verification_runtime_availability"].as_str(),
+        Some("available")
+    );
+    let scnet_id = "scnet-leftover";
+    harness
+        .state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &ocg_core::models::Account {
+                id: scnet_id.into(),
+                provider_id: SCNET_PROVIDER_ID.into(),
+                offering_id: ocg_core::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
+                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
+                quota_scope: ocg_core::provider::QuotaScope::Key,
+                name: scnet_id.into(),
+                username: None,
+                password_cipher: None,
+                key_cipher: harness.state.encrypt_key(SCNET_ACCOUNT_KEY).unwrap(),
+                enabled: false,
+                account_type: ocg_core::models::AccountType::Key,
+                setup_step: ocg_core::models::AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                notes: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+            None,
+            &[],
+            ocg_core::provider::builtin_plan(
+                SCNET_PROVIDER_ID,
+                ocg_core::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+            )
+            .unwrap()
+            .risk_notice,
+        )
+        .expect("preserved SCNet leftover draft");
     let (status, body) = harness
         .post_json(
-            &format!("/accounts/{id}/verify"),
+            &format!("/accounts/{scnet_id}/verify"),
             &json!({ "expected_revision": harness.settings_revision().await }),
         )
         .await;
     assert_eq!(
         status,
         StatusCode::NOT_IMPLEMENTED,
-        "v2-contract: POST /accounts/{{id}}/verify must fail closed with 501 in this slice: {body}"
+        "v2-contract: SCNet POST /accounts/{{id}}/verify must fail closed with 501: {body}"
     );
     assert_ne!(
         body["enabled"], true,
@@ -765,11 +817,11 @@ async fn verify_runtime_unavailable_leaves_draft_unchanged() {
         "501 verify must not mark the draft verified: {body}"
     );
     assert!(
-        !json_contains_secret(&body, GOAT_ACCOUNT_KEY),
+        !json_contains_secret(&body, SCNET_ACCOUNT_KEY),
         "verify error leaked the Key: {body}"
     );
 
-    let stored = harness.account_by_id(&id).await;
+    let stored = harness.account_by_id(&goat_id).await;
     assert_eq!(
         stored["enabled"], false,
         "draft must stay disabled after unavailable verify: {stored}"
@@ -855,7 +907,55 @@ async fn scnet_acknowledgement_persists_and_does_not_runtime_block() {
             "acknowledgements": matching_acknowledgements(notice)
         }))
         .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "archived SCNet creation must fail closed: {body}"
+    );
+    let offering_id = scnet["offering_id"].as_str().unwrap();
+    let leftover_id = "scnet-acked";
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &ocg_core::models::Account {
+                id: leftover_id.into(),
+                provider_id: SCNET_PROVIDER_ID.into(),
+                offering_id: offering_id.into(),
+                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
+                quota_scope: ocg_core::provider::QuotaScope::Key,
+                name: leftover_id.into(),
+                username: None,
+                password_cipher: None,
+                key_cipher: harness.state.encrypt_key(SCNET_ACCOUNT_KEY).unwrap(),
+                enabled: false,
+                account_type: ocg_core::models::AccountType::Key,
+                setup_step: ocg_core::models::AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                notes: None,
+                created_at: now,
+                updated_at: now,
+            },
+            None,
+            &[],
+            ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, offering_id)
+                .unwrap()
+                .risk_notice,
+        )
+        .expect("preserved SCNet leftover draft");
+    let body = harness.account_by_id(leftover_id).await;
 
     let stored = body
         .get("acknowledgements")

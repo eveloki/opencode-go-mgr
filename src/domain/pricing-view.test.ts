@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import type { PricingModel } from "../api/tauri.ts";
+import type { PricingModel } from "../api/dashboard.ts";
 import {
+  buildPricingOfferingSections,
   buildPricingTableRows,
   effectivePricingRate,
   formatPricingMultiplier,
@@ -173,11 +174,9 @@ test("MiniMax roots retain standard rates while every upgrade is materialized be
 
 test("pricing catalog keeps refresh explicit and exposes accessible grouped multiplier editing", () => {
   const catalog = readFileSync(new URL("../components/PricingCatalog.vue", import.meta.url), "utf8");
-  const pricing = readFileSync(new URL("./Pricing.vue", import.meta.url), "utf8");
-  const settings = readFileSync(new URL("./Settings.vue", import.meta.url), "utf8");
-  assert.match(pricing, /<PricingCatalog \/>/);
+  const settings = readFileSync(new URL("../views/Settings.vue", import.meta.url), "utf8");
   assert.doesNotMatch(settings, /PricingCatalog/);
-  assert.match(catalog, /if \(!props\.providerId \|\| props\.providerId === "opencode"\) void loadPricing\(\)/);
+  assert.match(catalog, /if \(props\.providerId === "opencode"\) void loadPricing\(\)/);
   assert.doesNotMatch(catalog, /onMounted\(\(\) => void performPricingRefresh\(\)\)/);
   assert.match(catalog, /@click="requestPricingRefresh"/);
   assert.match(catalog, /result\.error \|\| t\("价格表刷新失败，详见页面提示"\)/);
@@ -195,6 +194,9 @@ test("pricing catalog keeps refresh explicit and exposes accessible grouped mult
   assert.doesNotMatch(catalog, /hasOwnProperty\.call\(multiplierDrafts\.value/);
   assert.doesNotMatch(catalog, /precision: 4/);
   assert.match(catalog, /refresh_status === "needs_confirmation"/);
+  assert.match(catalog, /dashboardApi\.refreshProviderPricing\(props\.providerId/);
+  assert.match(catalog, /expected_provider_revision: expectedRevision/);
+  assert.match(catalog, /provider_pricing_revision/);
   assert.match(catalog, /expected_official_content_hash: expectedOfficialContentHash/);
   assert.match(catalog, /result\.official_content_hash/);
   assert.match(catalog, /async function reloadPricingAfterRevisionChange[\s\S]*?dashboardApi\.getPricing\(\)/);
@@ -205,4 +207,34 @@ test("pricing catalog keeps refresh explicit and exposes accessible grouped mult
   assert.match(catalog, /模型价格为 OpenCode Go 表中的美元\/百万 tokens；官方倍率用于换算额度消耗，可按活动手动调整。/);
   assert.doesNotMatch(catalog, /本地条件价格最后叠加/);
   assert.doesNotMatch(catalog, /official_price_multiplier|表价已含|Go 倍率/);
+  assert.match(catalog, /kind="goat"/);
+  assert.match(catalog, /kind="scnet"/);
+  assert.match(catalog, /:snapshot="group\.content\.snapshot"/);
+  assert.match(catalog, /plan\.id !== "scnet"/);
+  assert.doesNotMatch(catalog, /plan\.id !== "command-code-goat"/);
+});
+
+test("legacy offering sections keep GOAT unpriced and omit SCNet Credits", () => {
+  const sections = buildPricingOfferingSections(null);
+  assert.deepEqual(
+    sections.map(({ provider_id, offering_id, presentation }) => (
+      `${provider_id}/${offering_id}:${presentation}`
+    )),
+    [
+      "opencode/go:table",
+      "command-code/goat:unpriced",
+      "opencode-zen-free/anonymous-free:free",
+    ],
+  );
+  assert.ok(sections.every(({ offering_id }) => offering_id !== "token-plan-basic"));
+});
+
+test("GOAT usage helper does not apply legacy window quotas or load GOAT calibration", () => {
+  const usage = readFileSync(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+  assert.match(usage, /if \(isCommandCodeGoatAccount\(account\)\) return \[\]/);
+  assert.doesNotMatch(usage, /COMMAND_CODE_GOAT_USAGE_LIMITS/);
+  const retry = usage.slice(usage.indexOf("async function retryQuotaLimits"));
+  assert.doesNotMatch(retry, /isCommandCodeGoatAccount/);
+  assert.match(retry, /account\.provider_id === "opencode"/);
+  assert.match(retry, /account\.offering_id === "go"/);
 });

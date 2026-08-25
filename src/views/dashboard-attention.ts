@@ -1,7 +1,7 @@
 import type { Account } from "../api/dashboard.ts";
-import { isCooling, isFreeCooling } from "./accounts-usage.ts";
-import { daysUntilDate } from "./account-lifecycle.ts";
-import { isZenFreeAccount } from "./account-providers.ts";
+import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
+import { daysUntilDate } from "../domain/account-lifecycle.ts";
+import { isZenFreeAccount } from "../domain/account-providers.ts";
 
 /**
  * The Dashboard "needs attention" area: a single honest list of accounts that

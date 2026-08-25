@@ -19,13 +19,13 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone)]
-pub struct FakeReply {
+pub(crate) struct FakeReply {
     pub status: u16,
     pub body: &'static str,
 }
 
 #[derive(Clone, Debug)]
-pub struct FakeCall {
+pub(crate) struct FakeCall {
     pub key: String,
     pub method: Method,
     pub path: String,
@@ -39,9 +39,9 @@ pub struct FakeCall {
 }
 
 type Replies = Arc<Mutex<HashMap<String, VecDeque<FakeReply>>>>;
-pub type FakeCalls = Arc<Mutex<Vec<FakeCall>>>;
-pub type DelayedChunks = Vec<(Duration, &'static str)>;
-pub type DelayedResponses = Arc<Mutex<VecDeque<DelayedChunks>>>;
+pub(crate) type FakeCalls = Arc<Mutex<Vec<FakeCall>>>;
+pub(crate) type DelayedChunks = Vec<(Duration, &'static str)>;
+pub(crate) type DelayedResponses = Arc<Mutex<VecDeque<DelayedChunks>>>;
 
 #[derive(Clone)]
 struct FakeState {
@@ -62,7 +62,7 @@ struct DelayedState {
 /// Replies are selected by Bearer, `x-api-key`, then `x-goog-api-key`, and
 /// repeated once their queue is exhausted. An unexpected credential receives a
 /// deterministic 500 response instead of making a real network request.
-pub async fn start_fake_upstream(
+pub(crate) async fn start_fake_upstream(
     replies: HashMap<String, VecDeque<FakeReply>>,
 ) -> (String, FakeCalls, tokio::sync::oneshot::Sender<()>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -91,7 +91,7 @@ pub async fn start_fake_upstream(
 /// Serve one or more deliberately chunked responses over every local route.
 /// This models SSE usage chunks and timeout boundaries without sleeping in
 /// production code or contacting a provider.
-pub async fn start_delayed_fake_upstream(
+pub(crate) async fn start_delayed_fake_upstream(
     status: StatusCode,
     content_type: &'static str,
     responses: Vec<DelayedChunks>,
@@ -128,7 +128,7 @@ pub async fn start_delayed_fake_upstream(
 /// Write an incomplete raw HTTP response and close the socket immediately.
 /// Callers can place visible SSE output before the close to exercise both sides
 /// of the gateway's downstream-output retry boundary.
-pub async fn start_raw_disconnect_upstream(
+pub(crate) async fn start_raw_disconnect_upstream(
     response: Vec<u8>,
 ) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Sender<()>) {
     let calls = Arc::new(AtomicUsize::new(0));

@@ -290,7 +290,7 @@ fn v3_proxy_mode(mode: AppProxyMode) -> ProxyMode {
     }
 }
 
-fn app_proxy_mode(mode: ProxyMode) -> AppProxyMode {
+pub(crate) fn app_proxy_mode(mode: ProxyMode) -> AppProxyMode {
     match mode {
         ProxyMode::Auto => AppProxyMode::Auto,
         ProxyMode::Manual => AppProxyMode::Manual,

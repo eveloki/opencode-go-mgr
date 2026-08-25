@@ -3,7 +3,7 @@
 use chrono::Utc;
 use ocg_core::browser::browser_profile_paths;
 use ocg_core::dashboard_v3::{
-    Account, AccountList, AccountMutation, AccountSetupStep, AccountType,
+    Account, AccountGoatModelAccess, AccountList, AccountMutation, AccountSetupStep, AccountType,
     AccountVerificationStatus, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
     ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
     ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
@@ -205,6 +205,51 @@ fn scnet_ack() -> Value {
     })
 }
 
+fn insert_scnet_leftover(harness: &V3Harness, id: &str, name: &str, key: &str) {
+    let plan =
+        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
+            .unwrap();
+    let now = Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .create_account_with_contract(
+            &ocg_core::models::Account {
+                id: id.into(),
+                provider_id: SCNET_PROVIDER_ID.into(),
+                offering_id: SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
+                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
+                quota_scope: ocg_core::provider::QuotaScope::Key,
+                name: name.into(),
+                username: None,
+                password_cipher: None,
+                key_cipher: harness.state.encrypt_key(key).unwrap(),
+                enabled: false,
+                account_type: ocg_core::models::AccountType::Key,
+                setup_step: ocg_core::models::AccountSetupStep::Ready,
+                referral_code: None,
+                purchase_date: String::new(),
+                expires_on: String::new(),
+                cooldown_until: None,
+                cooldown_generic_until: None,
+                cooldown_5h_until: None,
+                cooldown_week_until: None,
+                cooldown_month_until: None,
+                cooldown_free_until: None,
+                last_error: None,
+                auth_error: None,
+                notes: None,
+                created_at: now,
+                updated_at: now,
+            },
+            None,
+            &[],
+            plan.risk_notice,
+        )
+        .expect("preserved SCNet leftover draft");
+}
+
 fn custom_write() -> Value {
     json!({
         "baseUrl": "https://api.example.com/v1",
@@ -257,6 +302,11 @@ fn mutation_routes(id: &str) -> Vec<(Method, String, Value)> {
         ),
         (
             Method::PUT,
+            format!("/accounts/{id}/goat-model-access"),
+            json!({ "modelAccess": "all" }),
+        ),
+        (
+            Method::PUT,
             format!("/accounts/{id}/model-capabilities"),
             json!({ "capabilities": [custom_capability()] }),
         ),
@@ -269,8 +319,8 @@ fn mutation_routes(id: &str) -> Vec<(Method, String, Value)> {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v27() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+fn dashboard_v3_schema_version_stays_at_v28() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
 }
 
 #[tokio::test]
@@ -658,7 +708,8 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_scnet_and_zen() {
     let goat = mutation_account(&goat);
     assert!(!goat.enabled);
     assert_eq!(goat.verification_status, AccountVerificationStatus::Pending);
-    assert!(!goat.plan_routable);
+    assert!(goat.plan_routable);
+    assert_eq!(goat.goat_model_access, Some(AccountGoatModelAccess::Goat));
 
     let (status, scnet_err) = send_json(
         &harness,
@@ -694,11 +745,14 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_scnet_and_zen() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{scnet}");
-    let scnet = mutation_account(&scnet);
-    assert!(!scnet.enabled);
-    assert_eq!(scnet.acknowledgements.len(), 1);
-    assert!(!scnet.plan_routable);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet}");
+    assert_v3_error(&scnet, ERROR_INVALID_REQUEST);
+    assert!(
+        scnet["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("archived") || message.contains("unsupported")),
+        "{scnet}"
+    );
 
     let (status, custom_err) = send_json(
         &harness,
@@ -766,6 +820,99 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_scnet_and_zen() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{zen}");
     assert_v3_error(&zen, ERROR_INVALID_REQUEST);
     assert!(zen["message"].as_str().unwrap().contains("singleton"));
+
+    harness.stop();
+}
+
+#[tokio::test]
+async fn goat_model_access_defaults_to_goat_and_switches_with_cas() {
+    let harness = start_loopback("goat-model-access").await;
+    let (status, created) = send_json(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "name": "GOAT",
+                "key": "goat-key",
+                "providerId": COMMAND_CODE_PROVIDER_ID,
+                "offeringId": GOAT_OFFERING_ID
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let created = mutation_account(&created);
+    assert_eq!(
+        created.goat_model_access,
+        Some(AccountGoatModelAccess::Goat)
+    );
+
+    let revision = harness.state.settings_revision();
+    let (status, stale) = send_json(
+        &harness,
+        Method::PUT,
+        &format!("/accounts/{}/goat-model-access", created.id),
+        &json!({
+            "expectedRevision": revision.saturating_sub(1),
+            "processGeneration": harness.state.process_generation(),
+            "modelAccess": "all"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_v3_error(&stale, ERROR_REVISION_CONFLICT);
+    assert_eq!(
+        harness
+            .state
+            .db
+            .lock()
+            .goat_model_access(&created.id)
+            .unwrap(),
+        Some(ocg_core::provider::GoatModelAccess::Goat)
+    );
+
+    let (status, updated) = send_json(
+        &harness,
+        Method::PUT,
+        &format!("/accounts/{}/goat-model-access", created.id),
+        &cas(&harness, json!({ "modelAccess": "all" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let updated = mutation_account(&updated);
+    assert_eq!(updated.goat_model_access, Some(AccountGoatModelAccess::All));
+    assert_eq!(
+        harness
+            .state
+            .db
+            .lock()
+            .goat_model_access(&created.id)
+            .unwrap(),
+        Some(ocg_core::provider::GoatModelAccess::All)
+    );
+
+    let (status, go) = send_json(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(&harness, json!({ "name": "Go", "key": "sk-go" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{go}");
+    let go = mutation_account(&go);
+    let before = harness.state.settings_revision();
+    let (status, rejected) = send_json(
+        &harness,
+        Method::PUT,
+        &format!("/accounts/{}/goat-model-access", go.id),
+        &cas(&harness, json!({ "modelAccess": "all" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_v3_error(&rejected, ERROR_INVALID_REQUEST);
+    assert_eq!(harness.state.settings_revision(), before);
 
     harness.stop();
 }
@@ -1126,7 +1273,7 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
         goat_enable["message"]
             .as_str()
             .unwrap()
-            .contains("not routable")
+            .contains("verify the account connection")
     );
     assert_eq!(harness.state.settings_revision(), before_goat);
 
@@ -1146,8 +1293,15 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{scnet}");
-    let scnet_id = mutation_account(&scnet).id;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet}");
+    assert!(
+        scnet["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("archived") || message.contains("unsupported")),
+        "{scnet}"
+    );
+    let scnet_id = "scnet-ack-later".to_string();
+    insert_scnet_leftover(&harness, &scnet_id, "SCNet ack later", "sk-tp-later");
     let before_ack_rejection = harness.state.settings_revision();
     let mut wrong_ack = scnet_ack();
     wrong_ack["version"] = json!("wrong-version");
@@ -1333,8 +1487,14 @@ async fn dashboard_v3_ack_commit_advances_revision_before_post_read_failure() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{scnet}");
-    let scnet_id = mutation_account(&scnet).id;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet}");
+    let scnet_id = "scnet-ack-post-read".to_string();
+    insert_scnet_leftover(
+        &harness,
+        &scnet_id,
+        "SCNet ack post-read",
+        "sk-tp-post-read",
+    );
     let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
     conn.busy_timeout(Duration::from_secs(5)).unwrap();
     conn.execute_batch(

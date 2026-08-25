@@ -271,10 +271,10 @@ export function buildPricingTableRows(
 
 /**
  * How an offering is presented on the pricing page: the full OpenCode Go
- * table, an experimental/unconfigured placeholder (no fake prices), or the
- * Zen Free zero-cost semantics block.
+ * table, GOAT as an unpriced placeholder (no invented prices),
+ * or the Zen Free zero-cost semantics block. Archived SCNet is not listed.
  */
-export type PricingOfferingPresentation = "table" | "experimental" | "free";
+export type PricingOfferingPresentation = "table" | "unpriced" | "free";
 
 export interface PricingOfferingSection {
   provider_id: string;
@@ -295,7 +295,7 @@ export function buildPricingOfferingSections(
 ): PricingOfferingSection[] {
   const known: Array<{ provider_id: string; offering_id: string; presentation: PricingOfferingPresentation }> = [
     { provider_id: DEFAULT_PROVIDER_ID, offering_id: DEFAULT_OFFERING_ID, presentation: "table" },
-    { provider_id: "command-code", offering_id: "goat", presentation: "experimental" },
+    { provider_id: "command-code", offering_id: "goat", presentation: "unpriced" },
     {
       provider_id: ZEN_FREE_OFFERING.provider_id,
       offering_id: ZEN_FREE_OFFERING.offering_id,

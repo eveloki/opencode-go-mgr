@@ -57,11 +57,11 @@ test("remote browser view URL preserves dashboard location and carries the opaqu
 
 test("managed account UI isolates pending controls and renders noVNC in a dedicated view", async () => {
   const [accounts, card, chooser, wizard, browser, app] = await Promise.all([
-    readSource(new URL("./Accounts.vue", import.meta.url)),
+    readSource(new URL("../views/Accounts.vue", import.meta.url)),
     readSource(new URL("../components/AccountCard.vue", import.meta.url)),
     readSource(new URL("../components/AccountAddModal.vue", import.meta.url)),
     readSource(new URL("../components/ManagedAccountWizard.vue", import.meta.url)),
-    readSource(new URL("./BrowserSession.vue", import.meta.url)),
+    readSource(new URL("../views/BrowserSession.vue", import.meta.url)),
     readSource(new URL("../App.vue", import.meta.url)),
   ]);
 
@@ -123,7 +123,7 @@ test("managed account UI isolates pending controls and renders noVNC in a dedica
 });
 
 test("managed account creation cannot be cancelled while its request is pending", async () => {
-  const accounts = await readSource(new URL("./Accounts.vue", import.meta.url));
+  const accounts = await readSource(new URL("../views/Accounts.vue", import.meta.url));
   const managedCreateModal = accounts.slice(
     accounts.indexOf('<n-modal\n      :show="showManagedCreate"'),
     accounts.indexOf("<ManagedAccountWizard"),

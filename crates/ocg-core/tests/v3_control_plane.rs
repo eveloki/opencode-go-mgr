@@ -176,7 +176,7 @@ fn tauri_and_cli_shaped_creates_differ_from_dashboard_enablement() {
         CUSTOM_PROVIDER_ID,
         CUSTOM_API_OFFERING_ID
     ));
-    assert!(!offering_allows_enablement(
+    assert!(offering_allows_enablement(
         COMMAND_CODE_PROVIDER_ID,
         GOAT_OFFERING_ID
     ));
@@ -191,10 +191,13 @@ fn tauri_and_cli_shaped_creates_differ_from_dashboard_enablement() {
     goat.provider_id = COMMAND_CODE_PROVIDER_ID.into();
     goat.offering_id = GOAT_OFFERING_ID.into();
     goat.credential_kind = ocg_core::provider::CredentialKind::ApiKey;
-    assert!(
-        state.db.lock().create_account(&goat).is_err(),
-        "Tauri/CLI-shaped enabled=true GOAT must fail closed"
-    );
+    state
+        .db
+        .lock()
+        .create_account(&goat)
+        .expect("catalog-routable GOAT may persist enabled=true at the Database layer");
+    goat.id = "tauri-goat-disabled".into();
+    goat.name = goat.id.clone();
     goat.enabled = false;
     state
         .db

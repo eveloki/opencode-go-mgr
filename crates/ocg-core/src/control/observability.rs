@@ -19,7 +19,7 @@ use crate::redaction::redact_known_secret;
 use chrono::{DateTime, SecondsFormat, Utc};
 use std::collections::{BTreeMap, HashSet};
 
-pub struct GatewayRuntimeStatus {
+pub(crate) struct GatewayRuntimeStatus {
     pub running: bool,
     pub port: u16,
     pub upstream_base_url: String,
@@ -27,13 +27,13 @@ pub struct GatewayRuntimeStatus {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct GatewayLogReadQuery {
+pub(crate) struct GatewayLogReadQuery {
     pub limit: Option<i64>,
     pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ForwardLogReadQuery {
+pub(crate) struct ForwardLogReadQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub status: Option<String>,
@@ -52,7 +52,7 @@ pub struct ForwardLogReadQuery {
 }
 
 #[derive(Debug, Clone)]
-pub struct EnrichedForwardLog {
+pub(crate) struct EnrichedForwardLog {
     pub log: ForwardLog,
     pub requested_model: Option<String>,
     pub resolved_alias: Option<String>,
@@ -63,13 +63,13 @@ pub struct EnrichedForwardLog {
 }
 
 #[derive(Debug, Clone)]
-pub struct EnrichedForwardLogPage {
+pub(crate) struct EnrichedForwardLogPage {
     pub items: Vec<EnrichedForwardLog>,
     pub summary: ForwardLogSummary,
 }
 
 #[derive(Debug)]
-pub enum ObservabilityError {
+pub(crate) enum ObservabilityError {
     InvalidQuery(String),
     Internal(anyhow::Error),
 }
@@ -89,7 +89,7 @@ impl From<anyhow::Error> for ObservabilityError {
     }
 }
 
-pub fn gateway_runtime_status(
+pub(crate) fn gateway_runtime_status(
     running: bool,
     port: u16,
     upstream_base_url: String,
@@ -105,7 +105,7 @@ pub fn gateway_runtime_status(
 
 /// Latest `error`/`gateway` log message, with every known decrypted account
 /// secret redacted using the same policy as gateway log lists.
-pub fn redacted_latest_gateway_error(
+pub(crate) fn redacted_latest_gateway_error(
     db: &Database,
     decrypt_key: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
@@ -114,14 +114,14 @@ pub fn redacted_latest_gateway_error(
     Some(redact_known_secrets(&message, &secrets))
 }
 
-pub fn application_models(
+pub(crate) fn application_models(
     snapshot: &PricingSnapshot,
     contracts: Option<&EffectiveContractSet>,
 ) -> Vec<String> {
     application_models_from_snapshot(snapshot, contracts)
 }
 
-pub fn application_models_from_snapshot(
+pub(crate) fn application_models_from_snapshot(
     snapshot: &PricingSnapshot,
     contracts: Option<&EffectiveContractSet>,
 ) -> Vec<String> {
@@ -165,7 +165,7 @@ fn application_alias_is_priced(alias: &str, priced: &HashSet<&str>) -> bool {
             .is_some_and(|base| priced.contains(base))
 }
 
-pub fn dashboard_summary(
+pub(crate) fn dashboard_summary(
     db: &Database,
     gateway_running: bool,
     decrypt_key: impl Fn(&str) -> Option<String>,
@@ -218,7 +218,7 @@ fn dashboard_account_is_available(
     }
 }
 
-pub fn daily_cost_by_model(
+pub(crate) fn daily_cost_by_model(
     db: &Database,
     days: Option<i64>,
 ) -> Result<Vec<DailyModelCost>, ObservabilityError> {
@@ -226,7 +226,7 @@ pub fn daily_cost_by_model(
         .map_err(ObservabilityError::from)
 }
 
-pub fn gateway_logs(
+pub(crate) fn gateway_logs(
     db: &Database,
     query: GatewayLogReadQuery,
     decrypt_key: impl Fn(&str) -> Option<String>,
@@ -241,7 +241,7 @@ pub fn gateway_logs(
     Ok(logs)
 }
 
-pub fn query_forward_logs(
+pub(crate) fn query_forward_logs(
     db: &Database,
     query: ForwardLogReadQuery,
     decrypt_key: impl Fn(&str) -> Option<String>,
@@ -323,16 +323,18 @@ fn enrich_forward_log_page(
     })
 }
 
-pub fn forward_log_models(db: &Database) -> Result<Vec<String>, ObservabilityError> {
+pub(crate) fn forward_log_models(db: &Database) -> Result<Vec<String>, ObservabilityError> {
     db.list_forward_log_models()
         .map_err(ObservabilityError::from)
 }
 
-pub fn forward_log_keys(db: &Database) -> Result<Vec<ForwardLogClientKey>, ObservabilityError> {
+pub(crate) fn forward_log_keys(
+    db: &Database,
+) -> Result<Vec<ForwardLogClientKey>, ObservabilityError> {
     db.list_forward_log_keys().map_err(ObservabilityError::from)
 }
 
-pub fn normalize_forward_log_window(
+pub(crate) fn normalize_forward_log_window(
     sort_by: Option<&str>,
     sort_order: Option<&str>,
     start_time: Option<&str>,
@@ -381,7 +383,7 @@ pub fn normalize_forward_log_window(
     Ok((start_time, end_time))
 }
 
-pub fn dashboard_account_secrets(
+pub(crate) fn dashboard_account_secrets(
     db: &Database,
     decrypt_key: impl Fn(&str) -> Option<String>,
 ) -> Result<BTreeMap<String, String>, ObservabilityError> {
@@ -393,13 +395,13 @@ pub fn dashboard_account_secrets(
         .collect())
 }
 
-pub fn redact_known_secrets(text: &str, secrets: &BTreeMap<String, String>) -> String {
+pub(crate) fn redact_known_secrets(text: &str, secrets: &BTreeMap<String, String>) -> String {
     secrets.values().fold(text.to_string(), |text, secret| {
         redact_known_secret(&text, secret)
     })
 }
 
-pub fn redact_diagnostic(
+pub(crate) fn redact_diagnostic(
     diagnostic: Option<serde_json::Value>,
     secrets: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Option<serde_json::Value> {

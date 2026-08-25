@@ -100,9 +100,11 @@ test("USER guides describe the Providers control plane and drop stale locations"
   assert.doesNotMatch(userZh, /通过卡片的 \*\*获取模型\*\* 动作刷新/);
 });
 
-test("USER guides keep GOAT/SCNet non-routable and refresh/probe manual-only", () => {
-  assert.match(userEn, /probes cannot promote them to production\s+routing/);
-  assert.match(userZh, /探测不能把它们提升为生产路由/);
+test("USER guides keep GOAT verified, SCNet archived, and refresh/probe manual-only", () => {
+  assert.match(userEn, /GOAT routes\s+only through verified, explicitly enabled accounts/);
+  assert.match(userZh, /GOAT 只通过已验证且显式启用的账号路由/);
+  assert.match(userEn, /SCNet remains archived/);
+  assert.match(userZh, /SCNet 已归档/);
   assert.match(userEn, /Refresh is never automatic/);
   assert.match(userZh, /刷新绝不会自动发生/);
   assert.match(userEn, /Client requests never probe/);

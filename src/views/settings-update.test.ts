@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
-import type { UpdatePhase } from "../api/tauri.ts";
-import { isVersionAtLeast } from "../api/tauri.ts";
+import type { UpdatePhase } from "../api/dashboard.ts";
+import { isVersionAtLeast } from "../utils/version.ts";
 import {
   UPDATE_TARGET_STORAGE_KEY,
   clearUpdateTarget,
@@ -86,10 +86,10 @@ test("install request failures preserve the target for restart observation", () 
 });
 
 test("update API sends the expected version and exposes polling status", () => {
-  const api = readFileSync(new URL("../api/tauri.ts", import.meta.url), "utf8");
-  assert.match(api, /install_supported: boolean/);
-  assert.match(api, /getUpdateStatus: \(\) => request<UpdateStatus>\("\/settings\/update-status"\)/);
-  assert.match(api, /body: jsonBody\(\{ expected_version: expectedVersion \}\)/);
+  const api = readFileSync(new URL("../api/dashboard-v3.ts", import.meta.url), "utf8");
+  assert.match(api, /installUpdate: \(expectedVersion: string/);
+  assert.match(api, /requestV3<DesktopUpdate>\("\/settings\/install-update"/);
+  assert.match(api, /withExpectation\(\{ expectedVersion \}/);
 });
 
 test("settings restores and observes updates with bounded, lifecycle-safe polling", () => {

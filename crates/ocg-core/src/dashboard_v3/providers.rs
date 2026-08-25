@@ -24,6 +24,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use crate::alias;
+use crate::goat;
 use crate::kernel::protocol::supported_model_protocol_profiles;
 #[cfg(debug_assertions)]
 use crate::kernel::zen::{ZEN_MODELS_SOURCE_URL, parse_catalog};
@@ -33,7 +34,7 @@ use crate::protocol_probe::{self, ProtocolProbeContext, ProtocolProbeRunError};
 use crate::provider::{
     BUILTIN_PLANS, BuiltinPlan, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, GO_OFFERING_ID,
     OPENCODE_PROVIDER_ID, ProviderAdapterKind, ProviderRegistry, ZEN_FREE_ACCOUNT_ID,
-    default_verification_status,
+    default_verification_status, is_command_code_goat,
 };
 use crate::provider_contracts::{
     self, ContractScope, EffectiveContractSet, EffectiveModelContract as DomainModelContract,
@@ -42,6 +43,7 @@ use crate::provider_contracts::{
 };
 use crate::state::CoreState;
 
+use super::accounts::load_model_account;
 use super::types::{
     AccountAuthScheme, AccountQuotaScope, AccountUpstreamProtocol, AccountVerificationStatus,
     CapabilitySummary, CardCapabilitySummary, ContractEvidenceSource, ContractScopeKind,
@@ -50,8 +52,8 @@ use super::types::{
     ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate,
     ProtocolSwitches, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
     ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
-    ProviderModelCapability, ProviderOfferingChoice, ZenFreeModel, ZenFreeModels, ZenFreeSettings,
-    ZenFreeSettingsUpdate,
+    ProviderModelCapability, ProviderModels, ProviderModelsRefreshUpdate, ProviderOfferingChoice,
+    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
@@ -197,6 +199,151 @@ pub(super) async fn refresh_zen_free_models(
         .map_err(V3ApiError::internal)?;
     let _revision = state.bump_settings_revision();
     Ok(Json(zen_free_models_from_state(&state)))
+}
+
+pub(super) async fn refresh_provider_models(
+    State(state): State<CoreState>,
+    Path(provider_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<ProviderModels>, V3ApiError> {
+    let input = parse_mutation_json::<ProviderModelsRefreshUpdate>(&body)?;
+    let _refresh = state.provider_models_refresh.try_lock().map_err(|_| {
+        V3ApiError::conflict_at(&state, "provider model refresh is already running")
+    })?;
+    let (account, config, key, goat_contract, base_url, source_url) = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &input.expectation)?;
+        let account = load_model_account(&state, input.account_id.trim())?;
+        if account.provider_id != provider_id {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "the selected account does not belong to this provider",
+            ));
+        }
+        let supported = (provider_id.as_str(), account.offering_id.as_str())
+            == (OPENCODE_PROVIDER_ID, GO_OFFERING_ID)
+            || is_command_code_goat(&provider_id, &account.offering_id);
+        if !supported {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "this provider does not support authenticated model refresh",
+            ));
+        }
+        let verification = state
+            .db
+            .lock()
+            .account_verification_state(&account.id)
+            .map_err(V3ApiError::internal)?;
+        if is_command_code_goat(&provider_id, &account.offering_id)
+            && verification.as_ref().map(|value| value.status)
+                != Some(ConnectionVerificationStatus::Verified)
+        {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "verify the Command Code GOAT account before refreshing its provider catalog",
+            ));
+        }
+        if account.key_cipher.trim().is_empty() {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "the selected account has no stored Key",
+            ));
+        }
+        let key = state
+            .decrypt_key(&account.key_cipher)
+            .map_err(V3ApiError::internal)?;
+        let config = state.config();
+        let goat_contract = if is_command_code_goat(&provider_id, &account.offering_id) {
+            state
+                .db
+                .lock()
+                .capture_goat_verification_contract(&account.id)
+                .map_err(V3ApiError::internal)?
+        } else {
+            None
+        };
+        let base_url = if provider_id == OPENCODE_PROVIDER_ID {
+            config.upstream_base_url.clone()
+        } else {
+            #[cfg(debug_assertions)]
+            {
+                goat::goat_verify_base_url(Some(state.process_generation()))
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                crate::provider::COMMAND_CODE_GOAT_BASE_URL.to_string()
+            }
+        };
+        let source_url = goat::goat_models_url_for_base(&base_url);
+        (account, config, key, goat_contract, base_url, source_url)
+    };
+
+    let label = if provider_id == OPENCODE_PROVIDER_ID {
+        "OpenCode Go"
+    } else {
+        "Command Code GOAT"
+    };
+    let models = goat::probe_provider_models(&config, &key, &base_url, label)
+        .await
+        .map_err(|failure| V3ApiError::outbound_failed(&state, failure.message))?;
+    if models.is_empty() {
+        return Err(V3ApiError::outbound_failed(
+            &state,
+            "provider model refresh returned an empty catalog",
+        ));
+    }
+
+    let now = Utc::now();
+    let _settings_update = state.settings_update.lock();
+    check_expectation(&state, &input.expectation)?;
+    if provider_id == OPENCODE_PROVIDER_ID {
+        let current = load_model_account(&state, &account.id)?;
+        if current.updated_at != account.updated_at || current.key_cipher != account.key_cipher {
+            return Err(V3ApiError::conflict_at(
+                &state,
+                "the selected OpenCode Go account changed while models were refreshing",
+            ));
+        }
+        state
+            .db
+            .lock()
+            .set_contract_catalog(
+                &ContractScope::provider(OPENCODE_PROVIDER_ID),
+                &models,
+                Some(now),
+                provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+                &source_url,
+                now,
+            )
+            .map_err(V3ApiError::internal)?;
+    } else {
+        let contract = goat_contract.ok_or_else(|| V3ApiError::not_found(&state))?;
+        let committed = state
+            .db
+            .lock()
+            .refresh_goat_catalog_if_contract_matches(&contract, &models, now)
+            .map_err(V3ApiError::internal)?;
+        if !committed {
+            return Err(V3ApiError::conflict_at(
+                &state,
+                "the selected Command Code GOAT account changed while models were refreshing",
+            ));
+        }
+    }
+    state
+        .reload_provider_contracts()
+        .map_err(V3ApiError::internal)?;
+    let revision = state.bump_settings_revision();
+    Ok(Json(ProviderModels {
+        provider_id,
+        account_id: account.id,
+        models,
+        refreshed_at: now.to_rfc3339(),
+        source_url,
+        revision,
+        process_generation: state.process_generation(),
+        pricing_revision: state.pricing_snapshot().revision.clone(),
+    }))
 }
 
 pub(super) async fn get_provider_contracts(
@@ -454,6 +601,14 @@ fn prepare_protocol_probe(
 
 fn validate_provider_scope(state: &CoreState, scope: &ContractScope) -> Result<(), V3ApiError> {
     match scope {
+        ContractScope::Provider(provider_id)
+            if provider_id == crate::provider::SCNET_PROVIDER_ID =>
+        {
+            Err(V3ApiError::invalid_request_at(
+                state,
+                "SCNet Token Plans are archived; protocol switches are read-only",
+            ))
+        }
         ContractScope::Provider(provider_id)
             if provider_contracts::builtin_provider_scope_ids().contains(&provider_id.as_str()) =>
         {

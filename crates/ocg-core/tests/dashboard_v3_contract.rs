@@ -39,8 +39,8 @@ fn checked_in_schema_matches_rust_dtos() {
 }
 
 #[test]
-fn schema_version_stays_at_v27() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+fn schema_version_stays_at_v28() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
 }
 
 #[test]

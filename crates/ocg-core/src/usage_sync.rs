@@ -8,8 +8,7 @@ pub mod provider_adapter;
 
 use crate::go_usage::{GoUsageError, GoUsageSnapshot};
 use crate::kernel::pricing::PricingLimits;
-use crate::models::{Account, AppConfig, UsageWindow};
-use crate::provider::ProviderUsageSyncState;
+use crate::models::{Account, AppConfig, ProviderUsageSyncState, UsageWindow};
 use crate::usage_sync::provider_adapter::supports_authoritative_auto_sync;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::future::FutureExt;
@@ -551,7 +550,7 @@ pub fn schedule_after_inference_429(state: &impl UsageSyncHost, account_id: &str
             }
         };
         if !supported {
-            // GOAT `/alpha/*` usage is experimental/unavailable and must not be
+            // GOAT has no supported quota/usage contract and must not be
             // coupled to inference cooldown or eligibility. Zen Free uses its
             // separate egress-IP/global cooldown path.
             return false;
@@ -1066,10 +1065,12 @@ mod tests {
     use super::*;
     use crate::crypto::{KeyCipher, StaticKeyCipher};
     use crate::db::{AccountUsageCalibrationSnapshot, Database};
-    use crate::models::{Account, AccountSetupStep, AccountType, AppConfig};
+    use crate::models::{
+        Account, AccountSetupStep, AccountType, AppConfig, CreditBalance, QuotaWindow,
+    };
     use crate::provider::{
-        COMMAND_CODE_PROVIDER_ID, CreditBalance, GOAT_OFFERING_ID, QUOTA_WINDOW_FIVE_HOURS,
-        QUOTA_WINDOW_MONTH, QUOTA_WINDOW_WEEK, QuotaWindow, ZEN_FREE_ACCOUNT_ID,
+        COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID, QUOTA_WINDOW_FIVE_HOURS, QUOTA_WINDOW_MONTH,
+        QUOTA_WINDOW_WEEK, ZEN_FREE_ACCOUNT_ID,
     };
     use crate::state::{CoreState, CoreStateInner};
     use std::path::PathBuf;

@@ -51,8 +51,8 @@ import {
   usagePercentFromCost,
   usageProgressPercentage,
   usageProgressStatus,
-} from "../views/accounts-usage";
-import type { UsageKey } from "../views/accounts-usage";
+} from "../domain/accounts-usage.ts";
+import type { UsageKey } from "../domain/accounts-usage.ts";
 import { t } from "../i18n/index.ts";
 import { formatCost } from "../utils/format.ts";
 

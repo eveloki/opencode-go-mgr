@@ -27,8 +27,9 @@ use serde_json::{Map, Value, json};
 
 use crate::models::{AccountSetupStep as ModelAccountSetupStep, AccountType as ModelAccountType};
 use crate::provider::{
-    ConnectionVerificationStatus as ProviderVerificationStatus, CredentialKind, QuotaScope,
-    UpstreamAuthScheme, UpstreamProtocolKind,
+    ConnectionVerificationStatus as ProviderVerificationStatus, CredentialKind,
+    GoatModelAccess as ProviderGoatModelAccess, QuotaScope, UpstreamAuthScheme,
+    UpstreamProtocolKind,
 };
 use crate::provider_contracts::{
     ContractEvidenceSource as DomainContractEvidenceSource,
@@ -64,6 +65,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AccountUpdate",
     "AccountOrder",
     "AccountSetupUpdate",
+    "AccountGoatModelAccessUpdate",
     "AccountCustomConfigUpdate",
     "AccountCustomConfigWrite",
     "AccountModelCapabilitiesUpdate",
@@ -156,6 +158,12 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "UsageRefresh",
     "UsageRefreshUpdate",
     "UsageRefreshThrottleError",
+    "ProviderModelsRefreshUpdate",
+    "ProviderModels",
+    "ProviderPricingSnapshot",
+    "ProviderPricingValue",
+    "ProviderPricingRefresh",
+    "ProviderPricingRefreshUpdate",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -715,6 +723,7 @@ pub struct Account {
     pub connection_verified_at: Option<String>,
     pub verification_error: Option<String>,
     pub plan_routable: bool,
+    pub goat_model_access: Option<AccountGoatModelAccess>,
     pub custom_config: Option<AccountCustomConfig>,
     pub model_capabilities: Vec<AccountModelCapability>,
     pub acknowledgements: Vec<AccountAcknowledgement>,
@@ -868,6 +877,16 @@ pub struct AccountSetupUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
     pub setup_step: AccountSetupStep,
+}
+
+/// PUT `/accounts/{id}/goat-model-access` body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountGoatModelAccessUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub model_access: AccountGoatModelAccess,
 }
 
 /// POST `/accounts/{id}/setup/verify-key` body. CAS tokens and the write-only
@@ -1063,6 +1082,32 @@ pub enum AccountVerificationStatus {
     Pending,
     Verified,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AccountGoatModelAccess {
+    Goat,
+    All,
+}
+
+impl From<ProviderGoatModelAccess> for AccountGoatModelAccess {
+    fn from(value: ProviderGoatModelAccess) -> Self {
+        match value {
+            ProviderGoatModelAccess::Goat => Self::Goat,
+            ProviderGoatModelAccess::All => Self::All,
+        }
+    }
+}
+
+impl From<AccountGoatModelAccess> for ProviderGoatModelAccess {
+    fn from(value: AccountGoatModelAccess) -> Self {
+        match value {
+            AccountGoatModelAccess::Goat => Self::Goat,
+            AccountGoatModelAccess::All => Self::All,
+        }
+    }
 }
 
 impl From<ProviderVerificationStatus> for AccountVerificationStatus {
@@ -1421,6 +1466,31 @@ pub struct CardCapabilitySummary {
     pub catalog_refresh: bool,
 }
 
+/// Provider-scoped model-directory refresh. The selected account supplies the
+/// credential; the saved result belongs to the Provider scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProviderModelsRefreshUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub account_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProviderModels {
+    pub provider_id: String,
+    pub account_id: String,
+    pub models: Vec<String>,
+    pub refreshed_at: String,
+    pub source_url: String,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+}
+
 /// PUT one protocol switch. CAS tokens and `enabled` are required. The path
 /// protocol token is not repeated here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1777,9 +1847,83 @@ pub struct ProviderPricing {
     pub offering_id: String,
     pub availability: PricingAvailability,
     pub snapshot: Option<PricingSnapshot>,
+    pub provider_snapshot: Option<ProviderPricingSnapshot>,
     pub revision: u64,
     pub process_generation: u64,
     pub pricing_revision: String,
+    pub provider_pricing_revision: String,
+}
+
+/// Result of refreshing every priced offering owned by one Provider. Provider
+/// failures are isolated: this response never represents a cross-Provider
+/// transaction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderPricingRefresh {
+    pub provider_id: String,
+    pub offering_ids: Vec<String>,
+    pub refresh_status: PricingRefreshStatus,
+    pub multiplier_changes: Vec<PricingMultiplierChange>,
+    pub official_content_hash: Option<String>,
+    pub error: Option<String>,
+    /// The refreshed Go snapshot. Provider-neutral plans expose their active
+    /// snapshot through the provider pricing read endpoint instead.
+    pub snapshot: Option<PricingSnapshot>,
+    pub revision: u64,
+    pub process_generation: u64,
+    pub pricing_revision: String,
+    pub provider_pricing_revision: String,
+}
+
+/// POST Provider pricing-refresh body. The Provider-local pricing revision is
+/// distinct from the global Go `pricingRevision` control token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderPricingRefreshUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub expected_provider_pricing_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PricingRefreshPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_official_content_hash: Option<String>,
+}
+
+/// Provider-neutral immutable pricing snapshot. GOAT uses this display-only
+/// shape; it never enters the local Go quota debit calculation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderPricingSnapshot {
+    pub revision: String,
+    pub activated_at: String,
+    pub document_updated_at: Option<String>,
+    pub source_url: String,
+    pub content_hash: String,
+    pub evidence: String,
+    pub values: Vec<ProviderPricingValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderPricingValue {
+    pub model_id: String,
+    pub display_name: String,
+    pub input_per_million: Option<f64>,
+    pub output_per_million: Option<f64>,
+    pub cache_read_per_million: Option<f64>,
+    pub cache_write_per_million: Option<f64>,
+    pub plan_limit: Option<f64>,
+    pub model_allowance: Option<f64>,
+    pub quota_multiplier: Option<f64>,
+    pub paid_plan_price: Option<f64>,
+    pub currency: Option<String>,
+    pub min_input_tokens: Option<i64>,
+    pub max_input_tokens: Option<i64>,
+    pub time_window: PricingTimeWindow,
 }
 
 /// Registry pricing availability. Wire values stay snake_case.
@@ -2115,7 +2259,7 @@ pub struct ProviderUsage {
     pub pricing_revision: Option<String>,
 }
 
-/// One live or synthetic quota window. Distinct from `provider::QuotaWindow`.
+/// One live or synthetic quota window. Distinct from `models::QuotaWindow`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -2328,6 +2472,10 @@ pub fn contract_schema() -> Value {
     include_type::<PricingRefreshStatus>(&mut serialize);
     include_type::<PricingMultiplierChange>(&mut serialize);
     include_type::<ProviderPricing>(&mut serialize);
+    include_type::<ProviderPricingSnapshot>(&mut serialize);
+    include_type::<ProviderPricingValue>(&mut serialize);
+    include_type::<ProviderPricingRefresh>(&mut serialize);
+    include_type::<ProviderModels>(&mut serialize);
     include_type::<PricingAvailability>(&mut serialize);
     include_type::<GatewayStatus>(&mut serialize);
     include_type::<ApplicationModels>(&mut serialize);
@@ -2372,6 +2520,7 @@ pub fn contract_schema() -> Value {
     include_type::<AccountUpdate>(&mut deserialize);
     include_type::<AccountOrder>(&mut deserialize);
     include_type::<AccountSetupUpdate>(&mut deserialize);
+    include_type::<AccountGoatModelAccessUpdate>(&mut deserialize);
     include_type::<AccountManagedKeyVerify>(&mut deserialize);
     include_type::<AccountCustomConfigUpdate>(&mut deserialize);
     include_type::<AccountCustomConfigWrite>(&mut deserialize);
@@ -2385,6 +2534,7 @@ pub fn contract_schema() -> Value {
     include_type::<ProtocolProbeRequest>(&mut deserialize);
     include_type::<PricingRefreshUpdate>(&mut deserialize);
     include_type::<PricingRefreshPolicy>(&mut deserialize);
+    include_type::<ProviderPricingRefreshUpdate>(&mut deserialize);
     include_type::<PricingMultipliersUpdate>(&mut deserialize);
     include_type::<PricingMultiplierWrite>(&mut deserialize);
     include_type::<GatewayLogQuery>(&mut deserialize);
@@ -2401,6 +2551,7 @@ pub fn contract_schema() -> Value {
     include_type::<BrowserTarget>(&mut deserialize);
     include_type::<InstallUpdate>(&mut deserialize);
     include_type::<UsageRefreshUpdate>(&mut deserialize);
+    include_type::<ProviderModelsRefreshUpdate>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -2830,6 +2981,7 @@ mod tests {
             connection_verified_at: None,
             verification_error: None,
             plan_routable: true,
+            goat_model_access: None,
             custom_config: None,
             model_capabilities: Vec::new(),
             acknowledgements: Vec::new(),
@@ -3111,6 +3263,7 @@ mod tests {
         "AccountUpdate",
         "AccountOrder",
         "AccountSetupUpdate",
+        "AccountGoatModelAccessUpdate",
         "AccountCustomConfigUpdate",
         "AccountCustomConfigWrite",
         "AccountModelCapabilitiesUpdate",
@@ -3503,6 +3656,7 @@ mod tests {
                 "connectionVerifiedAt",
                 "verificationError",
                 "planRoutable",
+                "goatModelAccess",
                 "customConfig",
                 "modelCapabilities",
                 "acknowledgements"
@@ -4223,6 +4377,14 @@ mod tests {
         "UsageRefreshUpdate",
         "UsageRefreshThrottleError",
     ];
+    const PROVIDER_REFRESH_CATALOG_TYPES: &[&str] = &[
+        "ProviderModelsRefreshUpdate",
+        "ProviderModels",
+        "ProviderPricingSnapshot",
+        "ProviderPricingValue",
+        "ProviderPricingRefresh",
+        "ProviderPricingRefreshUpdate",
+    ];
 
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
@@ -4292,7 +4454,12 @@ mod tests {
             &CATALOG_TYPE_NAMES[managed_end..usage_refresh_end],
             USAGE_REFRESH_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_end);
+        let provider_refresh_end = usage_refresh_end + PROVIDER_REFRESH_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[usage_refresh_end..provider_refresh_end],
+            PROVIDER_REFRESH_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), provider_refresh_end);
     }
 
     #[test]
@@ -4399,9 +4566,11 @@ mod tests {
             offering_id: "go".into(),
             availability: PricingAvailability::Available,
             snapshot: None,
+            provider_snapshot: None,
             revision: 11,
             process_generation: 9,
             pricing_revision: "seed-2026-08-16-local-v4".into(),
+            provider_pricing_revision: "seed-2026-08-16-local-v4".into(),
         };
         let provider_value = serde_json::to_value(&provider).unwrap();
         assert_eq!(provider_value["snapshot"], Value::Null);

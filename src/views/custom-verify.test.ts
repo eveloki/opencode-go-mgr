@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import type { Account } from "../api/tauri.ts";
+import type { Account } from "../api/dashboard.ts";
 import {
   accountMenuOptions,
   accountStatusLabel,
   accountStatusTagType,
-} from "./account-display.ts";
+} from "../domain/account-display.ts";
 
 const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
 const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
 const form = readFileSync(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
-const usage = readFileSync(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
+const usage = readFileSync(new URL("../domain/useAccountUsage.ts", import.meta.url), "utf8");
 
 function customAccount(overrides: Partial<Account> = {}): Account {
   return {
@@ -77,6 +77,9 @@ test("the verify flow is revision-guarded and never claims enablement", () => {
     accounts.indexOf("async function saveCustomAccountEdit"),
   );
   assert.match(body, /runWithFreshSettingsRevision\(\(revision\) => \(\s*dashboardApi\.verifyAccountConnection\(id, revision\)/);
+  assert.match(body, /updated\.verification_status === "failed"/);
+  assert.match(body, /updated\.verification_error\?\.trim\(\) \|\| t\("验证失败"\)/);
+  assert.match(body, /message\.error\(t\("连接验证失败: \{error\}"/);
   assert.match(body, /message\.success\(t\("连接验证成功，账号保持禁用，可手动启用。"\)\)/);
   assert.doesNotMatch(body, /toggleAccount|已启用/);
   // Failures refresh server state so the failed verification status renders.
@@ -99,7 +102,8 @@ test("Custom edits validate before dispatching only their changed sections", () 
 
 test("no Go usage or official refresh is ever requested for Custom accounts", () => {
   assert.match(accounts, /if \(accountHasUsageDisplay\(created\) && accountIsReady\(created\)\)/);
-  assert.match(accounts, /function accountHasUsageDisplay[\s\S]*isCommandCodeGoatAccount[\s\S]*provider_id === "opencode"[\s\S]*offering_id === "go"/);
+  assert.match(accounts, /function accountHasUsageDisplay[\s\S]*provider_id === "opencode" && account\.offering_id === "go"/);
+  assert.doesNotMatch(accounts.slice(accounts.indexOf("function accountHasUsageDisplay"), accounts.indexOf("async function refreshAccountState")), /isCommandCodeGoatAccount/);
   assert.doesNotMatch(accounts, /isCustomApiAccount\(created\)/);
   assert.match(accounts, /accountIsReady\(account\) && accountHasUsageDisplay\(account\)/);
   assert.match(usage, /async function retryQuotaLimits[\s\S]*?account\.provider_id === "opencode"[\s\S]*?account\.offering_id === "go"/);
@@ -111,9 +115,9 @@ test("the card exposes verify for pending/failed Custom accounts and gates the e
   assert.match(card, /:loading="verifying"/);
   assert.match(card, /customAccountToggleBlocked\(props\.account\)/);
   assert.match(card, /:disabled="!!toggleBlockedReason"/);
-  // Go-only controls stay Go-gated, and purchase/expiry tags skip Custom.
+  // Go-only controls stay Go-gated, and purchase/expiry tags are limited to plans that carry them.
   assert.match(card, /v-if="isGo && accountIsReady\(account\)"/);
-  assert.match(card, /!isZen && !isCustom && accountIsReady\(account\)/);
+  assert.match(card, /\(isGo \|\| isScnet\) && accountIsReady\(account\)/);
   // The persistent warning carries the administrator-trust risk copy.
   assert.match(card, /目标端点由管理员自行选择并负责/);
 });

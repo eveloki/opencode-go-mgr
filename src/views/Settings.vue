@@ -484,7 +484,7 @@ import {
   normalizeClientRootUrl,
   resolveConnectionUrls,
 } from "./dashboard-connection";
-import { DEFAULT_OPENCODE_INVITE_URL, normalizeOpenCodeInviteUrl } from "./managed-account";
+import { DEFAULT_OPENCODE_INVITE_URL, normalizeOpenCodeInviteUrl } from "../domain/managed-account.ts";
 import { mergeUnsavedSettings } from "./settings-merge";
 import { normalizeProxyUrl, validateProxyList } from "./settings-proxy";
 import {

@@ -59,7 +59,7 @@ fn namespaced_key(format: ApiFormat, model: &str, kind: &str, payload: &[u8]) ->
 
 // Avoid adding a hex crate; format digest bytes manually.
 mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
+    pub(crate) fn encode(bytes: impl AsRef<[u8]>) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let bytes = bytes.as_ref();
         let mut out = String::with_capacity(bytes.len() * 2);

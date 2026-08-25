@@ -1,9 +1,9 @@
 import type { Account } from "../api/dashboard.ts";
-import type { PlanDefinition } from "./plans.ts";
-import { planForAccount } from "./plans.ts";
-import { isCooling, isFreeCooling } from "./accounts-usage.ts";
-import { isZenFreeAccount } from "./account-providers.ts";
-import { isCustomApiAccount } from "./custom-account.ts";
+import type { PlanDefinition } from "../domain/plans.ts";
+import { planForAccount } from "../domain/plans.ts";
+import { isCooling, isFreeCooling } from "../domain/accounts-usage.ts";
+import { isZenFreeAccount } from "../domain/account-providers.ts";
+import { isCustomApiAccount } from "../domain/custom-account.ts";
 
 /**
  * Plan/status filters for the Accounts workbench. Both filters are pure and

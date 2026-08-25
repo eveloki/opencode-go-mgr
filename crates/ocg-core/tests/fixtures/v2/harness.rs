@@ -22,59 +22,59 @@ use std::time::Duration;
 #[path = "../fake_upstream.rs"]
 mod fake_upstream;
 
-pub use fake_upstream::FakeReply;
+pub(crate) use fake_upstream::FakeReply;
 use fake_upstream::{FakeCall, FakeCalls, start_fake_upstream, start_raw_disconnect_upstream};
 
-pub const GATEWAY_KEY: &str = "gw-v2-contract";
-pub const GO_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-go";
-pub const GO_ACCOUNT_KEY_2: &str = "v2-secret-KEY-9f3a2c1b-go-2";
-pub const GOAT_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-goat";
-pub const SCNET_ACCOUNT_KEY: &str = "sk-tp-v2-secret-KEY-9f3a2c1b";
-pub const CUSTOM_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-custom";
+pub(crate) const GATEWAY_KEY: &str = "gw-v2-contract";
+pub(crate) const GO_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-go";
+pub(crate) const GO_ACCOUNT_KEY_2: &str = "v2-secret-KEY-9f3a2c1b-go-2";
+pub(crate) const GOAT_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-goat";
+pub(crate) const SCNET_ACCOUNT_KEY: &str = "sk-tp-v2-secret-KEY-9f3a2c1b";
+pub(crate) const CUSTOM_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-custom";
 
-pub const OPENCODE_PROVIDER_ID: &str = "opencode";
-pub const GO_OFFERING_ID: &str = "go";
-pub const COMMAND_CODE_PROVIDER_ID: &str = "command-code";
-pub const GOAT_OFFERING_ID: &str = "goat";
-pub const SCNET_PROVIDER_ID: &str = "scnet";
-pub const SCNET_BASIC_OFFERING_ID: &str = "token-plan-basic";
-pub const SCNET_STANDARD_OFFERING_ID: &str = "token-plan-standard";
-pub const SCNET_PREMIUM_OFFERING_ID: &str = "token-plan-premium";
-pub const CUSTOM_PROVIDER_ID: &str = "custom";
-pub const CUSTOM_OFFERING_ID: &str = "api";
-pub const CUSTOM_UNROUTABLE_MODEL_ID: &str = "custom-unroutable-model";
+pub(crate) const OPENCODE_PROVIDER_ID: &str = "opencode";
+pub(crate) const GO_OFFERING_ID: &str = "go";
+pub(crate) const COMMAND_CODE_PROVIDER_ID: &str = "command-code";
+pub(crate) const GOAT_OFFERING_ID: &str = "goat";
+pub(crate) const SCNET_PROVIDER_ID: &str = "scnet";
+pub(crate) const SCNET_BASIC_OFFERING_ID: &str = "token-plan-basic";
+pub(crate) const SCNET_STANDARD_OFFERING_ID: &str = "token-plan-standard";
+pub(crate) const SCNET_PREMIUM_OFFERING_ID: &str = "token-plan-premium";
+pub(crate) const CUSTOM_PROVIDER_ID: &str = "custom";
+pub(crate) const CUSTOM_OFFERING_ID: &str = "api";
+pub(crate) const CUSTOM_UNROUTABLE_MODEL_ID: &str = "custom-unroutable-model";
 
-pub const GO_ALIAS: &str = "deepseek-v4-flash";
-pub const GOAT_UNIQUE_RAW_ID: &str = "deepseek/deepseek-v4-flash";
-pub const FREE_MODEL: &str = "mimo-v2.5-free";
-pub const AMBIGUOUS_ERROR_TYPE: &str = "ambiguous_model_id";
-pub const CUSTOM_OVERLAP_RAW_ID: &str = "shared-raw-model";
+pub(crate) const GO_ALIAS: &str = "deepseek-v4-flash";
+pub(crate) const GOAT_UNIQUE_RAW_ID: &str = "deepseek/deepseek-v4-flash";
+pub(crate) const FREE_MODEL: &str = "mimo-v2.5-free";
+pub(crate) const AMBIGUOUS_ERROR_TYPE: &str = "ambiguous_model_id";
+pub(crate) const CUSTOM_OVERLAP_RAW_ID: &str = "shared-raw-model";
 
-pub const SUCCESS_CHAT_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"upstream-should-not-leak","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
+pub(crate) const SUCCESS_CHAT_BODY: &str = r#"{"id":"ok","object":"chat.completion","model":"upstream-should-not-leak","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}"#;
 
-pub const MIXED_UPSTREAM_MODELS_BODY: &str = r#"{"object":"list","data":[{"id":"deepseek-v4-flash"},{"id":"deepseek/deepseek-v4-flash"},{"id":"vendor-raw-not-an-alias"},{"id":"minimax-m2.7"},{"id":"grok-4.5"}]}"#;
+pub(crate) const MIXED_UPSTREAM_MODELS_BODY: &str = r#"{"object":"list","data":[{"id":"deepseek-v4-flash"},{"id":"deepseek/deepseek-v4-flash"},{"id":"vendor-raw-not-an-alias"},{"id":"minimax-m2.7"},{"id":"grok-4.5"}]}"#;
 
-pub const CATALOG_CONTRACT: &str = include_str!("catalog_contract.json");
-pub const ALIAS_CONTRACT: &str = include_str!("alias_contract.json");
+pub(crate) const CATALOG_CONTRACT: &str = include_str!("catalog_contract.json");
+pub(crate) const ALIAS_CONTRACT: &str = include_str!("alias_contract.json");
 
 const CHAT_STREAM_HEAD: &str = "data: {\"id\":\"chat-stream\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n";
 
-pub fn loopback_client() -> reqwest::Client {
+pub(crate) fn loopback_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
         .build()
         .expect("v2 test client should build")
 }
 
-pub fn catalog_contract() -> Value {
+pub(crate) fn catalog_contract() -> Value {
     serde_json::from_str(CATALOG_CONTRACT).expect("catalog contract fixture")
 }
 
-pub fn alias_contract() -> Value {
+pub(crate) fn alias_contract() -> Value {
     serde_json::from_str(ALIAS_CONTRACT).expect("alias contract fixture")
 }
 
-pub struct V2Harness {
+pub(crate) struct V2Harness {
     pub state: Arc<CoreStateInner>,
     pub dir: PathBuf,
     pub handle: GatewayHandle,
@@ -87,11 +87,11 @@ pub struct V2Harness {
 }
 
 impl V2Harness {
-    pub async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         Self::start_with_upstream(None).await
     }
 
-    pub async fn start_with_chat_success(account_keys: &[&str]) -> Self {
+    pub(crate) async fn start_with_chat_success(account_keys: &[&str]) -> Self {
         let mut replies = HashMap::new();
         for key in account_keys {
             replies.insert(
@@ -112,7 +112,7 @@ impl V2Harness {
         Self::start_with_upstream(Some(replies)).await
     }
 
-    pub async fn start_with_upstream(
+    pub(crate) async fn start_with_upstream(
         replies: Option<HashMap<String, VecDeque<FakeReply>>>,
     ) -> Self {
         let dir = temp_data_dir();
@@ -160,11 +160,11 @@ impl V2Harness {
         }
     }
 
-    pub fn dashboard(&self, path: &str) -> String {
+    pub(crate) fn dashboard(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}/dashboard/api/v3{path}", self.port)
     }
 
-    pub fn mutation_body(&self, body: Value) -> Value {
+    pub(crate) fn mutation_body(&self, body: Value) -> Value {
         keys_to_camel(with_cas_tokens(
             body,
             self.state.settings_revision(),
@@ -172,18 +172,18 @@ impl V2Harness {
         ))
     }
 
-    pub fn gateway(&self, path: &str) -> String {
+    pub(crate) fn gateway(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
     }
 
-    pub async fn get_json(&self, path: &str) -> (StatusCode, Value) {
+    pub(crate) async fn get_json(&self, path: &str) -> (StatusCode, Value) {
         let response = self.client.get(self.dashboard(path)).send().await.unwrap();
         let status = response.status();
         let body = decode_json(response).await;
         (status, adapt_v3_response(path, status, body))
     }
 
-    pub async fn post_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+    pub(crate) async fn post_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
         let response = self
             .client
             .post(self.dashboard(path))
@@ -196,7 +196,7 @@ impl V2Harness {
         (status, adapt_v3_response(path, status, body))
     }
 
-    pub async fn patch_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+    pub(crate) async fn patch_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
         let response = self
             .client
             .patch(self.dashboard(path))
@@ -209,7 +209,7 @@ impl V2Harness {
         (status, adapt_v3_response(path, status, body))
     }
 
-    pub async fn put_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+    pub(crate) async fn put_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
         let response = self
             .client
             .put(self.dashboard(path))
@@ -222,7 +222,7 @@ impl V2Harness {
         (status, adapt_v3_response(path, status, body))
     }
 
-    pub async fn delete_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+    pub(crate) async fn delete_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
         let response = self
             .client
             .delete(self.dashboard(path))
@@ -235,7 +235,7 @@ impl V2Harness {
         (status, adapt_v3_response(path, status, body))
     }
 
-    pub async fn catalog(&self) -> Value {
+    pub(crate) async fn catalog(&self) -> Value {
         let (status, body) = self.get_json("/providers").await;
         assert_eq!(
             status,
@@ -245,17 +245,17 @@ impl V2Harness {
         body
     }
 
-    pub async fn accounts(&self) -> Value {
+    pub(crate) async fn accounts(&self) -> Value {
         let (status, body) = self.get_json("/accounts").await;
         assert_eq!(status, StatusCode::OK, "account list: {body}");
         body
     }
 
-    pub async fn create_account(&self, payload: Value) -> (StatusCode, Value) {
+    pub(crate) async fn create_account(&self, payload: Value) -> (StatusCode, Value) {
         self.post_json("/accounts", &payload).await
     }
 
-    pub async fn create_go_account(&self, name: &str, key: &str) -> Value {
+    pub(crate) async fn create_go_account(&self, name: &str, key: &str) -> Value {
         let revision = self.settings_revision().await;
         let (status, body) = self
             .create_account(json!({
@@ -270,7 +270,7 @@ impl V2Harness {
         body
     }
 
-    pub async fn account_by_id(&self, id: &str) -> Value {
+    pub(crate) async fn account_by_id(&self, id: &str) -> Value {
         self.accounts()
             .await
             .as_array()
@@ -281,12 +281,12 @@ impl V2Harness {
             .unwrap_or_else(|| panic!("account {id} missing from dashboard list"))
     }
 
-    pub async fn settings_revision(&self) -> u64 {
+    pub(crate) async fn settings_revision(&self) -> u64 {
         let (_, settings) = self.get_json("/settings").await;
         settings["revision"].as_u64().unwrap_or(0)
     }
 
-    pub async fn chat(&self, model: &str) -> (StatusCode, Value) {
+    pub(crate) async fn chat(&self, model: &str) -> (StatusCode, Value) {
         let response = self
             .client
             .post(self.gateway("/v1/chat/completions"))
@@ -308,7 +308,7 @@ impl V2Harness {
         (status, body)
     }
 
-    pub async fn list_client_models(&self) -> (StatusCode, Value) {
+    pub(crate) async fn list_client_models(&self) -> (StatusCode, Value) {
         let response = self
             .client
             .get(self.gateway("/v1/models"))
@@ -324,7 +324,7 @@ impl V2Harness {
         (status, body)
     }
 
-    pub async fn claude_desktop_models(&self) -> (StatusCode, Value) {
+    pub(crate) async fn claude_desktop_models(&self) -> (StatusCode, Value) {
         let response = self
             .client
             .get(self.gateway("/claude-desktop/v1/models"))
@@ -340,37 +340,37 @@ impl V2Harness {
         (status, body)
     }
 
-    pub async fn forward_logs(&self) -> Value {
+    pub(crate) async fn forward_logs(&self) -> Value {
         let (status, body) = self.get_json("/logs/forward?limit=50").await;
         assert_eq!(status, StatusCode::OK, "forward logs: {body}");
         body
     }
 
-    pub async fn gateway_logs(&self) -> Value {
+    pub(crate) async fn gateway_logs(&self) -> Value {
         let (status, body) = self.get_json("/logs/gateway?limit=100").await;
         assert_eq!(status, StatusCode::OK, "gateway logs: {body}");
         body
     }
 
-    pub fn fake_calls(&self) -> Vec<FakeCall> {
+    pub(crate) fn fake_calls(&self) -> Vec<FakeCall> {
         self.fake_calls
             .as_ref()
             .map(|calls| calls.lock().expect("fake call log").clone())
             .unwrap_or_default()
     }
 
-    pub fn fake_call_keys(&self) -> Vec<String> {
+    pub(crate) fn fake_call_keys(&self) -> Vec<String> {
         self.fake_calls().into_iter().map(|call| call.key).collect()
     }
 
-    pub fn disconnect_call_count(&self) -> usize {
+    pub(crate) fn disconnect_call_count(&self) -> usize {
         self.disconnect_calls
             .as_ref()
             .map(|calls| calls.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0)
     }
 
-    pub fn shutdown(mut self) {
+    pub(crate) fn shutdown(mut self) {
         gateway::stop_gateway(self.handle);
         if let Some(stop) = self.stop_fake.take() {
             let _ = stop.send(());
@@ -379,7 +379,7 @@ impl V2Harness {
     }
 }
 
-pub async fn start_output_then_disconnect_upstream() -> (
+pub(crate) async fn start_output_then_disconnect_upstream() -> (
     String,
     Arc<std::sync::atomic::AtomicUsize>,
     tokio::sync::oneshot::Sender<()>,
@@ -394,7 +394,7 @@ pub async fn start_output_then_disconnect_upstream() -> (
     start_raw_disconnect_upstream(raw).await
 }
 
-pub async fn start_v2_with_disconnect_upstream() -> V2Harness {
+pub(crate) async fn start_v2_with_disconnect_upstream() -> V2Harness {
     let dir = temp_data_dir();
     let db = Database::open(dir.clone()).unwrap();
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("v2-tests"));
@@ -423,7 +423,7 @@ pub async fn start_v2_with_disconnect_upstream() -> V2Harness {
     }
 }
 
-pub fn catalog_entry<'a>(
+pub(crate) fn catalog_entry<'a>(
     catalog: &'a Value,
     provider_id: &str,
     offering_id: &str,
@@ -434,14 +434,14 @@ pub fn catalog_entry<'a>(
         .find(|entry| entry["provider_id"] == provider_id && entry["offering_id"] == offering_id)
 }
 
-pub fn catalog_aliases(entry: &Value) -> Vec<Value> {
+pub(crate) fn catalog_aliases(entry: &Value) -> Vec<Value> {
     match &entry["model_aliases"] {
         Value::Array(items) => items.clone(),
         _ => Vec::new(),
     }
 }
 
-pub fn alias_name_list(entry: &Value) -> Vec<String> {
+pub(crate) fn alias_name_list(entry: &Value) -> Vec<String> {
     catalog_aliases(entry)
         .into_iter()
         .filter_map(|item| {
@@ -452,11 +452,11 @@ pub fn alias_name_list(entry: &Value) -> Vec<String> {
         .collect()
 }
 
-pub fn alias_names(entry: &Value) -> HashSet<String> {
+pub(crate) fn alias_names(entry: &Value) -> HashSet<String> {
     alias_name_list(entry).into_iter().collect()
 }
 
-pub fn form_field_ids(entry: &Value) -> HashSet<String> {
+pub(crate) fn form_field_ids(entry: &Value) -> HashSet<String> {
     entry["form_fields"]
         .as_array()
         .into_iter()
@@ -465,14 +465,14 @@ pub fn form_field_ids(entry: &Value) -> HashSet<String> {
         .collect()
 }
 
-pub fn matching_acknowledgements(notice: &Value) -> Value {
+pub(crate) fn matching_acknowledgements(notice: &Value) -> Value {
     json!([{
         "acknowledgement_id": notice["acknowledgement_id"],
         "version": notice["version"]
     }])
 }
 
-pub fn custom_create_payload(
+pub(crate) fn custom_create_payload(
     name: &str,
     key: &str,
     revision: u64,
@@ -497,7 +497,7 @@ pub fn custom_create_payload(
     })
 }
 
-pub fn overlapping_raw_ids(catalog: &Value) -> Vec<(String, Vec<(String, String)>)> {
+pub(crate) fn overlapping_raw_ids(catalog: &Value) -> Vec<(String, Vec<(String, String)>)> {
     let mut by_raw: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let Some(entries) = catalog.as_array() else {
         return Vec::new();
@@ -532,7 +532,7 @@ pub fn overlapping_raw_ids(catalog: &Value) -> Vec<(String, Vec<(String, String)
         .collect()
 }
 
-pub fn scnet_entries(catalog: &Value) -> Vec<&Value> {
+pub(crate) fn scnet_entries(catalog: &Value) -> Vec<&Value> {
     catalog
         .as_array()
         .into_iter()
@@ -546,13 +546,13 @@ pub fn scnet_entries(catalog: &Value) -> Vec<&Value> {
         .collect()
 }
 
-pub fn error_type(body: &Value) -> Option<&str> {
+pub(crate) fn error_type(body: &Value) -> Option<&str> {
     body.pointer("/error/type")
         .and_then(Value::as_str)
         .or_else(|| body.get("type").and_then(Value::as_str))
 }
 
-pub fn error_message(body: &Value) -> String {
+pub(crate) fn error_message(body: &Value) -> String {
     if let Some(message) = body.pointer("/error/message").and_then(Value::as_str) {
         return message.to_string();
     }
@@ -562,7 +562,7 @@ pub fn error_message(body: &Value) -> String {
     }
 }
 
-pub fn json_contains_secret(value: &Value, secret: &str) -> bool {
+pub(crate) fn json_contains_secret(value: &Value, secret: &str) -> bool {
     if secret.is_empty() {
         return false;
     }
@@ -574,7 +574,7 @@ pub fn json_contains_secret(value: &Value, secret: &str) -> bool {
     }
 }
 
-pub fn client_model_ids(body: &Value) -> Vec<String> {
+pub(crate) fn client_model_ids(body: &Value) -> Vec<String> {
     body["data"]
         .as_array()
         .into_iter()
@@ -583,7 +583,7 @@ pub fn client_model_ids(body: &Value) -> Vec<String> {
         .collect()
 }
 
-pub fn required_catalog_fields() -> Vec<String> {
+pub(crate) fn required_catalog_fields() -> Vec<String> {
     catalog_contract()["required_entry_fields"]
         .as_array()
         .into_iter()
@@ -592,7 +592,7 @@ pub fn required_catalog_fields() -> Vec<String> {
         .collect()
 }
 
-pub fn risk_notice_fields() -> Vec<String> {
+pub(crate) fn risk_notice_fields() -> Vec<String> {
     catalog_contract()["risk_notice_fields"]
         .as_array()
         .into_iter()
@@ -601,7 +601,7 @@ pub fn risk_notice_fields() -> Vec<String> {
         .collect()
 }
 
-pub fn missing_fields(entry: &Value, fields: &[String]) -> Vec<String> {
+pub(crate) fn missing_fields(entry: &Value, fields: &[String]) -> Vec<String> {
     fields
         .iter()
         .filter(|field| entry.get(field.as_str()).is_none() || entry[field.as_str()].is_null())

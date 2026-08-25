@@ -221,6 +221,18 @@ impl GatewayExecutor {
                     );
                 }
             };
+            let goat_runtimes = match state.db.lock().list_goat_account_runtimes() {
+                Ok(runtimes) => crate::goat::goat_runtimes_by_account(&runtimes),
+                Err(error) => {
+                    let message = format!("failed to load Command Code GOAT accounts: {error}");
+                    return protocol_error_response(
+                        client_format,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &message,
+                        None,
+                    );
+                }
+            };
             let route_set = match materialize_account_routes(
                 &accounts,
                 &snapshots.config,
@@ -231,6 +243,7 @@ impl GatewayExecutor {
                 &client_body,
                 free_available,
                 &custom_runtimes,
+                &goat_runtimes,
                 &snapshots.contracts,
             ) {
                 Ok(route_set) => route_set,
@@ -721,6 +734,7 @@ mod tests {
             "free_channel_exhausted",
             "list_accounts",
             "list_custom_account_runtimes",
+            "list_goat_account_runtimes",
             "materialize_account_routes",
             "Utc::now",
             "Instant::now",

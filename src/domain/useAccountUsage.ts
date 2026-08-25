@@ -18,10 +18,7 @@ import {
 } from "./accounts-usage.ts";
 import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
 import { accountIsReady, isUsageRefreshBlocked } from "./account-display.ts";
-import {
-  COMMAND_CODE_GOAT_USAGE_LIMITS,
-  isCommandCodeGoatAccount,
-} from "./account-providers.ts";
+import { isCommandCodeGoatAccount } from "./account-providers.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -31,10 +28,11 @@ export type AccountUsageEdits = Record<UsageKey, UsageEditState>;
 export type UsageLimitView = { key: UsageKey; label: string; limit: number };
 
 /**
- * Quota window state for the account list: pricing limits, per-account usage
- * snapshots, the manual calibration drafts, and the official-usage refresh
- * flow (including 429 throttle handling). Future dynamic quota windows per
- * provider/offering should localize here and in `accounts-usage.ts`.
+ * Quota window state for the account list: OpenCode Go pricing limits,
+ * per-account usage snapshots, the manual calibration drafts, and the
+ * official-usage refresh flow (including 429 throttle handling). GOAT is
+ * unpriced and has no machine-readable usage endpoint, so it does not use
+ * window quotas or calibration.
  */
 export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
   const message = useMessage();
@@ -53,9 +51,8 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
   });
 
   function usageLimitsFor(account: Account): UsageLimitView[] {
-    const limits = isCommandCodeGoatAccount(account)
-      ? COMMAND_CODE_GOAT_USAGE_LIMITS
-      : quotaLimits.value;
+    if (isCommandCodeGoatAccount(account)) return [];
+    const limits = quotaLimits.value;
     if (!limits) return [];
     return [
       { key: "window_5h", label: t("5小时"), limit: limits.window_5h },
@@ -304,19 +301,11 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
 
   async function retryQuotaLimits() {
     if (!await loadQuotaLimits()) return;
-    // OpenCode Go uses the official snapshot. GOAT has no machine-readable
-    // usage endpoint, so its locally calibrated display uses the same three
-    // persisted legacy windows with provider-specific limits.
     await mapWithConcurrency(
       accounts.value.filter((account) => (
         accountIsReady(account)
-        && (
-          isCommandCodeGoatAccount(account)
-          || (
-            account.provider_id === "opencode"
-            && account.offering_id === "go"
-          )
-        )
+        && account.provider_id === "opencode"
+        && account.offering_id === "go"
       )),
       4,
       (account) => loadAccountUsage(account.id),

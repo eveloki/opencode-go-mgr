@@ -157,8 +157,8 @@ fn assert_unrelated_config(harness: &V3Harness, before: &ocg_core::models::AppCo
 }
 
 #[test]
-fn dashboard_v3_claude_desktop_schema_version_stays_at_v27() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+fn dashboard_v3_claude_desktop_schema_version_stays_at_v28() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
 }
 
 #[test]
@@ -208,9 +208,15 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "UsageRefresh",
             "UsageRefreshUpdate",
             "UsageRefreshThrottleError",
+            "ProviderModelsRefreshUpdate",
+            "ProviderModels",
+            "ProviderPricingSnapshot",
+            "ProviderPricingValue",
+            "ProviderPricingRefresh",
+            "ProviderPricingRefreshUpdate",
         ]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_start + 3);
+    assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_start + 9);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");

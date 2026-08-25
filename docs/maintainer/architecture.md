@@ -16,6 +16,33 @@ ocg-cli     -> ocg-core
 src-tauri   -> ocg-core
 ```
 
+```text
+  ocg-domain                      ocg-infra
+  IDs, BUILTIN_PLANS,             crypto, proxy HTTP,
+  MODEL_PROTOCOLS, Zen            inference HTTP, log SQL
+       ^                               ^
+       |                               |
+  ocg-gateway                          |
+  alias, AttemptSpec,                  |
+  classify, selector,                  |
+  JSON convert (no I/O)                |
+       ^                               |
+       |                               |
+       +---------------+---------------+
+                       |
+                    ocg-core
+           SQLite, CoreState, Dashboard V3,
+           GatewayExecutor, adapters, host_router
+                       |
+             +---------+----------+
+             |                    |
+          ocg-cli             src-tauri
+       ocg-manager-cli        ocg-manager (tray)
+
+  aside: ocg-browser-worker   separate process, no ocg-* deps
+         Vue SPA in src/      static assets; talks HTTP V3 only
+```
+
 `ocg-domain` and `ocg-infra` have no internal `ocg-*` dependencies.
 `ocg-browser-worker` is a separate process with no internal crate dependency.
 
@@ -62,6 +89,40 @@ holds `CoreStateInner`, mounts HTTP, and talks to upstreams.
 - `control/observability.rs` is HTTP-neutral local read logic shared by
   leftover V2 adapters and V3. It never issues outbound HTTP.
 
+```text
+                    127.0.0.1:9042
+                            |
+              host_router.rs (HTTP composition root)
+                            |
+      +----------+----------+----------+----------+
+      |          |          |          |          |
+      v          v          v          v          v
+  inference   Dash V3    V2 REST    preserved   SPA
+  /v1 ...     /dashboard tombstone  V2 auth +   /dashboard
+              /api/v3    /dashboard browser WS  /assets
+                         /api
+                             |
+                     anon -> 401
+                     session -> 410 dashboardV2Removed
+
+  inference entries
+    POST /v1/chat/completions
+    POST /v1/responses
+    POST /v1/messages
+    GET  /v1/models                  local; no upstream
+    POST /v1beta|/v1/models/{model}:*
+    POST /claude-desktop/v1/messages
+    GET  /claude-desktop/v1/models   three role aliases only
+
+  preserved unversioned /dashboard/api
+    auth/status | register | login | logout
+    browser/sessions/{token}/ws
+  SPA auth uses /dashboard/api/v3/auth/...
+```
+
+User-facing maps of the same node: [Architecture diagrams](../user/architecture.md).
+Route tables: [HTTP routes](http-routes.md).
+
 ## Gateway execution
 
 Client inference lives under `crates/ocg-core/src/gateway/`. Axum + Tokio +
@@ -89,6 +150,41 @@ Split of responsibility:
    retry, no fallback inside `forward_once`.
 5. **Host `CredentialResolver`** — decrypts the handle after the outer
    loop has already selected the account.
+
+```text
+  handler.rs
+    1. x-ocg-request-id ; body cap 16 MiB (before auth)
+    2. Key vs credential_snapshot
+       Bearer / x-api-key / x-goog-api-key  (first header hit wins)
+    3. parse client protocol
+    4. Claude Desktop role rewrite (that entry only)
+    5. Alias resolve (kebab / raw ID / Custom overlay)
+         unknown -> 400
+         overlap -> 400 ambiguous_model_id   (no upstream)
+                    |
+                    v
+  GatewayExecutor     frozen at entry:
+                      pricing revision, ForwardRouteSet,
+                      contracts, Alias resolution
+    6. materialize candidates
+    7. filter cards + ocg-gateway::selector
+       StrictPriority / StickyGlobal / RoundRobin
+       fallback iteration re-reads accounts, Custom, Zen cooldown
+    8. provider_adapter -> AttemptSpec
+       (no decrypt, no DB, no HTTP client)
+    9. CredentialResolver decrypts the selected handle
+   10. forward_once = exactly one upstream .send()
+   11. classify  (not inside forward_once)
+         pre-send connect fail -> retry same account once
+         403 / Go 429          -> next card
+         Free 429              -> cool shared free channel
+         OpenCode 401          -> return as-is (no rotate, no auth_error)
+         Custom 401            -> rotate + persist auth_error
+         408 / 5xx / body timeout / stream interrupt -> never replay
+   12. convert response ; write forward_logs
+       requested_model, resolved_alias, upstream_model
+       (no requested_alias field)
+```
 
 Auth collects Bearer / `x-api-key` / `x-goog-api-key` candidates. Any hit
 on `CoreStateInner.credential_snapshot` (primary + enabled sub keys)
@@ -168,7 +264,10 @@ shared per egress IP: any active `cooldown_free_until` exhausts the whole
 free channel (no key rotation).
 
 Pricing snapshots are immutable and provider-scoped. Refresh is manual
-only. For OpenCode Go, an allowance derives the account quota-debit
+only. The Provider path fetches and activates only that Provider's priced
+offerings; OpenCode and Command Code use distinct revision tokens and
+last-known-good state, so one source failure cannot veto the other. For
+OpenCode Go, an allowance derives the account quota-debit
 multiplier (`monthly limit / Usage`) only; it is not a routable quota
 pool. Official Go rows whose Input/Output/Usage cells are all dashes
 (currently Ox Alpha Free / `ox-alpha-free`) are skipped as unpriced Go
@@ -219,6 +318,31 @@ tolerates old values. Construction lives in `ocg-infra::http`;
 request holds one `ForwardRouteSet` from entry; a concurrent settings
 switch only affects later requests.
 
+```text
+  AppConfig  (process-wide)
+    Auto | Manual HTTP | Direct | List
+
+  List mode
+    listed model id  -> exception leg
+      whitelist: proxy
+      blacklist: direct
+    unlisted model, and non-model outbound
+      (verify, Zen refresh, usage, pricing, updater)
+      -> default leg
+      whitelist: direct
+      blacklist: proxy
+
+  membership validated only on dashboard PUT /settings
+  (non-empty, exact known id, de-duplicated); load tolerates old values
+
+  in-flight request keeps the entry ForwardRouteSet
+
+  AttemptSpec.proxy_routing
+    RequestEntrySnapshot     Go / Zen ; follows redirects
+    IsolatedTrustedAdmin     Custom ; no redirects ; no client-header forward
+    ProcessWideNoRedirect    GOAT loopback tests only
+```
+
 ## Plan catalog
 
 `BUILTIN_PLANS` and `ProviderAdapterKind` live in `ocg-domain::provider`
@@ -264,6 +388,110 @@ adapter input only, never `model_aliases`): `GLM-5.2`, `GLM-5`,
 `https://api.scnet.cn/api/llm/anthropic`. Risk acknowledgement id
 `scnet-token-plan-restrictions`, version `2026-08-21`. This crate must not
 issue live Token Plan requests.
+
+## Control plane
+
+The Vue SPA is the only live dashboard client. It talks HTTP Dashboard V3.
+The CLI calls the same mutation services without an argv CAS token. There
+is no Tauri `invoke` path.
+
+```text
+  Vue 3  (seven views, KeepAlive)
+    Pinia: session / controlPlane / connection
+           accounts / providers / settings
+           |
+           |  src/api/dashboard-v3.ts
+           |  src/api/dashboard.ts
+           |  src/api/providers.ts
+           v
+  /dashboard/api/v3
+    public:  /auth/status|register|login|logout
+    else:    dashboard session
+             loopback skips login unless forwarding headers
+           |
+           |  CAS expectedRevision + processGeneration
+           |  pricing writes also expectedPricingRevision
+           |  GET /contract = live tokens, not schema export
+           |  GET /connection = only V3 DTO with plaintext Key
+           v
+  account_control / gateway_keys / settings / ...
+           |
+           v
+  SQLite schema v27
+           ^
+           |
+  ocg-manager-cli  same services, no argv CAS
+```
+
+409 `revisionConflict` refreshes tokens; the SPA does not auto-replay the
+mutation. CAS details: [Dashboard API](dashboard-api.md).
+
+## Persistence map
+
+Authoritative schema is v27. `sub_gateway_keys` exists only in pre-v27
+databases and is dropped by the migration. GUI data dir is
+`%USERPROFILE%\.ocg-mgr` on Windows and `~/.ocg-mgr` elsewhere; CLI
+defaults to `~/.ocg-mgr-cli`.
+
+```text
+  data.sqlite                         CURRENT_SCHEMA_VERSION = 27
+    access_keys                       Primary id PRIMARY_KEY_ID
+                                      cannot disable/delete Primary
+                                      64 active sub-key cap
+    accounts                          one card = one Plan
+    settings                          AppConfig (gateway_key stored "")
+    forward_logs                      requested_model, resolved_alias,
+                                      upstream_model, route, provider_id
+    gateway_logs
+    provider_pricing_snapshots
+    provider_usage_sync_state         official Go usage metadata
+    provider_model_catalogs
+    provider_contract_scopes
+    provider_contract_model_protocols
+    account_custom_configs
+    account_model_capabilities
+    account_acknowledgements
+
+  existing non-empty DB: non-overwriting
+    data.sqlite.pre-v3.<UTC>.bak + .sha256
+    before any v27 write
+  empty new DB: v27 directly, no that copy
+
+  keys obfuscated; ConnectionInfo is the only V3 plaintext-Key DTO
+```
+
+Upgrade, backup hash, rollback: [Storage and migrations](storage-migration.md).
+
+## Usage calibration
+
+Official Go usage is a periodic baseline. Local `forward_logs` remain the
+real-time estimator after the last successful calibration. Quota bars do
+not stop traffic.
+
+```text
+  official  GET https://opencode.ai/zen/go/v1/usage
+            calibration baseline (never auto-polled from the SPA)
+
+  local     forward_logs after last success
+            live estimate on the account card
+
+  background (Gateway start spawns; CoreState drop stops)
+    ready+enabled + local activity in 24h  ~ hourly
+    ready+enabled, idle                   ~ daily
+    disabled / not ready / empty key      no auto refresh
+    local Go usage >= 80%                 expedite, min 15 min
+    inference 429                         schedule official in 1-2 min
+                                          (not inline; official failure
+                                           never writes cooldown)
+    failure backoff  5m -> 15m -> 1h -> 6h
+    global concurrency 1; startup spread, no stampede
+
+  manual  POST /dashboard/api/v3/accounts/{id}/usage/refresh
+          15 s throttle (success and failure)
+```
+
+Locks, clocks, and credential snapshot: [State and lifecycle](state-and-lifecycle.md).
+
 ---
 
 [Maintainer guide index](../MAINTAINER.md) · [简体中文](architecture.zh-CN.md) · [Docs index](../README.md)

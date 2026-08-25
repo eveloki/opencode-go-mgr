@@ -11,14 +11,13 @@ use crate::kernel::ids::{
     OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, custom_model_id_matches,
     normalize_model_name,
 };
-use crate::kernel::protocol::{
-    ApiFormat, command_code_protocol_profiles, is_known_model, supported_model_protocol_profiles,
-};
+use crate::kernel::protocol::{ApiFormat, is_known_model, supported_model_protocol_profiles};
 use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::Account;
 use crate::provider::{
-    BUILTIN_PLANS, OPENCODE_CONSTRUCTABLE_PROTOCOLS, ProviderAdapterKind, ProviderRegistry,
-    SCNET_TOKEN_PLAN_USABLE_MODELS, StructuralProbeCeiling, UpstreamProtocolKind,
+    BUILTIN_PLANS, COMMAND_CODE_GOAT_BASE_URL, OPENCODE_CONSTRUCTABLE_PROTOCOLS,
+    ProviderAdapterKind, ProviderRegistry, SCNET_TOKEN_PLAN_USABLE_MODELS, StructuralProbeCeiling,
+    UpstreamProtocolKind,
 };
 use crate::redaction::sanitize_upstream_error_value_with_known_secret;
 use chrono::{DateTime, Utc};
@@ -33,6 +32,8 @@ pub const CATALOG_SOURCE_STATIC: &str = "static";
 pub const CATALOG_SOURCE_OFFICIAL_ZEN: &str = "official_zen";
 pub const CATALOG_SOURCE_CUSTOM_DISCOVERY: &str = "custom_discovery";
 pub const CATALOG_SOURCE_DECLARED: &str = "account_declared";
+pub const CATALOG_SOURCE_COMMAND_CODE_MODELS: &str = "command_code_get_models";
+pub const CATALOG_SOURCE_OPENCODE_MODELS: &str = "opencode_get_models";
 
 pub const NO_ENABLED_UPSTREAM_PROTOCOL: &str =
     "no enabled upstream protocol is available for this model";
@@ -569,17 +570,13 @@ pub fn static_verified_protocols(
                 Vec::new()
             }
         }
-        ProviderAdapterKind::CommandCodeGoat => command_code_protocol_profiles()
-            .find(|profile| profile.upstream_id.eq_ignore_ascii_case(model_id.trim()))
-            .map(|profile| {
-                profile
-                    .supported_upstream
-                    .iter()
-                    .copied()
-                    .filter_map(protocol_from_api)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        ProviderAdapterKind::CommandCodeGoat => {
+            ocg_domain::protocol::command_code_supported_formats(model_id)
+                .iter()
+                .copied()
+                .filter_map(protocol_from_api)
+                .collect()
+        }
         ProviderAdapterKind::Scnet => {
             if SCNET_TOKEN_PLAN_USABLE_MODELS
                 .iter()
@@ -796,16 +793,26 @@ fn merge_provider_scope(
     let revision = persisted.map(|row| row.revision).unwrap_or(1);
     let (catalog, static_models) = match adapter {
         ProviderAdapterKind::OpenCodeGo => {
-            let models: Vec<String> = supported_model_protocol_profiles()
-                .map(|(id, _, _)| id.to_string())
-                .collect();
+            let models: Vec<String> = persisted
+                .filter(|row| !row.catalog_models.is_empty())
+                .map(|row| row.catalog_models.clone())
+                .unwrap_or_else(|| {
+                    supported_model_protocol_profiles()
+                        .map(|(id, _, _)| id.to_string())
+                        .collect()
+                });
             (
                 EffectiveCatalog {
-                    source: CATALOG_SOURCE_STATIC.to_string(),
-                    source_url: String::new(),
-                    refreshed_at: None,
+                    source: persisted
+                        .map(|row| row.catalog_source.clone())
+                        .filter(|source| !source.is_empty())
+                        .unwrap_or_else(|| CATALOG_SOURCE_STATIC.to_string()),
+                    source_url: persisted
+                        .map(|row| row.catalog_source_url.clone())
+                        .unwrap_or_default(),
+                    refreshed_at: persisted.and_then(|row| row.catalog_refreshed_at),
                     models: models.clone(),
-                    refresh_supported: false,
+                    refresh_supported: true,
                 },
                 models,
             )
@@ -835,29 +842,32 @@ fn merge_provider_scope(
             )
         }
         ProviderAdapterKind::CommandCodeGoat => {
-            let models: Vec<String> = command_code_protocol_profiles()
-                .map(|profile| profile.upstream_id.to_string())
-                .collect();
+            let models: Vec<String> = persisted
+                .map(|row| row.catalog_models.clone())
+                .unwrap_or_default();
             (
                 EffectiveCatalog {
-                    source: CATALOG_SOURCE_STATIC.to_string(),
-                    source_url: String::new(),
-                    refreshed_at: None,
+                    source: persisted
+                        .map(|row| row.catalog_source.clone())
+                        .filter(|source| !source.is_empty())
+                        .unwrap_or_else(|| CATALOG_SOURCE_COMMAND_CODE_MODELS.to_string()),
+                    source_url: persisted
+                        .map(|row| row.catalog_source_url.clone())
+                        .filter(|url| !url.is_empty())
+                        .unwrap_or_else(|| COMMAND_CODE_GOAT_BASE_URL.to_string()),
+                    refreshed_at: persisted.and_then(|row| row.catalog_refreshed_at),
                     models: models.clone(),
-                    refresh_supported: false,
+                    refresh_supported: true,
                 },
                 models,
             )
         }
         ProviderAdapterKind::Scnet => {
-            let models: Vec<String> = SCNET_TOKEN_PLAN_USABLE_MODELS
-                .iter()
-                .map(|id| (*id).to_string())
-                .collect();
+            let models = Vec::new();
             (
                 EffectiveCatalog {
                     source: CATALOG_SOURCE_STATIC.to_string(),
-                    source_url: crate::provider::SCNET_TOKEN_PLAN_MODEL_SOURCE_URL.to_string(),
+                    source_url: String::new(),
                     refreshed_at: None,
                     models: models.clone(),
                     refresh_supported: false,
@@ -883,14 +893,16 @@ fn merge_provider_scope(
             ),
         );
     }
-    overlay_probe_confirmed_models(
-        &mut models,
-        adapter,
-        &[],
-        evidence,
-        switches,
-        descriptor.inference.catalog_routable && descriptor.inference.production_inference,
-    );
+    if adapter != ProviderAdapterKind::Scnet {
+        overlay_probe_confirmed_models(
+            &mut models,
+            adapter,
+            &[],
+            evidence,
+            switches,
+            descriptor.inference.catalog_routable && descriptor.inference.production_inference,
+        );
+    }
 
     let mut disabled_reasons = Vec::new();
     if !descriptor.inference.catalog_routable {
@@ -898,6 +910,9 @@ fn merge_provider_scope(
     }
     if !descriptor.inference.production_inference {
         disabled_reasons.push("production inference is disabled".to_string());
+    }
+    if adapter == ProviderAdapterKind::Scnet {
+        disabled_reasons.push("SCNet Token Plans are archived".to_string());
     }
 
     EffectiveScopeContract {
@@ -999,10 +1014,11 @@ fn preferred_protocol(
                 .and_then(|(preferred, _)| protocol_from_api(preferred))
                 .unwrap_or(UpstreamProtocolKind::ChatCompletions)
         }
-        ProviderAdapterKind::CommandCodeGoat => command_code_protocol_profiles()
-            .find(|profile| profile.upstream_id.eq_ignore_ascii_case(model_id.trim()))
-            .and_then(|profile| protocol_from_api(profile.preferred))
-            .unwrap_or(UpstreamProtocolKind::ChatCompletions),
+        ProviderAdapterKind::CommandCodeGoat => {
+            ocg_domain::protocol::command_code_preferred_format(model_id)
+                .and_then(protocol_from_api)
+                .unwrap_or(UpstreamProtocolKind::ChatCompletions)
+        }
         ProviderAdapterKind::Scnet => UpstreamProtocolKind::ChatCompletions,
         ProviderAdapterKind::ConfigurableHttp => declared
             .iter()
@@ -1406,11 +1422,25 @@ mod tests {
     }
 
     #[test]
-    fn goat_and_scnet_remain_unroutable_after_probe_success() {
+    fn goat_is_production_routable_and_scnet_stays_closed_after_probe_success() {
         let now = Utc::now();
         let mut persisted = empty_persisted();
+        let goat_scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+        persisted.scopes.insert(
+            goat_scope.clone(),
+            PersistedScopeRow {
+                scope: goat_scope.clone(),
+                catalog_models: vec![COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into()],
+                catalog_refreshed_at: Some(now),
+                catalog_source: CATALOG_SOURCE_COMMAND_CODE_MODELS.into(),
+                catalog_source_url: COMMAND_CODE_GOAT_BASE_URL.into(),
+                switches: ProtocolSwitches::default(),
+                revision: 1,
+                updated_at: now,
+            },
+        );
         persisted.evidence.insert(
-            ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+            goat_scope,
             vec![PersistedModelProtocol {
                 scope: ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
                 model_id: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
@@ -1439,17 +1469,17 @@ mod tests {
         );
         let set = build_effective_contracts(&zen_seed(), &[], persisted);
         let goat = set.providers.get(COMMAND_CODE_PROVIDER_ID).unwrap();
-        assert!(!goat.catalog_routable);
-        assert!(!goat.production_inference);
+        assert!(goat.catalog_routable);
+        assert!(goat.production_inference);
         assert!(
-            !goat
-                .model(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
+            goat.model(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
                 .unwrap()
                 .routable
         );
         let scnet = set.providers.get(SCNET_PROVIDER_ID).unwrap();
         assert!(!scnet.catalog_routable);
-        assert!(!scnet.model("GLM-5.2").unwrap().routable);
+        assert!(scnet.catalog.models.is_empty());
+        assert!(scnet.models.is_empty());
         assert!(!ProviderAdapterKind::CommandCodeGoat.protocol_probe_supported());
         assert!(!ProviderAdapterKind::Scnet.protocol_probe_supported());
     }

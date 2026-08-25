@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Account } from "../api/tauri.ts";
+import type { Account } from "../api/dashboard.ts";
 import type {
   CustomEndpointContract,
   EffectiveModelContract,

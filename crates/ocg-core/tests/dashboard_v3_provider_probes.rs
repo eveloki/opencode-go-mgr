@@ -289,8 +289,8 @@ fn load_go_evidence(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v27() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+fn dashboard_v3_schema_version_stays_at_v28() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
 }
 
 #[tokio::test]
@@ -1157,6 +1157,6 @@ async fn v2_duplicate_custom_and_ceiling_probes_coexist() {
     assert_eq!(stored.provider_id, CUSTOM_PROVIDER_ID);
     assert_eq!(stored.offering_id, CUSTOM_API_OFFERING_ID);
     assert!(!stored.enabled);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 27);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
     harness.stop();
 }
