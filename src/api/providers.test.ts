@@ -125,14 +125,14 @@ test("Go and GOAT model refresh use the selected account on the provider route",
   ]);
 });
 
-test("Custom endpoint protocol probe stays blocked while the switch uses the custom-endpoint route", async () => {
+test("Custom endpoint protocol probe stays blocked while overrides use the model-protocol-overrides route", async () => {
   setActivePinia(createPinia());
   useControlPlaneStore().sync({ revision: 8, processGeneration: 42, pricingRevision: "p1" });
   const requests = installFetch(({ url, method }) => {
     if (url.endsWith("/accounts/custom-1")) {
       return { id: "custom-1", providerId: "custom", revision: 8, processGeneration: 42 };
     }
-    if (url.endsWith("/provider-contracts/custom-endpoint/custom-1/protocols/chat_completions") && method === "PUT") {
+    if (url.endsWith("/provider-contracts/custom-endpoint/custom-1/model-protocol-overrides") && method === "PUT") {
       return {
         revision: 9,
         processGeneration: 42,
@@ -151,21 +151,20 @@ test("Custom endpoint protocol probe stays blocked while the switch uses the cus
     }),
     /尚未纳入 Dashboard V3 合同/,
   );
-  await providerApi.updateProviderContractProtocol(
+  await providerApi.updateModelProtocolOverrides(
     "custom_endpoint",
     "custom-1",
-    "chat_completions",
-    { enabled: false },
+    [{ model_id: "Org/Model", protocol: "chat_completions", state: "force_off" }],
   );
   assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
     { method: "GET", url: "/dashboard/api/v3/accounts/custom-1" },
     {
       method: "PUT",
-      url: "/dashboard/api/v3/provider-contracts/custom-endpoint/custom-1/protocols/chat_completions",
+      url: "/dashboard/api/v3/provider-contracts/custom-endpoint/custom-1/model-protocol-overrides",
     },
   ]);
   assert.deepEqual(requests[1]?.body, {
-    enabled: false,
+    overrides: [{ modelId: "Org/Model", protocol: "chat_completions", state: "force_off" }],
     expectedRevision: 8,
     processGeneration: 42,
   });

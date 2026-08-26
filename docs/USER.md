@@ -14,7 +14,7 @@ This guide is for people running OCG Manager as a desktop app, a headless gatewa
 - [The Dashboard](user/dashboard.md) — The seven views, i18n, and Connection Center.
 - [Application Guides And Model Capabilities](user/applications.md) — 16 client tutorials and the model capability table.
 - [Accounts](user/accounts.md) — Plans, credentials, ordering, quota behavior, and managed onboarding.
-- [Providers](user/providers.md) — Catalog, provider contracts, protocol switches, and probes.
+- [Providers](user/providers.md) — Catalog, provider contracts, per-model protocol overrides, and probes.
 - [Logs And Settings](user/logs-settings.md) — Request logs, settings, proxy modes, and theme.
 - [Gateway Behavior](user/gateway.md) — Endpoints, authentication, aliases, Zen Free, and circuit breakers.
 - [Protocol Conversion](user/protocol-conversion.md) — Preferred/supported protocols, passthrough, and conversion limits.

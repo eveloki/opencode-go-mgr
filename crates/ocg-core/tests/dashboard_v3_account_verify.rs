@@ -476,8 +476,8 @@ async fn create_custom_account(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v30() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
+fn dashboard_v3_schema_version_stays_at_v31() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
 }
 
 #[test]

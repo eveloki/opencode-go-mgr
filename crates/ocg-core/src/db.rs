@@ -8,8 +8,9 @@ use crate::models::*;
 use crate::provider::*;
 use crate::provider_contracts::{
     CATALOG_SOURCE_COMMAND_CODE_MODELS, CATALOG_SOURCE_OFFICIAL_ZEN, ContractEvidenceSource,
-    ContractScope, PersistedContracts, PersistedModelProtocol, PersistedScopeRow, ProbeResultKind,
-    ProtocolSwitches, SCOPE_KIND_CUSTOM_ENDPOINT,
+    ContractScope, PersistedContracts, PersistedModelProtocol, PersistedModelProtocolOverride,
+    PersistedScopeRow, ProbeResultKind, ProtocolOverrideState, ProtocolSwitches,
+    SCOPE_KIND_CUSTOM_ENDPOINT,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
@@ -60,7 +61,7 @@ pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// v26 and before any v27 write. Not created for a brand-new empty database.
 pub const PRE_V3_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v3.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 30;
+pub const CURRENT_SCHEMA_VERSION: i32 = 31;
 pub const V27_SCHEMA_VERSION: i32 = 27;
 /// Schema the v27 rewrite expects as its committed source. Historical databases
 /// always migrate through this version first.
@@ -362,17 +363,20 @@ fn persist_scope_from_row(row: &Row<'_>) -> rusqlite::Result<PersistedScopeRow> 
     let models: Vec<String> = serde_json::from_str(&models_json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
     })?;
+    // The switch columns are deprecated: effective contract derivation now uses
+    // per-model/per-protocol overrides. They are still read so legacy rows load.
+    let switches = ProtocolSwitches {
+        chat_completions: row.get::<_, i64>(6)? != 0,
+        responses: row.get::<_, i64>(7)? != 0,
+        messages: row.get::<_, i64>(8)? != 0,
+    };
     Ok(PersistedScopeRow {
         scope: scope_from_row(&kind, &id)?,
         catalog_models: models,
         catalog_refreshed_at: parse_rfc3339_opt(row.get(3)?, 3)?,
         catalog_source: row.get(4)?,
         catalog_source_url: row.get(5)?,
-        switches: ProtocolSwitches {
-            chat_completions: row.get::<_, i64>(6)? != 0,
-            responses: row.get::<_, i64>(7)? != 0,
-            messages: row.get::<_, i64>(8)? != 0,
-        },
+        switches,
         revision: row.get::<_, i64>(9)? as u64,
         updated_at: parse_rfc3339_column(row.get(10)?, 10)?,
     })
@@ -419,6 +423,34 @@ fn persist_evidence_from_row(row: &Row<'_>) -> rusqlite::Result<PersistedModelPr
         last_probe_result,
         last_probe_at: parse_rfc3339_opt(row.get(8)?, 8)?,
         last_probe_error: row.get(9)?,
+    })
+}
+
+fn persist_override_from_row(row: &Row<'_>) -> rusqlite::Result<PersistedModelProtocolOverride> {
+    let kind: String = row.get(0)?;
+    let id: String = row.get(1)?;
+    let protocol_value: String = row.get(3)?;
+    let protocol = UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            Type::Text,
+            Box::new(std::io::Error::other(error.to_string())),
+        )
+    })?;
+    let state_value: String = row.get(4)?;
+    let state = ProtocolOverrideState::try_from(state_value.as_str()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            Type::Text,
+            Box::new(std::io::Error::other(error)),
+        )
+    })?;
+    Ok(PersistedModelProtocolOverride {
+        scope: scope_from_row(&kind, &id)?,
+        model_id: row.get(2)?,
+        protocol,
+        state,
+        updated_at: parse_rfc3339_column(row.get(5)?, 5)?,
     })
 }
 
@@ -1370,6 +1402,35 @@ fn migrate_to_v30(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v31: Per-model/per-protocol override table replaces scope-level protocol
+/// switches. The `provider_contract_scopes` switch columns remain for backward
+/// compatibility but are no longer read by effective contract derivation.
+fn migrate_to_v31(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 31 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        version == 30,
+        "v31 requires a canonical schema v30 source, found {version}"
+    );
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS provider_contract_model_protocol_overrides (
+            scope_kind TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('force_on','force_off')),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(scope_kind, scope_id, model_id, protocol)
+        );",
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (31);")?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod v27_test_hooks {
     use super::V27MigrationFault;
@@ -1911,6 +1972,7 @@ impl Database {
         migrate_to_v28(&db.conn)?;
         migrate_to_v29(&db.conn)?;
         migrate_to_v30(&db.conn)?;
+        migrate_to_v31(&db.conn)?;
         Ok(db)
     }
 
@@ -3329,6 +3391,21 @@ impl Database {
                     .push(row);
             }
         }
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT scope_kind, scope_id, model_id, protocol, state, updated_at
+                 FROM provider_contract_model_protocol_overrides",
+            )?;
+            let rows = stmt.query_map([], persist_override_from_row)?;
+            for row in rows {
+                let row = row?;
+                persisted
+                    .overrides
+                    .entry(row.scope.clone())
+                    .or_default()
+                    .push(row);
+            }
+        }
         Ok(persisted)
     }
 
@@ -3365,40 +3442,49 @@ impl Database {
         Ok(row)
     }
 
-    pub fn set_protocol_switch(
+    pub fn set_model_protocol_overrides(
         &self,
         scope: &ContractScope,
-        protocol: UpstreamProtocolKind,
-        enabled: bool,
+        rows: &[(String, UpstreamProtocolKind, ProtocolOverrideState)],
         now: DateTime<Utc>,
     ) -> Result<PersistedScopeRow> {
+        anyhow::ensure!(
+            !rows.is_empty(),
+            "model protocol override batch must be nonempty"
+        );
         let tx = self.conn.unchecked_transaction()?;
         ensure_contract_scope_row(&tx, scope, now)?;
-        let mut current = load_scope_on(&tx, scope)?
+        for (model_id, protocol, state) in rows {
+            match state {
+                ProtocolOverrideState::Auto => {
+                    tx.execute(
+                        "DELETE FROM provider_contract_model_protocol_overrides
+                         WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3 AND protocol = ?4",
+                        params![scope.kind_str(), scope.id(), model_id, protocol.as_str()],
+                    )?;
+                }
+                ProtocolOverrideState::ForceOn | ProtocolOverrideState::ForceOff => {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO provider_contract_model_protocol_overrides
+                         (scope_kind, scope_id, model_id, protocol, state, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            scope.kind_str(),
+                            scope.id(),
+                            model_id,
+                            protocol.as_str(),
+                            state.as_str(),
+                            now.to_rfc3339(),
+                        ],
+                    )?;
+                }
+            }
+        }
+        bump_scope_revision_on(&tx, scope, now)?;
+        let scope = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
-        current.switches.set(protocol, enabled);
-        current.revision = current.revision.saturating_add(1);
-        current.updated_at = now;
-        tx.execute(
-            "UPDATE provider_contract_scopes SET
-                chat_completions_enabled = ?3,
-                responses_enabled = ?4,
-                messages_enabled = ?5,
-                revision = ?6,
-                updated_at = ?7
-             WHERE scope_kind = ?1 AND scope_id = ?2",
-            params![
-                scope.kind_str(),
-                scope.id(),
-                current.switches.chat_completions as i64,
-                current.switches.responses as i64,
-                current.switches.messages as i64,
-                current.revision as i64,
-                current.updated_at.to_rfc3339(),
-            ],
-        )?;
         tx.commit()?;
-        Ok(current)
+        Ok(scope)
     }
 
     pub fn load_model_protocol(
@@ -3814,6 +3900,11 @@ impl Database {
         )?;
         tx.execute(
             "DELETE FROM provider_contract_model_protocols
+             WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![SCOPE_KIND_CUSTOM_ENDPOINT, id],
+        )?;
+        tx.execute(
+            "DELETE FROM provider_contract_model_protocol_overrides
              WHERE scope_kind = ?1 AND scope_id = ?2",
             params![SCOPE_KIND_CUSTOM_ENDPOINT, id],
         )?;
@@ -6142,12 +6233,13 @@ impl Database {
         Ok((today, week, month))
     }
 
-    /// Aggregate `forward_logs` into per-day, per-model cost buckets covering
-    /// the last `days` calendar days (UTC). Rows with zero activity on a given
+    /// Aggregate `forward_logs` into per-day, per-model token buckets covering
+    /// the last `days` calendar days (UTC). Rows with zero tokens on a given
     /// day are omitted — the frontend synthesizes empty days so the x-axis
-    /// never collapses. Priced rows and preserved legacy estimates count,
-    /// including an upstream success whose local response conversion failed.
-    pub fn daily_cost_by_model(&self, days: i64) -> Result<Vec<DailyModelCost>> {
+    /// never collapses. Token totals are independent of pricing state: free,
+    /// priced, legacy estimate, and not_applicable rows all contribute as long
+    /// as they carry non-zero prompt or completion tokens.
+    pub fn daily_tokens_by_model(&self, days: i64) -> Result<Vec<DailyModelTokens>> {
         // Bone-simple SQLite date math: store timestamps as RFC3339 strings,
         // so group by `substr(timestamp, 1, 10)` to collapse to YYYY-MM-DD.
         // UTC-only is fine — the gateway runs local and the dashboard is a
@@ -6156,17 +6248,17 @@ impl Database {
         // machinery than this needs right now.
         let since = (Utc::now() - Duration::days(days - 1)).to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT substr(timestamp, 1, 10) AS day, model, COALESCE(SUM(cost), 0)
+            "SELECT substr(timestamp, 1, 10) AS day, model, COALESCE(SUM(prompt_tokens + completion_tokens), 0)
              FROM forward_logs
-             WHERE cost_state IN ('priced', 'legacy_estimate') AND timestamp > ?1
+             WHERE timestamp > ?1 AND prompt_tokens + completion_tokens > 0
              GROUP BY day, model
              ORDER BY day ASC, model ASC",
         )?;
         let rows = stmt.query_map([&since], |row| {
-            Ok(DailyModelCost {
+            Ok(DailyModelTokens {
                 date: row.get::<_, String>(0)?,
                 model: row.get::<_, String>(1)?,
-                cost: row.get::<_, f64>(2)?,
+                tokens: row.get::<_, i64>(2)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
@@ -11584,8 +11676,16 @@ mod tests {
             last_probe_error: None,
         })
         .unwrap();
-        db.set_protocol_switch(&go, UpstreamProtocolKind::Messages, false, now)
-            .unwrap();
+        db.set_model_protocol_overrides(
+            &go,
+            &[(
+                "glm-5.2".into(),
+                UpstreamProtocolKind::Messages,
+                ProtocolOverrideState::ForceOff,
+            )],
+            now,
+        )
+        .unwrap();
         let persisted = db.load_persisted_contracts().unwrap();
         assert!(
             persisted
@@ -11603,12 +11703,16 @@ mod tests {
                 .iter()
                 .all(|row| row.model_id != "glm-5.2")
         );
-        assert!(!persisted.scopes.get(&go).unwrap().switches.messages);
+        assert!(
+            persisted.overrides.get(&go).unwrap().iter().any(
+                |row| row.model_id == "glm-5.2" && row.state == ProtocolOverrideState::ForceOff
+            )
+        );
         assert!(
             persisted
-                .scopes
+                .overrides
                 .get(&custom)
-                .map(|row| row.switches.messages)
+                .map(|rows| rows.iter().all(|row| row.model_id != "glm-5.2"))
                 .unwrap_or(true)
         );
         drop(db);
@@ -13802,6 +13906,91 @@ mod tests {
             .unwrap();
         assert_eq!(accounts, before.0);
         assert_eq!(keys, before.1 + 1);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v31_migration_creates_override_table() {
+        let dir = temp_data_dir("v31-migration");
+        let db = Database::open(dir.clone()).unwrap();
+        db.conn
+            .execute_batch(
+                "DROP TABLE IF EXISTS provider_contract_model_protocol_overrides;
+                 DELETE FROM schema_version;
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (30);",
+            )
+            .unwrap();
+        drop(db);
+
+        let db = Database::open(dir.clone()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 31);
+        let table_exists: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'provider_contract_model_protocol_overrides'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn model_protocol_override_upsert_and_auto_delete_round_trip() {
+        let dir = temp_data_dir("override-roundtrip");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+
+        db.set_model_protocol_overrides(
+            &scope,
+            &[
+                (
+                    "glm-5.2".into(),
+                    UpstreamProtocolKind::ChatCompletions,
+                    ProtocolOverrideState::ForceOn,
+                ),
+                (
+                    "glm-5.2".into(),
+                    UpstreamProtocolKind::Messages,
+                    ProtocolOverrideState::ForceOff,
+                ),
+            ],
+            now,
+        )
+        .unwrap();
+
+        let persisted = db.load_persisted_contracts().unwrap();
+        let overrides = persisted.overrides.get(&scope).unwrap();
+        assert_eq!(overrides.len(), 2);
+        assert!(overrides.iter().any(|row| row.model_id == "glm-5.2"
+            && row.protocol == UpstreamProtocolKind::ChatCompletions
+            && row.state == ProtocolOverrideState::ForceOn));
+        assert!(overrides.iter().any(|row| row.model_id == "glm-5.2"
+            && row.protocol == UpstreamProtocolKind::Messages
+            && row.state == ProtocolOverrideState::ForceOff));
+
+        db.set_model_protocol_overrides(
+            &scope,
+            &[(
+                "glm-5.2".into(),
+                UpstreamProtocolKind::ChatCompletions,
+                ProtocolOverrideState::Auto,
+            )],
+            now,
+        )
+        .unwrap();
+
+        let persisted = db.load_persisted_contracts().unwrap();
+        let overrides = persisted.overrides.get(&scope).unwrap();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].protocol, UpstreamProtocolKind::Messages);
+        assert_eq!(overrides[0].state, ProtocolOverrideState::ForceOff);
+
         drop(db);
         fs::remove_dir_all(dir).unwrap();
     }

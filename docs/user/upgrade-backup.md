@@ -9,9 +9,9 @@ and verify them against the release's `SHA256SUMS`:
 on macOS, or `sha256sum <file>` on Linux. Backups, restores, and removal are
 the kind of operations that are boring right up until they aren't.
 
-## Database Migration And Access Keys (Schema v30)
+## Database Migration And Access Keys (Schema v31)
 
-The database schema is **v30**; historical databases migrate in place on
+The database schema is **v31**; historical databases migrate in place on
 startup. Upgrading from a single-key version keeps your existing credential
 as the **primary key** (fixed id
 `00000000-0000-0000-0000-000000000001`), so clients keep authenticating
@@ -19,15 +19,18 @@ with the same value. The `access_keys` table holds the primary key plus up
 to 64 non-deleted sub keys; deleting a sub key clears its plaintext but
 keeps the name for log attribution.
 
-An existing, non-empty database migrates through schema v29 first, then
-receives a sibling snapshot `data.sqlite.pre-v3.<timestamp>.bak` plus a
-SHA-256 sidecar before any v30 write. A fresh empty data directory creates
-schema v30 directly and skips the snapshot. That snapshot is a v29 rollback
-point, not a substitute for a complete backup; verify the sidecar before
-restoring it, and restore it only onto a v29-capable binary or to retry a
-v30 open that never committed. Never open a migrated database with an older
-build — extra Keys do not authenticate on a single-key-era build, and a
-revoked value cannot come back to life by downgrading.
+An existing, non-empty database migrates canonically to v26 first. The v27
+rewrite copies the primary Key and every `sub_gateway_keys` row into
+`access_keys`, drops `sub_gateway_keys`, and drops the legacy
+`accounts.usage_sync_*` columns. Before any v27 write the database receives a
+sibling snapshot `data.sqlite.pre-v3.<timestamp>.bak` plus a SHA-256 sidecar.
+A fresh empty data directory creates schema v31 directly and skips the
+snapshot. That snapshot is a v26 rollback point, not a substitute for a
+complete backup; verify the sidecar before restoring it, and restore it only
+onto a v26-capable binary or to retry a v27 open that never committed. Never
+open a migrated database with an older build — extra Keys do not authenticate
+on a single-key-era build, and a revoked value cannot come back to life by
+downgrading.
 
 v29 removes SCNet Token Plans from the catalog and deletes any existing
 SCNet account rows during migration. Every startup disables enabled leftovers
@@ -39,6 +42,10 @@ v30 expands Custom API `account_custom_configs` from the single
 `upstream_protocol` column to a JSON `upstream_protocols` set, backfilling
 each existing Custom account from its old value. Custom config/capability
 edits keep the account enabled but reset `verification_status` to `pending`.
+
+v31 adds `provider_contract_model_protocol_overrides` for per-model/per-protocol
+enablement and stops reading the deprecated `provider_contract_scopes` switch
+columns.
 
 ## Backup
 

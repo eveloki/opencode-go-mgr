@@ -46,7 +46,7 @@ function account(overrides: Partial<Account>): Account {
   };
 }
 
-test("needs attention orders auth errors, expiry, cooling, drafts, load failures", () => {
+test("needs attention orders auth errors, expiry, cooling, drafts", () => {
   const accounts = [
     account({ id: "ok", name: "Fine" }),
     account({ id: "auth", name: "Broken", auth_error: "401" }),
@@ -54,9 +54,8 @@ test("needs attention orders auth errors, expiry, cooling, drafts, load failures
     account({ id: "draft", name: "Draft", setup_step: "key_verification" }),
     account({ id: "gone", name: "Expired", expires_on: "2026-08-01" }),
     account({ id: "off", name: "Disabled", enabled: false }),
-    account({ id: "usage", name: "Unreadable" }),
   ];
-  const items = buildNeedsAttention(accounts, new Set(["usage"]), NOW);
+  const items = buildNeedsAttention(accounts, NOW);
   assert.deepEqual(
     items.map((item) => [item.accountId, item.reason]),
     [
@@ -64,7 +63,6 @@ test("needs attention orders auth errors, expiry, cooling, drafts, load failures
       ["gone", "expired"],
       ["cool", "cooling"],
       ["draft", "setup-incomplete"],
-      ["usage", "usage-load-failed"],
     ],
   );
 });
@@ -75,7 +73,7 @@ test("disabled accounts and expired cooldowns never need attention", () => {
     account({ id: "past", name: "Past", cooldown_until: "2026-08-21T11:00:00Z" }),
     account({ id: "offdraft", name: "OffDraft", enabled: false, setup_step: "payment" }),
   ];
-  const items = buildNeedsAttention(accounts, new Set(), NOW);
+  const items = buildNeedsAttention(accounts, NOW);
   assert.deepEqual(items.map((item) => item.accountId), ["offdraft"]);
 });
 
@@ -89,7 +87,7 @@ test("zen free cooling is reported through the shared free lane", () => {
     quota_scope: "egress-ip",
     cooldown_free_until: "2026-08-21T13:00:00Z",
   });
-  assert.deepEqual(buildNeedsAttention([zen], new Set(), NOW), [
+  assert.deepEqual(buildNeedsAttention([zen], NOW), [
     { accountId: "zen", accountName: "Zen", reason: "cooling" },
   ]);
 });

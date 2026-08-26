@@ -6,7 +6,7 @@ CLI 是桌面端的无头版本：同样的 Gateway，没有托盘图标。下�
 
 CLI 数据目录默认 `~/.ocg-mgr-cli`，所有平台一致，可用 `--data-dir <path>` 覆盖。混淆密钥默认放在 `<data-dir>/.encryption-key`，也可用 `--encryption-key <key>` 参数或 `OCG_MANAGER_ENCRYPTION_KEY` 环境变量覆盖。
 
-CLI 只提供 `serve`、`key`、`status`。`key` 管 OpenCode Go 账号凭据，不是面板 Key，也不碰 Custom 目的地或 Zen Free 卡片；那些留在面板里操作。CLI 写入会直接 bump 该进程的 settings revision，命令行没有 `expectedRevision`。
+CLI 只提供 `serve`、`key`、`status`。`key` 管 OpenCode Go 账号凭据，不是面板 Key，也不碰 Custom 目的地或 Zen Free 卡片；按模型协议覆盖等留在面板里操作。CLI 写入会直接 bump 该进程的 settings revision，命令行没有 `expectedRevision`。
 
 ```text
 ocg-manager-cli

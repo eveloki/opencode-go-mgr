@@ -39,7 +39,7 @@ use crate::provider::{
 use crate::provider_contracts::{
     self, ContractScope, EffectiveContractSet, EffectiveModelContract as DomainModelContract,
     EffectiveProtocolEvidence as DomainProtocolEvidence, PersistedModelProtocol,
-    ProtocolSwitches as DomainProtocolSwitches,
+    ProtocolOverrideState as DomainProtocolOverrideState,
 };
 use crate::state::CoreState;
 
@@ -48,12 +48,12 @@ use super::types::{
     AccountAuthScheme, AccountQuotaScope, AccountUpstreamProtocol, AccountVerificationStatus,
     CapabilitySummary, CardCapabilitySummary, ContractEvidenceSource, ContractScopeKind,
     ControlRevision, CustomEndpointContract, EffectiveCatalog, EffectiveModelContract,
-    EffectiveModelProtocols, EffectiveProtocolEvidence, MutationExpectation, ProbeResultKind,
-    ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate,
-    ProtocolSwitches, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
-    ProviderCatalogFormField, ProviderContractGroup, ProviderContracts, ProviderModelCapability,
-    ProviderModels, ProviderModelsRefreshUpdate, ProviderOfferingChoice, ZenFreeModel,
-    ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
+    EffectiveModelProtocols, EffectiveProtocolEvidence, ModelProtocolOverride,
+    ModelProtocolOverridesUpdate, MutationExpectation, ProbeResultKind, ProtocolOverrideState,
+    ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProviderAccountChoice,
+    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderContractGroup,
+    ProviderContracts, ProviderModelCapability, ProviderModels, ProviderModelsRefreshUpdate,
+    ProviderOfferingChoice, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
@@ -357,48 +357,58 @@ pub(super) async fn get_provider_contracts(
     )))
 }
 
-pub(super) async fn put_provider_protocol_switch(
+pub(super) async fn put_provider_model_protocol_overrides(
     State(state): State<CoreState>,
-    Path((scope_id, protocol)): Path<(String, String)>,
+    Path(scope_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
-    let input = parse_mutation_json::<ProtocolSwitchUpdate>(&body)?;
+    let input = parse_mutation_json::<ModelProtocolOverridesUpdate>(&body)?;
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &input.expectation)?;
     let scope = ContractScope::parse(provider_contracts::SCOPE_KIND_PROVIDER, &scope_id)
         .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    let protocol = provider_contracts::parse_upstream_protocol(&protocol)
-        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
     validate_provider_scope(&state, &scope)?;
-    commit_protocol_switch(&state, &scope, protocol, input.enabled)
+    commit_model_protocol_overrides(&state, &scope, input.overrides)
 }
 
-pub(super) async fn put_custom_endpoint_protocol_switch(
+pub(super) async fn put_custom_endpoint_model_protocol_overrides(
     State(state): State<CoreState>,
-    Path((scope_id, protocol)): Path<(String, String)>,
+    Path(scope_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
-    let input = parse_mutation_json::<ProtocolSwitchUpdate>(&body)?;
+    let input = parse_mutation_json::<ModelProtocolOverridesUpdate>(&body)?;
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &input.expectation)?;
     let scope = ContractScope::parse(provider_contracts::SCOPE_KIND_CUSTOM_ENDPOINT, &scope_id)
         .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
-    let protocol = provider_contracts::parse_upstream_protocol(&protocol)
-        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
     validate_custom_endpoint_scope(&state, &scope)?;
-    commit_protocol_switch(&state, &scope, protocol, input.enabled)
+    commit_model_protocol_overrides(&state, &scope, input.overrides)
 }
 
-fn commit_protocol_switch(
+fn commit_model_protocol_overrides(
     state: &CoreState,
     scope: &ContractScope,
-    protocol: crate::provider::UpstreamProtocolKind,
-    enabled: bool,
+    overrides: Vec<ModelProtocolOverride>,
 ) -> Result<Json<ProviderContracts>, V3ApiError> {
+    if overrides.is_empty() {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "override batch must be nonempty",
+        ));
+    }
+    let mut rows = Vec::with_capacity(overrides.len());
+    for item in overrides {
+        let protocol = crate::provider::UpstreamProtocolKind::from(item.protocol);
+        rows.push((
+            item.model_id,
+            protocol,
+            override_state_to_domain(item.state),
+        ));
+    }
     let now = Utc::now();
     {
         let db = state.db.lock();
-        db.set_protocol_switch(scope, protocol, enabled, now)
+        db.set_model_protocol_overrides(scope, &rows, now)
             .map_err(V3ApiError::internal)?;
         state
             .reload_provider_contracts_locked(&db)
@@ -411,6 +421,14 @@ fn commit_protocol_switch(
     Ok(Json(provider_contracts_from_state(
         state, &contracts, &accounts, &statuses,
     )))
+}
+
+fn override_state_to_domain(state: ProtocolOverrideState) -> DomainProtocolOverrideState {
+    match state {
+        ProtocolOverrideState::Auto => DomainProtocolOverrideState::Auto,
+        ProtocolOverrideState::ForceOn => DomainProtocolOverrideState::ForceOn,
+        ProtocolOverrideState::ForceOff => DomainProtocolOverrideState::ForceOff,
+    }
 }
 
 pub(super) async fn run_provider_protocol_probes(
@@ -924,7 +942,6 @@ fn provider_contracts_from_state(
                 .values()
                 .map(model_contract_from_domain)
                 .collect(),
-            protocols: protocol_switches(contract.switches),
             pricing: CapabilitySummary {
                 availability: descriptor.pricing.availability.to_string(),
             },
@@ -966,7 +983,6 @@ fn provider_contracts_from_state(
                     .values()
                     .map(model_contract_from_domain)
                     .collect(),
-                protocols: protocol_switches(contract.switches),
                 pricing: CapabilitySummary {
                     availability: descriptor.pricing.availability.to_string(),
                 },
@@ -1016,14 +1032,6 @@ fn card_summary(descriptor: crate::provider::ProviderDescriptor) -> CardCapabili
         discover_models: descriptor.card_actions.discover_models,
         protocol_probe: descriptor.card_actions.protocol_probe,
         catalog_refresh: descriptor.card_actions.catalog_refresh,
-    }
-}
-
-fn protocol_switches(value: DomainProtocolSwitches) -> ProtocolSwitches {
-    ProtocolSwitches {
-        chat_completions: value.chat_completions,
-        responses: value.responses,
-        messages: value.messages,
     }
 }
 
@@ -1083,6 +1091,15 @@ fn evidence_from_domain(row: &DomainProtocolEvidence) -> EffectiveProtocolEviden
         last_probe_result: row.last_probe_result.map(ProbeResultKind::from),
         last_probe_at: row.last_probe_at.map(|value| value.to_rfc3339()),
         last_probe_error: row.last_probe_error.clone(),
+        r#override: override_state_from_domain(row.r#override),
+    }
+}
+
+fn override_state_from_domain(state: DomainProtocolOverrideState) -> ProtocolOverrideState {
+    match state {
+        DomainProtocolOverrideState::Auto => ProtocolOverrideState::Auto,
+        DomainProtocolOverrideState::ForceOn => ProtocolOverrideState::ForceOn,
+        DomainProtocolOverrideState::ForceOff => ProtocolOverrideState::ForceOff,
     }
 }
 

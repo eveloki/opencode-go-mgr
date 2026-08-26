@@ -3241,10 +3241,13 @@ async fn disabled_goat_protocol_fails_locally_without_upstream() {
     state
         .db
         .lock()
-        .set_protocol_switch(
+        .set_model_protocol_overrides(
             &ocg_core::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
-            ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
-            false,
+            &[(
+                COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
+                ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+                ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
+            )],
             Utc::now(),
         )
         .unwrap();
@@ -3557,10 +3560,13 @@ async fn eligible_goat_anthropic_catalog_uses_messages_and_converts_client_respo
     state
         .db
         .lock()
-        .set_protocol_switch(
+        .set_model_protocol_overrides(
             &ocg_core::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
-            ocg_core::provider::UpstreamProtocolKind::Messages,
-            false,
+            &[(
+                "claude-sonnet-4-6".into(),
+                ocg_core::provider::UpstreamProtocolKind::Messages,
+                ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
+            )],
             Utc::now(),
         )
         .unwrap();
@@ -4550,36 +4556,40 @@ async fn list_mode_midflight_config_switch_keeps_the_entry_snapshot() {
     let _ = fs::remove_dir_all(dir);
 }
 
-fn disable_go_protocols(state: &Arc<CoreStateInner>, chat: bool, responses: bool, messages: bool) {
+fn disable_go_protocols(
+    state: &Arc<CoreStateInner>,
+    model_id: &str,
+    chat: bool,
+    responses: bool,
+    messages: bool,
+) {
     let now = Utc::now();
     let scope = ocg_core::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID);
     let db = state.db.lock();
+    let mut rows = Vec::new();
     if !chat {
-        db.set_protocol_switch(
-            &scope,
+        rows.push((
+            model_id.to_string(),
             ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
-            false,
-            now,
-        )
-        .unwrap();
+            ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
+        ));
     }
     if !responses {
-        db.set_protocol_switch(
-            &scope,
+        rows.push((
+            model_id.to_string(),
             ocg_core::provider::UpstreamProtocolKind::Responses,
-            false,
-            now,
-        )
-        .unwrap();
+            ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
+        ));
     }
     if !messages {
-        db.set_protocol_switch(
-            &scope,
+        rows.push((
+            model_id.to_string(),
             ocg_core::provider::UpstreamProtocolKind::Messages,
-            false,
-            now,
-        )
-        .unwrap();
+            ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
+        ));
+    }
+    if !rows.is_empty() {
+        db.set_model_protocol_overrides(&scope, &rows, now).unwrap();
     }
     drop(db);
     state.reload_provider_contracts().unwrap();
@@ -4596,7 +4606,7 @@ async fn disabled_protocols_fail_locally_without_upstream() {
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    disable_go_protocols(&state, false, false, false);
+    disable_go_protocols(&state, "glm-5.3", false, false, false);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, body) = protocol_call(port, "/v1/chat/completions", "glm-5.3").await;
@@ -4629,7 +4639,7 @@ async fn protocol_switch_filters_v1_models_and_application_models() {
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    disable_go_protocols(&state, false, true, true);
+    disable_go_protocols(&state, "glm-5.3", false, true, true);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, body) = models(port).await;
@@ -4675,7 +4685,7 @@ async fn reenabling_a_protocol_restores_routing_without_a_new_probe() {
     )]);
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
-    disable_go_protocols(&state, false, true, true);
+    disable_go_protocols(&state, "glm-5.3", false, true, true);
     let glm = state
         .provider_contracts()
         .scope(&ocg_core::provider_contracts::ContractScope::provider(
@@ -4692,10 +4702,13 @@ async fn reenabling_a_protocol_restores_routing_without_a_new_probe() {
     state
         .db
         .lock()
-        .set_protocol_switch(
+        .set_model_protocol_overrides(
             &ocg_core::provider_contracts::ContractScope::provider(OPENCODE_PROVIDER_ID),
-            ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
-            true,
+            &[(
+                "glm-5.3".into(),
+                ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+                ocg_core::provider_contracts::ProtocolOverrideState::Auto,
+            )],
             now,
         )
         .unwrap();

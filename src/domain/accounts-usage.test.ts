@@ -153,12 +153,9 @@ test("shows a live reset countdown below a quota progress bar during cooldown", 
 test("shows a distinct account authentication breaker instead of disguising it as cooldown", async () => {
   const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
   const display = await readFile(new URL("./account-display.ts", import.meta.url), "utf8");
-  const dashboard = await readFile(new URL("../views/Dashboard.vue", import.meta.url), "utf8");
   assert.match(card, /account\.auth_error \|\| isCooling\(account, now\)/);
   assert.match(display, /account\.enabled[\s\S]*t\("认证失效（401 熔断）"\)[\s\S]*t\("已禁用"\)/);
   assert.match(display, /if \(account\.auth_error\) return "error"/);
-  assert.match(dashboard, /if \(account\.auth_error\) return "auth-error"/);
-  assert.match(dashboard, /\.account-status\.auth-error \{ color: var\(--ocg-error\); \}/);
 });
 
 test("maps each usage window to its cooldown reset deadline", () => {

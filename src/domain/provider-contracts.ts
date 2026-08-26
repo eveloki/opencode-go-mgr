@@ -13,7 +13,6 @@ import type {
   ProviderContractsResponse,
   ProviderOfferingChoice,
   ProviderProtocol,
-  ProtocolSwitches,
 } from "../api/providers.ts";
 import {
   findPlanDefinition,
@@ -49,7 +48,6 @@ export interface ProviderScopeView {
   offerings: ProviderOfferingChoice[];
   catalog: EffectiveCatalog;
   models: EffectiveModelContract[];
-  protocols: ProtocolSwitches;
   pricing: CapabilitySummary;
   usage: CapabilitySummary;
   card: CardCapabilitySummary;
@@ -70,19 +68,12 @@ export interface AccountContractSummary {
 }
 
 export type ProtocolEvidenceUiStatus =
-  | "globally_closed"
   | "unavailable"
   | "unsupported"
   | "static"
   | "preset"
   | "probe_confirmed"
   | "probe_failure";
-
-const EMPTY_SWITCHES: ProtocolSwitches = {
-  chat_completions: true,
-  responses: true,
-  messages: true,
-};
 
 const EMPTY_CATALOG: EffectiveCatalog = {
   source: "",
@@ -169,14 +160,6 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-function normalizeSwitches(value: ProtocolSwitches | null | undefined): ProtocolSwitches {
-  return {
-    chat_completions: asBoolean(value?.chat_completions, true),
-    responses: asBoolean(value?.responses, true),
-    messages: asBoolean(value?.messages, true),
-  };
-}
-
 function normalizeCatalog(value: EffectiveCatalog | null | undefined): EffectiveCatalog {
   return {
     source: asString(value?.source),
@@ -201,6 +184,7 @@ function normalizeEvidence(
     last_probe_result: value?.last_probe_result ?? null,
     last_probe_at: typeof value?.last_probe_at === "string" ? value.last_probe_at : null,
     last_probe_error: typeof value?.last_probe_error === "string" ? value.last_probe_error : null,
+    override: value?.override ?? "auto",
   };
 }
 
@@ -260,7 +244,6 @@ function normalizeProviderGroup(group: ProviderContractGroup): ProviderContractG
     offerings: Array.isArray(group.offerings) ? group.offerings.map(normalizeOffering) : [],
     catalog: normalizeCatalog(group.catalog),
     models: Array.isArray(group.models) ? group.models.map(normalizeModel) : [],
-    protocols: normalizeSwitches(group.protocols),
     pricing: { availability: asString(group.pricing?.availability) },
     usage: { availability: asString(group.usage?.availability) },
     card: normalizeCard(group.card),
@@ -285,7 +268,6 @@ function normalizeCustomEndpoint(endpoint: CustomEndpointContract): CustomEndpoi
     },
     catalog: normalizeCatalog(endpoint.catalog),
     models: Array.isArray(endpoint.models) ? endpoint.models.map(normalizeModel) : [],
-    protocols: normalizeSwitches(endpoint.protocols),
     pricing: { availability: asString(endpoint.pricing?.availability, "unpriced") },
     usage: { availability: asString(endpoint.usage?.availability) },
     card: normalizeCard(endpoint.card),
@@ -357,7 +339,6 @@ export function flattenProviderScopes(
     offerings: group.offerings,
     catalog: group.catalog,
     models: group.models,
-    protocols: group.protocols,
     pricing: group.pricing,
     usage: group.usage,
     card: group.card,
@@ -375,7 +356,6 @@ export function flattenProviderScopes(
     offerings: customOfferings(endpoint, catalog),
     catalog: endpoint.catalog,
     models: endpoint.models,
-    protocols: endpoint.protocols,
     pricing: endpoint.pricing,
     usage: endpoint.usage,
     card: endpoint.card,
@@ -430,45 +410,16 @@ export function protocolProbeSupported(scope: Pick<ProviderScopeView, "card">): 
   return scope.card.protocol_probe;
 }
 
-export function enabledProtocols(scope: Pick<ProviderScopeView, "protocols" | "models">): ProviderProtocol[] {
+export function enabledProtocols(scope: Pick<ProviderScopeView, "models">): ProviderProtocol[] {
   return PROVIDER_PROTOCOLS.filter((protocol) => (
-    scope.protocols[protocol]
-    && scope.models.some((model) => model.protocols[protocol]?.enabled)
+    scope.models.some((model) => model.protocols[protocol]?.enabled)
   ));
-}
-
-/**
- * Protocols that structurally belong to a scope: any protocol with evidence
- * on at least one model, plus any protocol whose switch is currently off so
- * it can always be switched back on. Switches render only this set.
- */
-export function structuralProtocols(
-  scope: Pick<ProviderScopeView, "protocols" | "models">,
-): ProviderProtocol[] {
-  return PROVIDER_PROTOCOLS.filter((protocol) => (
-    !scope.protocols[protocol]
-    || scope.models.some((model) => model.protocols[protocol] !== undefined)
-  ));
-}
-
-/** Models effectively usable through a protocol right now (evidence enabled after switches). */
-export function availableModelCount(
-  scope: Pick<ProviderScopeView, "models">,
-  protocol: ProviderProtocol,
-): number {
-  return scope.models.filter((model) => model.protocols[protocol]?.enabled).length;
-}
-
-export function allSupplierProtocolsDisabled(switches: ProtocolSwitches): boolean {
-  return PROVIDER_PROTOCOLS.every((protocol) => !switches[protocol]);
 }
 
 export function protocolEvidenceStatus(
-  protocol: ProviderProtocol,
+  _protocol: ProviderProtocol,
   evidence: EffectiveProtocolEvidence | undefined,
-  switches: ProtocolSwitches,
 ): ProtocolEvidenceUiStatus {
-  if (!switches[protocol]) return "globally_closed";
   if (!evidence) return "unsupported";
   if (!evidence.available) return "unavailable";
   if (evidence.last_probe_result === "failure") return "probe_failure";
@@ -545,7 +496,7 @@ export function accountContractSummary(
     };
   }
   const protocols = enabledProtocols(scope);
-  const allDisabled = allSupplierProtocolsDisabled(scope.protocols);
+  const allDisabled = protocols.length === 0;
   const unroutable = !scope.catalog_routable || !scope.production_inference;
   return {
     ...ref,
@@ -570,7 +521,6 @@ export function emptyProviderScopeView(
     offerings: [],
     catalog: EMPTY_CATALOG,
     models: [],
-    protocols: EMPTY_SWITCHES,
     pricing: { availability: "" },
     usage: { availability: "" },
     card: EMPTY_CARD,

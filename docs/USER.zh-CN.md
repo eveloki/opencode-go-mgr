@@ -14,7 +14,7 @@
 - [管理面板](user/dashboard.zh-CN.md) — 七个视图、国际化与接入中心。
 - [应用教程与模型能力](user/applications.zh-CN.md) — 16 个客户端教程与模型能力表。
 - [账号](user/accounts.zh-CN.md) — Plan、凭据、排序、额度行为与托管注册。
-- [供应商](user/providers.zh-CN.md) — 目录、供应商合约、协议开关与探测。
+- [供应商](user/providers.zh-CN.md) — 目录、供应商合约、按模型协议覆盖与探测。
 - [日志与设置](user/logs-settings.zh-CN.md) — 请求日志、设置、代理模式与主题。
 - [Gateway 行为](user/gateway.zh-CN.md) — 端点、鉴权、别名、Zen Free 与熔断。
 - [协议转换](user/protocol-conversion.zh-CN.md) — 推荐/已验证协议、透传与转换边界。

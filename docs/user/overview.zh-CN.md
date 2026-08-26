@@ -7,7 +7,7 @@ OCG Manager 是一台本地 Gateway：把供应商 API Key 保存在 SQLite 数�
 Gateway 只做四件事，顺序基本符合直觉：
 
 1. 用面板签发的 **Key** 验证客户端。
-2. 用本地 Alias 注册表（以及合格 Custom 声明 ID）解析客户端模型名，再经能力过滤、适配器上限、已保存的供应商合约，以及 Chat Completions / Responses / Messages 开关后挑一张可用账号卡。
+2. 用本地 Alias 注册表（以及合格 Custom 声明 ID）解析客户端模型名，再经能力过滤、适配器上限、已保存的供应商合约，以及按模型协议 effective 状态后挑一张可用账号卡。
 3. 把请求转换到所选 Plan 的有效上游协议，再把响应转回客户端协议。客户端请求路径不会发现或探测。
 4. 把请求日志（`requested_model`、`resolved_alias`、`upstream_model`）、用量、冷却全部写回 SQLite，并在面板里呈现。
 
@@ -27,7 +27,7 @@ Gateway 只做四件事，顺序基本符合直觉：
     （系统浏览器）                 客户端 + Key
                \                    /
                 v                  v
-              SQLite schema v27（仅本地）
+              SQLite schema v31（仅本地）
 ```
 
 请求路径、Plan、七个面板视图和协议转换的文字图见

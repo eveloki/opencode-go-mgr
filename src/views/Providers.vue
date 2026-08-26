@@ -61,160 +61,84 @@
           </n-button>
         </n-alert>
 
-        <section class="providers-section" aria-labelledby="provider-overview-title">
-          <h2 id="provider-overview-title">{{ t("概览") }}</h2>
-          <dl class="providers-overview">
-            <div>
-              <dt>{{ t("供应商") }}</dt>
-              <dd>{{ activeScope.label }}</dd>
-            </div>
-            <div>
-              <dt>{{ t("范围修订") }}</dt>
-              <dd><code>{{ activeScope.revision }}</code></dd>
-            </div>
-            <div>
-              <dt>{{ t("生产状态") }}</dt>
-              <dd>{{ activeScope.production_inference ? t("可生产推理") : t("不可生产推理") }}</dd>
-            </div>
-            <div>
-              <dt>{{ t("目录可路由") }}</dt>
-              <dd>{{ activeScope.catalog_routable ? t("目录可路由") : t("目录不可路由") }}</dd>
-            </div>
-          </dl>
-          <ul v-if="activeScope.disabled_reasons.length > 0" class="providers-reasons">
-            <li v-for="reason in activeScope.disabled_reasons" :key="reason">
-              <span class="providers-reasons__label">{{ t("禁用原因") }}</span>
-              {{ reason }}
-            </li>
-          </ul>
-          <div class="providers-offerings">
-            <h3>{{ t("套餐与账号") }}</h3>
-            <article
-              v-for="offering in activeScope.offerings"
-              :key="offering.offering_id"
-              class="offering-block"
-            >
-              <header>
-                <strong>{{ offering.display_name }}</strong>
-                <span>{{ offering.routable ? t("可路由") : t("不可路由") }}</span>
-              </header>
-              <p v-if="offering.accounts.length === 0">{{ t("无账号") }}</p>
-              <ul v-else>
-                <li v-for="account in offering.accounts" :key="account.id">
-                  {{ account.name }}
-                  · {{ account.enabled ? t("已启用") : t("已禁用") }}
-                  <template v-if="account.verification_status !== 'not_required'">
-                    · {{ verificationLabel(account.verification_status) }}
-                  </template>
-                </li>
-              </ul>
-            </article>
-          </div>
-        </section>
-
-        <section class="providers-section" aria-labelledby="provider-catalog-title">
-          <h2 id="provider-catalog-title">{{ t("模型目录") }}</h2>
-          <dl class="providers-overview providers-overview--compact">
-            <div>
-              <dt>{{ t("目录来源") }}</dt>
-              <dd>{{ catalogSourceLabel(activeScope.catalog.source) }}</dd>
-            </div>
-            <div v-if="safeSourceUrl">
-              <dt>{{ t("来源地址") }}</dt>
-              <dd>
-                <a :href="safeSourceUrl" target="_blank" rel="noopener noreferrer">{{ t("官方来源") }}</a>
-              </dd>
-            </div>
-            <div>
-              <dt>{{ t("刷新时间") }}</dt>
-              <dd>{{ activeScope.catalog.refreshed_at ? formatTimestamp(activeScope.catalog.refreshed_at) : t("尚未刷新") }}</dd>
-            </div>
-          </dl>
-          <ul v-if="activeScope.catalog.models.length > 0" class="catalog-models">
-            <li v-for="modelId in activeScope.catalog.models" :key="modelId">
-              <code>{{ modelId }}</code>
-            </li>
-          </ul>
-          <p v-else class="providers-empty">{{ t("暂无模型合约") }}</p>
-          <template v-if="catalogRefreshSupported(activeScope)">
-            <n-form-item :label="t('选择用于刷新的账号')">
-              <n-select
-                v-model:value="refreshAccountId"
-                :options="refreshAccountOptions"
-                :placeholder="t('选择用于刷新的账号')"
-                :aria-label="t('选择用于刷新的账号')"
-                :disabled="catalogRefreshing || refreshAccountOptions.length === 0"
-                :consistent-menu-width="false"
+        <n-tabs v-model:value="activeTab" class="providers-tabs" display-directive="if">
+          <n-tab-pane name="catalog" :tab="t('模型目录')">
+            <section class="providers-section" aria-labelledby="provider-catalog-title">
+              <h2 id="provider-catalog-title">{{ t("模型目录") }}</h2>
+              <dl class="providers-overview providers-overview--compact">
+                <div>
+                  <dt>{{ t("目录来源") }}</dt>
+                  <dd>{{ catalogSourceLabel(activeScope.catalog.source) }}</dd>
+                </div>
+                <div v-if="safeSourceUrl">
+                  <dt>{{ t("来源地址") }}</dt>
+                  <dd>
+                    <a :href="safeSourceUrl" target="_blank" rel="noopener noreferrer">{{ t("官方来源") }}</a>
+                  </dd>
+                </div>
+                <div>
+                  <dt>{{ t("刷新时间") }}</dt>
+                  <dd>{{ activeScope.catalog.refreshed_at ? formatTimestamp(activeScope.catalog.refreshed_at) : t("尚未刷新") }}</dd>
+                </div>
+              </dl>
+              <template v-if="catalogRefreshSupported(activeScope)">
+                <n-form-item :label="t('选择用于刷新的账号')">
+                  <n-select
+                    v-model:value="refreshAccountId"
+                    :options="refreshAccountOptions"
+                    :placeholder="t('选择用于刷新的账号')"
+                    :aria-label="t('选择用于刷新的账号')"
+                    :disabled="catalogRefreshing || refreshAccountOptions.length === 0"
+                    :consistent-menu-width="false"
+                  />
+                </n-form-item>
+                <n-button
+                  type="primary"
+                  :loading="catalogRefreshing"
+                  :disabled="catalogRefreshing || !refreshAccountId"
+                  @click="refreshCatalog"
+                >
+                  {{ catalogRefreshing ? t("正在刷新模型目录…") : t("刷新模型目录") }}
+                </n-button>
+              </template>
+              <p v-else class="providers-empty">{{ t("该供应商不支持刷新模型目录") }}</p>
+              <n-alert
+                v-if="catalogRefreshError"
+                type="error"
+                :title="t('刷新模型目录失败: {error}', { error: catalogRefreshError })"
               />
-            </n-form-item>
-            <n-button
-              type="primary"
-              :loading="catalogRefreshing"
-              :disabled="catalogRefreshing || !refreshAccountId"
-              @click="refreshCatalog"
-            >
-              {{ catalogRefreshing ? t("正在刷新模型目录…") : t("刷新模型目录") }}
-            </n-button>
-          </template>
-          <p v-else class="providers-empty">{{ t("该供应商不支持刷新模型目录") }}</p>
-          <n-alert
-            v-if="catalogRefreshError"
-            type="error"
-            :title="t('刷新模型目录失败: {error}', { error: catalogRefreshError })"
-          />
-        </section>
+            </section>
 
-        <section class="providers-section" aria-labelledby="provider-protocol-title">
-          <h2 id="provider-protocol-title" class="sr-only">{{ t("上游协议策略") }}</h2>
-          <ProviderProtocolSwitches
-            :switches="activeScope.protocols"
-            :protocols="structuralProtocols(activeScope)"
-            :model-counts="protocolModelCounts"
-            :loading-protocol="switchLoading"
-            :disabled="actionLocked && switchLoading === null"
-            @change="updateProtocol"
-          />
-          <n-alert
-            v-if="protocolError"
-            type="error"
-            :title="t('保存协议设置失败: {error}', { error: protocolError })"
-          />
-        </section>
+            <section class="providers-section" aria-labelledby="provider-matrix-title">
+              <h2 id="provider-matrix-title" class="sr-only">{{ t("模型协议矩阵") }}</h2>
+              <ProviderModelMatrix
+                :scope="activeScope"
+                :loading="overridesLoading"
+                :probing-models="probingModels"
+                @update:overrides="updateOverrides"
+                @probe="runModelProbe"
+                @error="matrixError = $event"
+              />
+              <n-alert
+                v-if="matrixError"
+                type="error"
+                :title="t('保存协议覆盖失败: {error}', { error: matrixError })"
+              />
+              <n-alert
+                v-if="probeError"
+                type="error"
+                :title="t('探测失败: {error}', { error: probeError })"
+              />
+            </section>
+          </n-tab-pane>
 
-        <ProviderModelList
-          :models="activeScope.models"
-          :switches="activeScope.protocols"
-        />
-
-        <template v-if="activeScope.scope_kind !== 'custom_endpoint'">
-          <ProviderProbePanel
-            :unavailable="!protocolProbeSupported(activeScope)"
-            :account-id="probeAccountId"
-            :model-id="probeModelId"
-            :protocols="probeProtocols"
-            :confirmed="probeConfirmed"
-            :in-flight="probeInFlight"
-            :accounts="scopeAccounts(activeScope)"
-            :models="probeModelOptions"
-            :model-contracts="activeScope.models"
-            :results="probeResults"
-            @update:account-id="probeAccountId = $event"
-            @update:model-id="probeModelId = $event"
-            @update:protocols="probeProtocols = $event"
-            @update:confirmed="probeConfirmed = $event"
-            @probe="runProbe"
-          />
-          <n-alert
-            v-if="probeError"
-            type="error"
-            :title="t('探测失败: {error}', { error: probeError })"
-          />
-        </template>
-
-        <section class="providers-section" aria-labelledby="provider-pricing-title">
-          <h2 id="provider-pricing-title">{{ t("价格") }}</h2>
-          <PricingCatalog :provider-id="activeScope.provider_id" />
-        </section>
+          <n-tab-pane name="pricing" :tab="t('模型价格')">
+            <section class="providers-section" aria-labelledby="provider-pricing-title">
+              <h2 id="provider-pricing-title" class="sr-only">{{ t("模型价格") }}</h2>
+              <PricingCatalog :provider-id="activeScope.provider_id" />
+            </section>
+          </n-tab-pane>
+        </n-tabs>
       </div>
     </div>
 
@@ -232,41 +156,33 @@ import {
   NMenu,
   NSelect,
   NSpin,
+  NTabPane,
+  NTabs,
   useMessage,
 } from "naive-ui";
 import type { MenuOption, SelectOption } from "naive-ui";
 import { DashboardRequestError } from "../api/dashboard";
-import {
-  isCustomCatalogRefreshResponse,
-  providerApi,
-} from "../api/providers.ts";
+import { isCustomCatalogRefreshResponse, providerApi } from "../api/providers.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import type {
-  ProtocolProbeResult,
+  ModelProtocolOverrideUpdate,
   ProviderCatalogEntry,
   ProviderContractsResponse,
-  ProviderProtocol,
 } from "../api/providers.ts";
-import ProviderProtocolSwitches from "../components/ProviderProtocolSwitches.vue";
-import ProviderModelList from "../components/ProviderModelList.vue";
-import ProviderProbePanel from "../components/ProviderProbePanel.vue";
+import ProviderModelMatrix from "../components/ProviderModelMatrix.vue";
 import PricingCatalog from "../components/PricingCatalog.vue";
 import { locale, t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { applyAppViewSearchParams, readProviderScopeQuery } from "./app-navigation.ts";
 import {
   applyModelContractToResponse,
-  availableModelCount,
   catalogRefreshSupported,
   flattenProviderScopes,
   isSafeSourceUrl,
   normalizeProviderContractsResponse,
-  protocolProbeSupported,
   PROVIDER_PROTOCOLS,
-  selectProviderScope,
   scopeAccounts,
-  structuralProtocols,
-  uniqueProtocols,
+  selectProviderScope,
 } from "../domain/provider-contracts.ts";
 import {
   CATALOG_SOURCE_CUSTOM_DISCOVERY,
@@ -284,18 +200,14 @@ const catalog = ref<ProviderCatalogEntry[] | null>(null);
 const loading = ref(false);
 const loadError = ref("");
 const selectedKey = ref<string | null>(null);
-const switchLoading = ref<ProviderProtocol | null>(null);
-const protocolError = ref("");
+const activeTab = ref("catalog");
 const catalogRefreshing = ref(false);
 const catalogRefreshError = ref("");
 const refreshAccountId = ref<string | null>(null);
-const probeAccountId = ref<string | null>(null);
-const probeModelId = ref<string | null>(null);
-const probeProtocols = ref<ProviderProtocol[]>([]);
-const probeConfirmed = ref(false);
-const probeInFlight = ref(false);
+const overridesLoading = ref(false);
+const matrixError = ref("");
 const probeError = ref("");
-const probeResults = ref<ProtocolProbeResult[]>([]);
+const probingModels = ref<Set<string>>(new Set());
 const actionLive = ref("");
 let activatedOnce = false;
 
@@ -313,7 +225,7 @@ const activeSelection = computed(() => {
 const activeScope = computed(() => activeSelection.value.scope);
 const initialLoading = computed(() => loading.value && !contracts.value);
 const actionLocked = computed(() => (
-  switchLoading.value !== null || catalogRefreshing.value || probeInFlight.value
+  overridesLoading.value || catalogRefreshing.value || probingModels.value.size > 0
 ));
 const scopeMenuOptions = computed<MenuOption[]>(() => scopes.value.map((scope) => ({
   key: scope.key,
@@ -333,24 +245,6 @@ const refreshAccountOptions = computed<SelectOption[]>(() => (
       .map((account) => ({ value: account.id, label: account.name }))
     : []
 ));
-const probeModelOptions = computed(() => {
-  if (!activeScope.value) return [];
-  const ids = new Set<string>([
-    ...activeScope.value.catalog.models,
-    ...activeScope.value.models.map((model) => model.model_id),
-  ]);
-  return [...ids];
-});
-const protocolModelCounts = computed<Record<ProviderProtocol, number>>(() => {
-  const counts = { chat_completions: 0, responses: 0, messages: 0 };
-  const scope = activeScope.value;
-  if (scope) {
-    for (const protocol of PROVIDER_PROTOCOLS) {
-      counts[protocol] = availableModelCount(scope, protocol);
-    }
-  }
-  return counts;
-});
 const safeSourceUrl = computed(() => {
   const url = activeScope.value?.catalog.source_url ?? "";
   return isSafeSourceUrl(url) ? url : "";
@@ -364,13 +258,6 @@ function catalogSourceLabel(source: string): string {
   if (source === CATALOG_SOURCE_OPENCODE_MODELS) return `OpenCode · ${t("官方来源")}`;
   if (source === CATALOG_SOURCE_COMMAND_CODE_MODELS) return `Command Code · ${t("官方来源")}`;
   return source;
-}
-
-function verificationLabel(status: string): string {
-  if (status === "pending") return t("待验证");
-  if (status === "verified") return t("连接已验证");
-  if (status === "failed") return t("验证失败");
-  return status;
 }
 
 function formatTimestamp(value: string): string {
@@ -417,15 +304,10 @@ function selectScopeKey(key: string | number) {
 
 function resetScopeActions() {
   catalogRefreshError.value = "";
-  protocolError.value = "";
+  matrixError.value = "";
   probeError.value = "";
-  probeResults.value = [];
-  probeConfirmed.value = false;
-  probeProtocols.value = [];
   const accounts = activeScope.value ? scopeAccounts(activeScope.value) : [];
   refreshAccountId.value = accounts[0]?.id ?? null;
-  probeAccountId.value = accounts[0]?.id ?? null;
-  probeModelId.value = probeModelOptions.value[0] ?? null;
 }
 
 async function loadContracts(options: { retain?: boolean } = {}): Promise<{ ok: boolean; error: string }> {
@@ -451,31 +333,6 @@ async function loadContracts(options: { retain?: boolean } = {}): Promise<{ ok: 
     return { ok: false, error };
   } finally {
     loading.value = false;
-  }
-}
-
-async function updateProtocol(protocol: ProviderProtocol, enabled: boolean) {
-  const current = contracts.value;
-  const scope = activeScope.value;
-  if (!current || !scope || switchLoading.value) return;
-  switchLoading.value = protocol;
-  protocolError.value = "";
-  try {
-    const response = await providersStore.putProtocolSwitch(scope.scope_kind, scope.scope_id, protocol, enabled);
-    contracts.value = normalizeProviderContractsResponse(response);
-    actionLive.value = t("协议设置已保存");
-    message.success(t("协议设置已保存"));
-  } catch (error) {
-    if (error instanceof DashboardRequestError && error.status === 409) {
-      await loadContracts({ retain: true });
-      actionLive.value = t("供应商设置已在其他位置更新，已重新加载，请重试");
-      message.warning(t("供应商设置已在其他位置更新，已重新加载，请重试"));
-    } else {
-      protocolError.value = dashboardErrorDetail(error);
-      message.error(t("保存协议设置失败: {error}", { error: protocolError.value }));
-    }
-  } finally {
-    switchLoading.value = null;
   }
 }
 
@@ -505,24 +362,47 @@ async function refreshCatalog() {
   }
 }
 
-async function runProbe() {
-  const scope = activeScope.value;
-  if (!scope || !protocolProbeSupported(scope) || probeInFlight.value) return;
-  const protocols = uniqueProtocols(probeProtocols.value);
-  if (!probeAccountId.value || !probeModelId.value || protocols.length === 0) {
-    probeError.value = t("请选择测试账号、模型和至少一个协议");
-    return;
-  }
-  if (!probeConfirmed.value) return;
-  probeInFlight.value = true;
-  probeError.value = "";
-  probeResults.value = [];
+async function updateOverrides(payload: {
+  scopeKind: "provider" | "custom_endpoint";
+  scopeId: string;
+  overrides: ModelProtocolOverrideUpdate[];
+}) {
+  if (overridesLoading.value) return;
+  overridesLoading.value = true;
+  matrixError.value = "";
   try {
-    const response = await providerApi.runProtocolProbes(probeAccountId.value, {
-      model_id: probeModelId.value,
-      protocols,
+    const response = await providersStore.putModelProtocolOverrides(
+      payload.scopeKind,
+      payload.scopeId,
+      payload.overrides,
+    );
+    contracts.value = normalizeProviderContractsResponse(response);
+    actionLive.value = t("协议覆盖已保存");
+    message.success(t("协议覆盖已保存"));
+  } catch (error) {
+    if (error instanceof DashboardRequestError && error.status === 409) {
+      await loadContracts({ retain: true });
+      actionLive.value = t("供应商设置已在其他位置更新，已重新加载，请重试");
+      message.warning(t("供应商设置已在其他位置更新，已重新加载，请重试"));
+    } else {
+      matrixError.value = dashboardErrorDetail(error);
+      message.error(t("保存协议覆盖失败: {error}", { error: matrixError.value }));
+    }
+  } finally {
+    overridesLoading.value = false;
+  }
+}
+
+async function runModelProbe(payload: { modelId: string; accountId: string }) {
+  const scope = activeScope.value;
+  if (!scope || probingModels.value.has(payload.modelId)) return;
+  probingModels.value = new Set(probingModels.value).add(payload.modelId);
+  probeError.value = "";
+  try {
+    const response = await providerApi.runProtocolProbes(payload.accountId, {
+      model_id: payload.modelId,
+      protocols: [...PROVIDER_PROTOCOLS],
     });
-    probeResults.value = response.results;
     if (response.contract && contracts.value) {
       contracts.value = applyModelContractToResponse(contracts.value, {
         scope_kind: scope.scope_kind,
@@ -536,7 +416,9 @@ async function runProbe() {
     probeError.value = dashboardErrorDetail(error);
     message.error(t("探测失败: {error}", { error: probeError.value }));
   } finally {
-    probeInFlight.value = false;
+    const next = new Set(probingModels.value);
+    next.delete(payload.modelId);
+    probingModels.value = next;
   }
 }
 
@@ -601,10 +483,10 @@ onUnmounted(() => {
   gap: 16px;
   min-width: 0;
 }
-.providers-section,
-.providers-main :deep(.model-contracts),
-.providers-main :deep(.probe-panel),
-.providers-main :deep(.protocol-policy) {
+.providers-tabs :deep(.n-tabs-nav) {
+  margin-bottom: 12px;
+}
+.providers-section {
   min-width: 0;
   padding: 16px;
   border: 1px solid var(--ocg-border);
@@ -612,8 +494,7 @@ onUnmounted(() => {
   background: var(--ocg-surface);
   box-shadow: var(--ocg-shadow-sm);
 }
-.providers-section h2,
-.providers-offerings h3 {
+.providers-section h2 {
   margin: 0 0 10px;
   color: var(--ocg-ink);
   font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
@@ -647,51 +528,9 @@ onUnmounted(() => {
   color: var(--ocg-ink);
   font-weight: 600;
 }
-.providers-overview code {
-  font-family: "Cascadia Mono", Consolas, monospace;
-}
-.providers-reasons,
-.catalog-models,
-.offering-block ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.providers-reasons li,
-.offering-block li,
-.catalog-models li {
-  overflow-wrap: anywhere;
-  padding: 4px 0;
-  color: var(--ocg-ink);
-  font-size: var(--ocg-font-sm);
-}
-.providers-reasons__label {
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-xs);
-}
-.catalog-models code {
-  font-size: var(--ocg-font-sm);
-}
-.offering-block {
-  display: grid;
-  gap: 4px;
-  padding: 10px 0;
-  border-top: 1px solid var(--ocg-divider);
-}
-.offering-block header {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-}
-.offering-block header span,
 .providers-empty {
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
-}
-.providers-main :deep(.protocol-policy) {
-  padding: 0;
-  border: 0;
-  box-shadow: none;
 }
 
 @media (max-width: 720px) {

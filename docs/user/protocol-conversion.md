@@ -5,9 +5,9 @@
 OCG Manager speaks five client protocols on one port, then translates each
 request into whatever the upstream Plan actually understands. The conversion
 layer is deliberately incurious: it resolves the Alias, checks account
-eligibility, applies the adapter ceiling and saved provider contract, respects
-the Chat Completions / Responses / Messages switches, and only then
-passthroughs or converts. A globally closed protocol wins — even if the model
+eligibility, applies the adapter ceiling and saved provider contract, checks
+the per-model/per-protocol effective state, and only then passthroughs or
+converts. A force_off or globally closed protocol wins — even if the model
 claims it supports it.
 
 Each known OpenCode Go model starts from a hardcoded **preferred** protocol
@@ -15,11 +15,11 @@ and a **supported** set, maintained after test-account probes; the request
 path does not discover protocols. A successful probe on **Providers** can
 confirm or add support only within that adapter ceiling; failures are recorded
 but never remove static capability. If the client protocol is supported and
-enabled, request and response pass through. Otherwise the gateway converts
-the **request body** to the preferred upstream protocol and the **response
-body** — or SSE stream — back to the client protocol. Custom API does the
-same to the account's declared upstream protocol, then honors that endpoint's
-contract and switches. Conversion covers text, system instructions, images,
+effectively enabled, request and response pass through. Otherwise the gateway
+converts the **request body** to the preferred upstream protocol and the
+**response body** — or SSE stream — back to the client protocol. Custom API
+does the same to the account's declared upstream protocol, then honors that
+endpoint's contract and per-model overrides. Conversion covers text, system instructions, images,
 tool calls and results, reasoning content, completion status, errors, and
 usage fields. `glm-5.2` passthroughs Chat, Responses, and Messages;
 `grok-4.5` is Responses-only and converts Chat / Messages / Gemini entries;

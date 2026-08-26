@@ -246,6 +246,45 @@ impl TryFrom<&str> for ProbeResultKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolOverrideState {
+    /// Follow persisted evidence and adapter safety ceiling.
+    #[default]
+    Auto,
+    /// Enable the protocol if the adapter safety ceiling allows it,
+    /// even when no probe evidence exists yet.
+    ForceOn,
+    /// Disable the protocol regardless of evidence.
+    ForceOff,
+}
+
+impl ProtocolOverrideState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::ForceOn => "force_on",
+            Self::ForceOff => "force_off",
+        }
+    }
+}
+
+impl TryFrom<&str> for ProtocolOverrideState {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "force_on" => Ok(Self::ForceOn),
+            "force_off" => Ok(Self::ForceOff),
+            other => Err(format!("unknown protocol override state `{other}`")),
+        }
+    }
+}
+
+/// Deprecated scope-level protocol switches. The database columns remain for
+/// backward compatibility but effective contract derivation no longer reads
+/// them; per-model/per-protocol overrides now control enablement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolSwitches {
     pub chat_completions: bool,
@@ -259,24 +298,6 @@ impl Default for ProtocolSwitches {
             chat_completions: true,
             responses: true,
             messages: true,
-        }
-    }
-}
-
-impl ProtocolSwitches {
-    pub fn is_enabled(self, protocol: UpstreamProtocolKind) -> bool {
-        match protocol {
-            UpstreamProtocolKind::ChatCompletions => self.chat_completions,
-            UpstreamProtocolKind::Responses => self.responses,
-            UpstreamProtocolKind::Messages => self.messages,
-        }
-    }
-
-    pub fn set(&mut self, protocol: UpstreamProtocolKind, enabled: bool) {
-        match protocol {
-            UpstreamProtocolKind::ChatCompletions => self.chat_completions = enabled,
-            UpstreamProtocolKind::Responses => self.responses = enabled,
-            UpstreamProtocolKind::Messages => self.messages = enabled,
         }
     }
 }
@@ -306,10 +327,20 @@ pub struct PersistedModelProtocol {
     pub last_probe_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedModelProtocolOverride {
+    pub scope: ContractScope,
+    pub model_id: String,
+    pub protocol: UpstreamProtocolKind,
+    pub state: ProtocolOverrideState,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PersistedContracts {
     pub scopes: HashMap<ContractScope, PersistedScopeRow>,
     pub evidence: HashMap<ContractScope, Vec<PersistedModelProtocol>>,
+    pub overrides: HashMap<ContractScope, Vec<PersistedModelProtocolOverride>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -332,6 +363,8 @@ pub struct EffectiveProtocolEvidence {
     pub last_probe_result: Option<ProbeResultKind>,
     pub last_probe_at: Option<DateTime<Utc>>,
     pub last_probe_error: Option<String>,
+    #[serde(rename = "override")]
+    pub r#override: ProtocolOverrideState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -364,7 +397,6 @@ pub struct EffectiveScopeContract {
     pub adapter_kind: ProviderAdapterKind,
     pub catalog_routable: bool,
     pub production_inference: bool,
-    pub switches: ProtocolSwitches,
     pub catalog: EffectiveCatalog,
     pub models: BTreeMap<String, EffectiveModelContract>,
     pub revision: u64,
@@ -731,12 +763,14 @@ pub fn build_effective_contracts(
             .expect("builtin provider scopes map to adapters");
         let persisted_scope = persisted.scopes.get(&scope);
         let evidence = persisted.evidence.get(&scope).cloned().unwrap_or_default();
+        let overrides = persisted.overrides.get(&scope).cloned().unwrap_or_default();
         let contract = merge_provider_scope(
             provider_id,
             adapter,
             zen_catalog,
             persisted_scope,
             &evidence,
+            &overrides,
         );
         set.providers.insert(provider_id.to_string(), contract);
     }
@@ -744,7 +778,8 @@ pub fn build_effective_contracts(
         let scope = ContractScope::custom_endpoint(&runtime.account_id);
         let persisted_scope = persisted.scopes.get(&scope);
         let evidence = persisted.evidence.get(&scope).cloned().unwrap_or_default();
-        let contract = merge_custom_scope(runtime, persisted_scope, &evidence);
+        let overrides = persisted.overrides.get(&scope).cloned().unwrap_or_default();
+        let contract = merge_custom_scope(runtime, persisted_scope, &evidence, &overrides);
         set.custom_endpoints
             .insert(runtime.account_id.clone(), contract);
     }
@@ -771,9 +806,9 @@ fn merge_provider_scope(
     zen_catalog: &ZenFreeModelCatalog,
     persisted: Option<&PersistedScopeRow>,
     evidence: &[PersistedModelProtocol],
+    overrides: &[PersistedModelProtocolOverride],
 ) -> EffectiveScopeContract {
     let descriptor = representative_descriptor(adapter).expect("adapter has a catalog offering");
-    let switches = persisted.map(|row| row.switches).unwrap_or_default();
     let revision = persisted.map(|row| row.revision).unwrap_or(1);
     let (catalog, static_models) = match adapter {
         ProviderAdapterKind::OpenCodeGo => {
@@ -859,7 +894,7 @@ fn merge_provider_scope(
                 &[],
                 ContractEvidenceSource::Static,
                 evidence,
-                switches,
+                overrides,
                 descriptor.inference.catalog_routable && descriptor.inference.production_inference,
             ),
         );
@@ -869,7 +904,7 @@ fn merge_provider_scope(
         adapter,
         &[],
         evidence,
-        switches,
+        overrides,
         descriptor.inference.catalog_routable && descriptor.inference.production_inference,
     );
 
@@ -887,7 +922,6 @@ fn merge_provider_scope(
         adapter_kind: adapter,
         catalog_routable: descriptor.inference.catalog_routable,
         production_inference: descriptor.inference.production_inference,
-        switches,
         catalog,
         models,
         revision,
@@ -900,10 +934,10 @@ fn merge_custom_scope(
     runtime: &CustomAccountRuntime,
     persisted: Option<&PersistedScopeRow>,
     evidence: &[PersistedModelProtocol],
+    overrides: &[PersistedModelProtocolOverride],
 ) -> EffectiveScopeContract {
     let descriptor = ProviderRegistry::get(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
         .expect("custom offering is registered");
-    let switches = persisted.map(|row| row.switches).unwrap_or_default();
     let revision = persisted.map(|row| row.revision).unwrap_or(1);
     let declared: Vec<(String, UpstreamProtocolKind)> = runtime
         .capabilities
@@ -940,7 +974,7 @@ fn merge_custom_scope(
                 &declared,
                 ContractEvidenceSource::Preset,
                 evidence,
-                switches,
+                overrides,
                 descriptor.inference.catalog_routable && descriptor.inference.production_inference,
             ),
         );
@@ -950,7 +984,7 @@ fn merge_custom_scope(
         ProviderAdapterKind::ConfigurableHttp,
         &declared,
         evidence,
-        switches,
+        overrides,
         descriptor.inference.catalog_routable && descriptor.inference.production_inference,
     );
 
@@ -960,7 +994,6 @@ fn merge_custom_scope(
         adapter_kind: ProviderAdapterKind::ConfigurableHttp,
         catalog_routable: descriptor.inference.catalog_routable,
         production_inference: descriptor.inference.production_inference,
-        switches,
         catalog,
         models,
         revision,
@@ -1008,7 +1041,7 @@ fn merge_model_contract(
     declared: &[(String, UpstreamProtocolKind)],
     default_source: ContractEvidenceSource,
     evidence: &[PersistedModelProtocol],
-    switches: ProtocolSwitches,
+    overrides: &[PersistedModelProtocolOverride],
     adapter_routable: bool,
 ) -> EffectiveModelContract {
     let preferred = preferred_protocol(adapter, model_id, declared);
@@ -1021,7 +1054,13 @@ fn merge_model_contract(
             .find(|row| custom_or_case_match(&row.model_id, model_id) && row.protocol == protocol);
         let in_ceiling = ceiling.contains(&protocol);
         let statically_verified = static_verified.contains(&protocol);
-        if persisted.is_none() && !in_ceiling && !statically_verified {
+        let override_state = overrides
+            .iter()
+            .find(|row| custom_or_case_match(&row.model_id, model_id) && row.protocol == protocol)
+            .map(|row| row.state)
+            .unwrap_or(ProtocolOverrideState::Auto);
+        let has_override = override_state != ProtocolOverrideState::Auto;
+        if persisted.is_none() && !in_ceiling && !statically_verified && !has_override {
             continue;
         }
         let source = persisted
@@ -1031,8 +1070,15 @@ fn merge_model_contract(
             } else {
                 ContractEvidenceSource::ProbeObserved
             });
-        let available = source.confers_support() && (statically_verified || in_ceiling);
-        let enabled = available && switches.is_enabled(protocol);
+        let supported = statically_verified || in_ceiling;
+        let (available, enabled) = match override_state {
+            ProtocolOverrideState::ForceOn => (supported, supported),
+            ProtocolOverrideState::ForceOff => (source.confers_support() && supported, false),
+            ProtocolOverrideState::Auto => {
+                let available = source.confers_support() && supported;
+                (available, available)
+            }
+        };
         protocols.insert(
             protocol.as_str().to_string(),
             EffectiveProtocolEvidence {
@@ -1049,6 +1095,7 @@ fn merge_model_contract(
                 last_probe_result: persisted.and_then(|row| row.last_probe_result),
                 last_probe_at: persisted.and_then(|row| row.last_probe_at),
                 last_probe_error: persisted.and_then(|row| row.last_probe_error.clone()),
+                r#override: override_state,
             },
         );
     }
@@ -1058,13 +1105,14 @@ fn merge_model_contract(
             EffectiveProtocolEvidence {
                 protocol: preferred,
                 available: true,
-                enabled: switches.is_enabled(preferred),
+                enabled: true,
                 source: default_source,
                 verified_at: None,
                 observed_at: None,
                 last_probe_result: None,
                 last_probe_at: None,
                 last_probe_error: None,
+                r#override: ProtocolOverrideState::Auto,
             },
         );
     }
@@ -1089,7 +1137,7 @@ fn overlay_probe_confirmed_models(
     adapter: ProviderAdapterKind,
     declared: &[(String, UpstreamProtocolKind)],
     evidence: &[PersistedModelProtocol],
-    switches: ProtocolSwitches,
+    overrides: &[PersistedModelProtocolOverride],
     adapter_routable: bool,
 ) {
     let mut extra: HashSet<String> = HashSet::new();
@@ -1117,7 +1165,7 @@ fn overlay_probe_confirmed_models(
                 declared,
                 ContractEvidenceSource::ProbeConfirmed,
                 evidence,
-                switches,
+                overrides,
                 adapter_routable,
             ),
         );
@@ -1310,25 +1358,18 @@ mod tests {
     }
 
     #[test]
-    fn switch_disables_without_destroying_evidence_and_reenable_needs_no_probe() {
+    fn override_force_off_disables_without_destroying_evidence() {
         let mut persisted = empty_persisted();
         let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        persisted.scopes.insert(
+        persisted.overrides.insert(
             scope.clone(),
-            PersistedScopeRow {
+            vec![PersistedModelProtocolOverride {
                 scope: scope.clone(),
-                catalog_models: Vec::new(),
-                catalog_refreshed_at: None,
-                catalog_source: String::new(),
-                catalog_source_url: String::new(),
-                switches: ProtocolSwitches {
-                    chat_completions: false,
-                    responses: true,
-                    messages: true,
-                },
-                revision: 2,
+                model_id: "glm-5.3".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                state: ProtocolOverrideState::ForceOff,
                 updated_at: Utc::now(),
-            },
+            }],
         );
         let set = build_effective_contracts(&zen_seed(), &[], persisted);
         let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
@@ -1336,6 +1377,7 @@ mod tests {
         let chat = glm.protocols.get("chat_completions").unwrap();
         assert!(chat.available);
         assert!(!chat.enabled);
+        assert_eq!(chat.r#override, ProtocolOverrideState::ForceOff);
         assert!(!glm.routable);
 
         let grok = go.model("grok-4.5").unwrap();
@@ -1344,9 +1386,52 @@ mod tests {
     }
 
     #[test]
+    fn override_force_on_enables_supported_protocol_without_evidence() {
+        let mut persisted = empty_persisted();
+        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+        persisted.overrides.insert(
+            scope.clone(),
+            vec![PersistedModelProtocolOverride {
+                scope: scope.clone(),
+                model_id: "grok-4.5".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                state: ProtocolOverrideState::ForceOn,
+                updated_at: Utc::now(),
+            }],
+        );
+        let set = build_effective_contracts(&zen_seed(), &[], persisted);
+        let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
+        let grok = go.model("grok-4.5").unwrap();
+        let chat = grok.protocols.get("chat_completions").unwrap();
+        assert!(chat.available);
+        assert!(chat.enabled);
+        assert_eq!(chat.r#override, ProtocolOverrideState::ForceOn);
+        assert!(grok.routable);
+    }
+
+    #[test]
+    fn override_force_on_does_not_break_safety_ceiling() {
+        let mut persisted = empty_persisted();
+        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+        // "not-a-known-model" is outside the OpenCode safety ceiling for all protocols.
+        persisted.overrides.insert(
+            scope.clone(),
+            vec![PersistedModelProtocolOverride {
+                scope: scope.clone(),
+                model_id: "not-a-known-model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                state: ProtocolOverrideState::ForceOn,
+                updated_at: Utc::now(),
+            }],
+        );
+        let set = build_effective_contracts(&zen_seed(), &[], persisted);
+        let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
+        assert!(go.model("not-a-known-model").is_none());
+    }
+
+    #[test]
     fn protocol_fallback_prefers_client_then_adapter_priority() {
         let mut go = go_contract();
-        go.switches.chat_completions = false;
         let glm = go.models.get_mut("glm-5.2").unwrap();
         glm.protocols.get_mut("chat_completions").unwrap().enabled = false;
         glm.protocols.get_mut("responses").unwrap().enabled = true;
@@ -1363,11 +1448,6 @@ mod tests {
     #[test]
     fn no_valid_protocol_fails_locally() {
         let mut go = go_contract();
-        go.switches = ProtocolSwitches {
-            chat_completions: false,
-            responses: false,
-            messages: false,
-        };
         for model in go.models.values_mut() {
             for evidence in model.protocols.values_mut() {
                 evidence.enabled = false;

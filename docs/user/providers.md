@@ -13,18 +13,27 @@ everyone inherits from. Scopes are split like this:
 - `CustomEndpoint(account_id)` for each Custom destination. Custom endpoints
   stay isolated from each other and from the built-in families.
 
-The left rail lists those scopes. The main pane is **Overview**, **Model
-catalog**, **Upstream protocol policy**, **Model contracts**, **Protocol
-probe**, and scoped **Pricing**.
+The left rail lists those scopes. The main pane has two tabs: **Model catalog**
+and **Pricing**. The old catalog and model-contract views are merged into one
+matrix on the Model catalog tab.
 
-**Overview** shows the selected provider, scope revision, production-inference
-state, catalog-routable state, disabled reasons, and each offering with its
-bound accounts (enabled/disabled and verification). Command Code GOAT routes
-only through verified, explicitly enabled accounts.
+**Model catalog** is local. The matrix has one row per model and three columns —
+Chat Completions, Responses, and Messages. Each cell shows the effective state
+of that model/protocol pair and carries a three-state control: **Auto** (no
+override, follow the underlying evidence), **Force on** (enable the protocol for
+that model up to the adapter safety ceiling), or **Force off** (disable it). You
+can change cells individually, apply a state to the whole row, or apply a state
+to the whole column.
 
-**Model catalog** is local. Sources are labeled Static catalog, Official Zen
-catalog, Custom discovery, or Account-declared; the URL and last refresh time
-are shown when available. Refresh is never automatic:
+The underlying evidence for a cell is one of: unavailable,
+unsupported, static, preset (Custom declared protocols), probe confirmed, or
+latest probe failed. The matrix cell shows the effective result after applying
+the override: `force_on` enables even when evidence is absent, but never breaks
+the adapter ceiling; `force_off` disables even when evidence says supported;
+`auto` follows evidence. A failed probe is recorded; it does not erase static
+capability.
+
+Refresh is never automatic:
 
 - OpenCode Go **Refresh model catalog** uses the selected Go account Key to
   call the official `GET /zen/go/v1/models` endpoint. The saved provider
@@ -44,33 +53,17 @@ are shown when available. Refresh is never automatic:
   failure keeps the last good snapshot.
 
 Saved Go/GOAT catalogs feed local Alias resolution without another upstream
-call. A model is advertised only when its saved contract has an enabled,
-known protocol; an unfamiliar Go ID therefore remains visible in the Provider
-catalog but fails closed for client routing. Zen Free still derives one extra
-alias by stripping `-free` from each saved ID, as described under
+call. A model is advertised only when its saved contract has an effective,
+known, enabled protocol; an unfamiliar Go ID therefore remains visible in the
+Provider catalog but fails closed for client routing. Zen Free still derives one
+extra alias by stripping `-free` from each saved ID, as described under
 [Zen Free models](routing.md#zen-free-models).
 
-**Upstream protocol policy** renders switches for the scope's structural
-protocol set: protocols with model evidence plus currently-disabled switches.
-For built-in providers this is the three Chat Completions, Responses, and
-Messages switches; for a Custom endpoint the switches are exactly the account's
-declared protocols. Each switch shows the count of available models under it.
-Flipping a switch immediately applies to every account in this scope and
-changes production routing; Custom-endpoint switches are also writable through
-their account scope. Switches beat probe evidence and static support. Disabling
-an account keeps the saved contract intact; re-enabling restores the saved
-catalog, evidence, and switches.
-
-**Model contracts** list every local model with its protocol evidence.
-A single-protocol model shows that protocol directly; a model with two or more
-enabled protocols shows a preferred protocol among them. Per-protocol status is
-one of: Globally closed, Unavailable, Unsupported, Static, Preset, Probe
-confirmed, or Latest probe failed (with a sanitized error and timestamp). A
-probe can only confirm or add support inside the adapter's structural ceiling.
-A failed probe is recorded; it does not erase static capability.
-
-**Protocol probe** is an explicit action: pick a test account, send a real
-minimal request, and accept that it may consume quota. Client requests never probe. GOAT shows that probes are not available for this plan.
+Each row has a **Test** button. It auto-selects the first account in the scope
+and probes every protocol for that model. A Popconfirm warns that the probe may
+consume quota. Custom endpoint scopes do not show the Test button because Custom
+account-level protocol probing has no V3 counterpart. Probe results confirm or
+add support only inside the adapter safety ceiling.
 
 **Pricing** is scoped to the selected provider. **Refresh price table** only
 hits the official source owned by that Provider. OpenCode and Command Code
@@ -94,12 +87,13 @@ refreshes those Plans only. Refresh stays manual:
 
 There is no model-level quota pool.
 
-At request time the gateway never discovers or probes. Flow: Alias → account
-eligibility → adapter ceiling → saved contract → protocol switch →
-passthrough or conversion. Authenticated `GET /v1/models` and protected
-`GET /dashboard/api/v3/application-models` publish only currently routable
-models that have an effective enabled protocol. The Applications picker stays
-Go aliases ∩ active pricing and does not include Custom.
+Client requests never probe: at request time the gateway never discovers or
+probes. Flow: Alias → account
+eligibility → adapter ceiling → saved contract → per-model/per-protocol
+effective state → passthrough or conversion. Authenticated `GET /v1/models` and
+protected `GET /dashboard/api/v3/application-models` publish only currently
+routable models that have an effective enabled protocol. The Applications picker
+stays Go aliases ∩ active pricing and does not include Custom.
 
 ---
 

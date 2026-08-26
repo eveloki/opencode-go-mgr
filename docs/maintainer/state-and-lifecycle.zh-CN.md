@@ -8,7 +8,7 @@
 
 锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。
 
-两层凭证共用一张 `access_keys` 表（schema v30）和一份鉴权快照：
+两层凭证共用一张 `access_keys` 表（schema v31）和一份鉴权快照：
 
 - 主 Key：固定 id `00000000-0000-0000-0000-000000000001`，显示名 `"Primary"`。始终启用，没有删除入口。公开 `AppConfig` 与面板 API 仍暴露 `gateway_key`；v27 之后经消毒的 config JSON **不再** 是该值的数据库权威。
 - 子 Key：非主行，活跃上限 64，软删保留身份/名称并清除明文。只经 `/dashboard/api/v3/keys*` 生命周期 API 变更。CLI 没有子 Key 命令。
@@ -57,7 +57,7 @@ Profile 删除先停浏览器，校验账号 ID 防目录穿越，再把新旧 P
 
 ## 持久化
 
-`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 **v30**。`provider_contracts.rs` 负责供应商合约范围与模型协议证据。 `models.rs` 定义共享 serde 类型和 `AppConfig`。Key 混淆在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：这是轻量混淆，不是 KMS。 Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让 v27 密文探测使用已经解析的 cipher。账号 `key_cipher` / `password_cipher` 就地校验，**不会重新加密**。比本构建支持的更新 schema 会 fail closed。
+`crates/ocg-core/src/db.rs` 定义 SQLite schema、迁移与查询。当前 schema 是 **v31**。`provider_contracts.rs` 负责供应商合约范围、按模型/按协议覆盖、effective 合约推导与模型协议证据。 `models.rs` 定义共享 serde 类型和 `AppConfig`。Key 混淆在 `ocg-infra::crypto`（门面 `ocg_core::crypto`）：这是轻量混淆，不是 KMS。 Windows 桌面使用 `MachineBoundCipher`；CLI/Docker 使用来自 `OCG_MANAGER_ENCRYPTION_KEY` 或 `<data-dir>/.encryption-key` 的 `StaticKeyCipher`。生产宿主必须调用 `Database::open_with_cipher`，让 v27 密文探测使用已经解析的 cipher。账号 `key_cipher` / `password_cipher` 就地校验，**不会重新加密**。比本构建支持的更新 schema 会 fail closed。
 
 升级路径上历史版本仍然重要：
 
@@ -71,6 +71,7 @@ Profile 删除先停浏览器，校验账号 ID 防目录穿越，再把新旧 P
 - **v27：** 把主 `gateway_key` 与 `sub_gateway_keys` 复制进 `access_keys`；删除 `sub_gateway_keys`；删除遗留 `accounts.usage_sync_*`。数据库到达规范 v26 后，既有（非空）库会在 **任何 v27 写入前** 得到唯一同目录副本 `data.sqlite.pre-v3.<UTC>.bak` 及其 SHA-256 sidecar。全新空目录直接创建 v27，不写这份副本。操作恢复见 [storage-migration.zh-CN.md](storage-migration.zh-CN.md)。
 - **v29：** 从目录中移除 SCNet Token Plans，并在迁移期间删除所有现有 SCNet 账号行。
 - **v30：** 将 `account_custom_configs.upstream_protocol` 回填为 JSON `upstream_protocols` 集合（1–3 个 chat_completions / responses / messages）；Custom 配置/能力编辑保持账号启用，但将 `verification_status` 重置为 `pending`。
+- **v31：** 新增 `provider_contract_model_protocol_overrides` 表以支持按模型/按协议启用，并停止读取已弃用的 `provider_contract_scopes` 开关列。
 
 GUI 数据目录：Windows `%USERPROFILE%\.ocg-mgr` 或 macOS/Linux `~/.ocg-mgr`。 CLI 默认 `~/.ocg-mgr-cli`。Docker 将 SQLite、Key 与 `.encryption-key` 放在 `ocg-data`，长期 Cookie 与浏览器状态放在 `ocg-browser-profiles`。两卷都是高敏感持久状态，必须在服务停止后成对备份；`ocg-browser-runtime` 只含运行时控制 token，不应加入备份。浏览器 Profile 不由 OCG Manager 加密。
 

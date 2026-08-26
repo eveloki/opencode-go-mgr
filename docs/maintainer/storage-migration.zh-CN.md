@@ -33,7 +33,11 @@ GUI 或 CLI 启动时会原地执行 SQLite 迁移。打开新版二进制前：
 
 ## Schema v27 与 pre-v3 快照
 
-`CURRENT_SCHEMA_VERSION = 30`（`crates/ocg-core/src/db.rs`）。打开历史库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进一张 `access_keys` 表（主 Key 固定 id `00000000-0000-0000-0000-000000000001`），删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`（用量同步元数据在 `provider_usage_sync_state`）。后续迁移（v29、v30）为加法迁移，不影响本快照语义。账号 `key_cipher` / `password_cipher` 用 Host cipher 就地校验，**不会重新加密**。
+`CURRENT_SCHEMA_VERSION = 31`（`crates/ocg-core/src/db.rs`）。打开历史库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进一张 `access_keys` 表（主 Key 固定 id `00000000-0000-0000-0000-000000000001`），删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`（用量同步元数据在 `provider_usage_sync_state`）。后续迁移（v29、v30、v31）为加法迁移，不影响本快照语义。账号 `key_cipher` / `password_cipher` 用 Host cipher 就地校验，**不会重新加密**。
+
+## Schema v31 — 按模型/按协议覆盖
+
+v31 创建 `provider_contract_model_protocol_overrides` 表。每行对应一个合约范围 × 模型 × 协议，`state` 取值 `force_on` / `force_off`；无行即表示“自动”。复合主键为 `(scope_kind, scope_id, model_id, protocol)`。`provider_contract_scopes` 的开关列仍保留在数据库中以保证向后兼容，但 effective 合约推导不再读取它们。
 
 在任何 v27 写入前，既有（非空）库会得到一份唯一、不覆盖的同目录快照：
 

@@ -19,7 +19,7 @@
       :aria-labelledby="`chart-title-${gid}`"
       :aria-describedby="`chart-description-${gid}`"
     >
-      <title :id="`chart-title-${gid}`">{{ t("最近 {days} 天按模型分段的每日消耗", { days }) }}</title>
+      <title :id="`chart-title-${gid}`">{{ t("最近 {days} 天按模型分段的每日 Token 消耗", { days }) }}</title>
       <desc :id="`chart-description-${gid}`">{{ chartDescription }}</desc>
       <defs>
         <linearGradient
@@ -121,7 +121,7 @@
         :style="{ left: tooltip.x + 'px', top: tooltip.y + 'px' }"
       >
         <div class="tooltip-title">{{ tooltip.title }}</div>
-        <div class="tooltip-total">{{ t("合计 {total}", { total: formatCost(tooltip.total) }) }}</div>
+        <div class="tooltip-total">{{ t("合计 {total}", { total: formatTokens(tooltip.total) }) }}</div>
         <div
           v-for="row in tooltip.rows"
           :key="row.model"
@@ -129,7 +129,7 @@
         >
           <span class="dot" :style="{ background: row.color }" />
           <span class="model">{{ row.model }}</span>
-          <span class="cost">{{ formatCost(row.cost) }}</span>
+          <span class="tokens">{{ formatTokens(row.tokens) }}</span>
         </div>
       </div>
     </Teleport>
@@ -138,13 +138,13 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, useId } from "vue";
-import type { DailyModelCost } from "../api/dashboard";
+import type { DailyModelTokens } from "../api/dashboard";
 import { CHART_PALETTE } from "../theme";
 import { locale, t } from "../i18n/index.ts";
-import { formatCost } from "../utils/format.ts";
+import { formatTokens } from "../utils/format.ts";
 
 const props = withDefaults(defineProps<{
-  data: DailyModelCost[];
+  data: DailyModelTokens[];
   days?: number; // 实际展示的天数(用于补零)
 }>(), {
   days: 30,
@@ -194,12 +194,12 @@ function formatChartDate(value: string, short = false): string {
 }
 
 // --- 数据处理:按日期补零,得到连续的日期序列 ---
-function padZeroDates(rows: DailyModelCost[], days: number) {
+function padZeroDates(rows: DailyModelTokens[], days: number) {
   const map = new Map<string, Map<string, number>>();
   for (const r of rows) {
     if (!map.has(r.date)) map.set(r.date, new Map());
     const m = map.get(r.date)!;
-    m.set(r.model, (m.get(r.model) ?? 0) + r.cost);
+    m.set(r.model, (m.get(r.model) ?? 0) + r.tokens);
   }
   // 生成最近 `days` 天的日期(UTC),缺失的天用空 map 填充
   const today = new Date();
@@ -220,26 +220,26 @@ function padZeroDates(rows: DailyModelCost[], days: number) {
 const sortedModels = computed(() => {
   const totals = new Map<string, number>();
   for (const r of props.data) {
-    totals.set(r.model, (totals.get(r.model) ?? 0) + r.cost);
+    totals.set(r.model, (totals.get(r.model) ?? 0) + r.tokens);
   }
   return [...totals.keys()].sort((a, b) => (totals.get(b)! - totals.get(a)!));
 });
 
 const dates = computed(() => padZeroDates(props.data, props.days));
 
-const totalCost = computed(() => dates.value.reduce((sum, date) => sum + date.total, 0));
+const totalTokens = computed(() => dates.value.reduce((sum, date) => sum + date.total, 0));
 const chartDescription = computed(() => [
   t("模型：{count}", { count: sortedModels.value.length }),
-  `${t("{days} 天合计", { days: props.days })} ${formatCost(totalCost.value)}`,
+  `${t("{days} 天合计", { days: props.days })} ${formatTokens(totalTokens.value)}`,
 ].join(t("；")));
 
 const chartW = computed(() => Math.max(0, width.value - padL - padR));
 const chartH = height - padT - padB;
 
-const maxCost = computed(() => {
+const maxTokens = computed(() => {
   let m = 0;
   for (const d of dates.value) if (d.total > m) m = d.total;
-  if (m === 0) m = 0.01; // 避免除零
+  if (m === 0) m = 1; // 避免除零
   return m;
 });
 
@@ -256,7 +256,7 @@ function niceCeil(v: number): number {
   return nice * pow;
 }
 
-const ceil = computed(() => niceCeil(maxCost.value));
+const ceil = computed(() => niceCeil(maxTokens.value));
 
 const yTicks = computed(() => {
   const steps = 4;
@@ -267,7 +267,7 @@ const yTicks = computed(() => {
     out.push({
       value: val,
       y,
-      label: val < 0.001 ? formatCost(0) : formatCost(val),
+      label: val < 1 ? formatTokens(0) : formatTokens(val),
     });
   }
   return out;
@@ -278,25 +278,25 @@ const barWidth = computed(() => {
   return chartW.value / n;
 });
 
-// 每根柱子: [{model, idx, y, h, cost}]
+// 每根柱子: [{model, idx, y, h, tokens}]
 const bars = computed(() => {
   const models = sortedModels.value;
   const scale = chartH / ceil.value;
   return dates.value.map((d, i) => {
     let cursor = padT + chartH; // 从底往上堆
-    const segments: { idx: number; model: string; y: number; h: number; cost: number }[] = [];
+    const segments: { idx: number; model: string; y: number; h: number; tokens: number }[] = [];
     // 按 sortedModels 顺序堆叠,保证颜色块在所有柱子里对齐
     for (const model of models) {
-      const cost = d.models.get(model) ?? 0;
-      if (cost <= 0) continue;
-      const h = cost * scale;
+      const tokens = d.models.get(model) ?? 0;
+      if (tokens <= 0) continue;
+      const h = tokens * scale;
       cursor -= h;
       segments.push({
         idx: models.indexOf(model) % CHART_PALETTE.length,
         model,
         y: cursor,
         h: Math.max(0.5, h),
-        cost,
+        tokens,
       });
     }
     return { x: padL + barWidth.value * i, segments };
@@ -326,7 +326,7 @@ const xLabels = computed(() => {
 });
 
 // --- tooltip ---
-const tooltip = ref<{ show: boolean; x: number; y: number; title: string; total: number; rows: { model: string; cost: number; color: string }[] }>({
+const tooltip = ref<{ show: boolean; x: number; y: number; title: string; total: number; rows: { model: string; tokens: number; color: string }[] }>({
   show: false,
   x: 0,
   y: 0,
@@ -350,9 +350,9 @@ function tooltipRows(bi: number) {
   if (!d) return [];
   const models = sortedModels.value;
   return models
-    .map((model) => ({ model, cost: d.models.get(model) ?? 0 }))
-    .filter((row) => row.cost > 0)
-    .sort((a, b) => b.cost - a.cost)
+    .map((model) => ({ model, tokens: d.models.get(model) ?? 0 }))
+    .filter((row) => row.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
     .map((row) => ({ ...row, color: modelColor(row.model, models) }));
 }
 
@@ -361,8 +361,8 @@ function barAriaLabel(bi: number): string {
   if (!d) return "";
   return [
     formatChartDate(d.date),
-    t("合计 {total}", { total: formatCost(d.total) }),
-    ...tooltipRows(bi).map((row) => `${row.model} ${formatCost(row.cost)}`),
+    t("合计 {total}", { total: formatTokens(d.total) }),
+    ...tooltipRows(bi).map((row) => `${row.model} ${formatTokens(row.tokens)}`),
   ].join(t("；"));
 }
 
@@ -484,7 +484,7 @@ function updateTooltip(bi: number, e: PointerEvent) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tooltip-row .cost {
+.tooltip-row .tokens {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
   color: var(--ocg-muted);

@@ -293,11 +293,6 @@ fn mutation_routes() -> Vec<(Method, String, Value)> {
             "/providers/zen-free/models/refresh".into(),
             json!({}),
         ),
-        (
-            Method::PUT,
-            "/provider-contracts/provider/opencode/protocols/messages".into(),
-            json!({ "enabled": false }),
-        ),
     ]
 }
 
@@ -320,8 +315,8 @@ fn custom_create_body() -> Value {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v30() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
+fn dashboard_v3_schema_version_stays_at_v31() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
 }
 
 #[tokio::test]
@@ -568,18 +563,6 @@ async fn dashboard_v3_provider_contracts_project_four_scopes_and_custom_endpoint
     assert!(parsed.custom_endpoints.is_empty());
     assert!(body["providers"][0].get("scope_kind").is_none());
     assert_eq!(body["providers"][0]["scopeKind"], "provider");
-    assert!(
-        body["providers"][0]["protocols"]
-            .as_object()
-            .unwrap()
-            .contains_key("chat_completions")
-    );
-    assert!(
-        !body["providers"][0]["protocols"]
-            .as_object()
-            .unwrap()
-            .contains_key("chatCompletions")
-    );
 
     let (status, created) = send_json(
         &harness,
@@ -1020,8 +1003,8 @@ fn assert_debug_gated(source: &str, needle: &str) {
 }
 
 #[tokio::test]
-async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only() {
-    let harness = start_loopback("providers-protocol-put").await;
+async fn dashboard_v3_provider_model_protocol_overrides_enforces_cas_and_persists() {
+    let harness = start_loopback("providers-overrides").await;
     let (status, listed) = get_v3(&harness, "/provider-contracts").await;
     assert_eq!(status, StatusCode::OK, "{listed}");
     let before = harness.state.settings_revision();
@@ -1032,14 +1015,18 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
         .find(|group| group["providerId"] == OPENCODE_PROVIDER_ID)
         .unwrap();
     let scope_revision = go["revision"].as_u64().unwrap();
-    assert_eq!(go["protocols"]["messages"], true);
+
+    let path = "/provider-contracts/provider/opencode/model-protocol-overrides";
 
     let (status, missing) = send_raw(
         &harness,
         Method::PUT,
-        "/provider-contracts/provider/opencode/protocols/messages",
-        &json!({ "enabled": false, "processGeneration": harness.state.process_generation() })
-            .to_string(),
+        path,
+        &json!({
+            "overrides": [{ "modelId": "glm-5.2", "protocol": "messages", "state": "force_off" }],
+            "processGeneration": harness.state.process_generation()
+        })
+        .to_string(),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
@@ -1049,9 +1036,9 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
     let (status, stale) = send_json(
         &harness,
         Method::PUT,
-        "/provider-contracts/provider/opencode/protocols/messages",
+        path,
         &json!({
-            "enabled": false,
+            "overrides": [{ "modelId": "glm-5.2", "protocol": "messages", "state": "force_off" }],
             "expectedRevision": 1,
             "processGeneration": harness.state.process_generation()
         }),
@@ -1061,22 +1048,40 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
     assert_v3_error(&stale, ERROR_REVISION_CONFLICT);
     assert_eq!(harness.state.settings_revision(), before);
 
+    let (status, empty) = send_json(
+        &harness,
+        Method::PUT,
+        path,
+        &cas(&harness, json!({ "overrides": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{empty}");
+    assert_v3_error(&empty, ERROR_INVALID_REQUEST);
+    assert_eq!(harness.state.settings_revision(), before);
+
     let (status, unknown_protocol) = send_json(
         &harness,
         Method::PUT,
-        "/provider-contracts/provider/opencode/protocols/gemini",
-        &cas(&harness, json!({ "enabled": false })),
+        path,
+        &cas(
+            &harness,
+            json!({
+                "overrides": [{ "modelId": "glm-5.2", "protocol": "gemini", "state": "force_off" }]
+            }),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown_protocol}");
-    assert_v3_error(&unknown_protocol, ERROR_INVALID_REQUEST);
+    assert_v3_error(&unknown_protocol, ERROR_INVALID_JSON);
     assert_eq!(harness.state.settings_revision(), before);
 
     let (status, unknown_scope) = send_json(
         &harness,
         Method::PUT,
-        "/provider-contracts/provider/not-a-provider/protocols/chat_completions",
-        &cas(&harness, json!({ "enabled": false })),
+        "/provider-contracts/provider/not-a-provider/model-protocol-overrides",
+        &cas(&harness, json!({
+            "overrides": [{ "modelId": "glm-5.2", "protocol": "chat_completions", "state": "force_off" }]
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{unknown_scope}");
@@ -1086,8 +1091,16 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
     let (status, switched) = send_json(
         &harness,
         Method::PUT,
-        "/provider-contracts/provider/opencode/protocols/messages",
-        &cas(&harness, json!({ "enabled": false })),
+        path,
+        &cas(
+            &harness,
+            json!({
+                "overrides": [
+                    { "modelId": "glm-5.2", "protocol": "messages", "state": "force_off" },
+                    { "modelId": "grok-4.5", "protocol": "chat_completions", "state": "force_on" }
+                ]
+            }),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{switched}");
@@ -1100,8 +1113,25 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
         .iter()
         .find(|group| group["providerId"] == OPENCODE_PROVIDER_ID)
         .unwrap();
-    assert_eq!(go_after["protocols"]["messages"], false);
     assert_ne!(go_after["revision"].as_u64(), Some(scope_revision));
+    let glm = go_after["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "glm-5.2")
+        .unwrap();
+    assert_eq!(glm["protocols"]["messages"]["override"], "force_off");
+    assert_eq!(glm["protocols"]["messages"]["enabled"], false);
+    let grok = go_after["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "grok-4.5")
+        .unwrap();
+    assert_eq!(
+        grok["protocols"]["chat_completions"]["override"],
+        "force_on"
+    );
 
     harness
         .assert_v2_path_removed(Method::GET, "/provider-contracts", None)
@@ -1114,44 +1144,34 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
         .iter()
         .find(|group| group["providerId"] == OPENCODE_PROVIDER_ID)
         .unwrap();
-    assert_eq!(v3_go["protocols"]["messages"], false);
+    let glm = v3_go["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "glm-5.2")
+        .unwrap();
+    assert_eq!(glm["protocols"]["messages"]["override"], "force_off");
 
     let custom_path = format!(
-        "/provider-contracts/custom_endpoint/{ZEN_FREE_ACCOUNT_ID}/protocols/chat_completions"
+        "/provider-contracts/custom_endpoint/{ZEN_FREE_ACCOUNT_ID}/model-protocol-overrides"
     );
     let v3_custom = harness
         .client
         .put(format!("{}{custom_path}", harness.v3_base))
-        .json(&cas(&harness, json!({ "enabled": false })))
+        .json(&cas(&harness, json!({
+            "overrides": [{ "modelId": "glm-5.2", "protocol": "chat_completions", "state": "force_off" }]
+        })))
         .send()
         .await
         .unwrap();
     assert_eq!(v3_custom.status(), StatusCode::NOT_FOUND);
 
-    let probes = harness
-        .client
-        .post(format!(
-            "{}/providers/{OPENCODE_PROVIDER_ID}/protocol-probes",
-            harness.v3_base
-        ))
-        .json(&cas(
-            &harness,
-            json!({ "modelId": "grok-4.5", "protocols": ["responses"] }),
-        ))
-        .send()
-        .await
-        .unwrap();
-    let probes_status = probes.status();
-    let probes_body: Value = probes.json().await.unwrap_or(Value::Null);
-    assert_eq!(probes_status, StatusCode::BAD_REQUEST, "{probes_body}");
-    assert_v3_error(&probes_body, ERROR_INVALID_REQUEST);
-
     harness.stop();
 }
 
 #[tokio::test]
-async fn dashboard_v3_custom_endpoint_protocol_put_enforces_cas_and_persists() {
-    let harness = start_loopback("providers-custom-switch").await;
+async fn dashboard_v3_custom_endpoint_model_protocol_overrides_enforce_cas_and_persist() {
+    let harness = start_loopback("providers-custom-overrides").await;
     let (status, created) = send_json(
         &harness,
         Method::POST,
@@ -1161,7 +1181,7 @@ async fn dashboard_v3_custom_endpoint_protocol_put_enforces_cas_and_persists() {
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let custom_id = created["account"]["id"].as_str().unwrap().to_string();
-    let path = format!("/provider-contracts/custom-endpoint/{custom_id}/protocols/messages");
+    let path = format!("/provider-contracts/custom-endpoint/{custom_id}/model-protocol-overrides");
     let before = harness.state.settings_revision();
 
     let (status, stale) = send_json(
@@ -1169,7 +1189,7 @@ async fn dashboard_v3_custom_endpoint_protocol_put_enforces_cas_and_persists() {
         Method::PUT,
         &path,
         &json!({
-            "enabled": false,
+            "overrides": [{ "modelId": "org/model", "protocol": "messages", "state": "force_off" }],
             "expectedRevision": 1,
             "processGeneration": harness.state.process_generation()
         }),
@@ -1182,8 +1202,10 @@ async fn dashboard_v3_custom_endpoint_protocol_put_enforces_cas_and_persists() {
     let (status, missing) = send_json(
         &harness,
         Method::PUT,
-        "/provider-contracts/custom-endpoint/not-an-account/protocols/messages",
-        &cas(&harness, json!({ "enabled": false })),
+        "/provider-contracts/custom-endpoint/not-an-account/model-protocol-overrides",
+        &cas(&harness, json!({
+            "overrides": [{ "modelId": "org/model", "protocol": "messages", "state": "force_off" }]
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
@@ -1194,7 +1216,9 @@ async fn dashboard_v3_custom_endpoint_protocol_put_enforces_cas_and_persists() {
         &harness,
         Method::PUT,
         &path,
-        &cas(&harness, json!({ "enabled": false })),
+        &cas(&harness, json!({
+            "overrides": [{ "modelId": "org/model", "protocol": "messages", "state": "force_off" }]
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{switched}");
@@ -1205,7 +1229,14 @@ async fn dashboard_v3_custom_endpoint_protocol_put_enforces_cas_and_persists() {
         .iter()
         .find(|endpoint| endpoint["scopeId"] == custom_id)
         .unwrap();
-    assert_eq!(endpoint["protocols"]["messages"], false);
+    let local = endpoint["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "org/model")
+        .unwrap();
+    assert_eq!(local["protocols"]["messages"]["override"], "force_off");
+    assert_eq!(local["protocols"]["messages"]["enabled"], false);
 
     let (status, after) = get_v3(&harness, "/provider-contracts").await;
     assert_eq!(status, StatusCode::OK, "{after}");
@@ -1215,9 +1246,15 @@ async fn dashboard_v3_custom_endpoint_protocol_put_enforces_cas_and_persists() {
         .iter()
         .find(|endpoint| endpoint["scopeId"] == custom_id)
         .unwrap();
+    let local = endpoint["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "org/model")
+        .unwrap();
     assert_eq!(
-        endpoint["protocols"]["messages"], false,
-        "custom endpoint switch must persist across reload"
+        local["protocols"]["messages"]["override"], "force_off",
+        "custom endpoint override must persist across reload"
     );
 
     harness.stop();
@@ -1291,6 +1328,6 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     assert_eq!(v3_zen["enabled"], false);
     assert!(v3_zen.get("account").is_none());
 
-    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
     harness.stop();
 }

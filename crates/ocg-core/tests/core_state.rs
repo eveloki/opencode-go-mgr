@@ -449,17 +449,25 @@ fn query_forward_logs_filters_before_limit_and_summarizes_all_matches() {
 }
 
 #[test]
-fn daily_cost_by_model_groups_chargeable_rows_only() {
-    let dir = temp_data_dir("daily");
+fn daily_tokens_by_model_counts_all_rows_with_tokens_regardless_of_cost_state() {
+    let dir = temp_data_dir("daily-tokens");
     let db = Database::open(dir).unwrap();
     let today = Utc::now();
-    for (model, status, cost, offset) in [
-        ("glm-5.2", "success", 1.0, 0),
-        ("glm-5.2", "success", 2.0, 0),
-        ("kimi-k2.7-code", "success", 3.0, 1),
-        ("glm-5.2", "error", 9.0, 0),
+    // (model, prompt_tokens, completion_tokens, cost_state, status, day_offset)
+    for (model, prompt, completion, cost_state, status, offset) in [
+        // priced success today -> counted
+        ("glm-5.2", 10_i64, 20_i64, "priced", "success", 0),
+        // legacy estimate success today, same model -> aggregated
+        ("glm-5.2", 5, 10, "legacy_estimate", "success", 0),
+        // priced success yesterday, different model -> separate day/model bucket
+        ("kimi-k2.7-code", 100, 50, "priced", "success", 1),
+        // free / not_applicable row still has tokens -> counted
+        ("glm-5.2", 8, 12, "not_applicable", "success", 0),
+        // error row with tokens -> counted (token usage is independent of cost state)
+        ("glm-5.2", 2, 3, "not_applicable", "error", 0),
+        // zero-token row -> excluded entirely
+        ("glm-5.2", 0, 0, "priced", "success", 0),
     ] {
-        let charged = status == "success";
         db.log_forward(&ForwardLog {
             id: 0,
             timestamp: today - Duration::days(offset),
@@ -475,11 +483,11 @@ fn daily_cost_by_model_groups_chargeable_rows_only() {
             status: status.into(),
             http_status: Some(200),
             route: String::new(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
+            prompt_tokens: prompt,
+            completion_tokens: completion,
             cached_tokens: 0,
             cache_creation_tokens: 0,
-            cost: charged.then_some(cost),
+            cost: None,
             raw_cost_usd: None,
             quota_debit: None,
             effective_paid_cost_usd: None,
@@ -487,12 +495,7 @@ fn daily_cost_by_model_groups_chargeable_rows_only() {
             quota_multiplier: None,
             local_adjustment_multiplier: None,
             service_tier: None,
-            cost_state: if charged {
-                "legacy_estimate"
-            } else {
-                "not_applicable"
-            }
-            .into(),
+            cost_state: cost_state.into(),
             error_message: None,
             request_id: None,
             attempt: None,
@@ -504,16 +507,19 @@ fn daily_cost_by_model_groups_chargeable_rows_only() {
         .unwrap();
     }
 
-    let rows = db.daily_cost_by_model(3).unwrap();
+    let rows = db.daily_tokens_by_model(3).unwrap();
     assert_eq!(rows.len(), 2);
-    assert!(
-        rows.iter()
-            .any(|row| row.model == "glm-5.2" && (row.cost - 3.0).abs() < f64::EPSILON)
-    );
-    assert!(
-        rows.iter()
-            .any(|row| row.model == "kimi-k2.7-code" && (row.cost - 3.0).abs() < f64::EPSILON)
-    );
+    let glm_today = rows
+        .iter()
+        .find(|row| row.model == "glm-5.2")
+        .expect("glm-5.2 row present");
+    // 10+20 + 5+10 + 8+12 + 2+3 = 70
+    assert_eq!(glm_today.tokens, 70);
+    let kimi_yesterday = rows
+        .iter()
+        .find(|row| row.model == "kimi-k2.7-code")
+        .expect("kimi-k2.7-code row present");
+    assert_eq!(kimi_yesterday.tokens, 150);
 }
 
 #[test]

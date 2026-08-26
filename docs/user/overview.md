@@ -17,7 +17,7 @@ The gateway does four jobs, in roughly the order you would expect:
 2. Resolve the requested model against the local Alias registry (and eligible
    Custom declared IDs), then pick a usable account card after capability
    filtering, the adapter ceiling, the saved provider contract, and the
-   Chat Completions / Responses / Messages switches.
+   per-model protocol effective state.
 3. Convert the request to the selected Plan's effective upstream protocol,
    and the response back to the client protocol. Client requests never
    discover or probe.
@@ -41,7 +41,7 @@ Anthropic, Gemini, or Claude Desktop format.
     (system browser)              clients + Key
                \                    /
                 v                  v
-              SQLite schema v27 (local only)
+              SQLite schema v31 (local only)
 ```
 
 Text diagrams for request flow, Plans, the seven dashboard views, and protocol

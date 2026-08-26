@@ -41,9 +41,10 @@
   not document or ship it as live support. Custom API is live under the
   trusted-administrator boundary (`custom.rs` + `custom_http.rs`); keep it
   out of GOAT anti-abuse wording.
-- Custom provider-scope protocol probes are not on V3; the V2 account-owned
-  probe path is 410. Custom verify and model discovery are the live Custom
-  operational paths.
+- Per-model/per-protocol overrides are on V3; Custom account-level
+  per-protocol probing has no V3 counterpart, and the historical V2
+  account-owned probe path is 410. Custom verify and model discovery are the
+  live Custom operational paths.
 
 ## Deliberate Non-Goals
 

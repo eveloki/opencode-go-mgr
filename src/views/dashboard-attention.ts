@@ -15,7 +15,6 @@ export type AttentionReason =
   | "expired"
   | "cooling"
   | "setup-incomplete"
-  | "usage-load-failed"
   | "verification-failed";
 
 export interface AttentionItem {
@@ -30,7 +29,6 @@ const REASON_PRIORITY: Record<AttentionReason, number> = {
   expired: 2,
   cooling: 3,
   "setup-incomplete": 4,
-  "usage-load-failed": 5,
 };
 
 function accountCooling(account: Account, now: number): boolean {
@@ -41,7 +39,6 @@ function accountCooling(account: Account, now: number): boolean {
 
 export function buildNeedsAttention(
   accounts: readonly Account[],
-  usageFailedAccountIds: ReadonlySet<string> = new Set(),
   now: number = Date.now(),
 ): AttentionItem[] {
   const items: AttentionItem[] = [];
@@ -68,10 +65,6 @@ export function buildNeedsAttention(
     }
     if (!ready) {
       items.push({ accountId: account.id, accountName: account.name, reason: "setup-incomplete" });
-      continue;
-    }
-    if (usageFailedAccountIds.has(account.id)) {
-      items.push({ accountId: account.id, accountName: account.name, reason: "usage-load-failed" });
     }
   }
   return items.sort(

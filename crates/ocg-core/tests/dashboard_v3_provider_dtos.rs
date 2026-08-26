@@ -2,7 +2,7 @@
 //! request omission, protocol tokens, and secrecy.
 
 use ocg_core::dashboard_v3::{CATALOG_TYPE_NAMES, contract_schema};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "ControlRevision",
@@ -48,14 +48,15 @@ const PROVIDER_CATALOG_TYPES: &[&str] = &[
     "CustomEndpointContract",
     "ProviderOfferingChoice",
     "ProviderAccountChoice",
-    "ProtocolSwitches",
     "EffectiveCatalog",
     "EffectiveModelContract",
     "EffectiveModelProtocols",
     "EffectiveProtocolEvidence",
     "CapabilitySummary",
     "CardCapabilitySummary",
-    "ProtocolSwitchUpdate",
+    "ModelProtocolOverridesUpdate",
+    "ModelProtocolOverride",
+    "ProtocolOverrideState",
     "ProtocolProbeRequest",
     "ProtocolProbeResult",
     "ProtocolProbeResponse",
@@ -205,7 +206,10 @@ fn provider_schema_registers_nullable_responses_and_omittable_requests() {
     assert!(!probe_request_required.contains(&"accountId"));
     assert_eq!(defs["ProtocolProbeRequest"]["additionalProperties"], false);
     assert_eq!(defs["ZenFreeSettingsUpdate"]["additionalProperties"], false);
-    assert_eq!(defs["ProtocolSwitchUpdate"]["additionalProperties"], false);
+    assert_eq!(
+        defs["ModelProtocolOverridesUpdate"]["additionalProperties"],
+        false
+    );
 
     let catalog_required = required_fields(defs, "ProviderCatalog");
     for field in [
@@ -239,11 +243,13 @@ fn provider_schema_registers_nullable_responses_and_omittable_requests() {
 fn protocol_tokens_stay_snake_case_and_nested_revision_is_not_cas() {
     let schema = contract_schema();
     let defs = defs(&schema);
-    let switches = properties(defs, "ProtocolSwitches");
-    assert!(switches.contains_key("chat_completions"));
-    assert!(switches.contains_key("responses"));
-    assert!(switches.contains_key("messages"));
-    assert!(!switches.contains_key("chatCompletions"));
+    let override_state = schema["$defs"]["ProtocolOverrideState"]
+        .as_object()
+        .unwrap();
+    assert_eq!(
+        override_state["enum"],
+        json!(["auto", "force_on", "force_off"])
+    );
 
     let model_protocols = properties(defs, "EffectiveModelProtocols");
     assert!(model_protocols.contains_key("chat_completions"));
@@ -270,11 +276,16 @@ fn protocol_tokens_stay_snake_case_and_nested_revision_is_not_cas() {
     assert!(catalog_entry.contains_key("offeringId"));
     assert!(!catalog_entry.contains_key("provider_id"));
 
-    let switch_update = properties(defs, "ProtocolSwitchUpdate");
-    assert!(switch_update.contains_key("expectedRevision"));
-    assert!(switch_update.contains_key("processGeneration"));
-    assert!(switch_update.contains_key("enabled"));
-    assert!(!switch_update.contains_key("expected_revision"));
+    let override_update = properties(defs, "ModelProtocolOverridesUpdate");
+    assert!(override_update.contains_key("expectedRevision"));
+    assert!(override_update.contains_key("processGeneration"));
+    assert!(override_update.contains_key("overrides"));
+    assert!(!override_update.contains_key("expected_revision"));
+
+    let override_entry = properties(defs, "ModelProtocolOverride");
+    assert!(override_entry.contains_key("modelId"));
+    assert!(override_entry.contains_key("protocol"));
+    assert!(override_entry.contains_key("state"));
 
     for field in [
         "creationAvailability",

@@ -45,14 +45,15 @@ export type DashboardApiV3 =
   | CustomEndpointContract
   | ProviderOfferingChoice
   | ProviderAccountChoice
-  | ProtocolSwitches
   | EffectiveCatalog
   | EffectiveModelContract
   | EffectiveModelProtocols
   | EffectiveProtocolEvidence
   | CapabilitySummary
   | CardCapabilitySummary
-  | ProtocolSwitchUpdate
+  | ModelProtocolOverridesUpdate
+  | ModelProtocolOverride
+  | ProtocolOverrideState
   | ProtocolProbeRequest
   | ProtocolProbeResult
   | ProtocolProbeResponse
@@ -73,8 +74,8 @@ export type DashboardApiV3 =
   | GatewayStatus
   | ApplicationModels
   | DashboardSummary
-  | DailyModelCost
-  | DailyCostByModel
+  | DailyModelTokens
+  | DailyTokensByModel
   | GatewayLog
   | GatewayLogs
   | ForwardLog
@@ -85,7 +86,7 @@ export type DashboardApiV3 =
   | ForwardLogModels
   | GatewayLogQuery
   | ForwardLogQuery
-  | DailyCostQuery
+  | DailyTokensQuery
   | UsageWindow
   | UsageMutation
   | AccountUsageUpdate
@@ -169,6 +170,10 @@ export type AccountVerificationStatus = "not_required" | "pending" | "verified" 
  * [`ProtocolProbeResult`].
  */
 export type ProbeResultKind = "success" | "failure";
+/**
+ * Per-model/per-protocol override state. `auto` removes any persisted override.
+ */
+export type ProtocolOverrideState = "auto" | "force_on" | "force_off";
 /**
  * How a protocol row was established. Wire values match V2 snake_case.
  */
@@ -658,7 +663,6 @@ export interface CustomEndpointContract {
   models: EffectiveModelContract[];
   pricing: CapabilitySummary;
   productionInference: boolean;
-  protocols: ProtocolSwitches;
   providerId: string;
   /**
    * Display revision for this endpoint, distinct from the top-level CAS token.
@@ -725,6 +729,7 @@ export interface EffectiveProtocolEvidence {
   lastProbeError: string | null;
   lastProbeResult: ProbeResultKind | null;
   observedAt: string | null;
+  override: ProtocolOverrideState;
   protocol: AccountUpstreamProtocol;
   source: ContractEvidenceSource;
   verifiedAt: string | null;
@@ -734,14 +739,6 @@ export interface EffectiveProtocolEvidence {
  */
 export interface CapabilitySummary {
   availability: string;
-}
-/**
- * Upstream protocol enablement. JSON keys stay the protocol tokens.
- */
-export interface ProtocolSwitches {
-  chat_completions: boolean;
-  messages: boolean;
-  responses: boolean;
 }
 /**
  * One built-in provider scope.
@@ -755,7 +752,6 @@ export interface ProviderContractGroup {
   offerings: ProviderOfferingChoice[];
   pricing: CapabilitySummary;
   productionInference: boolean;
-  protocols: ProtocolSwitches;
   providerId: string;
   /**
    * Display revision for this scope, distinct from the top-level CAS token.
@@ -775,13 +771,21 @@ export interface ProviderOfferingChoice {
   routable: boolean;
 }
 /**
- * PUT one protocol switch. CAS tokens and `enabled` are required. The path
- * protocol token is not repeated here.
+ * PUT a batch of per-model/per-protocol overrides for one contract scope.
+ * An empty `overrides` array is rejected by handlers.
  */
-export interface ProtocolSwitchUpdate {
-  enabled: boolean;
+export interface ModelProtocolOverridesUpdate {
   expectedRevision: number;
+  overrides: ModelProtocolOverride[];
   processGeneration: number;
+}
+/**
+ * One per-cell override entry in a batch update.
+ */
+export interface ModelProtocolOverride {
+  modelId: string;
+  protocol: AccountUpstreamProtocol;
+  state: ProtocolOverrideState;
 }
 /**
  * POST protocol-probe body. `accountId` may be omitted; `protocols` is the
@@ -996,18 +1000,18 @@ export interface DashboardSummary {
   weekCost: number;
 }
 /**
- * One UTC day / model cost bucket. `date` is `YYYY-MM-DD`.
+ * One UTC day / model token bucket. `date` is `YYYY-MM-DD`.
  */
-export interface DailyModelCost {
-  cost: number;
+export interface DailyModelTokens {
   date: string;
   model: string;
+  tokens: number;
 }
 /**
- * GET `/dashboard/daily-cost-by-model` envelope.
+ * GET `/dashboard/daily-tokens-by-model` envelope.
  */
-export interface DailyCostByModel {
-  items: DailyModelCost[];
+export interface DailyTokensByModel {
+  items: DailyModelTokens[];
   pricingRevision: string;
   processGeneration: number;
   revision: number;
@@ -1158,9 +1162,9 @@ export interface ForwardLogQuery {
   status?: string | null;
 }
 /**
- * GET `/dashboard/daily-cost-by-model` query. `days` may be omitted.
+ * GET `/dashboard/daily-tokens-by-model` query. `days` may be omitted.
  */
-export interface DailyCostQuery {
+export interface DailyTokensQuery {
   days?: number | null;
 }
 /**

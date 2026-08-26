@@ -72,29 +72,29 @@ pub use types::{
     BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
     ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey,
     ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
-    CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyCostByModel, DailyCostQuery,
-    DailyModelCost, DashboardSummary, DesktopUpdate, DesktopUpdatePhase, ERROR_CONFLICT,
-    ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE, ERROR_INTERNAL, ERROR_INVALID_JSON,
-    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
-    ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT,
-    ERROR_SERVICE_UNAVAILABLE, ERROR_THROTTLED, ERROR_UNAUTHORIZED, EffectiveCatalog,
-    EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence, ForwardLog,
-    ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery, ForwardLogSummary,
-    ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus, InstallUpdate, KeyCreate,
-    KeyUpdate, MutationAck, MutationExpectation, PricingAdjustment, PricingAvailability,
-    PricingLimits, PricingModel, PricingMultiplierChange, PricingMultiplierWrite,
-    PricingMultipliersUpdate, PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus,
-    PricingRefreshUpdate, PricingRevision, PricingSnapshot, PricingTimeWindow,
-    ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate,
-    ProtocolSwitches, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
-    ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
-    ProviderModelCapability, ProviderOfferingChoice, ProviderPricing, ProviderPricingRefresh,
-    ProviderPricingRefreshUpdate, ProviderUsage, ProxyListDirection, ProxyMode,
-    ProxySupportedModel, ProxyTestRequest, ProxyTestResponse, QuotaWindow, RoutingMode, Settings,
-    SettingsUpdate, UpdateCheck, UsageAvailability, UsageMutation, UsageRefresh,
-    UsageRefreshThrottleError, UsageRefreshUpdate, UsageSyncState, UsageWindow, V3Error,
-    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate, contract_schema,
-    contract_schema_pretty,
+    CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyModelTokens,
+    DailyTokensByModel, DailyTokensQuery, DashboardSummary, DesktopUpdate, DesktopUpdatePhase,
+    ERROR_CONFLICT, ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE, ERROR_INTERNAL,
+    ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
+    ERROR_NOT_IMPLEMENTED, ERROR_OUTBOUND_FAILED, ERROR_PRECONDITION_FAILED,
+    ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE, ERROR_THROTTLED, ERROR_UNAUTHORIZED,
+    EffectiveCatalog, EffectiveModelContract, EffectiveModelProtocols, EffectiveProtocolEvidence,
+    ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery,
+    ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus,
+    InstallUpdate, KeyCreate, KeyUpdate, ModelProtocolOverride, ModelProtocolOverridesUpdate,
+    MutationAck, MutationExpectation, PricingAdjustment, PricingAvailability, PricingLimits,
+    PricingModel, PricingMultiplierChange, PricingMultiplierWrite, PricingMultipliersUpdate,
+    PricingRefresh, PricingRefreshPolicy, PricingRefreshStatus, PricingRefreshUpdate,
+    PricingRevision, PricingSnapshot, PricingTimeWindow, ProtocolOverrideState,
+    ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProviderAccountChoice,
+    ProviderCatalog, ProviderCatalogEntry, ProviderCatalogFormField, ProviderCatalogRiskNotice,
+    ProviderContractGroup, ProviderContracts, ProviderModelCapability, ProviderOfferingChoice,
+    ProviderPricing, ProviderPricingRefresh, ProviderPricingRefreshUpdate, ProviderUsage,
+    ProxyListDirection, ProxyMode, ProxySupportedModel, ProxyTestRequest, ProxyTestResponse,
+    QuotaWindow, RoutingMode, Settings, SettingsUpdate, UpdateCheck, UsageAvailability,
+    UsageMutation, UsageRefresh, UsageRefreshThrottleError, UsageRefreshUpdate, UsageSyncState,
+    UsageWindow, V3Error, ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
+    contract_schema, contract_schema_pretty,
 };
 pub use updater::{GITHUB_LATEST_RELEASE_API, GITHUB_LATEST_RELEASE_URL};
 
@@ -236,12 +236,12 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             get(providers::get_provider_contracts),
         )
         .route(
-            "/provider-contracts/provider/{scope_id}/protocols/{protocol}",
-            put(providers::put_provider_protocol_switch),
+            "/provider-contracts/provider/{scope_id}/model-protocol-overrides",
+            put(providers::put_provider_model_protocol_overrides),
         )
         .route(
-            "/provider-contracts/custom-endpoint/{scope_id}/protocols/{protocol}",
-            put(providers::put_custom_endpoint_protocol_switch),
+            "/provider-contracts/custom-endpoint/{scope_id}/model-protocol-overrides",
+            put(providers::put_custom_endpoint_model_protocol_overrides),
         )
         .route(
             "/providers/{provider_id}/protocol-probes",
@@ -262,8 +262,8 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             get(observability::get_dashboard_summary),
         )
         .route(
-            "/dashboard/daily-cost-by-model",
-            get(observability::get_daily_cost_by_model),
+            "/dashboard/daily-tokens-by-model",
+            get(observability::get_daily_tokens_by_model),
         )
         .route("/logs/gateway", get(observability::get_gateway_logs))
         .route("/logs/forward", get(observability::get_forward_logs))

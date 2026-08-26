@@ -5,7 +5,7 @@ import type {
   BrowserCapabilities as V3BrowserCapabilities,
   BrowserOpen as V3BrowserOpen,
   ConnectionInfo as V3ConnectionInfo,
-  DailyModelCost as V3DailyModelCost,
+  DailyModelTokens as V3DailyModelTokens,
   DashboardSummary as V3DashboardSummary,
   DesktopUpdate as V3DesktopUpdate,
   ForwardLog as V3ForwardLog,
@@ -435,10 +435,10 @@ export interface DashboardSummary {
   gateway_running: boolean;
 }
 
-export interface DailyModelCost {
+export interface DailyModelTokens {
   date: string;
   model: string;
-  cost: number;
+  tokens: number;
 }
 
 export interface DashboardAuthStatus {
@@ -683,8 +683,8 @@ export function presentDashboardSummary(value: V3DashboardSummary): DashboardSum
   };
 }
 
-export function presentDailyModelCost(value: V3DailyModelCost): DailyModelCost {
-  return { date: value.date, model: value.model, cost: value.cost };
+export function presentDailyModelTokens(value: V3DailyModelTokens): DailyModelTokens {
+  return { date: value.date, model: value.model, tokens: value.tokens };
 }
 
 export function presentGatewayLog(value: V3GatewayLog): GatewayLog {

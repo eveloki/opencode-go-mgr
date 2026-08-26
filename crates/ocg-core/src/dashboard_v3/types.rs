@@ -82,14 +82,15 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "CustomEndpointContract",
     "ProviderOfferingChoice",
     "ProviderAccountChoice",
-    "ProtocolSwitches",
     "EffectiveCatalog",
     "EffectiveModelContract",
     "EffectiveModelProtocols",
     "EffectiveProtocolEvidence",
     "CapabilitySummary",
     "CardCapabilitySummary",
-    "ProtocolSwitchUpdate",
+    "ModelProtocolOverridesUpdate",
+    "ModelProtocolOverride",
+    "ProtocolOverrideState",
     "ProtocolProbeRequest",
     "ProtocolProbeResult",
     "ProtocolProbeResponse",
@@ -110,8 +111,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "GatewayStatus",
     "ApplicationModels",
     "DashboardSummary",
-    "DailyModelCost",
-    "DailyCostByModel",
+    "DailyModelTokens",
+    "DailyTokensByModel",
     "GatewayLog",
     "GatewayLogs",
     "ForwardLog",
@@ -122,7 +123,7 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ForwardLogModels",
     "GatewayLogQuery",
     "ForwardLogQuery",
-    "DailyCostQuery",
+    "DailyTokensQuery",
     "UsageWindow",
     "UsageMutation",
     "AccountUsageUpdate",
@@ -1291,7 +1292,6 @@ pub struct ProviderContractGroup {
     pub offerings: Vec<ProviderOfferingChoice>,
     pub catalog: EffectiveCatalog,
     pub models: Vec<EffectiveModelContract>,
-    pub protocols: ProtocolSwitches,
     pub pricing: CapabilitySummary,
     pub usage: CapabilitySummary,
     pub card: CardCapabilitySummary,
@@ -1313,7 +1313,6 @@ pub struct CustomEndpointContract {
     pub account: ProviderAccountChoice,
     pub catalog: EffectiveCatalog,
     pub models: Vec<EffectiveModelContract>,
-    pub protocols: ProtocolSwitches,
     pub pricing: CapabilitySummary,
     pub usage: CapabilitySummary,
     pub card: CardCapabilitySummary,
@@ -1346,14 +1345,14 @@ pub struct ProviderAccountChoice {
     pub verification_status: AccountVerificationStatus,
 }
 
-/// Upstream protocol enablement. JSON keys stay the protocol tokens.
+/// Per-model/per-protocol override state. `auto` removes any persisted override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(rename_all = "snake_case", deny_unknown_fields)]
-pub struct ProtocolSwitches {
-    pub chat_completions: bool,
-    pub responses: bool,
-    pub messages: bool,
+pub enum ProtocolOverrideState {
+    Auto,
+    ForceOn,
+    ForceOff,
 }
 
 /// Merged model-id catalog for one contract scope.
@@ -1405,6 +1404,9 @@ pub struct EffectiveProtocolEvidence {
     pub last_probe_result: Option<ProbeResultKind>,
     pub last_probe_at: Option<String>,
     pub last_probe_error: Option<String>,
+    #[serde(rename = "override")]
+    #[schemars(rename = "override")]
+    pub r#override: ProtocolOverrideState,
 }
 
 /// Registry pricing or usage availability copied as display data.
@@ -1451,15 +1453,25 @@ pub(crate) struct ProviderModels {
     pub pricing_revision: String,
 }
 
-/// PUT one protocol switch. CAS tokens and `enabled` are required. The path
-/// protocol token is not repeated here.
+/// One per-cell override entry in a batch update.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProtocolSwitchUpdate {
+pub struct ModelProtocolOverride {
+    pub model_id: String,
+    pub protocol: AccountUpstreamProtocol,
+    pub state: ProtocolOverrideState,
+}
+
+/// PUT a batch of per-model/per-protocol overrides for one contract scope.
+/// An empty `overrides` array is rejected by handlers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelProtocolOverridesUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
-    pub enabled: bool,
+    pub overrides: Vec<ModelProtocolOverride>,
 }
 
 /// POST protocol-probe body. `accountId` may be omitted; `protocols` is the
@@ -1939,22 +1951,22 @@ pub struct DashboardSummary {
     pub pricing_revision: String,
 }
 
-/// One UTC day / model cost bucket. `date` is `YYYY-MM-DD`.
+/// One UTC day / model token bucket. `date` is `YYYY-MM-DD`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DailyModelCost {
+pub struct DailyModelTokens {
     pub date: String,
     pub model: String,
-    pub cost: f64,
+    pub tokens: i64,
 }
 
-/// GET `/dashboard/daily-cost-by-model` envelope.
+/// GET `/dashboard/daily-tokens-by-model` envelope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DailyCostByModel {
-    pub items: Vec<DailyModelCost>,
+pub struct DailyTokensByModel {
+    pub items: Vec<DailyModelTokens>,
     pub revision: u64,
     pub process_generation: u64,
     pub pricing_revision: String,
@@ -2142,11 +2154,11 @@ pub struct ForwardLogQuery {
     pub sort_order: Option<String>,
 }
 
-/// GET `/dashboard/daily-cost-by-model` query. `days` may be omitted.
+/// GET `/dashboard/daily-tokens-by-model` query. `days` may be omitted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DailyCostQuery {
+pub struct DailyTokensQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<i64>,
 }
@@ -2412,7 +2424,6 @@ pub fn contract_schema() -> Value {
     include_type::<CustomEndpointContract>(&mut serialize);
     include_type::<ProviderOfferingChoice>(&mut serialize);
     include_type::<ProviderAccountChoice>(&mut serialize);
-    include_type::<ProtocolSwitches>(&mut serialize);
     include_type::<EffectiveCatalog>(&mut serialize);
     include_type::<EffectiveModelContract>(&mut serialize);
     include_type::<EffectiveModelProtocols>(&mut serialize);
@@ -2438,8 +2449,8 @@ pub fn contract_schema() -> Value {
     include_type::<GatewayStatus>(&mut serialize);
     include_type::<ApplicationModels>(&mut serialize);
     include_type::<DashboardSummary>(&mut serialize);
-    include_type::<DailyModelCost>(&mut serialize);
-    include_type::<DailyCostByModel>(&mut serialize);
+    include_type::<DailyModelTokens>(&mut serialize);
+    include_type::<DailyTokensByModel>(&mut serialize);
     include_type::<GatewayLog>(&mut serialize);
     include_type::<GatewayLogs>(&mut serialize);
     include_type::<ForwardLog>(&mut serialize);
@@ -2486,7 +2497,7 @@ pub fn contract_schema() -> Value {
     include_type::<AccountModelCapabilityWrite>(&mut deserialize);
     include_type::<AccountVerify>(&mut deserialize);
     include_type::<ZenFreeSettingsUpdate>(&mut deserialize);
-    include_type::<ProtocolSwitchUpdate>(&mut deserialize);
+    include_type::<ModelProtocolOverridesUpdate>(&mut deserialize);
     include_type::<ProtocolProbeRequest>(&mut deserialize);
     include_type::<PricingRefreshUpdate>(&mut deserialize);
     include_type::<PricingRefreshPolicy>(&mut deserialize);
@@ -2495,7 +2506,7 @@ pub fn contract_schema() -> Value {
     include_type::<PricingMultiplierWrite>(&mut deserialize);
     include_type::<GatewayLogQuery>(&mut deserialize);
     include_type::<ForwardLogQuery>(&mut deserialize);
-    include_type::<DailyCostQuery>(&mut deserialize);
+    include_type::<DailyTokensQuery>(&mut deserialize);
     include_type::<AccountUsageUpdate>(&mut deserialize);
     include_type::<AuthRegister>(&mut deserialize);
     include_type::<AuthLogin>(&mut deserialize);
@@ -3308,6 +3319,7 @@ mod tests {
             last_probe_result: None,
             last_probe_at: None,
             last_probe_error: None,
+            r#override: ProtocolOverrideState::Auto,
         }
     }
 
@@ -3407,16 +3419,12 @@ mod tests {
                         last_probe_result: None,
                         last_probe_at: None,
                         last_probe_error: None,
+                        r#override: ProtocolOverrideState::Auto,
                     }),
                 },
                 routable: false,
                 disabled_reasons: vec!["offering is not routable".into()],
             }],
-            protocols: ProtocolSwitches {
-                chat_completions: true,
-                responses: false,
-                messages: true,
-            },
             pricing: CapabilitySummary {
                 availability: "unavailable".into(),
             },
@@ -3454,11 +3462,6 @@ mod tests {
                     refresh_supported: true,
                 },
                 models: Vec::new(),
-                protocols: ProtocolSwitches {
-                    chat_completions: true,
-                    responses: true,
-                    messages: true,
-                },
                 pricing: CapabilitySummary {
                     availability: "unpriced".into(),
                 },
@@ -3502,14 +3505,15 @@ mod tests {
             "CustomEndpointContract",
             "ProviderOfferingChoice",
             "ProviderAccountChoice",
-            "ProtocolSwitches",
             "EffectiveCatalog",
             "EffectiveModelContract",
             "EffectiveModelProtocols",
             "EffectiveProtocolEvidence",
             "CapabilitySummary",
             "CardCapabilitySummary",
-            "ProtocolSwitchUpdate",
+            "ModelProtocolOverridesUpdate",
+            "ModelProtocolOverride",
+            "ProtocolOverrideState",
             "ProtocolProbeRequest",
             "ProtocolProbeResult",
             "ProtocolProbeResponse",
@@ -3670,21 +3674,6 @@ mod tests {
             1
         );
         assert_eq!(
-            contracts_value["providers"][0]["protocols"],
-            json!({
-                "chat_completions": true,
-                "responses": false,
-                "messages": true
-            })
-        );
-        assert!(
-            contracts_value["providers"][0]["protocols"]
-                .as_object()
-                .unwrap()
-                .get("chatCompletions")
-                .is_none()
-        );
-        assert_eq!(
             contracts_value["providers"][0]["models"][0]["protocols"]["responses"],
             Value::Null
         );
@@ -3715,13 +3704,13 @@ mod tests {
         assert_secret_free(&contracts_value);
 
         let schema = contract_schema();
-        let switches = schema["$defs"]["ProtocolSwitches"]["properties"]
+        let override_state = schema["$defs"]["ProtocolOverrideState"]
             .as_object()
             .unwrap();
-        assert!(switches.contains_key("chat_completions"));
-        assert!(switches.contains_key("responses"));
-        assert!(switches.contains_key("messages"));
-        assert!(!switches.contains_key("chatCompletions"));
+        assert_eq!(
+            override_state["enum"],
+            json!(["auto", "force_on", "force_off"])
+        );
         let protocol_required = schema["$defs"]["EffectiveModelProtocols"]["required"]
             .as_array()
             .unwrap();
@@ -3761,18 +3750,23 @@ mod tests {
             .is_err()
         );
 
-        let switch: ProtocolSwitchUpdate = serde_json::from_value(json!({
+        let overrides: ModelProtocolOverridesUpdate = serde_json::from_value(json!({
             "expectedRevision": 11,
             "processGeneration": 9,
-            "enabled": false
+            "overrides": [
+                { "modelId": "glm-5.2", "protocol": "chat_completions", "state": "force_on" }
+            ]
         }))
         .unwrap();
-        assert!(!switch.enabled);
+        assert_eq!(overrides.overrides.len(), 1);
+        assert_eq!(overrides.overrides[0].state, ProtocolOverrideState::ForceOn);
         assert!(
-            serde_json::from_value::<ProtocolSwitchUpdate>(json!({
+            serde_json::from_value::<ModelProtocolOverridesUpdate>(json!({
                 "expectedRevision": 11,
                 "processGeneration": 9,
-                "enabled": false,
+                "overrides": [
+                    { "modelId": "glm-5.2", "protocol": "chat_completions", "state": "force_on" }
+                ],
                 "scopeRevision": 2
             }))
             .is_err()
@@ -4161,14 +4155,15 @@ mod tests {
         "CustomEndpointContract",
         "ProviderOfferingChoice",
         "ProviderAccountChoice",
-        "ProtocolSwitches",
         "EffectiveCatalog",
         "EffectiveModelContract",
         "EffectiveModelProtocols",
         "EffectiveProtocolEvidence",
         "CapabilitySummary",
         "CardCapabilitySummary",
-        "ProtocolSwitchUpdate",
+        "ModelProtocolOverridesUpdate",
+        "ModelProtocolOverride",
+        "ProtocolOverrideState",
         "ProtocolProbeRequest",
         "ProtocolProbeResult",
         "ProtocolProbeResponse",
@@ -4251,8 +4246,8 @@ mod tests {
         "GatewayStatus",
         "ApplicationModels",
         "DashboardSummary",
-        "DailyModelCost",
-        "DailyCostByModel",
+        "DailyModelTokens",
+        "DailyTokensByModel",
         "GatewayLog",
         "GatewayLogs",
         "ForwardLog",
@@ -4263,7 +4258,7 @@ mod tests {
         "ForwardLogModels",
         "GatewayLogQuery",
         "ForwardLogQuery",
-        "DailyCostQuery",
+        "DailyTokensQuery",
     ];
 
     const PROXY_TEST_CATALOG_TYPES: &[&str] = &["ProxyTestRequest", "ProxyTestResponse"];
@@ -4720,11 +4715,11 @@ mod tests {
         assert_eq!(summary_value["gatewayRunning"], true);
         assert!(summary_value.get("total_accounts").is_none());
 
-        let daily = DailyCostByModel {
-            items: vec![DailyModelCost {
+        let daily = DailyTokensByModel {
+            items: vec![DailyModelTokens {
                 date: "2026-08-16".into(),
                 model: "glm-5".into(),
-                cost: 1.25,
+                tokens: 1250,
             }],
             revision: 11,
             process_generation: 9,
@@ -4733,7 +4728,7 @@ mod tests {
         let daily_value = serde_json::to_value(&daily).unwrap();
         assert_eq!(daily_value["items"][0]["date"], "2026-08-16");
         assert_eq!(daily_value["items"][0]["model"], "glm-5");
-        assert_eq!(daily_value["items"][0]["cost"], 1.25);
+        assert_eq!(daily_value["items"][0]["tokens"], 1250);
 
         let log = sample_forward_log();
         let log_value = serde_json::to_value(&log).unwrap();
@@ -4832,8 +4827,8 @@ mod tests {
             .is_err()
         );
         assert!(serde_json::from_value::<GatewayLogQuery>(json!({ "request_id": "r" })).is_err());
-        assert!(serde_json::from_value::<DailyCostQuery>(json!({ "Days": 7 })).is_err());
-        let days: DailyCostQuery = serde_json::from_value(json!({ "days": 7 })).unwrap();
+        assert!(serde_json::from_value::<DailyTokensQuery>(json!({ "Days": 7 })).is_err());
+        let days: DailyTokensQuery = serde_json::from_value(json!({ "days": 7 })).unwrap();
         assert_eq!(days.days, Some(7));
     }
 
@@ -4885,7 +4880,7 @@ mod tests {
         );
         assert_eq!(defs["ForwardLogQuery"]["additionalProperties"], false);
         assert_eq!(defs["GatewayLogQuery"]["additionalProperties"], false);
-        assert_eq!(defs["DailyCostQuery"]["additionalProperties"], false);
+        assert_eq!(defs["DailyTokensQuery"]["additionalProperties"], false);
     }
 
     #[test]

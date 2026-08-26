@@ -43,7 +43,7 @@ test("DESIGN.md names Providers as the fourth of seven views", () => {
   );
   assert.doesNotMatch(design, /Accounts, Pricing, Applications/);
   assert.match(design, /Providers is the supplier control plane/);
-  assert.match(design, /structural protocol switches with per-switch available-model counts/);
+  assert.match(design, /three-state control per cell/);
   assert.match(design, /multi-select checkboxes \(Chat Completions, Responses, Messages\)/);
   assert.match(design, /may consume quota/);
   assert.match(design, /never automatic on page load/);
@@ -87,12 +87,12 @@ test("USER guides describe the Providers control plane and drop stale locations"
   assert.match(userZh, /`CustomEndpoint\(account_id\)`/);
   assert.match(userEn, /Chat Completions, Responses,\s+and Messages/);
   assert.match(userZh, /Chat Completions、Responses、Messages/);
-  assert.match(userEn, /may consume quota/);
+  assert.match(userEn, /may\s+consume quota/);
   assert.match(userZh, /可能消耗\s*额度/);
   assert.match(userEn, /\?view=pricing/);
   assert.match(userZh, /\?view=pricing/);
-  assert.match(userEn, /schema v29/i);
-  assert.match(userZh, /schema v29/);
+  assert.match(userEn, /schema v31/i);
+  assert.match(userZh, /schema v31/);
   assert.match(userEn, /\*\*Open\s+provider\*\*/);
   assert.match(userZh, /\*\*前往供应商\*\*/);
   assert.doesNotMatch(userEn, /There is no separate provider page/);

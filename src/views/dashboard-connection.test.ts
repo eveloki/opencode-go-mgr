@@ -918,8 +918,6 @@ test("dashboard keeps the connection center first and protects key regeneration"
   assert.doesNotMatch(source, /ref<AppConfig>/);
   // The primary key is pinned first and identified by the fixed constant.
   assert.match(source, /const enabledGatewayKeys = computed<SwitcherKey\[\]>\(\(\) => \[\s*\{ id: PRIMARY_KEY_ID, name: t\("主 Key"\), value: serviceConfig\.value\.primary_key \},/);
-  assert.match(template, /class="account-usage-row"/);
-  assert.match(source, /grid-template-columns: minmax\(3\.5em, auto\) minmax\(0, 1fr\)/);
 });
 
 test("dashboard reports gateway health and serializes key regeneration", async () => {
@@ -930,7 +928,6 @@ test("dashboard reports gateway health and serializes key regeneration", async (
   assert.match(source, /gateway_running: false/);
   assert.match(source, /const summaryLoaded = ref\(false\)/);
   assert.match(source, /v-if="dashboardError"[\s\S]*?@click="loadDashboard"/);
-  assert.match(source, /usageFailedAccountIds\.has\(account\.id\)/);
   assert.match(source, /:disabled="refreshingKey \|\| !selectedKey"/);
   assert.match(source, /:loading="refreshingKey"\s+:disabled="refreshingKey \|\| loading \|\| !selectedKey"/);
   assert.match(source, /async function regenerateKey\(\) \{\s*const target = selectedKey\.value;\s*if \(refreshingKey\.value \|\| dashboardRequestActive \|\| !target\) return;/);

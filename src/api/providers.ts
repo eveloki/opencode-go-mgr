@@ -1,14 +1,16 @@
-import { dashboardV3, isRevisionConflict } from "./dashboard-v3.ts";
+import { dashboardV3, isRevisionConflict, type WithoutExpectation } from "./dashboard-v3.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import type {
   AccountCredentialKind,
   AccountQuotaScope,
+  ModelProtocolOverridesUpdate,
   ProviderCatalogEntry as V3ProviderCatalogEntry,
   ProviderContracts as V3ProviderContracts,
   ProviderPricing as V3ProviderPricing,
   ProviderPricingSnapshot as V3ProviderPricingSnapshot,
   ProviderModels as V3ProviderModels,
   ProviderUsage as V3ProviderUsage,
+  ProtocolOverrideState as V3ProtocolOverrideState,
   ProtocolProbeResponse as V3ProtocolProbeResponse,
   ZenFreeModels as V3ZenFreeModels,
   ZenFreeSettings,
@@ -183,12 +185,7 @@ export type ContractScopeKind = "provider" | "custom_endpoint";
 export type ContractEvidenceSource = "static" | "preset" | "probe_confirmed" | "probe_observed";
 export type ProbeResultKind = "success" | "failure";
 export type ConnectionVerificationStatus = "not_required" | "pending" | "verified" | "failed";
-
-export interface ProtocolSwitches {
-  chat_completions: boolean;
-  responses: boolean;
-  messages: boolean;
-}
+export type ProtocolOverrideState = V3ProtocolOverrideState;
 
 export interface EffectiveCatalog {
   source: string;
@@ -208,6 +205,7 @@ export interface EffectiveProtocolEvidence {
   last_probe_result: ProbeResultKind | null;
   last_probe_at: string | null;
   last_probe_error: string | null;
+  override: ProtocolOverrideState;
 }
 
 export interface EffectiveModelContract {
@@ -250,7 +248,6 @@ export interface ProviderContractGroup {
   offerings: ProviderOfferingChoice[];
   catalog: EffectiveCatalog;
   models: EffectiveModelContract[];
-  protocols: ProtocolSwitches;
   pricing: CapabilitySummary;
   usage: CapabilitySummary;
   card: CardCapabilitySummary;
@@ -267,7 +264,6 @@ export interface CustomEndpointContract {
   account: ProviderAccountChoice;
   catalog: EffectiveCatalog;
   models: EffectiveModelContract[];
-  protocols: ProtocolSwitches;
   pricing: CapabilitySummary;
   usage: CapabilitySummary;
   card: CardCapabilitySummary;
@@ -284,14 +280,15 @@ export interface ProviderContractsResponse {
   custom_endpoints: CustomEndpointContract[];
 }
 
-export interface ProtocolSwitchUpdate {
-  enabled: boolean;
-  expected_revision?: number;
-}
-
 export interface ProtocolProbeRequest {
   model_id: string;
   protocols: ProviderProtocol[];
+}
+
+export interface ModelProtocolOverrideUpdate {
+  model_id: string;
+  protocol: ProviderProtocol;
+  state: ProtocolOverrideState;
 }
 
 export interface ProtocolProbeResult {
@@ -400,6 +397,7 @@ function presentEvidence(value: V3ProviderContracts["providers"][number]["models
     last_probe_result: value.lastProbeResult,
     last_probe_at: value.lastProbeAt,
     last_probe_error: value.lastProbeError,
+    override: value.override,
   };
 }
 
@@ -463,7 +461,6 @@ export function presentContracts(value: V3ProviderContracts): ProviderContractsR
       })),
       catalog: presentCatalog(scope.catalog),
       models: scope.models.map(presentModel),
-      protocols: { ...scope.protocols },
       pricing: { availability: scope.pricing.availability },
       usage: { availability: scope.usage.availability },
       card: presentCard(scope.card),
@@ -479,14 +476,11 @@ export function presentContracts(value: V3ProviderContracts): ProviderContractsR
       account: presentAccountChoice(scope.account),
       catalog: presentCatalog(scope.catalog),
       models: scope.models.map(presentModel),
-      protocols: { ...scope.protocols },
       pricing: { availability: scope.pricing.availability },
       usage: { availability: scope.usage.availability },
       card: {
         ...presentCard(scope.card),
-        // Custom per-protocol probing has no V3 endpoint yet (deferred); the
-        // protocol switches themselves are writable via the custom-endpoint
-        // route, so only the probe capability is masked here.
+        // Custom per-protocol probing has no V3 endpoint yet (deferred).
         protocol_probe: false,
       },
       catalog_routable: scope.catalogRoutable,
@@ -691,35 +685,25 @@ export const providerApi = {
     ));
   },
   getProviderContracts: async () => presentContracts(await dashboardV3.getProviderContracts()),
-  putProviderProtocolSwitch: async (
+  updateModelProtocolOverrides: async (
+    scopeKind: ContractScopeKind,
     scopeId: string,
-    protocol: ProviderProtocol,
-    enabled: boolean,
+    overrides: { model_id: string; protocol: ProviderProtocol; state: ProtocolOverrideState }[],
   ): Promise<ProviderContractsResponse> => {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
     try {
       return presentContracts(await control.runMutation((expectation) =>
-        dashboardV3.putProviderProtocolSwitch(scopeId, protocol, enabled, expectation)));
-    } catch (cause) {
-      if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
-      throw cause;
-    }
-  },
-  updateProviderContractProtocol: async (
-    scopeKind: ContractScopeKind,
-    scopeId: string,
-    protocol: ProviderProtocol,
-    update: ProtocolSwitchUpdate,
-  ) => {
-    const control = useControlPlaneStore();
-    if (!control.hasTokens()) await control.refresh();
-    try {
-      return presentContracts(await control.runMutation((expectation) => (
-        scopeKind === "custom_endpoint"
-          ? dashboardV3.putCustomEndpointProtocolSwitch(scopeId, protocol, update.enabled, expectation)
-          : dashboardV3.putProviderProtocolSwitch(scopeId, protocol, update.enabled, expectation)
-      )));
+        dashboardV3.putModelProtocolOverrides(
+          scopeKind,
+          scopeId,
+          { overrides: overrides.map((item) => ({
+            modelId: item.model_id,
+            protocol: item.protocol,
+            state: item.state,
+          })) } satisfies WithoutExpectation<ModelProtocolOverridesUpdate>,
+          expectation,
+        )));
     } catch (cause) {
       if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
       throw cause;

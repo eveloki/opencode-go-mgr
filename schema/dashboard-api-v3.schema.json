@@ -1419,9 +1419,6 @@
         "productionInference": {
           "type": "boolean"
         },
-        "protocols": {
-          "$ref": "#/$defs/ProtocolSwitches"
-        },
         "providerId": {
           "type": "string"
         },
@@ -1448,7 +1445,6 @@
         "account",
         "catalog",
         "models",
-        "protocols",
         "pricing",
         "usage",
         "card",
@@ -1531,13 +1527,35 @@
       ],
       "type": "object"
     },
-    "DailyCostByModel": {
+    "DailyModelTokens": {
       "additionalProperties": false,
-      "description": "GET `/dashboard/daily-cost-by-model` envelope.",
+      "description": "One UTC day / model token bucket. `date` is `YYYY-MM-DD`.",
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "tokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "date",
+        "model",
+        "tokens"
+      ],
+      "type": "object"
+    },
+    "DailyTokensByModel": {
+      "additionalProperties": false,
+      "description": "GET `/dashboard/daily-tokens-by-model` envelope.",
       "properties": {
         "items": {
           "items": {
-            "$ref": "#/$defs/DailyModelCost"
+            "$ref": "#/$defs/DailyModelTokens"
           },
           "type": "array"
         },
@@ -1563,9 +1581,9 @@
       ],
       "type": "object"
     },
-    "DailyCostQuery": {
+    "DailyTokensQuery": {
       "additionalProperties": false,
-      "description": "GET `/dashboard/daily-cost-by-model` query. `days` may be omitted.",
+      "description": "GET `/dashboard/daily-tokens-by-model` query. `days` may be omitted.",
       "properties": {
         "days": {
           "format": "int64",
@@ -1575,28 +1593,6 @@
           ]
         }
       },
-      "type": "object"
-    },
-    "DailyModelCost": {
-      "additionalProperties": false,
-      "description": "One UTC day / model cost bucket. `date` is `YYYY-MM-DD`.",
-      "properties": {
-        "cost": {
-          "format": "double",
-          "type": "number"
-        },
-        "date": {
-          "type": "string"
-        },
-        "model": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "date",
-        "model",
-        "cost"
-      ],
       "type": "object"
     },
     "DashboardSummary": {
@@ -1868,6 +1864,9 @@
             "null"
           ]
         },
+        "override": {
+          "$ref": "#/$defs/ProtocolOverrideState"
+        },
         "protocol": {
           "$ref": "#/$defs/AccountUpstreamProtocol"
         },
@@ -1890,7 +1889,8 @@
         "observedAt",
         "lastProbeResult",
         "lastProbeAt",
-        "lastProbeError"
+        "lastProbeError",
+        "override"
       ],
       "type": "object"
     },
@@ -2658,6 +2658,55 @@
       ],
       "type": "object"
     },
+    "ModelProtocolOverride": {
+      "additionalProperties": false,
+      "description": "One per-cell override entry in a batch update.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "state": {
+          "$ref": "#/$defs/ProtocolOverrideState"
+        }
+      },
+      "required": [
+        "modelId",
+        "protocol",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ModelProtocolOverridesUpdate": {
+      "additionalProperties": false,
+      "description": "PUT a batch of per-model/per-protocol overrides for one contract scope.\nAn empty `overrides` array is rejected by handlers.",
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "overrides": {
+          "items": {
+            "$ref": "#/$defs/ModelProtocolOverride"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "overrides"
+      ],
+      "type": "object"
+    },
     "MutationAck": {
       "additionalProperties": false,
       "description": "Successful control-plane mutation acknowledgement.",
@@ -3089,6 +3138,15 @@
       ],
       "type": "string"
     },
+    "ProtocolOverrideState": {
+      "description": "Per-model/per-protocol override state. `auto` removes any persisted override.",
+      "enum": [
+        "auto",
+        "force_on",
+        "force_off"
+      ],
+      "type": "string"
+    },
     "ProtocolProbeRequest": {
       "additionalProperties": false,
       "description": "POST protocol-probe body. `accountId` may be omitted; `protocols` is the\nrequired explicit probe set. Handlers validate membership and uniqueness.",
@@ -3207,52 +3265,6 @@
         "success",
         "skipped",
         "error"
-      ],
-      "type": "object"
-    },
-    "ProtocolSwitchUpdate": {
-      "additionalProperties": false,
-      "description": "PUT one protocol switch. CAS tokens and `enabled` are required. The path\nprotocol token is not repeated here.",
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "expectedRevision": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "processGeneration": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "expectedRevision",
-        "processGeneration",
-        "enabled"
-      ],
-      "type": "object"
-    },
-    "ProtocolSwitches": {
-      "additionalProperties": false,
-      "description": "Upstream protocol enablement. JSON keys stay the protocol tokens.",
-      "properties": {
-        "chat_completions": {
-          "type": "boolean"
-        },
-        "messages": {
-          "type": "boolean"
-        },
-        "responses": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "chat_completions",
-        "responses",
-        "messages"
       ],
       "type": "object"
     },
@@ -3494,9 +3506,6 @@
         "productionInference": {
           "type": "boolean"
         },
-        "protocols": {
-          "$ref": "#/$defs/ProtocolSwitches"
-        },
         "providerId": {
           "type": "string"
         },
@@ -3523,7 +3532,6 @@
         "offerings",
         "catalog",
         "models",
-        "protocols",
         "pricing",
         "usage",
         "card",
@@ -5116,9 +5124,6 @@
       "$ref": "#/$defs/ProviderAccountChoice"
     },
     {
-      "$ref": "#/$defs/ProtocolSwitches"
-    },
-    {
       "$ref": "#/$defs/EffectiveCatalog"
     },
     {
@@ -5137,7 +5142,13 @@
       "$ref": "#/$defs/CardCapabilitySummary"
     },
     {
-      "$ref": "#/$defs/ProtocolSwitchUpdate"
+      "$ref": "#/$defs/ModelProtocolOverridesUpdate"
+    },
+    {
+      "$ref": "#/$defs/ModelProtocolOverride"
+    },
+    {
+      "$ref": "#/$defs/ProtocolOverrideState"
     },
     {
       "$ref": "#/$defs/ProtocolProbeRequest"
@@ -5200,10 +5211,10 @@
       "$ref": "#/$defs/DashboardSummary"
     },
     {
-      "$ref": "#/$defs/DailyModelCost"
+      "$ref": "#/$defs/DailyModelTokens"
     },
     {
-      "$ref": "#/$defs/DailyCostByModel"
+      "$ref": "#/$defs/DailyTokensByModel"
     },
     {
       "$ref": "#/$defs/GatewayLog"
@@ -5236,7 +5247,7 @@
       "$ref": "#/$defs/ForwardLogQuery"
     },
     {
-      "$ref": "#/$defs/DailyCostQuery"
+      "$ref": "#/$defs/DailyTokensQuery"
     },
     {
       "$ref": "#/$defs/UsageWindow"

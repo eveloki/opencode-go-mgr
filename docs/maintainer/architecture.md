@@ -399,7 +399,7 @@ is no Tauri `invoke` path.
   account_control / gateway_keys / settings / ...
            |
            v
-  SQLite schema v27
+  SQLite schema v31
            ^
            |
   ocg-manager-cli  same services, no argv CAS
@@ -410,13 +410,13 @@ mutation. CAS details: [Dashboard API](dashboard-api.md).
 
 ## Persistence map
 
-Authoritative schema is v27. `sub_gateway_keys` exists only in pre-v27
+Authoritative schema is v31. `sub_gateway_keys` exists only in pre-v27
 databases and is dropped by the migration. GUI data dir is
 `%USERPROFILE%\.ocg-mgr` on Windows and `~/.ocg-mgr` elsewhere; CLI
 defaults to `~/.ocg-mgr-cli`.
 
 ```text
-  data.sqlite                         CURRENT_SCHEMA_VERSION = 27
+  data.sqlite                         CURRENT_SCHEMA_VERSION = 31
     access_keys                       Primary id PRIMARY_KEY_ID
                                       cannot disable/delete Primary
                                       64 active sub-key cap
@@ -428,8 +428,11 @@ defaults to `~/.ocg-mgr-cli`.
     provider_pricing_snapshots
     provider_usage_sync_state         official Go usage metadata
     provider_model_catalogs
-    provider_contract_scopes
-    provider_contract_model_protocols
+    provider_contract_scopes          deprecated scope-level switch columns;
+                                      no longer read by effective derivation
+    provider_contract_model_protocols model-protocol evidence
+    provider_contract_model_protocol_overrides
+                                      per-model/per-protocol override state
     account_custom_configs
     account_model_capabilities
     account_acknowledgements
@@ -437,7 +440,7 @@ defaults to `~/.ocg-mgr-cli`.
   existing non-empty DB: non-overwriting
     data.sqlite.pre-v3.<UTC>.bak + .sha256
     before any v27 write
-  empty new DB: v27 directly, no that copy
+  empty new DB: v31 directly, no that copy
 
   keys obfuscated; ConnectionInfo is the only V3 plaintext-Key DTO
 ```

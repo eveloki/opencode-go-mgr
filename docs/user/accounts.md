@@ -15,8 +15,8 @@ pool.
 card order, managed registration, and local usage / calibration / cooldown. Each
 card shows a read-only contract summary (effective protocols, or a disabled /
 unroutable notice) and an **Open provider** deep link into
-**Providers**. Catalogs, protocol probes, Chat Completions / Responses /
-Messages switches, and scoped pricing live on **Providers**, not here.
+**Providers**. Catalogs, protocol probes, per-model protocol overrides, and
+scoped pricing live on **Providers**, not here.
 
 The registry is sealed. Built-in Plan families are:
 
@@ -45,7 +45,9 @@ destination and must not send its key to an OpenCode endpoint.
 
 GOAT verification performs one authenticated, non-billable `GET /models` and
 saves the returned account catalog without enabling the card. After verify,
-explicitly enable the account. The account can use the included `goat` model
+explicitly enable the account.
+GOAT routes only through verified, explicitly enabled accounts.
+The account can use the included `goat` model
 set (default) or the full `all` catalog. Changing the Key invalidates
 verification and disables the account; switching `goat`/`all` does not.
 

@@ -39,11 +39,12 @@ Session-protected (non-exhaustive; see `dashboard_v3/mod.rs`):
 `/providers/zen-free`, `/providers/zen-free/models`,
 `/providers/zen-free/models/refresh`,
 `/providers/{provider_id}/models/refresh`, `/provider-contracts`,
-`/provider-contracts/provider/{scope_id}/protocols/{protocol}`,
+`/provider-contracts/provider/{scope_id}/model-protocol-overrides`,
+`/provider-contracts/custom-endpoint/{scope_id}/model-protocol-overrides`,
 `/providers/{provider_id}/protocol-probes`, `/browser/capabilities`,
 `/browser/sessions/{token}/ws`, `/gateway/status`,
 `/application-models`, `/dashboard/summary`,
-`/dashboard/daily-cost-by-model`, `/logs/gateway`, `/logs/forward`,
+`/dashboard/daily-tokens-by-model`, `/logs/gateway`, `/logs/forward`,
 `/logs/forward/models`, `/logs/forward/keys`,
 `/custom/models/discover`.
 

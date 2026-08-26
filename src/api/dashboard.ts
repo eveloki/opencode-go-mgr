@@ -44,7 +44,7 @@ import {
   presentBrowserCapabilities,
   presentBrowserOpen,
   presentConnection,
-  presentDailyModelCost,
+  presentDailyModelTokens,
   presentDashboardSummary,
   presentForwardLogs,
   presentGatewayLog,
@@ -328,6 +328,6 @@ export const dashboardApi = {
   getForwardLogModels: async () => (await dashboardV3.getForwardLogModels()).models,
   getForwardLogKeys: async () => (await dashboardV3.getForwardLogKeys()).keys,
   getDashboardSummary: async () => presentDashboardSummary(await dashboardV3.getDashboardSummary()),
-  getDailyCostByModel: async (days?: number) =>
-    (await dashboardV3.getDailyCostByModel(days)).items.map(presentDailyModelCost),
+  getDailyTokensByModel: async (days?: number) =>
+    (await dashboardV3.getDailyTokensByModel(days)).items.map(presentDailyModelTokens),
 };

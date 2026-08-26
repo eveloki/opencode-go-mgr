@@ -12,7 +12,7 @@ User guides live under `docs/user/` (landing: `docs/USER.md` / `docs/USER.zh-CN.
 - Dashboard views (sidebar order, seven pages, fixed): Dashboard / Access Keys / Accounts / Providers / Applications / Logs / Settings. `browser` is a managed-session overlay page. Access credentials are shown as **Key** (never “Gateway Key”); the design system is governed by `DESIGN.md` + `src/theme.ts`.
 - One default port `127.0.0.1:9042` (composition root `crates/ocg-core/src/host_router.rs`) merges inference entrypoints (OpenAI Chat Completions / Responses, Anthropic Messages, Gemini `generateContent`, Claude Desktop aliases), Dashboard V3, V2 REST tombstones, preserved V2 auth + browser WebSocket, and `/dashboard` static assets.
 - Dashboard V3 control-plane writes require CAS (`expectedRevision` / `processGeneration`); the frozen contract is `schema/dashboard-api-v3.schema.json`. Tombstoned V2 REST returns `410` after auth; never add handlers there.
-- Access credentials are SQLite `access_keys` rows (schema v30); plaintext leaves the process only via the session-protected `GET /dashboard/api/v3/connection`. Persistence details: `docs/maintainer/storage-migration.md`.
+- Access credentials are SQLite `access_keys` rows (schema v31); plaintext leaves the process only via the session-protected `GET /dashboard/api/v3/connection`. Persistence details: `docs/maintainer/storage-migration.md`.
 - Desktop: Tauri v2 tray app; Host capabilities are registered into `CoreState`, never as `#[tauri::command]`. No remote sync or Admin API; each node is managed by its own dashboard.
 - Sources of truth: protocol tables `ocg-domain/src/protocol.rs`, capability table `src/views/application-guides.ts`, aliases `ocg-gateway/src/alias.rs`, Plan catalog `ocg-domain/src/provider.rs`. USER guides mirror them; do not pad the README with those tables.
 
@@ -30,14 +30,14 @@ User guides live under `docs/user/` (landing: `docs/USER.md` / `docs/USER.zh-CN.
 - `crates/ocg-core/src/dashboard.rs`: SPA static assets, preserved V2 auth/browser WS. The tombstoned V2 REST middleware lives in `host_router.rs`.
 - `crates/ocg-core/src/gateway/`: OpenAI / Anthropic / Gemini client protocol routes and conversions, Claude Desktop alias rewriting, forwarding, cooldown, and cost accounting. `materialize.rs` parses the client protocol first, then materializes candidates by Alias mapping; adapters must not use billable paths to probe protocols.
 - `crates/ocg-core/src/provider.rs`: domain catalog compatibility facade.
-- `crates/ocg-core/src/provider_contracts.rs`: provider contract scopes, protocol switches, and model protocol evidence.
+- `crates/ocg-core/src/provider_contracts.rs`: provider contract scopes, per-model/per-protocol overrides, effective contract derivation, and model protocol evidence.
 - `crates/ocg-core/src/goat.rs`: GOAT verification contract and account runtime types (GOAT is disabled `pending`; verify `501`).
 - `crates/ocg-core/src/custom.rs` / `custom_http.rs`: Custom eligible runtime, URL validation/inspection, verification probe, declared-model matching, and outbound boundaries.
 - `crates/ocg-core/src/gateway_keys.rs`: `access_keys` lifecycle implementation, credential snapshot, `PRIMARY_KEY_ID`, cross-layer value-uniqueness gate.
 - `crates/ocg-core/src/http_client.rs`: maps `AppConfig` to `ocg_infra::http`.
 - `crates/ocg-core/src/go_usage.rs`: official Go usage client (`/zen/go/v1/usage`).
 - `crates/ocg-core/src/usage_sync.rs`: adaptive official usage sync. Background loop starts/stops with `CoreState` (spawned on Gateway start, exits when CoreState drops).
-- `crates/ocg-core/src/db.rs`: SQLite schema, migrations, queries; `CURRENT_SCHEMA_VERSION = 30`.
+- `crates/ocg-core/src/db.rs`: SQLite schema, migrations, queries; `CURRENT_SCHEMA_VERSION = 31`.
 - `crates/ocg-core/src/models.rs`: shared serde types and `AppConfig` (includes `DEFAULT_OPENCODE_INVITE_URL`).
 - `crates/ocg-core/src/pricing.rs` + `kernel/pricing.rs`: OpenCode Go price snapshot, multipliers, and quota estimation.
 - `crates/ocg-cli/src/main.rs`: CLI `serve`, `key`, `status` (writes Database directly, does not go through dashboard CAS).
@@ -45,7 +45,7 @@ User guides live under `docs/user/` (landing: `docs/USER.md` / `docs/USER.zh-CN.
 - `src-tauri/src/host/`: desktop Host capabilities (gateway lifecycle, native browser, desktop settings).
 - `src-tauri/src/updater.rs`: signed desktop updater bridge; triggered by protected dashboard HTTP API.
 - `src-tauri/src/tray.rs`: tray menu and dashboard-open logic.
-- `src/api/dashboard-v3.ts` / `dashboard.ts` / `providers.ts` / `generated/dashboard-v3.ts`: current dashboard HTTP client (transport), presenters, and contract types. `dashboardApi` covers auth/keys/acknowledgements; `providerApi` covers Zen-free/pricing/protocol-switch methods.
+- `src/api/dashboard-v3.ts` / `dashboard.ts` / `providers.ts` / `generated/dashboard-v3.ts`: current dashboard HTTP client (transport), presenters, and contract types. `dashboardApi` covers auth/keys/acknowledgements; `providerApi` covers Zen-free/pricing/model-protocol-override methods.
 - `src/domain/`: shared domain helpers used by both views and components (plans, account-*, pricing-*, provider-contracts, accounts-usage, custom-account, managed-account, etc.).
 - `src/views/`: Dashboard / Keys / Accounts / Providers / Applications / Logs / Settings.
 - `src/components/ManagedAccountWizard.vue`: managed registration wizard (step back, Google/GitHub).

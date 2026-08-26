@@ -2,7 +2,7 @@
 
 use chrono::{Duration, Utc};
 use ocg_core::dashboard_v3::{
-    ApplicationModels, DailyCostByModel, DashboardSummary, ERROR_INVALID_REQUEST,
+    ApplicationModels, DailyTokensByModel, DashboardSummary, ERROR_INVALID_REQUEST,
     ERROR_UNAUTHORIZED, ForwardLogKeys, ForwardLogModels, ForwardLogs, GatewayLogs, GatewayStatus,
     install_official_pricing_fetch_for_tests,
 };
@@ -45,7 +45,7 @@ const OBSERVABILITY_GETS: &[&str] = &[
     "/gateway/status",
     "/application-models",
     "/dashboard/summary",
-    "/dashboard/daily-cost-by-model",
+    "/dashboard/daily-tokens-by-model",
     "/logs/gateway",
     "/logs/forward",
     "/logs/forward/models",
@@ -203,8 +203,8 @@ fn forward_log(account_id: &str, model: &str, cost: Option<f64>, cost_state: &st
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v30() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
+fn dashboard_v3_schema_version_stays_at_v31() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
 }
 
 #[tokio::test]
@@ -448,21 +448,21 @@ async fn dashboard_v3_and_v2_observability_coexist_with_stable_v2_shapes() {
     harness
         .assert_v2_path_removed(
             reqwest::Method::GET,
-            "/dashboard/daily-cost-by-model?days=30",
+            "/dashboard/daily-tokens-by-model?days=30",
             None,
         )
         .await;
     let (v3_status, v3_daily) = harness
         .get_json(&format!(
-            "{}/dashboard/daily-cost-by-model?days=30",
+            "{}/dashboard/daily-tokens-by-model?days=30",
             harness.v3_base
         ))
         .await;
     assert_eq!(v3_status, StatusCode::OK);
-    let daily: DailyCostByModel = serde_json::from_value(v3_daily).unwrap();
+    let daily: DailyTokensByModel = serde_json::from_value(v3_daily).unwrap();
     assert_eq!(daily.items.len(), 1);
     assert_eq!(daily.items[0].model, "glm-5.2");
-    assert!((daily.items[0].cost - 1.25).abs() < 1e-9);
+    assert_eq!(daily.items[0].tokens, 30);
 
     harness.stop();
 }
@@ -530,7 +530,11 @@ async fn dashboard_v3_summary_and_daily_cost_match_seeded_logs() {
         today_b.timestamp = Utc::now();
         let mut yesterday = forward_log("acct-go", "glm-5.2", Some(3.0), "priced");
         yesterday.timestamp = Utc::now() - Duration::days(1);
-        let skipped = forward_log("acct-go", "glm-5.2", Some(9.0), "not_applicable");
+        // Zero tokens keeps this row excluded from the token chart, matching the
+        // old "skipped" semantics even though cost_state is not_applicable.
+        let mut skipped = forward_log("acct-go", "glm-5.2", Some(9.0), "not_applicable");
+        skipped.prompt_tokens = 0;
+        skipped.completion_tokens = 0;
         db.log_forward(&today_a).unwrap();
         db.log_forward(&today_b).unwrap();
         db.log_forward(&yesterday).unwrap();
@@ -549,20 +553,21 @@ async fn dashboard_v3_summary_and_daily_cost_match_seeded_logs() {
 
     let (status, daily) = harness
         .get_json(&format!(
-            "{}/dashboard/daily-cost-by-model?days=3",
+            "{}/dashboard/daily-tokens-by-model?days=3",
             harness.v3_base
         ))
         .await;
     assert_eq!(status, StatusCode::OK, "{daily}");
     let items = daily["items"].as_array().unwrap();
     assert_eq!(items.len(), 3);
-    assert!(items.iter().any(|row| row["model"] == "kimi-k2.7-code"
-        && (row["cost"].as_f64().unwrap() - 2.0).abs() < 1e-9));
+    // forward_log seeds prompt_tokens=10, completion_tokens=20 -> 30 tokens each.
     assert!(
-        !items
+        items
             .iter()
-            .any(|row| (row["cost"].as_f64().unwrap() - 9.0).abs() < 1e-9)
+            .any(|row| row["model"] == "kimi-k2.7-code" && row["tokens"].as_i64().unwrap() == 30)
     );
+    // The skipped row has zero tokens, so its 9.0 cost is not reflected.
+    assert!(!items.iter().any(|row| row["tokens"].as_i64().unwrap() == 0));
 
     harness.stop();
 }

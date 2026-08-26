@@ -11,7 +11,7 @@ use crate::state::CoreState;
 use super::V3ApiError;
 use super::V3Query;
 use super::types::{
-    ApplicationModels, DailyCostByModel, DailyCostQuery, DailyModelCost, DashboardSummary,
+    ApplicationModels, DailyModelTokens, DailyTokensByModel, DailyTokensQuery, DashboardSummary,
     ForwardLog, ForwardLogClientKey, ForwardLogKeys, ForwardLogModels, ForwardLogQuery,
     ForwardLogSummary, ForwardLogs, GatewayLog, GatewayLogQuery, GatewayLogs, GatewayStatus,
 };
@@ -90,21 +90,21 @@ pub(super) async fn get_dashboard_summary(
     }))
 }
 
-pub(super) async fn get_daily_cost_by_model(
+pub(super) async fn get_daily_tokens_by_model(
     State(state): State<CoreState>,
-    V3Query(query): V3Query<DailyCostQuery>,
-) -> Result<Json<DailyCostByModel>, V3ApiError> {
+    V3Query(query): V3Query<DailyTokensQuery>,
+) -> Result<Json<DailyTokensByModel>, V3ApiError> {
     let _settings_update = state.settings_update.lock();
-    let items = observability::daily_cost_by_model(&state.db.lock(), query.days)
+    let items = observability::daily_tokens_by_model(&state.db.lock(), query.days)
         .map_err(|error| map_error(&state, error))?;
     let (revision, process_generation, pricing_revision) = snapshot_tokens(&state);
-    Ok(Json(DailyCostByModel {
+    Ok(Json(DailyTokensByModel {
         items: items
             .into_iter()
-            .map(|row| DailyModelCost {
+            .map(|row| DailyModelTokens {
                 date: row.date,
                 model: row.model,
-                cost: row.cost,
+                tokens: row.tokens,
             })
             .collect(),
         revision,

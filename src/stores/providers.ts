@@ -4,10 +4,10 @@ import { isRevisionConflict } from "../api/dashboard.ts";
 import { providerApi } from "../api/providers.ts";
 import type {
   ContractScopeKind,
+  ModelProtocolOverrideUpdate,
   ProviderCatalogEntry,
   ProviderContractsResponse,
   ProviderModelCapability,
-  ProviderProtocol,
   ZenFreeModelsResponse,
 } from "../api/providers.ts";
 import type { PricingSnapshot } from "../api/dashboard-presenters.ts";
@@ -97,14 +97,13 @@ export const useProvidersStore = defineStore("providers", () => {
     }
   }
 
-  async function putProtocolSwitch(
+  async function putModelProtocolOverrides(
     scopeKind: ContractScopeKind,
     scopeId: string,
-    protocol: ProviderProtocol,
-    enabled: boolean,
+    overrides: ModelProtocolOverrideUpdate[],
   ): Promise<ProviderContractsResponse> {
     try {
-      const result = await providerApi.updateProviderContractProtocol(scopeKind, scopeId, protocol, { enabled });
+      const result = await providerApi.updateModelProtocolOverrides(scopeKind, scopeId, overrides);
       contracts.value = result;
       return result;
     } catch (cause) {
@@ -140,7 +139,7 @@ export const useProvidersStore = defineStore("providers", () => {
     loadPricing,
     setZenFreeEnabled,
     refreshZenModels,
-    putProtocolSwitch,
+    putModelProtocolOverrides,
     reset,
   };
 });

@@ -15,8 +15,8 @@ or `OCG_MANAGER_ENCRYPTION_KEY`.
 
 The CLI only does `serve`, `key`, and `status`. `key` manages OpenCode Go
 account credentials — not dashboard Keys and not Custom or Zen Free cards.
-Keys, Custom destinations, protocol switches, and catalogs stay on the
-dashboard. CLI writes bump that process's settings revision directly; there is
+Keys, Custom destinations, per-model protocol overrides, and catalogs stay on
+the dashboard. CLI writes bump that process's settings revision directly; there is
 no `--expectedRevision` flag.
 
 ```text

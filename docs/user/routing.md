@@ -11,8 +11,8 @@ you can drag into shape and persist from the Accounts view. The selector skips:
 - Accounts that are cooling down.
 - Accounts that have already failed during the current request (e.g. with a
   `429`).
-- Accounts whose saved provider contract has no enabled upstream protocol
-  for the resolved model.
+- Accounts whose saved provider contract has no effective enabled upstream
+  protocol for the resolved model.
 
 A `429` with a recognized `Resets in …` phrase writes `cooldown_until` and
 the gateway tries the next account. `403` fails over without writing a

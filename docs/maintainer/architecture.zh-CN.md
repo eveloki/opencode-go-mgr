@@ -245,7 +245,7 @@ Vue SPA 是当前唯一的面板客户端，走 HTTP Dashboard V3。CLI 调用�
   account_control / gateway_keys / settings / ...
            |
            v
-  SQLite schema v30
+  SQLite schema v31
            ^
            |
   ocg-manager-cli  同一组服务，无 argv CAS
@@ -255,10 +255,10 @@ Vue SPA 是当前唯一的面板客户端，走 HTTP Dashboard V3。CLI 调用�
 
 ## 持久化地图
 
-权威 schema 是 v27。`sub_gateway_keys` 只出现在迁到 v27 之前的历史库，迁完即丢弃。GUI 数据目录在 Windows 为 `%USERPROFILE%\.ocg-mgr`，在 macOS/Linux 为 `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
+权威 schema 是 v31。`sub_gateway_keys` 只出现在迁到 v27 之前的历史库，迁完即丢弃。GUI 数据目录在 Windows 为 `%USERPROFILE%\.ocg-mgr`，在 macOS/Linux 为 `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
 
 ```text
-  data.sqlite                         CURRENT_SCHEMA_VERSION = 27
+  data.sqlite                         CURRENT_SCHEMA_VERSION = 31
     access_keys                       主 Key id PRIMARY_KEY_ID
                                       主 Key 不可禁用/删除
                                       子 Key 活跃上限 64
@@ -270,15 +270,17 @@ Vue SPA 是当前唯一的面板客户端，走 HTTP Dashboard V3。CLI 调用�
     provider_pricing_snapshots
     provider_usage_sync_state         官方 Go 用量元数据
     provider_model_catalogs
-    provider_contract_scopes
-    provider_contract_model_protocols
+    provider_contract_scopes          旧范围级开关列；effective 推导不再读取
+    provider_contract_model_protocols 模型协议证据
+    provider_contract_model_protocol_overrides
+                                      按模型/按协议覆盖状态
     account_custom_configs
     account_model_capabilities
     account_acknowledgements
 
   既有非空库：任何 v27 写入前
     同目录不覆盖的 data.sqlite.pre-v3.<UTC>.bak + .sha256
-  全新空库：直接建 v27，不写这份拷贝
+  全新空库：直接建 v31，不写这份拷贝
 
   Key 经混淆存储；ConnectionInfo 是唯一带明文 Key 的 V3 DTO
 ```

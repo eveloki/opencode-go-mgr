@@ -12,9 +12,7 @@ import type {
 import {
   accountContractSummary,
   accountProviderScope,
-  allSupplierProtocolsDisabled,
   applyModelContractToResponse,
-  availableModelCount,
   catalogRefreshSupported,
   enabledProtocols,
   flattenProviderScopes,
@@ -26,7 +24,6 @@ import {
   protocolProbeSupported,
   providerScopeKey,
   selectProviderScope,
-  structuralProtocols,
   uniqueProtocols,
 } from "./provider-contracts.ts";
 
@@ -73,6 +70,7 @@ function modelContract(
       last_probe_result: null,
       last_probe_at: null,
       last_probe_error: null,
+      override: "auto" as const,
     },
     responses: {
       protocol: "responses" as const,
@@ -84,6 +82,7 @@ function modelContract(
       last_probe_result: null,
       last_probe_at: null,
       last_probe_error: null,
+      override: "auto" as const,
     },
     messages: {
       protocol: "messages" as const,
@@ -95,6 +94,7 @@ function modelContract(
       last_probe_result: null,
       last_probe_at: null,
       last_probe_error: null,
+      override: "auto" as const,
     },
   };
   return {
@@ -125,7 +125,6 @@ function providerGroup(overrides: Partial<ProviderContractGroup> = {}): Provider
       refresh_supported: false,
     },
     models: [modelContract("gpt-5.6-luna", { chat_completions: true, responses: true })],
-    protocols: { chat_completions: true, responses: true, messages: true },
     pricing: { availability: "available" },
     usage: { availability: "available" },
     card: {
@@ -156,7 +155,6 @@ function customEndpoint(overrides: Partial<CustomEndpointContract> = {}): Custom
       refresh_supported: true,
     },
     models: [modelContract("local-model", { chat_completions: true })],
-    protocols: { chat_completions: true, responses: false, messages: false },
     pricing: { availability: "unpriced" },
     usage: { availability: "unavailable" },
     card: {
@@ -281,7 +279,6 @@ test("stale or missing scope selection falls back to the first scope", () => {
 test("account summaries use contract facts for protocol availability and unroutable reasons", () => {
   const closed = contracts({
     providers: [providerGroup({
-      protocols: { chat_completions: false, responses: false, messages: false },
       models: [modelContract("gpt-5.6-luna")],
       catalog_routable: false,
       production_inference: false,
@@ -333,10 +330,8 @@ test("a missing contract snapshot is not an empty-protocol summary and last-good
   );
 });
 
-test("protocol evidence maps switch, probe, and preset states without color-only meaning", () => {
-  const switches = { chat_completions: true, responses: false, messages: true };
-  assert.equal(protocolEvidenceStatus("responses", undefined, switches), "globally_closed");
-  assert.equal(protocolEvidenceStatus("messages", undefined, switches), "unsupported");
+test("protocol evidence maps probe and preset states without color-only meaning", () => {
+  assert.equal(protocolEvidenceStatus("messages", undefined), "unsupported");
   assert.equal(protocolEvidenceStatus("chat_completions", {
     protocol: "chat_completions",
     available: true,
@@ -347,7 +342,8 @@ test("protocol evidence maps switch, probe, and preset states without color-only
     last_probe_result: null,
     last_probe_at: null,
     last_probe_error: null,
-  }, switches), "static");
+    override: "auto",
+  }), "static");
   assert.equal(protocolEvidenceStatus("chat_completions", {
     protocol: "chat_completions",
     available: true,
@@ -358,7 +354,8 @@ test("protocol evidence maps switch, probe, and preset states without color-only
     last_probe_result: "success",
     last_probe_at: "2026-08-22T00:00:00Z",
     last_probe_error: null,
-  }, switches), "probe_confirmed");
+    override: "auto",
+  }), "probe_confirmed");
   assert.equal(protocolEvidenceStatus("chat_completions", {
     protocol: "chat_completions",
     available: true,
@@ -369,7 +366,8 @@ test("protocol evidence maps switch, probe, and preset states without color-only
     last_probe_result: "failure",
     last_probe_at: "2026-08-22T00:00:00Z",
     last_probe_error: "upstream 500",
-  }, switches), "probe_failure");
+    override: "auto",
+  }), "probe_failure");
 });
 
 test("refresh and probe capability follow card/catalog facts, not raw provider ids", () => {
@@ -379,7 +377,6 @@ test("refresh and probe capability follow card/catalog facts, not raw provider i
   assert.equal(protocolProbeSupported(go), true);
   assert.equal(catalogRefreshSupported(custom), true);
   assert.equal(protocolProbeSupported(custom), true);
-  assert.equal(allSupplierProtocolsDisabled(custom.protocols), false);
   assert.deepEqual(enabledProtocols(custom), ["chat_completions"]);
 });
 
@@ -392,31 +389,16 @@ test("unique protocols drop duplicates and unknown values before a probe payload
   assert.equal(protocolDisplayName("chat_completions"), "Chat Completions");
 });
 
-test("structural protocols cover model evidence plus switched-off protocols; counts track enabled evidence", () => {
+test("enabled protocols are derived only from model evidence, not scope switches", () => {
   const scope = flattenProviderScopes(normalizeProviderContractsResponse(contracts({
     providers: [providerGroup({
       models: [modelContract("gpt-5.6-luna", { chat_completions: true, responses: true })],
-      protocols: { chat_completions: true, responses: false, messages: true },
     })],
   })))[0]!;
-  // The fixture model carries evidence rows for all three protocols.
-  assert.deepEqual(structuralProtocols(scope), ["chat_completions", "responses", "messages"]);
+  assert.deepEqual(enabledProtocols(scope), ["chat_completions", "responses"]);
 
-  const chatOnly = {
-    ...scope,
-    models: [{
-      ...scope.models[0]!,
-      protocols: { chat_completions: scope.models[0]!.protocols.chat_completions! },
-    }],
-  };
-  // Without evidence, responses stays only because its switch is off;
-  // messages (switch on, no evidence) is not structural.
-  assert.deepEqual(structuralProtocols(chatOnly), ["chat_completions", "responses"]);
-
-  assert.equal(availableModelCount(scope, "chat_completions"), 1);
-  assert.equal(availableModelCount(scope, "responses"), 1);
-  assert.equal(availableModelCount(scope, "messages"), 0);
-  assert.equal(availableModelCount(chatOnly, "responses"), 0);
+  const empty = { ...scope, models: [] };
+  assert.deepEqual(enabledProtocols(empty), []);
 });
 
 test("source URLs with credentials are not treated as safe to render", () => {

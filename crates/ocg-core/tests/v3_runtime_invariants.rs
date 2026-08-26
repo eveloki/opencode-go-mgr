@@ -17,7 +17,7 @@ use ocg_core::provider::{
     CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, UpstreamProtocolKind,
     ZEN_FREE_ACCOUNT_ID,
 };
-use ocg_core::provider_contracts::ContractScope;
+use ocg_core::provider_contracts::{ContractScope, ProtocolOverrideState};
 use ocg_core::state::CoreStateInner;
 use ocg_core::usage_sync::INFERENCE_429_DELAY_MIN;
 use ocg_core::zen_models::{ZEN_MODELS_SOURCE_URL, ZenFreeModelCatalog};
@@ -45,14 +45,28 @@ fn disable_all_go_protocols(state: &Arc<ocg_core::state::CoreStateInner>) {
     let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
     {
         let db = state.db.lock();
-        for protocol in [
-            UpstreamProtocolKind::ChatCompletions,
-            UpstreamProtocolKind::Responses,
-            UpstreamProtocolKind::Messages,
-        ] {
-            db.set_protocol_switch(&scope, protocol, false, now)
-                .unwrap();
-        }
+        db.set_model_protocol_overrides(
+            &scope,
+            &[
+                (
+                    GO_MODEL.into(),
+                    UpstreamProtocolKind::ChatCompletions,
+                    ProtocolOverrideState::ForceOff,
+                ),
+                (
+                    GO_MODEL.into(),
+                    UpstreamProtocolKind::Responses,
+                    ProtocolOverrideState::ForceOff,
+                ),
+                (
+                    GO_MODEL.into(),
+                    UpstreamProtocolKind::Messages,
+                    ProtocolOverrideState::ForceOff,
+                ),
+            ],
+            now,
+        )
+        .unwrap();
     }
     state.reload_provider_contracts().unwrap();
 }

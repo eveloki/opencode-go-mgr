@@ -941,14 +941,15 @@ pub struct DashboardSummary {
     pub month_cost: f64,
 }
 
-/// One row of "daily cost per model" aggregation for the dashboard chart.
-/// `date` is `YYYY-MM-DD` (UTC). The frontend groups rows by date into a
-/// stacked bar for each day.
+/// One row of "daily tokens per model" aggregation for the dashboard chart.
+/// `date` is `YYYY-MM-DD` (UTC). `tokens` is `prompt_tokens + completion_tokens`
+/// summed over the day; cached reads are already included in the input token
+/// counts recorded by the gateway, so they are not added again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DailyModelCost {
+pub struct DailyModelTokens {
     pub date: String,
     pub model: String,
-    pub cost: f64,
+    pub tokens: i64,
 }
 
 #[cfg(test)]

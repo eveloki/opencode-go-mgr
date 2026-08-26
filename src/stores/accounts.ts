@@ -130,10 +130,6 @@ export const useAccountsStore = defineStore("accounts", () => {
     return usage;
   }
 
-  async function loadPresentedUsage(id: string): Promise<UsageWindow> {
-    return loadUsage(id);
-  }
-
   async function patchUsage(
     id: string,
     update: { window: "window_5h" | "window_week" | "window_month"; percent: number; resetsInMinutes?: number | null },
@@ -194,7 +190,6 @@ export const useAccountsStore = defineStore("accounts", () => {
     putCustomConfig,
     putModelCapabilities,
     loadUsage,
-    loadPresentedUsage,
     patchUsage,
     refreshUsage,
     loadProviderUsage,

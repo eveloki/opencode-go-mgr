@@ -15,7 +15,7 @@ rebind → compensation) is acquired before `gateway_lifecycle` when a
 settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits.
 
-Two credential tiers share one `access_keys` table (schema v30) and one
+Two credential tiers share one `access_keys` table (schema v31) and one
 auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
@@ -147,8 +147,9 @@ and profile are removed.
 ## Persistence
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
-queries. Current schema is **v30**. `provider_contracts.rs` owns provider
-contract scopes and model-protocol evidence. `models.rs` defines shared
+queries. Current schema is **v31**. `provider_contracts.rs` owns provider
+contract scopes, per-model/per-protocol overrides, effective contract
+derivation, and model-protocol evidence. `models.rs` defines shared
 serde types and `AppConfig`. Key obfuscation is `ocg-infra::crypto`
 (facade `ocg_core::crypto`): this is lightweight obfuscation, not a KMS.
 Windows desktop uses `MachineBoundCipher`; CLI/Docker use
@@ -186,6 +187,9 @@ Historical versions still matter on upgrade:
   JSON `upstream_protocols` set (1–3 of chat_completions / responses /
   messages); Custom config/capability edits keep the account enabled but
   reset `verification_status` to `pending`.
+- **v31:** adds `provider_contract_model_protocol_overrides` for
+  per-model/per-protocol enablement and stops reading the deprecated
+  `provider_contract_scopes` switch columns.
 
 GUI data directory: Windows `%USERPROFILE%\.ocg-mgr` or macOS/Linux
 `~/.ocg-mgr`. CLI default: `~/.ocg-mgr-cli`. Docker stores SQLite, keys,

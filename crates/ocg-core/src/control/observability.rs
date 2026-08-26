@@ -11,7 +11,7 @@ use crate::alias;
 use crate::db::{Database, ForwardLogQueryOptions};
 use crate::kernel::pricing::PricingSnapshot;
 use crate::models::{
-    Account, DailyModelCost, DashboardSummary, ForwardLog, ForwardLogClientKey, ForwardLogPage,
+    Account, DailyModelTokens, DashboardSummary, ForwardLog, ForwardLogClientKey, ForwardLogPage,
     ForwardLogSummary, GatewayLog, UpstreamChannel,
 };
 use crate::provider_contracts::EffectiveContractSet;
@@ -218,11 +218,11 @@ fn dashboard_account_is_available(
     }
 }
 
-pub(crate) fn daily_cost_by_model(
+pub(crate) fn daily_tokens_by_model(
     db: &Database,
     days: Option<i64>,
-) -> Result<Vec<DailyModelCost>, ObservabilityError> {
-    db.daily_cost_by_model(days.unwrap_or(30))
+) -> Result<Vec<DailyModelTokens>, ObservabilityError> {
+    db.daily_tokens_by_model(days.unwrap_or(30))
         .map_err(ObservabilityError::from)
 }
 

@@ -20,7 +20,7 @@ ocg-manager/
 │   │   ├── dashboard-v3.ts            Hand-written `/dashboard/api/v3` client
 │   │   ├── generated/dashboard-v3.ts  Types generated from the frozen JSON Schema
 │   │   ├── dashboard.ts               Presenter over V3 for existing pages
-│   │   ├── providers.ts               Provider-page presenter (Zen Free, pricing, protocol switches)
+│   │   ├── providers.ts               Provider-page presenter (Zen Free, pricing, model-protocol overrides)
 │   │   └── dashboard-presenters.ts    Field projection (camelCase wire → page shapes)
 │   ├── stores/        session, controlPlane (CAS tokens), connection, accounts, providers, settings
 │   ├── components/    Account cards, managed wizard, pricing catalog, …

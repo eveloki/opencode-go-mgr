@@ -26,7 +26,7 @@ import type {
   ControlRevision,
   CustomModelDiscoveryRequest,
   CustomModelDiscoveryResponse,
-  DailyCostByModel,
+  DailyTokensByModel,
   DashboardSummary,
   DesktopUpdate,
   ForwardLogKeys,
@@ -39,13 +39,13 @@ import type {
   InstallUpdate,
   KeyCreate,
   KeyUpdate,
+  ModelProtocolOverridesUpdate,
   MutationAck,
   MutationExpectation,
   PricingMultipliersUpdate,
   PricingSnapshot,
   ProtocolProbeRequest,
   ProtocolProbeResponse,
-  ProtocolSwitchUpdate,
   ProviderCatalog,
   ProviderContracts,
   ProviderModelCapability,
@@ -547,30 +547,17 @@ export const dashboardV3 = {
       body: mutation(expectation),
     }),
   getProviderContracts: () => requestV3<ProviderContracts>("/provider-contracts"),
-  putProviderProtocolSwitch: (
+  putModelProtocolOverrides: (
+    scopeKind: "provider" | "custom_endpoint",
     scopeId: string,
-    protocol: string,
-    enabled: boolean,
+    update: WithoutExpectation<ModelProtocolOverridesUpdate>,
     expectation: MutationExpectation,
   ) =>
     requestV3<ProviderContracts>(
-      `/provider-contracts/provider/${encode(scopeId)}/protocols/${encode(protocol)}`,
+      `/provider-contracts/${scopeKind === "custom_endpoint" ? "custom-endpoint" : "provider"}/${encode(scopeId)}/model-protocol-overrides`,
       {
         method: "PUT",
-        body: withExpectation({ enabled } satisfies WithoutExpectation<ProtocolSwitchUpdate>, expectation),
-      },
-    ),
-  putCustomEndpointProtocolSwitch: (
-    scopeId: string,
-    protocol: string,
-    enabled: boolean,
-    expectation: MutationExpectation,
-  ) =>
-    requestV3<ProviderContracts>(
-      `/provider-contracts/custom-endpoint/${encode(scopeId)}/protocols/${encode(protocol)}`,
-      {
-        method: "PUT",
-        body: withExpectation({ enabled } satisfies WithoutExpectation<ProtocolSwitchUpdate>, expectation),
+        body: withExpectation(update, expectation),
       },
     ),
   runProviderProtocolProbes: (providerId: string, input: WithoutExpectation<ProtocolProbeRequest>, expectation: MutationExpectation) =>
@@ -590,8 +577,8 @@ export const dashboardV3 = {
   getGatewayStatus: () => requestV3<GatewayStatus>("/gateway/status"),
   getApplicationModels: () => requestV3<ApplicationModels>("/application-models"),
   getDashboardSummary: () => requestV3<DashboardSummary>("/dashboard/summary"),
-  getDailyCostByModel: (days?: number) =>
-    requestV3<DailyCostByModel>(`/dashboard/daily-cost-by-model?days=${days ?? 30}`),
+  getDailyTokensByModel: (days?: number) =>
+    requestV3<DailyTokensByModel>(`/dashboard/daily-tokens-by-model?days=${days ?? 30}`),
   getGatewayLogs: (query: GatewayLogQuery = {}) => {
     const params = new URLSearchParams({ limit: String(query.limit ?? 100) });
     if (query.requestId) params.set("requestId", query.requestId);
