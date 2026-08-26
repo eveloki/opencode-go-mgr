@@ -92,7 +92,6 @@ function v3Account(id: string): object {
     planRoutable: true,
     customConfig: null,
     modelCapabilities: [],
-    acknowledgements: [],
   };
 }
 

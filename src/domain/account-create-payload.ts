@@ -1,19 +1,20 @@
 import type { AccountInput } from "../api/dashboard.ts";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { MessageKey } from "../i18n/index.ts";
 import type { PlanDefinition } from "./plans.ts";
 import {
+  canonicalCustomProtocols,
   CustomCapabilityError,
   customBaseUrlIssue,
+  expandCustomModelCapabilities,
   normalizeCustomCapabilities,
 } from "./custom-account.ts";
 
 export type UpstreamProtocol = "chat_completions" | "responses" | "messages";
 export type AuthScheme = "bearer" | "x-api-key";
 
+/** The form declares plain model IDs; protocols come from the account-level set. */
 export interface AccountCreateCapability {
   model_id: string;
-  protocol: UpstreamProtocol;
 }
 
 export interface AccountCreateFormValues {
@@ -23,9 +24,8 @@ export interface AccountCreateFormValues {
   purchase_date?: string;
   notes?: string;
   base_url?: string;
-  upstream_protocol?: UpstreamProtocol;
+  upstream_protocols?: UpstreamProtocol[];
   auth_scheme?: AuthScheme;
-  acknowledgement_accepted?: boolean;
   model_capabilities?: AccountCreateCapability[];
 }
 
@@ -44,8 +44,7 @@ export type AccountCreatePayloadErrorCode =
   | "model_id_too_long"
   | "model_id_has_control_character"
   | "capability_protocol_mismatch"
-  | "custom_fields_not_allowed"
-  | "risk_acknowledgement_required";
+  | "custom_fields_not_allowed";
 
 const ACCOUNT_CREATE_PAYLOAD_ERROR_KEYS = {
   missing_offering: "无法确定账号方案，请关闭后重试",
@@ -55,15 +54,14 @@ const ACCOUNT_CREATE_PAYLOAD_ERROR_KEYS = {
   invalid_base_url: "Base URL 格式无效",
   base_url_not_http: "Base URL 必须是 http:// 或 https:// URL",
   base_url_with_credentials: "Base URL 不能包含用户名或密码",
-  missing_upstream_protocol: "选择上游协议",
+  missing_upstream_protocol: "请至少选择一个上游协议",
   missing_auth_scheme: "选择鉴权方式",
   missing_model_capabilities: "请至少添加一个模型能力",
   duplicate_model_id: "模型 ID 不能重复",
   model_id_too_long: "模型 ID 最多 200 个字符",
   model_id_has_control_character: "模型 ID 不能包含控制字符",
-  capability_protocol_mismatch: "模型能力必须与上游协议一致",
+  capability_protocol_mismatch: "模型能力协议必须属于所选上游协议",
   custom_fields_not_allowed: "账号创建失败，请重试",
-  risk_acknowledgement_required: "请阅读并同意条款",
 } as const satisfies Record<AccountCreatePayloadErrorCode, MessageKey>;
 
 export class AccountCreatePayloadError extends Error {
@@ -90,7 +88,7 @@ function trimOptional(value: string | undefined): string | undefined {
 
 /**
  * Build the exact `POST /dashboard/api/accounts` payload from the chosen plan
- * family, offering, form values, and the matching catalog entry.
+ * family, offering, and form values.
  *
  * This function is pure and testable in Node; it does not depend on Vue or the
  * i18n runtime.
@@ -99,7 +97,6 @@ export function buildCreateAccountPayload(
   plan: PlanDefinition,
   offeringId: string | undefined,
   values: AccountCreateFormValues,
-  catalogEntry: ProviderCatalogEntry | undefined,
 ): AccountInput {
   const selectedOfferingId = offeringId && plan.offering_ids.includes(offeringId)
     ? offeringId
@@ -149,9 +146,10 @@ export function buildCreateAccountPayload(
     if (baseUrlIssue === "with_credentials") {
       throw new AccountCreatePayloadError("base_url_with_credentials");
     }
-    if (!values.upstream_protocol) {
+    if (!values.upstream_protocols || values.upstream_protocols.length === 0) {
       throw new AccountCreatePayloadError("missing_upstream_protocol");
     }
+    const upstream_protocols = canonicalCustomProtocols(values.upstream_protocols);
     if (!values.auth_scheme) {
       throw new AccountCreatePayloadError("missing_auth_scheme");
     }
@@ -160,13 +158,17 @@ export function buildCreateAccountPayload(
     }
     payload.custom_config = {
       base_url: values.base_url.trim(),
-      upstream_protocol: values.upstream_protocol,
+      upstream_protocols,
       auth_scheme: values.auth_scheme,
     };
     try {
+      // The backend only accepts the exact model × protocol-set expansion.
       payload.model_capabilities = normalizeCustomCapabilities(
-        values.model_capabilities,
-        values.upstream_protocol,
+        expandCustomModelCapabilities(
+          values.model_capabilities.map((capability) => capability.model_id),
+          upstream_protocols,
+        ),
+        upstream_protocols,
       );
     } catch (error) {
       if (error instanceof CustomCapabilityError) {
@@ -184,22 +186,12 @@ export function buildCreateAccountPayload(
   } else {
     if (
       values.base_url?.trim()
-      || values.upstream_protocol
+      || values.upstream_protocols?.length
       || values.auth_scheme
       || values.model_capabilities?.length
     ) {
       throw new AccountCreatePayloadError("custom_fields_not_allowed");
     }
-  }
-
-  if (catalogEntry?.risk_notice) {
-    if (!values.acknowledgement_accepted) {
-      throw new AccountCreatePayloadError("risk_acknowledgement_required");
-    }
-    payload.acknowledgements = [{
-      acknowledgement_id: catalogEntry.risk_notice.acknowledgement_id,
-      version: catalogEntry.risk_notice.version,
-    }];
   }
 
   return payload;

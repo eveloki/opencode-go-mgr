@@ -36,13 +36,11 @@
 - Claude Desktop only advertises three fixed Claude aliases, mapped to the
   supported actual models; it does not mean OCG Manager provides native
   Claude 4.6 models or the full Anthropic Models API.
-- Command Code GOAT and SCNet Token Plans are schema/UI drafts only. They
-  create disabled `pending` accounts; verification is `501`; they are not
-  selected for Alias routing. SCNet official usable-model and endpoint
-  snapshots are adapter input only and must not be published as client
-  aliases. Do not document or ship those families as live support. Custom API
-  is live under the trusted-administrator boundary (`custom.rs` +
-  `custom_http.rs`); keep it out of GOAT/SCNet anti-abuse wording.
+- Command Code GOAT is a schema/UI draft only. It creates disabled `pending`
+  accounts; verification is `501`; it is not selected for Alias routing. Do
+  not document or ship it as live support. Custom API is live under the
+  trusted-administrator boundary (`custom.rs` + `custom_http.rs`); keep it
+  out of GOAT anti-abuse wording.
 - Custom provider-scope protocol probes are not on V3; the V2 account-owned
   probe path is 410. Custom verify and model discovery are the live Custom
   operational paths.
@@ -55,8 +53,7 @@
 - Tauri `invoke` as a dashboard data path; WebView commands stay removed.
 - Request-time upstream discovery on `GET /v1/models` or
   `GET /dashboard/api/v3/application-models`.
-- Live GOAT or SCNet routing, usage, pricing, verification, or provider
-  guides.
+- Live GOAT routing, usage, pricing, verification, or provider guides.
 - `/embeddings`, Gemini `embedContent` (501), or Gemini `countTokens` as a
   real upstream count (501 so Gemini CLI can fall back locally).
 - Gemini as an upstream protocol.

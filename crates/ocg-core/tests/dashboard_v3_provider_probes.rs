@@ -15,7 +15,7 @@ use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::models::{ProxyListDirection, ProxyMode};
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
 };
 use ocg_core::provider_contracts::{ContractScope, PersistedModelProtocol, ProbeResultKind};
 use reqwest::{Method, StatusCode};
@@ -289,8 +289,8 @@ fn load_go_evidence(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[tokio::test]
@@ -480,22 +480,6 @@ async fn protocol_probes_zero_call_gates_do_not_touch_upstream() {
     .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{goat}");
     assert_v3_error(&goat, ERROR_NOT_IMPLEMENTED);
-
-    let (status, scnet) = send_json(
-        &harness,
-        Method::POST,
-        &probe_path(SCNET_PROVIDER_ID),
-        &cas(
-            &harness,
-            json!({
-                "modelId": "DeepSeek-V3",
-                "protocols": ["chat_completions"]
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{scnet}");
-    assert_v3_error(&scnet, ERROR_NOT_IMPLEMENTED);
 
     let (status, missing_account) = send_json(
         &harness,
@@ -1123,7 +1107,7 @@ async fn v2_duplicate_custom_and_ceiling_probes_coexist() {
                 "offeringId": CUSTOM_API_OFFERING_ID,
                 "customConfig": {
                     "baseUrl": origin.url,
-                    "upstreamProtocol": "chat_completions",
+                    "upstreamProtocols": ["chat_completions"],
                     "authScheme": "x-api-key"
                 },
                 "modelCapabilities": [{
@@ -1157,6 +1141,6 @@ async fn v2_duplicate_custom_and_ceiling_probes_coexist() {
     assert_eq!(stored.provider_id, CUSTOM_PROVIDER_ID);
     assert_eq!(stored.offering_id, CUSTOM_API_OFFERING_ID);
     assert!(!stored.enabled);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
     harness.stop();
 }

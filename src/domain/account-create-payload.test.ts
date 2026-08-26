@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
 import { PLAN_DEFINITIONS } from "./plans.ts";
 import {
   accountCreatePayloadErrorKey,
@@ -9,40 +8,8 @@ import {
 } from "./account-create-payload.ts";
 import type { AccountCreatePayloadErrorCode } from "./account-create-payload.ts";
 
-function catalogEntry(
-  provider_id: string,
-  offering_id: string,
-  extra: Partial<ProviderCatalogEntry> = {},
-): ProviderCatalogEntry {
-  return {
-    provider_id,
-    offering_id,
-    display_name: `${provider_id} ${offering_id}`,
-    display_family: provider_id,
-    credential_kind: "api_key",
-    quota_scope: "key",
-    singleton: false,
-    creation_availability: "available",
-    verification_policy: "not_required",
-    verification_runtime_availability: "optional",
-    routable: true,
-    managed_registration: false,
-    pricing_availability: "available",
-    usage_availability: "available",
-    manual_usage_calibration: false,
-    quota_unit: "usd",
-    model_source: "builtin",
-    auth_schemes: ["bearer"],
-    upstream_protocols: ["chat_completions", "responses", "messages"],
-    form_fields: [],
-    model_aliases: [],
-    ...extra,
-  };
-}
-
 const goPlan = PLAN_DEFINITIONS.find((p) => p.id === "opencode-go")!;
 const goatPlan = PLAN_DEFINITIONS.find((p) => p.id === "command-code-goat")!;
-const scnetPlan = PLAN_DEFINITIONS.find((p) => p.id === "scnet")!;
 const customPlan = PLAN_DEFINITIONS.find((p) => p.id === "custom-endpoint")!;
 
 test("GOAT payload uses the goat offering and omits custom fields", () => {
@@ -50,7 +17,6 @@ test("GOAT payload uses the goat offering and omits custom fields", () => {
     goatPlan,
     undefined,
     { name: "GOAT", key: "goat-key" },
-    catalogEntry("command-code", "goat"),
   );
   assert.equal(payload.provider_id, "command-code");
   assert.equal(payload.offering_id, "goat");
@@ -58,56 +24,9 @@ test("GOAT payload uses the goat offering and omits custom fields", () => {
   assert.equal(payload.key, "goat-key");
   assert.equal(payload.custom_config, undefined);
   assert.deepEqual(payload.model_capabilities, undefined);
-  assert.deepEqual(payload.acknowledgements, undefined);
 });
 
-test("SCNet payload includes the chosen tier and risk acknowledgement", () => {
-  const entry = catalogEntry("scnet", "token-plan-standard", {
-    risk_notice: {
-      acknowledgement_id: "scnet-token-plan-restrictions",
-      version: "2026-08-21",
-      source_url: "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html",
-      body: "Restrictions apply.",
-      content_hash: "abc",
-    },
-  });
-  const payload = buildCreateAccountPayload(
-    scnetPlan,
-    "token-plan-standard",
-    { name: "SCNet", key: "sk-tp-live", acknowledgement_accepted: true },
-    entry,
-  );
-  assert.equal(payload.provider_id, "scnet");
-  assert.equal(payload.offering_id, "token-plan-standard");
-  assert.equal(payload.key, "sk-tp-live");
-  assert.deepEqual(payload.acknowledgements, [
-    { acknowledgement_id: "scnet-token-plan-restrictions", version: "2026-08-21" },
-  ]);
-  assert.equal(payload.custom_config, undefined);
-});
-
-test("SCNet payload rejects a missing acknowledgement", () => {
-  const entry = catalogEntry("scnet", "token-plan-basic", {
-    risk_notice: {
-      acknowledgement_id: "scnet-token-plan-restrictions",
-      version: "2026-08-21",
-      source_url: "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html",
-      body: "Restrictions apply.",
-      content_hash: "abc",
-    },
-  });
-  assert.throws(
-    () => buildCreateAccountPayload(
-      scnetPlan,
-      "token-plan-basic",
-      { name: "SCNet", key: "sk-tp-live" },
-      entry,
-    ),
-    AccountCreatePayloadError,
-  );
-});
-
-test("Custom payload includes custom_config and model_capabilities", () => {
+test("Custom payload includes custom_config and the model × protocol-set expansion", () => {
   const payload = buildCreateAccountPayload(
     customPlan,
     undefined,
@@ -115,23 +34,43 @@ test("Custom payload includes custom_config and model_capabilities", () => {
       name: "Custom",
       key: "custom-key",
       base_url: "https://api.example.com/v1",
-      upstream_protocol: "chat_completions",
+      upstream_protocols: ["chat_completions"],
       auth_scheme: "x-api-key",
-      model_capabilities: [{ model_id: "my-model", protocol: "chat_completions" }],
+      model_capabilities: [{ model_id: "my-model" }],
     },
-    catalogEntry("custom", "api"),
   );
   assert.equal(payload.provider_id, "custom");
   assert.equal(payload.offering_id, "api");
   assert.deepEqual(payload.custom_config, {
     base_url: "https://api.example.com/v1",
-    upstream_protocol: "chat_completions",
+    upstream_protocols: ["chat_completions"],
     auth_scheme: "x-api-key",
   });
   assert.deepEqual(payload.model_capabilities, [
     { model_id: "my-model", protocol: "chat_completions", source: "manual" },
   ]);
-  assert.deepEqual(payload.acknowledgements, undefined);
+});
+
+test("Custom payload expands every model across the whole checked protocol set in canonical order", () => {
+  const payload = buildCreateAccountPayload(
+    customPlan,
+    undefined,
+    {
+      name: "Custom",
+      key: "custom-key",
+      base_url: "https://api.example.com/v1",
+      upstream_protocols: ["messages", "chat_completions"],
+      auth_scheme: "bearer",
+      model_capabilities: [{ model_id: "m1" }, { model_id: "m2" }],
+    },
+  );
+  assert.deepEqual(payload.custom_config?.upstream_protocols, ["chat_completions", "messages"]);
+  assert.deepEqual(payload.model_capabilities, [
+    { model_id: "m1", protocol: "chat_completions", source: "manual" },
+    { model_id: "m1", protocol: "messages", source: "manual" },
+    { model_id: "m2", protocol: "chat_completions", source: "manual" },
+    { model_id: "m2", protocol: "messages", source: "manual" },
+  ]);
 });
 
 test("Custom payload rejects missing custom fields", () => {
@@ -140,7 +79,6 @@ test("Custom payload rejects missing custom fields", () => {
       customPlan,
       undefined,
       { name: "Custom", key: "custom-key" },
-      catalogEntry("custom", "api"),
     ),
     AccountCreatePayloadError,
   );
@@ -152,11 +90,10 @@ test("Custom payload rejects missing custom fields", () => {
         name: "Custom",
         key: "custom-key",
         base_url: "https://api.example.com/v1",
-        upstream_protocol: "chat_completions",
+        upstream_protocols: ["chat_completions"],
         auth_scheme: "x-api-key",
         model_capabilities: [],
       },
-      catalogEntry("custom", "api"),
     ),
     AccountCreatePayloadError,
   );
@@ -171,10 +108,9 @@ test("Non-custom plans reject custom_config and model_capabilities", () => {
         name: "GOAT",
         key: "goat-key",
         base_url: "https://api.example.com/v1",
-        upstream_protocol: "chat_completions",
+        upstream_protocols: ["chat_completions"],
         auth_scheme: "bearer",
       } as never,
-      catalogEntry("command-code", "goat"),
     ),
     AccountCreatePayloadError,
   );
@@ -185,43 +121,39 @@ test("Non-custom plans reject custom_config and model_capabilities", () => {
       {
         name: "GOAT",
         key: "goat-key",
-        model_capabilities: [{ model_id: "x", protocol: "chat_completions" }],
+        model_capabilities: [{ model_id: "x" }],
       } as never,
-      catalogEntry("command-code", "goat"),
     ),
     AccountCreatePayloadError,
   );
 });
 
-test("OpenCode Go payload keeps legacy behavior without acknowledgements", () => {
+test("OpenCode Go payload keeps legacy behavior", () => {
   const payload = buildCreateAccountPayload(
     goPlan,
     undefined,
     { name: "Go", key: "ocg-key", purchase_date: "2026-08-21", notes: "note" },
-    catalogEntry("opencode", "go"),
   );
   assert.equal(payload.provider_id, "opencode");
   assert.equal(payload.offering_id, "go");
   assert.equal(payload.purchase_date, "2026-08-21");
   assert.equal(payload.notes, "note");
   assert.equal(payload.custom_config, undefined);
-  assert.equal(payload.acknowledgements, undefined);
   assert.equal(payload.model_capabilities, undefined);
 });
 
-test("OpenCode Go import stays explicit and rejects blank credentials without a catalog", () => {
+test("OpenCode Go import stays explicit and rejects blank credentials", () => {
   const payload = buildCreateAccountPayload(
     goPlan,
     undefined,
     { name: "Go", key: "ocg-key" },
-    undefined,
   );
   assert.equal(payload.provider_id, "opencode");
   assert.equal(payload.offering_id, "go");
   assert.equal(payload.key, "ocg-key");
 
   assert.throws(
-    () => buildCreateAccountPayload(goPlan, undefined, { name: "Go", key: "   " }, undefined),
+    () => buildCreateAccountPayload(goPlan, undefined, { name: "Go", key: "   " }),
     (error) => (
       error instanceof AccountCreatePayloadError
       && error.code === "missing_key"
@@ -239,30 +171,23 @@ test("payload validation exposes stable codes that map to localized message keys
     {
       code: "missing_name",
       key: "名称不能为空",
-      run: () => buildCreateAccountPayload(goPlan, undefined, { name: " ", key: "key" }, undefined),
+      run: () => buildCreateAccountPayload(goPlan, undefined, { name: " ", key: "key" }),
     },
     {
       code: "missing_base_url",
       key: "请填写 Base URL",
-      run: () => buildCreateAccountPayload(customPlan, undefined, { name: "Custom", key: "key" }, catalogEntry("custom", "api")),
+      run: () => buildCreateAccountPayload(customPlan, undefined, { name: "Custom", key: "key" }),
     },
     {
-      code: "risk_acknowledgement_required",
-      key: "请阅读并同意条款",
-      run: () => buildCreateAccountPayload(
-        scnetPlan,
-        "token-plan-basic",
-        { name: "SCNet", key: "key" },
-        catalogEntry("scnet", "token-plan-basic", {
-          risk_notice: {
-            acknowledgement_id: "terms",
-            version: "1",
-            source_url: "https://example.com/terms",
-            body: "Terms",
-            content_hash: "hash",
-          },
-        }),
-      ),
+      code: "missing_upstream_protocol",
+      key: "请至少选择一个上游协议",
+      run: () => buildCreateAccountPayload(customPlan, undefined, {
+        name: "Custom",
+        key: "key",
+        base_url: "https://api.example.com/v1",
+        auth_scheme: "bearer",
+        model_capabilities: [{ model_id: "m" }],
+      }),
     },
   ];
 
@@ -294,11 +219,10 @@ test("Custom payload accepts administrator-trusted LAN, localhost, and metadata 
         name: "Custom",
         key: "custom-key",
         base_url,
-        upstream_protocol: "chat_completions",
+        upstream_protocols: ["chat_completions"],
         auth_scheme: "bearer",
-        model_capabilities: [{ model_id: "m", protocol: "chat_completions" }],
+        model_capabilities: [{ model_id: "m" }],
       },
-      catalogEntry("custom", "api"),
     );
     assert.equal(payload.custom_config?.base_url, base_url);
   }
@@ -308,9 +232,9 @@ test("Custom payload rejects malformed, non-http(s), and credentialed base URLs"
   const baseValues = {
     name: "Custom",
     key: "custom-key",
-    upstream_protocol: "chat_completions" as const,
+    upstream_protocols: ["chat_completions"] as ("chat_completions")[],
     auth_scheme: "bearer" as const,
-    model_capabilities: [{ model_id: "m", protocol: "chat_completions" as const }],
+    model_capabilities: [{ model_id: "m" }],
   };
   const cases: Array<{ base_url: string; code: AccountCreatePayloadErrorCode }> = [
     { base_url: "not-a-url", code: "invalid_base_url" },
@@ -323,36 +247,31 @@ test("Custom payload rejects malformed, non-http(s), and credentialed base URLs"
         customPlan,
         undefined,
         { ...baseValues, base_url },
-        catalogEntry("custom", "api"),
       ),
       (error) => error instanceof AccountCreatePayloadError && error.code === code,
     );
   }
 });
 
-test("Custom payload rejects duplicate normalized IDs, backend ID limits, and protocol mismatches", () => {
+test("Custom payload rejects duplicate normalized IDs and backend ID limits", () => {
   const values = {
     name: "Custom",
     key: "custom-key",
     base_url: "https://api.example.com/v1",
-    upstream_protocol: "responses" as const,
+    upstream_protocols: ["responses", "messages"] as ("responses" | "messages")[],
     auth_scheme: "bearer" as const,
   };
-  const cases: Array<{ capabilities: Array<{ model_id: string; protocol: "responses" | "messages" }>; code: AccountCreatePayloadErrorCode }> = [
+  const cases: Array<{ capabilities: Array<{ model_id: string }>; code: AccountCreatePayloadErrorCode }> = [
     {
       capabilities: [
-        { model_id: " model-a ", protocol: "responses" },
-        { model_id: "model-a", protocol: "responses" },
+        { model_id: " model-a " },
+        { model_id: "model-a" },
       ],
       code: "duplicate_model_id",
     },
     {
-      capabilities: [{ model_id: "a".repeat(201), protocol: "responses" }],
+      capabilities: [{ model_id: "a".repeat(201) }],
       code: "model_id_too_long",
-    },
-    {
-      capabilities: [{ model_id: "model-a", protocol: "messages" }],
-      code: "capability_protocol_mismatch",
     },
   ];
   for (const { capabilities, code } of cases) {
@@ -361,7 +280,6 @@ test("Custom payload rejects duplicate normalized IDs, backend ID limits, and pr
         customPlan,
         undefined,
         { ...values, model_capabilities: capabilities },
-        catalogEntry("custom", "api"),
       ),
       (error) => error instanceof AccountCreatePayloadError && error.code === code,
     );

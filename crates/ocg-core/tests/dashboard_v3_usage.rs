@@ -11,7 +11,7 @@ use ocg_core::models::CreditBalance;
 use ocg_core::models::UsageWindowKind;
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID,
-    SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
+    ZEN_FREE_ACCOUNT_ID,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -174,18 +174,6 @@ fn parse_provider_usage(body: &Value) -> ProviderUsage {
     serde_json::from_value(body.clone()).unwrap_or_else(|_| panic!("ProviderUsage JSON: {body}"))
 }
 
-fn scnet_ack() -> Value {
-    let notice =
-        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-            .unwrap()
-            .risk_notice
-            .unwrap();
-    json!({
-        "acknowledgementId": notice.acknowledgement_id,
-        "version": notice.version
-    })
-}
-
 async fn create_go(harness: &V3Harness) -> String {
     let (status, body) = send_json(
         harness,
@@ -249,8 +237,8 @@ fn seed_credit_balance(harness: &V3Harness, account_id: &str) {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[test]
@@ -531,7 +519,7 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
                 "offeringId": CUSTOM_API_OFFERING_ID,
                 "customConfig": {
                     "baseUrl": "https://api.example.com/v1",
-                    "upstreamProtocol": "messages",
+                    "upstreamProtocols": ["messages"],
                     "authScheme": "x-api-key"
                 },
                 "modelCapabilities": [{ "modelId": "org/model", "protocol": "messages" }]
@@ -542,72 +530,11 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
     assert_eq!(status, StatusCode::OK, "{custom}");
     let custom_id = custom["account"]["id"].as_str().unwrap().to_string();
 
-    let (status, scnet) = send_json(
-        &harness,
-        Method::POST,
-        "/accounts",
-        &cas(
-            &harness,
-            json!({
-                "name": "SCNet",
-                "key": "sk-tp-basic",
-                "providerId": SCNET_PROVIDER_ID,
-                "offeringId": SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-                "acknowledgements": [scnet_ack()]
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet}");
-    let scnet_id = "scnet-usage-leftover".to_string();
-    let plan =
-        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-            .unwrap();
-    let now = Utc::now();
-    harness
-        .state
-        .db
-        .lock()
-        .create_account_with_contract(
-            &ocg_core::models::Account {
-                id: scnet_id.clone(),
-                provider_id: SCNET_PROVIDER_ID.into(),
-                offering_id: SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
-                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
-                quota_scope: ocg_core::provider::QuotaScope::Key,
-                name: "SCNet".into(),
-                username: None,
-                password_cipher: None,
-                key_cipher: harness.state.encrypt_key("sk-tp-basic").unwrap(),
-                enabled: false,
-                account_type: ocg_core::models::AccountType::Key,
-                setup_step: ocg_core::models::AccountSetupStep::Ready,
-                referral_code: None,
-                purchase_date: String::new(),
-                expires_on: String::new(),
-                cooldown_until: None,
-                cooldown_generic_until: None,
-                cooldown_5h_until: None,
-                cooldown_week_until: None,
-                cooldown_month_until: None,
-                cooldown_free_until: None,
-                last_error: None,
-                auth_error: None,
-                notes: None,
-                created_at: now,
-                updated_at: now,
-            },
-            None,
-            &[],
-            plan.risk_notice,
-        )
-        .expect("preserved SCNet leftover draft");
-
-    for id in [&goat_id, &custom_id, &scnet_id] {
+    for id in [&goat_id, &custom_id] {
         seed_credit_balance(&harness, id);
     }
 
-    for (id, experimental) in [(&goat_id, false), (&custom_id, false), (&scnet_id, false)] {
+    for (id, experimental) in [(&goat_id, false), (&custom_id, false)] {
         let (status, body) = harness
             .get_json(&format!("{}/accounts/{id}/provider-usage", harness.v3_base))
             .await;

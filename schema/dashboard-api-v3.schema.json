@@ -8,12 +8,6 @@
         "accountType": {
           "$ref": "#/$defs/AccountType"
         },
-        "acknowledgements": {
-          "items": {
-            "$ref": "#/$defs/AccountAcknowledgement"
-          },
-          "type": "array"
-        },
         "authError": {
           "type": [
             "string",
@@ -211,83 +205,7 @@
         "planRoutable",
         "goatModelAccess",
         "customConfig",
-        "modelCapabilities",
-        "acknowledgements"
-      ],
-      "type": "object"
-    },
-    "AccountAcknowledgement": {
-      "additionalProperties": false,
-      "description": "One persisted Plan risk acknowledgement as returned on an account.",
-      "properties": {
-        "acceptedAt": {
-          "type": "string"
-        },
-        "accountId": {
-          "type": "string"
-        },
-        "acknowledgementId": {
-          "type": "string"
-        },
-        "contentHash": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "accountId",
-        "acknowledgementId",
-        "version",
-        "contentHash",
-        "acceptedAt"
-      ],
-      "type": "object"
-    },
-    "AccountAcknowledgementCreate": {
-      "additionalProperties": false,
-      "description": "POST `/accounts/{id}/acknowledgements` body.",
-      "properties": {
-        "acknowledgementId": {
-          "type": "string"
-        },
-        "expectedRevision": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "processGeneration": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "expectedRevision",
-        "processGeneration",
-        "acknowledgementId",
-        "version"
-      ],
-      "type": "object"
-    },
-    "AccountAcknowledgementWrite": {
-      "additionalProperties": false,
-      "description": "Create-time Plan risk acknowledgement. Nested under `AccountCreate`.",
-      "properties": {
-        "acknowledgementId": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "acknowledgementId",
-        "version"
+        "modelCapabilities"
       ],
       "type": "object"
     },
@@ -303,12 +221,6 @@
       "additionalProperties": false,
       "description": "POST `/accounts` body. CAS tokens and `name` are required. `key`,\n`password`, and `referralCode` are write-only and never echoed.",
       "properties": {
-        "acknowledgements": {
-          "items": {
-            "$ref": "#/$defs/AccountAcknowledgementWrite"
-          },
-          "type": "array"
-        },
         "customConfig": {
           "anyOf": [
             {
@@ -419,14 +331,17 @@
         "updatedAt": {
           "type": "string"
         },
-        "upstreamProtocol": {
-          "$ref": "#/$defs/AccountUpstreamProtocol"
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
         }
       },
       "required": [
         "accountId",
         "baseUrl",
-        "upstreamProtocol",
+        "upstreamProtocols",
         "authScheme",
         "createdAt",
         "updatedAt"
@@ -435,7 +350,7 @@
     },
     "AccountCustomConfigUpdate": {
       "additionalProperties": false,
-      "description": "PUT `/accounts/{id}/custom-config` body. Protocol and auth scheme are\nimmutable after create; the handler enforces that.",
+      "description": "PUT `/accounts/{id}/custom-config` body. Protocol set and auth scheme are\neditable; a change re-opens verification as pending without disabling.",
       "properties": {
         "authScheme": {
           "$ref": "#/$defs/AccountAuthScheme"
@@ -453,15 +368,18 @@
           "minimum": 0,
           "type": "integer"
         },
-        "upstreamProtocol": {
-          "$ref": "#/$defs/AccountUpstreamProtocol"
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
         }
       },
       "required": [
         "expectedRevision",
         "processGeneration",
         "baseUrl",
-        "upstreamProtocol",
+        "upstreamProtocols",
         "authScheme"
       ],
       "type": "object"
@@ -476,13 +394,16 @@
         "baseUrl": {
           "type": "string"
         },
-        "upstreamProtocol": {
-          "$ref": "#/$defs/AccountUpstreamProtocol"
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
         }
       },
       "required": [
         "baseUrl",
-        "upstreamProtocol",
+        "upstreamProtocols",
         "authScheme"
       ],
       "type": "object"
@@ -1560,13 +1481,16 @@
         "baseUrl": {
           "type": "string"
         },
-        "upstreamProtocol": {
-          "$ref": "#/$defs/AccountUpstreamProtocol"
+        "upstreamProtocols": {
+          "items": {
+            "$ref": "#/$defs/AccountUpstreamProtocol"
+          },
+          "type": "array"
         }
       },
       "required": [
         "baseUrl",
-        "upstreamProtocol",
+        "upstreamProtocols",
         "authScheme"
       ],
       "type": "object"
@@ -1677,7 +1601,7 @@
     },
     "DashboardSummary": {
       "additionalProperties": false,
-      "description": "Dashboard home totals. Custom/GOAT/SCNet cards are not \"available\".",
+      "description": "Dashboard home totals. Custom/GOAT cards are not \"available\".",
       "properties": {
         "availableAccounts": {
           "format": "uint64",
@@ -3459,16 +3383,6 @@
         "quotaUnit": {
           "type": "string"
         },
-        "riskNotice": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProviderCatalogRiskNotice"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "routable": {
           "type": "boolean"
         },
@@ -3514,7 +3428,6 @@
         "authSchemes",
         "upstreamProtocols",
         "formFields",
-        "riskNotice",
         "modelAliases"
       ],
       "type": "object"
@@ -3544,38 +3457,9 @@
       ],
       "type": "object"
     },
-    "ProviderCatalogRiskNotice": {
-      "additionalProperties": false,
-      "description": "Plan risk notice shown before create. `body` is the acknowledgement text,\nnot a secret.",
-      "properties": {
-        "acknowledgementId": {
-          "type": "string"
-        },
-        "body": {
-          "type": "string"
-        },
-        "contentHash": {
-          "type": "string"
-        },
-        "sourceUrl": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "acknowledgementId",
-        "version",
-        "sourceUrl",
-        "body",
-        "contentHash"
-      ],
-      "type": "object"
-    },
     "ProviderContractGroup": {
       "additionalProperties": false,
-      "description": "One built-in provider scope. SCNet is a single group with three offerings.",
+      "description": "One built-in provider scope.",
       "properties": {
         "card": {
           "$ref": "#/$defs/CardCapabilitySummary"
@@ -3691,7 +3575,7 @@
     },
     "ProviderModelCapability": {
       "additionalProperties": false,
-      "description": "One Go protocol-table capability. GOAT/SCNet must not reuse these rows.",
+      "description": "One Go protocol-table capability. GOAT must not reuse these rows.",
       "properties": {
         "modelId": {
           "type": "string"
@@ -5163,9 +5047,6 @@
       "$ref": "#/$defs/AccountModelCapability"
     },
     {
-      "$ref": "#/$defs/AccountAcknowledgement"
-    },
-    {
       "$ref": "#/$defs/AccountCreate"
     },
     {
@@ -5196,12 +5077,6 @@
       "$ref": "#/$defs/AccountModelCapabilityWrite"
     },
     {
-      "$ref": "#/$defs/AccountAcknowledgementCreate"
-    },
-    {
-      "$ref": "#/$defs/AccountAcknowledgementWrite"
-    },
-    {
       "$ref": "#/$defs/ProviderCatalog"
     },
     {
@@ -5209,9 +5084,6 @@
     },
     {
       "$ref": "#/$defs/ProviderCatalogFormField"
-    },
-    {
-      "$ref": "#/$defs/ProviderCatalogRiskNotice"
     },
     {
       "$ref": "#/$defs/ProviderModelCapability"

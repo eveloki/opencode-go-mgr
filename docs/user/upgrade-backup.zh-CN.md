@@ -4,13 +4,15 @@
 
 从 [GitHub 最新 Release](https://github.com/klarkxy/opencode-go-mgr/releases/latest) 下载升级包，并用同一 Release 的 `SHA256SUMS` 校验：PowerShell 用 `Get-FileHash <文件> -Algorithm SHA256`，macOS 用 `shasum -a 256 <文件>`，Linux 用 `sha256sum <文件>`。下面把备份、恢复和卸载一起讲完——都是平时很枯燥、关键时刻恨自己没看的操作。
 
-## 数据库迁移与接入 Key（schema v27）
+## 数据库迁移与接入 Key（schema v30）
 
-数据库 schema 是 **v27**，历史库启动时原地迁移。从单 Key 版本升级会保留既有凭证为 **主 Key**（id 固定为 `00000000-0000-0000-0000-000000000001`），客户端无需改动即可继续鉴权。主 Key 与额外子 Key 共用 `access_keys` 表：未删除子 Key 最多 64 把，删除为软删除，保留名称用于日志归因并清除明文。
+数据库 schema 是 **v30**，历史库启动时原地迁移。从单 Key 版本升级会保留既有凭证为 **主 Key**（id 固定为 `00000000-0000-0000-0000-000000000001`），客户端无需改动即可继续鉴权。主 Key 与额外子 Key 共用 `access_keys` 表：未删除子 Key 最多 64 把，删除为软删除，保留名称用于日志归因并清除明文。
 
-已有（非空）库会先迁到 schema v26，然后在任何 v27 写入前生成同级快照 `data.sqlite.pre-v3.<timestamp>.bak` 及 SHA-256 sidecar。全新空数据目录直接创建 schema v27，不写该副本。快照只是 v26 回滚点，不能替代完整备份：恢复前先校验 sidecar，只能恢复到仍支持 v26 的程序，或用于重试尚未提交的 v27 打开。旧版程序无法打开已迁移的数据库——单 Key 时代不识额外 Key，已撤销的值也不会因降级复活。
+已有（非空）库会先迁到 schema v29，然后在任何 v30 写入前生成同级快照 `data.sqlite.pre-v3.<timestamp>.bak` 及 SHA-256 sidecar。全新空数据目录直接创建 schema v30，不写该副本。快照只是 v29 回滚点，不能替代完整备份：恢复前先校验 sidecar，只能恢复到仍支持 v29 的程序，或用于重试尚未提交的 v30 打开。旧版程序无法打开已迁移的数据库——单 Key 时代不识额外 Key，已撤销的值也不会因降级复活。
 
-每次启动时，遗留的已启用 Command Code GOAT 与全部三个 SCNet Token Plan tier 会被禁用，且不改动 `updated_at`；Custom API 的 enabled 状态保留，未验证的 GOAT 行重置为 `pending`。OpenCode Go、Zen Free 与未知 provider/offering pair 不受影响。
+v29 从目录中移除 SCNet Token Plans，并在迁移期间删除所有现有 SCNet 账号行。每次启动时，遗留的已启用 Command Code GOAT 会被禁用，且不改动 `updated_at`；Custom API 的 enabled 状态保留，未验证的 GOAT 行重置为 `pending`。OpenCode Go、Zen Free 与未知 provider/offering pair 不受影响。
+
+v30 将 Custom API 的 `account_custom_configs` 从单一 `upstream_protocol` 列扩展为 JSON `upstream_protocols` 集合，按旧值回填每个现有 Custom 账号。Custom 配置/能力编辑保持账号启用，但将 `verification_status` 重置为 `pending`。
 
 ## 备份
 

@@ -29,17 +29,12 @@ pub(crate) const GATEWAY_KEY: &str = "gw-v2-contract";
 pub(crate) const GO_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-go";
 pub(crate) const GO_ACCOUNT_KEY_2: &str = "v2-secret-KEY-9f3a2c1b-go-2";
 pub(crate) const GOAT_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-goat";
-pub(crate) const SCNET_ACCOUNT_KEY: &str = "sk-tp-v2-secret-KEY-9f3a2c1b";
 pub(crate) const CUSTOM_ACCOUNT_KEY: &str = "v2-secret-KEY-9f3a2c1b-custom";
 
 pub(crate) const OPENCODE_PROVIDER_ID: &str = "opencode";
 pub(crate) const GO_OFFERING_ID: &str = "go";
 pub(crate) const COMMAND_CODE_PROVIDER_ID: &str = "command-code";
 pub(crate) const GOAT_OFFERING_ID: &str = "goat";
-pub(crate) const SCNET_PROVIDER_ID: &str = "scnet";
-pub(crate) const SCNET_BASIC_OFFERING_ID: &str = "token-plan-basic";
-pub(crate) const SCNET_STANDARD_OFFERING_ID: &str = "token-plan-standard";
-pub(crate) const SCNET_PREMIUM_OFFERING_ID: &str = "token-plan-premium";
 pub(crate) const CUSTOM_PROVIDER_ID: &str = "custom";
 pub(crate) const CUSTOM_OFFERING_ID: &str = "api";
 pub(crate) const CUSTOM_UNROUTABLE_MODEL_ID: &str = "custom-unroutable-model";
@@ -465,13 +460,6 @@ pub(crate) fn form_field_ids(entry: &Value) -> HashSet<String> {
         .collect()
 }
 
-pub(crate) fn matching_acknowledgements(notice: &Value) -> Value {
-    json!([{
-        "acknowledgement_id": notice["acknowledgement_id"],
-        "version": notice["version"]
-    }])
-}
-
 pub(crate) fn custom_create_payload(
     name: &str,
     key: &str,
@@ -487,7 +475,7 @@ pub(crate) fn custom_create_payload(
         "expected_revision": revision,
         "custom_config": {
             "base_url": base_url,
-            "upstream_protocol": "chat_completions",
+            "upstream_protocols": ["chat_completions"],
             "auth_scheme": "bearer"
         },
         "model_capabilities": [{
@@ -528,20 +516,6 @@ pub(crate) fn overlapping_raw_ids(catalog: &Value) -> Vec<(String, Vec<(String, 
             } else {
                 None
             }
-        })
-        .collect()
-}
-
-pub(crate) fn scnet_entries(catalog: &Value) -> Vec<&Value> {
-    catalog
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|entry| {
-            entry["provider_id"] == SCNET_PROVIDER_ID
-                || entry["display_name"]
-                    .as_str()
-                    .is_some_and(|name| name.to_ascii_lowercase().contains("scnet"))
         })
         .collect()
 }

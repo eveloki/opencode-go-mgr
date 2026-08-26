@@ -89,9 +89,9 @@ desktop-specific steps need a real machine.
       the active pricing snapshot (highspeed inherits the base row) and must
       not include Custom. Unknown models return `400` on Chat / Responses /
       Messages / Gemini unless they match that `/v1/models` list. Command
-      Code GOAT / SCNet Token Plan drafts stay disabled, unroutable
-      (`routable=false`), and `501` on verify. Do not smoke GOAT or SCNet as
-      live routing, usage, pricing, or provider guides. These local-list and
+      Command Code GOAT drafts stay disabled, unroutable
+      (`routable=false`), and `501` on verify. Do not smoke GOAT as live
+      routing, usage, pricing, or provider guides. These local-list and
       fail-closed checks do not require live provider keys.
 - [ ] Bounded fake-upstream Custom API smoke (no live provider key): URL
       credentials are rejected; a `2xx` JSON object verifies; the card stays

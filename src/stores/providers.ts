@@ -3,6 +3,7 @@ import { defineStore } from "pinia";
 import { isRevisionConflict } from "../api/dashboard.ts";
 import { providerApi } from "../api/providers.ts";
 import type {
+  ContractScopeKind,
   ProviderCatalogEntry,
   ProviderContractsResponse,
   ProviderModelCapability,
@@ -96,12 +97,14 @@ export const useProvidersStore = defineStore("providers", () => {
     }
   }
 
-  async function putProtocolSwitch(scopeId: string, protocol: ProviderProtocol, enabled: boolean): Promise<ProviderContractsResponse> {
-    if (contracts.value?.custom_endpoints.some((scope) => scope.scope_id === scopeId)) {
-      throw new Error("Custom API 协议变更尚未纳入 Dashboard V3 合同，请在账号配置中保持创建时协议");
-    }
+  async function putProtocolSwitch(
+    scopeKind: ContractScopeKind,
+    scopeId: string,
+    protocol: ProviderProtocol,
+    enabled: boolean,
+  ): Promise<ProviderContractsResponse> {
     try {
-      const result = await providerApi.putProviderProtocolSwitch(scopeId, protocol, enabled);
+      const result = await providerApi.updateProviderContractProtocol(scopeKind, scopeId, protocol, { enabled });
       contracts.value = result;
       return result;
     } catch (cause) {

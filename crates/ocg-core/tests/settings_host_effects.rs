@@ -272,7 +272,8 @@ fn v3_settings_updates_use_the_core_state_host_path() {
     assert!(v3_production.contains("rebind_listener_after_settings_commit"));
     assert!(v3_production.contains("map_host_settings_error"));
 
-    for adapter in [v3_production] {
+    {
+        let adapter = v3_production;
         assert!(
             !adapter.contains("failed to synchronize desktop settings"),
             "adapters must not keep the host rollback policy"

@@ -42,14 +42,14 @@ get billed for a bad guess.
   eligible Custom ID from authenticated `GET /v1/models`. Names with `/`,
   `_`, or whitespace are raw IDs, not kebab aliases. Unknown names and
   overlapping raw IDs fail closed and never call upstream.
-- **Saving Command Code GOAT or SCNet does not start routing.** Those Plans
-  stay disabled `pending` drafts; verification returns `501`. Use an
-  OpenCode Go key, Zen Free, or a verified-then-enabled Custom API card for
-  live traffic.
-- **Saving Custom API does not start routing.** Create/update stay disabled
-  `pending`. Verify with a `2xx` JSON response, then enable explicitly.
-  Changing the URL, key, or declared models re-pends verification and
-  disables the card.
+- **Saving Command Code GOAT does not start routing.** It stays a disabled
+  `pending` draft; verification returns `501`. Use an OpenCode Go key, Zen
+  Free, or an enabled Custom API card (verification is optional) for live traffic.
+- **Saving Custom API does not start routing.** The card is created disabled
+  `pending`, but you can enable it immediately; an unverified badge is shown
+  while verification is `pending`. Verify probes every selected protocol with a
+  `2xx` JSON response. Changing the URL, key, declared models, protocol set,
+  or auth scheme re-pends verification but leaves the card enabled.
 - **Gemini requests fail with `400` over `safetySettings`.** The gateway
   cannot map Google's safety thresholds to a Chat/Messages upstream, so it
   rejects non-empty arrays. Remove the field and retry; do not assume the

@@ -12,7 +12,7 @@
 //! Alias `deepseek-v4-flash` → raw `deepseek/deepseek-v4-flash`. The kebab
 //! alias stays Go-owned and published; the unique slash raw ID pins to GOAT.
 //! Eligible verified GOAT catalogs overlay unique IDs without stealing
-//! Go/Zen aliases. SCNet stays fail-closed. Eligible Custom capabilities
+//! Go/Zen aliases. Eligible Custom capabilities
 //! overlay published aliases and resolve otherwise unknown IDs without
 //! stealing Go/Zen mappings.
 //! Later host adapters consume [`ProviderMapping`]: parse the client protocol
@@ -757,7 +757,7 @@ pub struct PublishedAlias {
 
 /// Routeable preferred aliases that `GET /v1/models` exposes, in deterministic
 /// registry order. `owned_by` is the first routeable mapping's `provider_id`.
-/// Non-routeable GOAT / SCNet / Custom mappings stay unpublished.
+/// Non-routeable GOAT / Custom mappings stay unpublished.
 ///
 /// First-wins `owned_by` is only the client list advertisement. Catalog and
 /// application-model discovery use [`routeable_aliases_for`], which keeps an
@@ -832,7 +832,7 @@ fn published_routeable_in(registry: &Registry) -> Vec<PublishedAlias> {
 
 /// Preferred aliases that currently have a routeable mapping for this
 /// provider/offering, in deterministic registry order. Raw upstream IDs are
-/// never returned. Unroutable mappings (GOAT / SCNet / Custom today) yield an
+/// never returned. Unroutable mappings (GOAT / Custom today) yield an
 /// empty list without a hardcoded per-plan alias set.
 pub fn routeable_aliases_for(provider_id: &str, offering_id: &str) -> Vec<String> {
     routeable_aliases_for_in(registry(), provider_id, offering_id)
@@ -892,7 +892,6 @@ const _: fn(&str) -> bool = is_published_alias;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocg_domain::ids::{SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_OFFERING_IDS};
     use std::any::{TypeId, type_name};
 
     fn production_source(source: &str) -> &str {
@@ -1129,7 +1128,11 @@ mod tests {
             assert!(resolve(id).unwrap().routeable_mappings()[0].is_zen_free());
         }
         assert!(!aliases.iter().any(|alias| alias.contains("goat")));
-        assert!(!aliases.iter().any(|alias| alias.contains("scnet")));
+        assert!(
+            !aliases
+                .iter()
+                .any(|alias| alias.contains("unknown-provider"))
+        );
         assert!(!aliases.iter().any(|alias| alias.contains("custom")));
     }
 
@@ -1157,7 +1160,7 @@ mod tests {
                         .expect("published alias must have a routeable mapping");
                     assert_eq!(item.owned_by, routeable.provider_id);
                     assert_ne!(item.owned_by, COMMAND_CODE_PROVIDER_ID);
-                    assert_ne!(item.owned_by, SCNET_PROVIDER_ID);
+                    assert_ne!(item.owned_by, "unknown-provider");
                     assert_ne!(item.owned_by, CUSTOM_PROVIDER_ID);
                 }
                 other => panic!("published id must be an alias, got {other:?}"),
@@ -1532,12 +1535,6 @@ mod tests {
             routeable_aliases_for(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).is_empty(),
             "Custom catalog aliases stay empty; client IDs come from account capabilities"
         );
-        for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
-            assert!(
-                routeable_aliases_for(SCNET_PROVIDER_ID, offering_id).is_empty(),
-                "unroutable scnet/{offering_id} must not publish aliases"
-            );
-        }
     }
 
     #[test]

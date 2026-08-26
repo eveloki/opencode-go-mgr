@@ -1,7 +1,6 @@
 import { t } from "../i18n/index.ts";
 import type {
   Account,
-  AccountAcknowledgementCreate,
   AccountCreate,
   AccountCustomConfigUpdate,
   AccountGoatModelAccessUpdate,
@@ -490,11 +489,6 @@ export const dashboardV3 = {
       method: "PUT",
       body: withExpectation(update, expectation),
     }),
-  createAccountAcknowledgement: (id: string, input: WithoutExpectation<AccountAcknowledgementCreate>, expectation: MutationExpectation) =>
-    requestV3<AccountMutation>(`/accounts/${encode(id)}/acknowledgements`, {
-      method: "POST",
-      body: withExpectation(input, expectation),
-    }),
   verifyAccount: (id: string, expectation: MutationExpectation) =>
     requestV3<AccountMutation>(`/accounts/${encode(id)}/verify`, {
       method: "POST",
@@ -561,6 +555,19 @@ export const dashboardV3 = {
   ) =>
     requestV3<ProviderContracts>(
       `/provider-contracts/provider/${encode(scopeId)}/protocols/${encode(protocol)}`,
+      {
+        method: "PUT",
+        body: withExpectation({ enabled } satisfies WithoutExpectation<ProtocolSwitchUpdate>, expectation),
+      },
+    ),
+  putCustomEndpointProtocolSwitch: (
+    scopeId: string,
+    protocol: string,
+    enabled: boolean,
+    expectation: MutationExpectation,
+  ) =>
+    requestV3<ProviderContracts>(
+      `/provider-contracts/custom-endpoint/${encode(scopeId)}/protocols/${encode(protocol)}`,
       {
         method: "PUT",
         body: withExpectation({ enabled } satisfies WithoutExpectation<ProtocolSwitchUpdate>, expectation),

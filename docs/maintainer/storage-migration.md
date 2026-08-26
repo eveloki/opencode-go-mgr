@@ -33,7 +33,7 @@ Downgrades are not supported: never point an older binary at a migrated database
 
 ## Schema v27 and the pre-v3 snapshot
 
-`CURRENT_SCHEMA_VERSION = 27` (`crates/ocg-core/src/db.rs`). Opening a historical database first migrates canonically to v26, then the v27 rewrite copies the primary Key and every `sub_gateway_keys` row into one `access_keys` table (live primary id `00000000-0000-0000-0000-000000000001`), drops `sub_gateway_keys`, and drops the five legacy `accounts.usage_sync_*` columns (usage-sync metadata lives in `provider_usage_sync_state`). Account `key_cipher` / `password_cipher` bytes are validated with the Host cipher and never re-encrypted.
+`CURRENT_SCHEMA_VERSION = 30` (`crates/ocg-core/src/db.rs`). Opening a historical database first migrates canonically to v26, then the v27 rewrite copies the primary Key and every `sub_gateway_keys` row into one `access_keys` table (live primary id `00000000-0000-0000-0000-000000000001`), drops `sub_gateway_keys`, and drops the five legacy `accounts.usage_sync_*` columns (usage-sync metadata lives in `provider_usage_sync_state`). Later migrations (v29, v30) are additive and do not change this snapshot semantics. Account `key_cipher` / `password_cipher` bytes are validated with the Host cipher and never re-encrypted.
 
 Before any v27 write, an existing (non-empty) library gets a unique, never-overwritten sibling snapshot:
 
@@ -42,7 +42,7 @@ data.sqlite.pre-v3.<timestamp>.bak
 data.sqlite.pre-v3.<timestamp>.bak.sha256
 ```
 
-The snapshot is a standalone v26 SQLite file (`VACUUM INTO`, `quick_check` on both sides); the sidecar's first field is the lowercase SHA-256 of the `.bak`. A brand-new empty directory creates schema v27 directly and does not write this copy. The snapshot is a rollback point, not a substitute for the whole-directory backup. Verify the sidecar from the data directory before any restore:
+The snapshot is a standalone v26 SQLite file (`VACUUM INTO`, `quick_check` on both sides); the sidecar's first field is the lowercase SHA-256 of the `.bak`. A brand-new empty directory creates the current schema directly and does not write this copy. The snapshot is a rollback point, not a substitute for the whole-directory backup. Verify the sidecar from the data directory before any restore:
 
 ```bash
 sha256sum -c data.sqlite.pre-v3.<timestamp>.bak.sha256      # Linux

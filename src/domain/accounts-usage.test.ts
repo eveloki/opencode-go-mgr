@@ -190,8 +190,8 @@ test("keeps account cards compact with metadata tags and popover calibration", a
 
   assert.ok(header.indexOf("accountStatusLabel(account, now)") < header.indexOf('t("购买于 {date}"'));
   // Only plans with purchase/expiry metadata show these tags. GOAT and Custom skip them.
-  assert.match(header, /<n-tag v-if="\(isGo \|\| isScnet\) && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
-  assert.match(header, /<n-tag v-if="\(isGo \|\| isScnet\) && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
+  assert.match(header, /<n-tag v-if="isGo && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
+  assert.match(header, /<n-tag v-if="isGo && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
   assert.match(card, /<n-popover[\s\S]*?trigger="click"[\s\S]*?placement="bottom-end"[\s\S]*?:width="320"[\s\S]*?@update:show="\(show: boolean\) => show && emit\('usage-editor-open'\)"/);
   assert.match(editor, /class="usage-editor-popover"/);
   assert.doesNotMatch(card, /:flip="false"/);

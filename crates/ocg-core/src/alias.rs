@@ -25,6 +25,7 @@ type ResolveCatalogs =
 type ResolveAllCatalogs =
     fn(&str, &[String], &[String], &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
 type RouteableWithZen = fn(&str, &str, &[String]) -> Vec<String>;
+type RouteableAllCatalogs = fn(&[String], &[String], &[String]) -> Vec<PublishedAlias>;
 
 const _: ResolveName = resolve;
 const _: ResolveName = ocg_gateway::alias::resolve;
@@ -35,8 +36,7 @@ const _: ResolveAllCatalogs = resolve_with_all_catalogs;
 const _: fn() -> Vec<String> = published_aliases;
 const _: fn() -> Vec<PublishedAlias> = published_routeable_aliases;
 const _: fn(&[String]) -> Vec<PublishedAlias> = published_routeable_aliases_with_zen;
-const _: fn(&[String], &[String], &[String]) -> Vec<PublishedAlias> =
-    published_routeable_aliases_with_all_catalogs;
+const _: RouteableAllCatalogs = published_routeable_aliases_with_all_catalogs;
 const _: fn(&str, &str) -> Vec<String> = routeable_aliases_for;
 const _: RouteableWithZen = routeable_aliases_for_with_zen;
 const _: fn(&str) -> bool = is_published_alias;

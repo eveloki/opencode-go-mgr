@@ -144,7 +144,7 @@ pub(crate) async fn execute_protocol_probe(
     };
     if ctx.adapter == ProviderAdapterKind::ConfigurableHttp && plan.custom_route.is_none() {
         return Err(
-            "Custom API accounts require a persisted base URL, protocol, and auth scheme"
+            "Custom API accounts require a persisted base URL, protocol set, and auth scheme"
                 .to_string(),
         );
     }

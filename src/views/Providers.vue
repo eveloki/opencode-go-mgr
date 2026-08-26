@@ -61,15 +61,6 @@
           </n-button>
         </n-alert>
 
-        <n-alert
-          v-if="activeScope.provider_id === 'scnet'"
-          type="info"
-          :title="t('已归档')"
-          :show-icon="false"
-        >
-          {{ t("SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。") }}
-        </n-alert>
-
         <section class="providers-section" aria-labelledby="provider-overview-title">
           <h2 id="provider-overview-title">{{ t("概览") }}</h2>
           <dl class="providers-overview">
@@ -121,7 +112,6 @@
           </div>
         </section>
 
-        <template v-if="!scnetArchived">
         <section class="providers-section" aria-labelledby="provider-catalog-title">
           <h2 id="provider-catalog-title">{{ t("模型目录") }}</h2>
           <dl class="providers-overview providers-overview--compact">
@@ -178,17 +168,12 @@
           <h2 id="provider-protocol-title" class="sr-only">{{ t("上游协议策略") }}</h2>
           <ProviderProtocolSwitches
             :switches="activeScope.protocols"
+            :protocols="structuralProtocols(activeScope)"
+            :model-counts="protocolModelCounts"
             :loading-protocol="switchLoading"
-            :disabled="customProtocolReadOnly || (actionLocked && switchLoading === null)"
+            :disabled="actionLocked && switchLoading === null"
             @change="updateProtocol"
           />
-          <n-alert
-            v-if="customProtocolReadOnly"
-            type="info"
-            :title="t('自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。')"
-          >
-            {{ t("该方案暂不支持协议探测") }}
-          </n-alert>
           <n-alert
             v-if="protocolError"
             type="error"
@@ -201,33 +186,35 @@
           :switches="activeScope.protocols"
         />
 
-        <ProviderProbePanel
-          :unavailable="!protocolProbeSupported(activeScope)"
-          :account-id="probeAccountId"
-          :model-id="probeModelId"
-          :protocols="probeProtocols"
-          :confirmed="probeConfirmed"
-          :in-flight="probeInFlight"
-          :accounts="scopeAccounts(activeScope)"
-          :models="probeModelOptions"
-          :results="probeResults"
-          @update:account-id="probeAccountId = $event"
-          @update:model-id="probeModelId = $event"
-          @update:protocols="probeProtocols = $event"
-          @update:confirmed="probeConfirmed = $event"
-          @probe="runProbe"
-        />
-        <n-alert
-          v-if="probeError"
-          type="error"
-          :title="t('探测失败: {error}', { error: probeError })"
-        />
+        <template v-if="activeScope.scope_kind !== 'custom_endpoint'">
+          <ProviderProbePanel
+            :unavailable="!protocolProbeSupported(activeScope)"
+            :account-id="probeAccountId"
+            :model-id="probeModelId"
+            :protocols="probeProtocols"
+            :confirmed="probeConfirmed"
+            :in-flight="probeInFlight"
+            :accounts="scopeAccounts(activeScope)"
+            :models="probeModelOptions"
+            :model-contracts="activeScope.models"
+            :results="probeResults"
+            @update:account-id="probeAccountId = $event"
+            @update:model-id="probeModelId = $event"
+            @update:protocols="probeProtocols = $event"
+            @update:confirmed="probeConfirmed = $event"
+            @probe="runProbe"
+          />
+          <n-alert
+            v-if="probeError"
+            type="error"
+            :title="t('探测失败: {error}', { error: probeError })"
+          />
+        </template>
 
         <section class="providers-section" aria-labelledby="provider-pricing-title">
           <h2 id="provider-pricing-title">{{ t("价格") }}</h2>
           <PricingCatalog :provider-id="activeScope.provider_id" />
         </section>
-        </template>
       </div>
     </div>
 
@@ -269,13 +256,16 @@ import { dashboardErrorDetail } from "../utils/errors.ts";
 import { applyAppViewSearchParams, readProviderScopeQuery } from "./app-navigation.ts";
 import {
   applyModelContractToResponse,
+  availableModelCount,
   catalogRefreshSupported,
   flattenProviderScopes,
   isSafeSourceUrl,
   normalizeProviderContractsResponse,
   protocolProbeSupported,
+  PROVIDER_PROTOCOLS,
   selectProviderScope,
   scopeAccounts,
+  structuralProtocols,
   uniqueProtocols,
 } from "../domain/provider-contracts.ts";
 import {
@@ -321,8 +311,6 @@ const activeSelection = computed(() => {
   return selectProviderScope(scopes.value, scopeKind, scopeId);
 });
 const activeScope = computed(() => activeSelection.value.scope);
-const scnetArchived = computed(() => activeScope.value?.provider_id === "scnet");
-const customProtocolReadOnly = computed(() => activeScope.value?.scope_kind === "custom_endpoint");
 const initialLoading = computed(() => loading.value && !contracts.value);
 const actionLocked = computed(() => (
   switchLoading.value !== null || catalogRefreshing.value || probeInFlight.value
@@ -352,6 +340,16 @@ const probeModelOptions = computed(() => {
     ...activeScope.value.models.map((model) => model.model_id),
   ]);
   return [...ids];
+});
+const protocolModelCounts = computed<Record<ProviderProtocol, number>>(() => {
+  const counts = { chat_completions: 0, responses: 0, messages: 0 };
+  const scope = activeScope.value;
+  if (scope) {
+    for (const protocol of PROVIDER_PROTOCOLS) {
+      counts[protocol] = availableModelCount(scope, protocol);
+    }
+  }
+  return counts;
 });
 const safeSourceUrl = computed(() => {
   const url = activeScope.value?.catalog.source_url ?? "";
@@ -459,11 +457,11 @@ async function loadContracts(options: { retain?: boolean } = {}): Promise<{ ok: 
 async function updateProtocol(protocol: ProviderProtocol, enabled: boolean) {
   const current = contracts.value;
   const scope = activeScope.value;
-  if (!current || !scope || scope.scope_kind === "custom_endpoint" || switchLoading.value) return;
+  if (!current || !scope || switchLoading.value) return;
   switchLoading.value = protocol;
   protocolError.value = "";
   try {
-    const response = await providersStore.putProtocolSwitch(scope.scope_id, protocol, enabled);
+    const response = await providersStore.putProtocolSwitch(scope.scope_kind, scope.scope_id, protocol, enabled);
     contracts.value = normalizeProviderContractsResponse(response);
     actionLive.value = t("协议设置已保存");
     message.success(t("协议设置已保存"));

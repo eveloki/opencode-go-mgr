@@ -12,11 +12,13 @@ test("Providers reads and mutates contracts through its store while explicit act
   assert.match(providers, /useProvidersStore\(\)/);
   assert.match(providers, /providersStore\.loadContracts\(\)/);
   assert.match(providers, /providersStore\.loadCatalog\(\)/);
-  assert.match(providers, /providersStore\.putProtocolSwitch\(/);
+  assert.match(providers, /providersStore\.putProtocolSwitch\(scope\.scope_kind, scope\.scope_id/);
   assert.match(providers, /providerApi\.refreshProviderModels\(/);
   assert.match(providers, /providerApi\.runProtocolProbes\(/);
   assert.match(providers, /error\.status === 409/);
-  assert.match(providers, /scope\.scope_kind === "custom_endpoint"/);
+  // Custom scopes have writable switches; only the probe panel stays hidden.
+  assert.doesNotMatch(providers, /customProtocolReadOnly/);
+  assert.match(providers, /activeScope\.scope_kind !== 'custom_endpoint'/);
   assert.doesNotMatch(providers, /getProviderModels\(/);
   assert.doesNotMatch(providers, /getProviderModelCapabilities/);
   assert.doesNotMatch(providers, /dashboardApi\.testAccount/);
@@ -68,14 +70,26 @@ test("Providers catalog refresh toasts success only after contracts GET replaces
 test("protocol switches, catalog refresh, and probes stay explicit and unique", () => {
   assert.match(protocolSwitches, /<fieldset class="protocol-policy"/);
   assert.match(protocolSwitches, /t\('启用 \{protocol\}'/);
+  // Switches render only the structural protocol set with effective model counts.
+  assert.match(providers, /structuralProtocols\(activeScope\)/);
+  assert.match(providers, /availableModelCount/);
+  assert.match(protocolSwitches, /t\("\{count\} 个模型可用"/);
   assert.match(providers, /catalogRefreshSupported\(activeScope\)/);
   assert.match(providers, /protocolProbeSupported\(activeScope\)/);
   assert.match(probePanel, /t\("我了解这会发送真实最小请求，并可能消耗额度"\)/);
   assert.match(probePanel, /t\("发送探测"\)/);
   assert.match(probePanel, /uniqueProtocols/);
+  // Probe checkboxes are filtered to the selected model's safety ceiling.
+  assert.match(probePanel, /modelContracts\.find/);
+  assert.match(probePanel, /contract\.protocols\[protocol\]\?\.available/);
+  assert.match(providers, /:model-contracts="activeScope\.models"/);
   assert.match(providers, /if \(!scope \|\| !protocolProbeSupported\(scope\) \|\| probeInFlight\.value\) return/);
   assert.match(modelList, /t\("暂无模型合约"\)/);
   assert.match(modelList, /protocolEvidenceStatus/);
+  // "Preferred protocol" only appears when a model has two or more enabled protocols.
+  assert.match(modelList, /首选协议：\{protocol\}/);
+  assert.match(modelList, /协议：\{protocol\}/);
+  assert.match(modelList, /enabled\.length >= 2/);
 });
 
 test("Providers pricing is filtered to the active provider and 390px layout does not require horizontal scrolling", () => {

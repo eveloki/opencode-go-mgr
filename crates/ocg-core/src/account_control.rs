@@ -360,7 +360,14 @@ pub(crate) fn ensure_account_can_enable(
         .map_err(|error| AccountControlError::Conflict(error.to_string()))?;
     let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
         .ok_or_else(|| AccountControlError::Invalid("unknown provider offering".into()))?;
-    if plan.verification_policy == VerificationPolicy::Required {
+    // Verification blocks enablement only for Plans whose composed card
+    // descriptor gates on it (GOAT). Custom keeps `VerificationPolicy::Required`
+    // for status tracking, but its card flips the gate off, so a pending Custom
+    // account may be enabled without verifying first.
+    let verification_gates_enablement = plan.verification_policy == VerificationPolicy::Required
+        && crate::provider::ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+    if verification_gates_enablement {
         let status = host
             .account_verification_status(&account.id)
             .map_err(AccountControlError::Internal)?
@@ -509,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn go_create_and_toggle_bump_revision_and_reject_pending_custom() {
+    fn go_create_and_toggle_bump_revision_and_allow_pending_custom() {
         let (state, dir) = temp_state("go-toggle");
         let before = state.settings_revision();
         let created = create_go_api_key(
@@ -534,28 +541,24 @@ mod tests {
         assert!(enabled.enabled);
         assert_eq!(state.settings_revision(), before + 3);
 
+        // Custom verification is an optional tool: a pending Custom account
+        // enables without verifying first.
         state
             .db
             .lock()
             .create_account(&custom_pending(&state, "cli-custom"))
             .unwrap();
-        let error = set_account_enabled(&state, "cli-custom", true).unwrap_err();
-        match error {
-            AccountControlError::Conflict(message) => {
-                assert_eq!(message, VERIFY_BEFORE_ENABLE_MESSAGE);
-            }
-            other => panic!("expected verify-first conflict, got {other}"),
-        }
-        assert!(
-            !state
-                .db
-                .lock()
-                .get_account("cli-custom")
-                .unwrap()
-                .unwrap()
-                .enabled
-        );
-        assert_eq!(state.settings_revision(), before + 3);
+        let enabled = set_account_enabled(&state, "cli-custom", true)
+            .expect("pending Custom may enable; verification is optional");
+        assert!(enabled.enabled);
+        let verification = state
+            .db
+            .lock()
+            .account_verification_state("cli-custom")
+            .unwrap()
+            .unwrap();
+        assert_eq!(verification.status, ConnectionVerificationStatus::Pending);
+        assert_eq!(state.settings_revision(), before + 4);
 
         let zen = set_account_enabled(&state, ZEN_FREE_ACCOUNT_ID, false).unwrap_err();
         assert!(
@@ -564,6 +567,38 @@ mod tests {
 
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn verification_enablement_gate_reads_the_composed_card_descriptor() {
+        // Both Plans keep VerificationPolicy::Required for status tracking;
+        // only the composed card descriptor decides whether verification
+        // blocks enablement. Custom flips off, GOAT stays on.
+        let custom_plan =
+            crate::provider::builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
+        let goat_plan = crate::provider::builtin_plan(
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            crate::provider::GOAT_OFFERING_ID,
+        )
+        .unwrap();
+        assert_eq!(
+            custom_plan.verification_policy,
+            crate::provider::VerificationPolicy::Required
+        );
+        assert_eq!(
+            goat_plan.verification_policy,
+            crate::provider::VerificationPolicy::Required
+        );
+        let custom_card =
+            crate::provider::ProviderRegistry::get(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
+                .unwrap();
+        assert!(!custom_card.card_actions.enable_requires_verification);
+        let goat_card = crate::provider::ProviderRegistry::get(
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            crate::provider::GOAT_OFFERING_ID,
+        )
+        .unwrap();
+        assert!(goat_card.card_actions.enable_requires_verification);
     }
 
     #[tokio::test]

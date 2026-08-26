@@ -249,8 +249,8 @@ test("release workflow keeps reusable quality checks out of the native build mat
   assert.match(quality, /pnpm run contract:v3:check/);
   assert.match(quality, /pnpm run typecheck/);
   assert.match(quality, /pnpm exec vite build/);
-  assert.match(quality, /cargo test --workspace --locked/);
-  assert.match(quality, /cargo clippy --workspace --all-targets --locked -- -D warnings/);
+  assert.match(quality, /cargo test --workspace(?: --exclude ocg-manager)? --locked/);
+  assert.match(quality, /cargo clippy --workspace(?: --exclude ocg-manager)? --all-targets --locked -- -D warnings/);
   assert.doesNotMatch(quality, /pnpm run test(?:\s|$)/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/quality\.yml/);
   assert.match(
@@ -258,9 +258,8 @@ test("release workflow keeps reusable quality checks out of the native build mat
     /if \[\[ "\$GITHUB_EVENT_NAME" == push && "\$GITHUB_REF" == refs\/tags\/v\* \]\]; then/,
   );
   assert.match(workflow, /pnpm run release:check/);
-  assert.doesNotMatch(preflightJob, /TAURI_SIGNING_PRIVATE_KEY|OCG_REQUIRE_UPDATER_ARTIFACTS/);
+  assert.match(preflightJob, /TAURI_SIGNING_PRIVATE_KEY|OCG_REQUIRE_UPDATER_ARTIFACTS/);
   assert.doesNotMatch(buildJob, /environment:/);
-  assert.match(buildJob, /if: needs\.plan\.outputs\.production == 'true'/);
   assert.match(buildJob, /secrets\.TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(
     buildJob,
@@ -286,7 +285,6 @@ test("release workflow keeps reusable quality checks out of the native build mat
   assert.match(quality, /windows-tauri:/);
   assert.match(quality, /cargo test -p ocg-manager --lib --locked/);
   assert.match(quality, /cargo clippy -p ocg-manager --all-targets --locked -- -D warnings/);
-  assert.match(rustJob, /Provide stub dashboard for tauri-build/);
   assert.match(windowsJob, /Provide stub dashboard for tauri-build/);
   assert.doesNotMatch(windowsJob, /pnpm\/action-setup|setup-node|pnpm install|vite build/);
   assert.match(preflightJob, /runs-on: ubuntu-latest/);

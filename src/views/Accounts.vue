@@ -882,8 +882,8 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       busy.value = false;
     }
   } else {
-    // Preserve every catalog-gated create field (acknowledgements, Custom
-    // config, and capabilities) rather than rebuilding a legacy-only DTO.
+    // Preserve every catalog-gated create field (Custom config and
+    // capabilities) rather than rebuilding a legacy-only DTO.
     const input: AccountInput = { ...payload, key: payload.key || "" };
     busy.value = true;
     try {

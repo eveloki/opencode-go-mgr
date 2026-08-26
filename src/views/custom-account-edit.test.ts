@@ -44,7 +44,7 @@ function customAccount(overrides: Partial<Account> = {}): Account {
     custom_config: {
       account_id: "custom-1",
       base_url: "https://api.example.com/v1",
-      upstream_protocol: "responses",
+      upstream_protocols: ["responses"],
       auth_scheme: "bearer",
       created_at: "2026-08-21T00:00:00Z",
       updated_at: "2026-08-21T00:00:00Z",
@@ -56,7 +56,6 @@ function customAccount(overrides: Partial<Account> = {}): Account {
       verified_at: null,
       source: "manual",
     }],
-    acknowledgements: [],
     ...overrides,
   };
 }
@@ -199,5 +198,62 @@ test("invalid Custom capability edits are rejected before any account mutation",
       model_capabilities: [{ model_id: "a".repeat(201), protocol: "responses" }],
     }),
     (error) => error instanceof CustomCapabilityError && error.issue === "model_id_too_long",
+  );
+});
+
+test("Custom protocol set and auth scheme edits go through the custom-config route with the new values", async () => {
+  const account = customAccount();
+  const plan = planCustomAccountEdit(account, {
+    name: "Custom",
+    notes: "",
+    base_url: "https://api.example.com/v1",
+    upstream_protocols: ["messages", "chat_completions"],
+    auth_scheme: "x-api-key",
+    model_capabilities: [
+      { model_id: "model-a", protocol: "chat_completions" },
+      { model_id: "model-a", protocol: "messages" },
+    ],
+  });
+  assert.deepEqual(plan.customConfig, {
+    base_url: "https://api.example.com/v1",
+    upstream_protocols: ["chat_completions", "messages"],
+    auth_scheme: "x-api-key",
+  });
+  assert.deepEqual(await recordedWrites(plan), ["custom-config", "model-capabilities"]);
+
+  // Re-submitting the saved values unchanged rewrites nothing.
+  const settled = customAccount({
+    custom_config: {
+      ...account.custom_config!,
+      upstream_protocols: ["chat_completions", "messages"],
+      auth_scheme: "x-api-key",
+    },
+    model_capabilities: [
+      { account_id: "custom-1", model_id: "model-a", protocol: "chat_completions", verified_at: null, source: "manual" },
+      { account_id: "custom-1", model_id: "model-a", protocol: "messages", verified_at: null, source: "manual" },
+    ],
+  });
+  const noOp = planCustomAccountEdit(settled, {
+    name: "Custom",
+    notes: "",
+    base_url: "https://api.example.com/v1",
+    upstream_protocols: ["chat_completions", "messages"],
+    auth_scheme: "x-api-key",
+    model_capabilities: [
+      { model_id: "model-a", protocol: "chat_completions" },
+      { model_id: "model-a", protocol: "messages" },
+    ],
+  });
+  assert.deepEqual(await recordedWrites(noOp), []);
+
+  // An empty protocol set is rejected before any mutation.
+  assert.throws(
+    () => planCustomAccountEdit(account, {
+      name: "Custom",
+      base_url: "https://api.example.com/v1",
+      upstream_protocols: [],
+      model_capabilities: [{ model_id: "model-a", protocol: "responses" }],
+    }),
+    (error) => error instanceof CustomCapabilityError && error.issue === "protocol_mismatch",
   );
 });

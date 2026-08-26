@@ -53,14 +53,12 @@ test("add-account chooser omits singleton Zen Free and groups remaining families
       creation_availability: "available",
     }),
     catalogEntry("command-code", "goat", { routable: false, creation_availability: "available" }),
-    catalogEntry("scnet", "token-plan-basic", { routable: false, creation_availability: "available" }),
     catalogEntry("custom", "api", { routable: true, creation_availability: "available" }),
   ];
   const options = buildPlanOptions(catalog);
   assert.deepEqual(options.map(({ plan }) => plan.id), [
     "opencode-go",
     "command-code-goat",
-    "scnet",
     "custom-endpoint",
   ]);
   assert.deepEqual(
@@ -68,7 +66,6 @@ test("add-account chooser omits singleton Zen Free and groups remaining families
     [
       ["available", ["opencode-go", "custom-endpoint"]],
       ["draft", ["command-code-goat"]],
-      ["unavailable", ["scnet"]],
     ],
   );
 });
@@ -92,36 +89,15 @@ test("GOAT follows the catalog: routable means addable with verify-then-enable c
   assert.equal(draftGoat.creationHint, "创建为禁用草稿；验证与路由尚未就绪");
 });
 
-test("SCNet is sealed: archived, non-selectable, and never a draft", () => {
-  for (const catalog of [
-    null,
-    [catalogEntry("scnet", "token-plan-basic", { routable: true, creation_availability: "available" })],
-  ] as const) {
-    const scnet = buildPlanOptions(catalog).find(({ plan }) => plan.id === "scnet")!;
-    assert.equal(scnet.disabled, true);
-    assert.equal(scnet.disabledReason, "该方案已归档，暂不支持创建");
-    assert.equal(scnet.creationHint, "");
-    const groups = buildPlanChooserGroups(catalog);
-    const home = groups.find((group) => group.options.some(({ plan }) => plan.id === "scnet"))!;
-    assert.equal(home.id, "unavailable");
-  }
-});
-
 test("plan hints and disabled reasons are translation keys", () => {
   const catalog = [
     catalogEntry("opencode", "go", { display_name: "OpenCode Go Catalog" }),
-    catalogEntry("scnet", "token-plan-basic"),
-    catalogEntry("scnet", "token-plan-standard"),
-    catalogEntry("scnet", "token-plan-premium"),
   ];
   const options = buildPlanOptions(catalog);
   const go = options.find(({ plan }) => plan.id === "opencode-go")!;
-  const scnet = options.find(({ plan }) => plan.id === "scnet")!;
   const custom = options.find(({ plan }) => plan.id === "custom-endpoint")!;
 
   assert.equal(go.label, "OpenCode Go Catalog");
-  assert.equal(scnet.label, "SCNet");
-  assert.equal(scnet.disabled, true);
   assert.equal(custom.disabledReason, "服务商目录未提供该方案");
 
   const unavailable = buildPlanOptions([

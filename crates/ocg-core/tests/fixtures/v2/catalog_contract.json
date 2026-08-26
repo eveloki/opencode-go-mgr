@@ -53,42 +53,6 @@
       "routable": true
     },
     {
-      "provider_id": "scnet",
-      "offering_id": "token-plan-basic",
-      "verification_policy": "required",
-      "verification_runtime_availability": "unavailable",
-      "creation_availability": "unavailable",
-      "routable": false,
-      "requires_risk_notice": true,
-      "key_prefix": "sk-tp-",
-      "model_aliases_empty": true,
-      "required_form_field_ids": ["acknowledgement"]
-    },
-    {
-      "provider_id": "scnet",
-      "offering_id": "token-plan-standard",
-      "verification_policy": "required",
-      "verification_runtime_availability": "unavailable",
-      "creation_availability": "unavailable",
-      "routable": false,
-      "requires_risk_notice": true,
-      "key_prefix": "sk-tp-",
-      "model_aliases_empty": true,
-      "required_form_field_ids": ["acknowledgement"]
-    },
-    {
-      "provider_id": "scnet",
-      "offering_id": "token-plan-premium",
-      "verification_policy": "required",
-      "verification_runtime_availability": "unavailable",
-      "creation_availability": "unavailable",
-      "routable": false,
-      "requires_risk_notice": true,
-      "key_prefix": "sk-tp-",
-      "model_aliases_empty": true,
-      "required_form_field_ids": ["acknowledgement"]
-    },
-    {
       "provider_id": "custom",
       "offering_id": "api",
       "verification_policy": "required",

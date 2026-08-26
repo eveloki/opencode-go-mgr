@@ -116,16 +116,12 @@ export const useAccountsStore = defineStore("accounts", () => {
     return mutate(() => dashboardApi.verifyAccountConnection(id).then(applyAccount));
   }
 
-  async function putCustomConfig(id: string, config: { base_url: string; upstream_protocol: AccountProtocol; auth_scheme: "bearer" | "x-api-key" }): Promise<Account> {
+  async function putCustomConfig(id: string, config: { base_url: string; upstream_protocols: AccountProtocol[]; auth_scheme: "bearer" | "x-api-key" }): Promise<Account> {
     return mutate(() => dashboardApi.updateAccountCustomConfig(id, config).then(applyAccount));
   }
 
   async function putModelCapabilities(id: string, capabilities: AccountModelCapabilityInput[]): Promise<Account> {
     return mutate(() => dashboardApi.updateAccountModelCapabilities(id, capabilities).then(applyAccount));
-  }
-
-  async function acknowledge(id: string, acknowledgementId: string, version: string): Promise<Account> {
-    return mutate(() => dashboardApi.createAccountAcknowledgement(id, acknowledgementId, version).then(applyAccount));
   }
 
   async function loadUsage(id: string): Promise<UsageWindow> {
@@ -197,7 +193,6 @@ export const useAccountsStore = defineStore("accounts", () => {
     verifyConnection,
     putCustomConfig,
     putModelCapabilities,
-    acknowledge,
     loadUsage,
     loadPresentedUsage,
     patchUsage,

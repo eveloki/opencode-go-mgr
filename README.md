@@ -63,7 +63,8 @@ Auth:    Authorization: Bearer <key>
 1. Install and launch. The dashboard opens in your system browser once the
    gateway is ready; the tray icon brings it back.
 2. In **Accounts**, import an OpenCode Go account key, pick credential-free
-   Zen Free, or add a Custom API destination (verify, then enable). Copy the
+   Zen Free, or add a Custom API destination (declare protocols and models,
+   then enable — verification is optional). Copy the
    **Key** — the only secret your client ever sees.
 3. Point your client at `http://127.0.0.1:9042/v1`. **Applications** has
    per-client setup guides.

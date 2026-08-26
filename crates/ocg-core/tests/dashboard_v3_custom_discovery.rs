@@ -190,7 +190,7 @@ async fn send_raw(harness: &V3Harness, path: &str, body: &str) -> (StatusCode, V
 fn discover_body(base_url: &str, protocol: &str, auth: &str, api_key: Option<&str>) -> Value {
     let mut body = json!({
         "baseUrl": base_url,
-        "upstreamProtocol": protocol,
+        "upstreamProtocols": [protocol],
         "authScheme": auth,
     });
     if let Some(api_key) = api_key {
@@ -326,7 +326,7 @@ async fn create_custom_account(harness: &V3Harness, base_url: &str, auth: &str) 
                 "offeringId": CUSTOM_API_OFFERING_ID,
                 "customConfig": {
                     "baseUrl": base_url,
-                    "upstreamProtocol": "chat_completions",
+                    "upstreamProtocols": ["chat_completions"],
                     "authScheme": auth
                 },
                 "modelCapabilities": [{
@@ -345,8 +345,8 @@ async fn create_custom_account(harness: &V3Harness, base_url: &str, auth: &str) 
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[tokio::test]
@@ -399,7 +399,7 @@ async fn discovery_does_not_require_expected_revision_and_rejects_unknown_fields
         "/custom/models/discover",
         &json!({
             "baseUrl": origin.url,
-            "upstreamProtocol": "chat_completions",
+            "upstreamProtocols": ["chat_completions"],
             "authScheme": "bearer",
             "apiKey": CUSTOM_KEY,
             "expectedRevision": before
@@ -415,7 +415,7 @@ async fn discovery_does_not_require_expected_revision_and_rejects_unknown_fields
         "/custom/models/discover",
         &json!({
             "base_url": origin.url,
-            "upstream_protocol": "chat_completions",
+            "upstream_protocols": ["chat_completions"],
             "auth_scheme": "bearer",
             "api_key": CUSTOM_KEY
         }),
@@ -429,7 +429,7 @@ async fn discovery_does_not_require_expected_revision_and_rejects_unknown_fields
         "/custom/models/discover",
         &json!({
             "baseUrl": origin.url,
-            "upstreamProtocol": "gemini",
+            "upstreamProtocols": ["gemini"],
             "authScheme": "bearer",
             "apiKey": CUSTOM_KEY
         })
@@ -747,7 +747,7 @@ async fn discovery_rejects_malformed_inputs_before_upstream() {
         "/custom/models/discover",
         &json!({
             "baseUrl": origin.url,
-            "upstreamProtocol": "chat_completions",
+            "upstreamProtocols": ["chat_completions"],
             "authScheme": "bearer",
             "accountId": go_id
         }),
@@ -769,7 +769,7 @@ async fn discovery_rejects_malformed_inputs_before_upstream() {
         "/custom/models/discover",
         &json!({
             "baseUrl": origin.url,
-            "upstreamProtocol": "chat_completions",
+            "upstreamProtocols": ["chat_completions"],
             "authScheme": "bearer",
             "accountId": "missing-account"
         }),
@@ -807,7 +807,7 @@ async fn stored_key_discovery_does_not_use_a_stale_expected_revision() {
         "/custom/models/discover",
         &json!({
             "baseUrl": origin.url,
-            "upstreamProtocol": "chat_completions",
+            "upstreamProtocols": ["chat_completions"],
             "authScheme": "bearer",
             "accountId": account_id
         }),
@@ -877,7 +877,7 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
             "/custom/models/discover",
             Some(json!({
                 "base_url": origin.url,
-                "upstream_protocol": "chat_completions",
+                "upstream_protocols": ["chat_completions"],
                 "auth_scheme": "bearer",
                 "api_key": CUSTOM_KEY
             })),
@@ -896,7 +896,7 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
             "/custom/models/discover",
             Some(json!({
                 "base_url": auth_origin.url,
-                "upstream_protocol": "chat_completions",
+                "upstream_protocols": ["chat_completions"],
                 "auth_scheme": "bearer",
                 "api_key": CUSTOM_KEY
             })),
@@ -935,7 +935,7 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
     assert!(!v3_text.contains(CUSTOM_KEY), "{v3_auth}");
     assert_eq!(v3["revision"], before);
     assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
     harness.stop();
 }
 
@@ -992,7 +992,7 @@ async fn stored_key_hostile_upstream_ids_are_dropped_without_echoing_plaintext()
         "/custom/models/discover",
         &json!({
             "baseUrl": origin.url,
-            "upstreamProtocol": "chat_completions",
+            "upstreamProtocols": ["chat_completions"],
             "authScheme": "bearer",
             "accountId": account_id
         }),

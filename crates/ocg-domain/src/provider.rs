@@ -11,12 +11,9 @@ use crate::catalog::{
 use crate::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
     CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-    SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID,
-    ZEN_FREE_ACCOUNT_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fmt;
 
 /// Official Command Code Provider API v1 base. Production GOAT routes this
@@ -123,65 +120,6 @@ pub fn command_code_goat_includes_model(model_id: &str) -> bool {
             .any(|included| included.eq_ignore_ascii_case(model_id))
 }
 
-pub const SCNET_CREATION_UNAVAILABLE_REASON: &str = "SCNet Token Plans are archived and unsupported; existing drafts are preserved but new accounts cannot be created.";
-
-pub const SCNET_TOKEN_PLAN_KEY_PREFIX: &str = "sk-tp-";
-pub const SCNET_RISK_ACKNOWLEDGEMENT_ID: &str = "scnet-token-plan-restrictions";
-pub const SCNET_RISK_ACKNOWLEDGEMENT_VERSION: &str = "2026-08-21";
-pub const SCNET_RISK_ACKNOWLEDGEMENT_SOURCE_URL: &str =
-    "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html";
-pub const SCNET_RISK_ACKNOWLEDGEMENT_BODY: &str = "SCNet Token Plan keys (sk-tp-) are limited to interactive use inside AI tools. Account sharing and using the API as a custom application backend, automation script, or non-interactive batch caller is prohibited and may suspend the subscription or revoke the key.";
-/// Pinned SHA-256 of [`SCNET_RISK_ACKNOWLEDGEMENT_BODY`]. Changing the body
-/// requires an explicit acknowledgement version bump and this hash update.
-pub const SCNET_RISK_ACKNOWLEDGEMENT_CONTENT_HASH: &str =
-    "d8d82fda982880016cf7f3c5e6a8e944cac4dcf900643f31eab3cdfd05aa6e60";
-
-pub const SCNET_TOKEN_PLAN_OFFICIAL_BASIC_NAME: &str = "基础版";
-pub const SCNET_TOKEN_PLAN_OFFICIAL_STANDARD_NAME: &str = "标准版";
-pub const SCNET_TOKEN_PLAN_OFFICIAL_PREMIUM_NAME: &str = "高级版";
-/// Catalog `model_source` shared by token-plan-basic/standard/premium.
-/// Official usable-model table only; not a client alias registry.
-pub const SCNET_TOKEN_PLAN_MODEL_SOURCE: &str = "official_token_plan_usable_models_2026_08_21";
-pub const SCNET_TOKEN_PLAN_MODEL_SNAPSHOT_VERSION: &str = "2026-08-21";
-pub const SCNET_TOKEN_PLAN_MODEL_SOURCE_URL: &str = SCNET_RISK_ACKNOWLEDGEMENT_SOURCE_URL;
-
-/// Documented OpenAI/Anthropic bases and paths. Future adapter input only;
-/// this crate must not issue live Token Plan requests.
-pub const SCNET_TOKEN_PLAN_ENDPOINT_SOURCE_URL: &str =
-    "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/tutorial/quickstart.html";
-pub const SCNET_TOKEN_PLAN_OPENAI_BASE_URL: &str = "https://api.scnet.cn/api/llm/v1";
-pub const SCNET_TOKEN_PLAN_ANTHROPIC_BASE_URL: &str = "https://api.scnet.cn/api/llm/anthropic";
-pub const SCNET_TOKEN_PLAN_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
-pub const SCNET_TOKEN_PLAN_MESSAGES_PATH: &str = "/v1/messages";
-
-/// Official Token Plan usable-model table, 2026-08-21, exact case and order.
-/// Shared by 基础版/标准版/高级版. Do not publish as `model_aliases`.
-/// Catalog aliases come from the Alias registry's currently routeable
-/// mappings; these Plans stay unroutable, so that list stays empty.
-pub const SCNET_TOKEN_PLAN_USABLE_MODELS: &[&str] = &[
-    "GLM-5.2",
-    "GLM-5",
-    "GLM-5.1",
-    "Kimi-K3",
-    "Kimi-K2.7-Code",
-    "Kimi-K2.6",
-    "Kimi-K2.5",
-    "DeepSeek-V4-Flash",
-    "DeepSeek-V3.2",
-    "MiniMax-M3",
-    "MiniMax-M2.7",
-    "MiniMax-M2.5",
-    "MiMo-V2.5-Pro",
-];
-
-/// Pricing-table / FAQ extras that are not in the usable-model table.
-pub const SCNET_TOKEN_PLAN_EXCLUDED_PRICING_TABLE_OR_FAQ_MODELS: &[&str] = &[
-    "DeepSeek-V4-Pro",
-    "DeepSeek-V4-Flash-0731",
-    "Qwen3.8-max",
-    "Qwen3-235B-A22B",
-];
-
 pub const QUOTA_WINDOW_FIVE_HOURS: &str = "five_hours";
 pub const QUOTA_WINDOW_WEEK: &str = "week";
 pub const QUOTA_WINDOW_MONTH: &str = "month";
@@ -281,7 +219,7 @@ pub const PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES: &[UpstreamProtocolKind] = &
 pub const OPENCODE_CONSTRUCTABLE_PROTOCOLS: &[UpstreamProtocolKind] =
     PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES;
 
-/// Command Code / SCNet documented surfaces have no Responses path.
+/// Command Code documented surfaces have no Responses path.
 pub const PROTOCOL_FALLBACK_CHAT_MESSAGES: &[UpstreamProtocolKind] = &[
     UpstreamProtocolKind::ChatCompletions,
     UpstreamProtocolKind::Messages,
@@ -294,87 +232,6 @@ pub struct PlanFormField {
     pub required: bool,
     pub immutable_after_create: bool,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct PlanRiskNotice {
-    pub acknowledgement_id: &'static str,
-    pub version: &'static str,
-    pub source_url: &'static str,
-    pub body: &'static str,
-}
-
-impl PlanRiskNotice {
-    pub fn content_hash(self) -> String {
-        acknowledgement_content_hash(self.body)
-    }
-}
-
-/// Official Token Plan usage restrictions pinned from the 2026-08-21 docs.
-/// Adapter input only; these flags do not authorize outbound calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScnetTokenPlanUsageRestrictions {
-    pub interactive_ai_tools_only: bool,
-    pub account_sharing_prohibited: bool,
-    pub custom_application_backends_prohibited: bool,
-    pub automation_scripts_prohibited: bool,
-    pub non_interactive_batch_calls_prohibited: bool,
-    pub curl_style_non_interactive_calls_prohibited: bool,
-    pub quota_status_rest_established: bool,
-    pub non_billable_verification_established: bool,
-}
-
-pub const SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS: ScnetTokenPlanUsageRestrictions =
-    ScnetTokenPlanUsageRestrictions {
-        interactive_ai_tools_only: true,
-        account_sharing_prohibited: true,
-        custom_application_backends_prohibited: true,
-        automation_scripts_prohibited: true,
-        non_interactive_batch_calls_prohibited: true,
-        curl_style_non_interactive_calls_prohibited: true,
-        quota_status_rest_established: false,
-        non_billable_verification_established: false,
-    };
-
-/// Documented Token Plan HTTP contract. Do not concatenate these into a live
-/// client; official usage restrictions prohibit custom application backends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScnetTokenPlanDocumentedEndpoints {
-    pub source_url: &'static str,
-    pub openai_base_url: &'static str,
-    pub anthropic_base_url: &'static str,
-    pub chat_completions_path: &'static str,
-    pub messages_path: &'static str,
-    pub auth_scheme: UpstreamAuthScheme,
-}
-
-pub const SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS: ScnetTokenPlanDocumentedEndpoints =
-    ScnetTokenPlanDocumentedEndpoints {
-        source_url: SCNET_TOKEN_PLAN_ENDPOINT_SOURCE_URL,
-        openai_base_url: SCNET_TOKEN_PLAN_OPENAI_BASE_URL,
-        anthropic_base_url: SCNET_TOKEN_PLAN_ANTHROPIC_BASE_URL,
-        chat_completions_path: SCNET_TOKEN_PLAN_CHAT_COMPLETIONS_PATH,
-        messages_path: SCNET_TOKEN_PLAN_MESSAGES_PATH,
-        auth_scheme: UpstreamAuthScheme::Bearer,
-    };
-
-/// Versioned official usable-model snapshot shared by all three offerings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScnetTokenPlanModelSnapshot {
-    pub source: &'static str,
-    pub version: &'static str,
-    pub source_url: &'static str,
-    pub upstream_models: &'static [&'static str],
-    pub excluded_pricing_table_or_faq_models: &'static [&'static str],
-}
-
-pub const SCNET_TOKEN_PLAN_MODEL_SNAPSHOT: ScnetTokenPlanModelSnapshot =
-    ScnetTokenPlanModelSnapshot {
-        source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
-        version: SCNET_TOKEN_PLAN_MODEL_SNAPSHOT_VERSION,
-        source_url: SCNET_TOKEN_PLAN_MODEL_SOURCE_URL,
-        upstream_models: SCNET_TOKEN_PLAN_USABLE_MODELS,
-        excluded_pricing_table_or_faq_models: SCNET_TOKEN_PLAN_EXCLUDED_PRICING_TABLE_OR_FAQ_MODELS,
-    };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinPlan {
@@ -398,7 +255,6 @@ pub struct BuiltinPlan {
     pub auth_schemes: &'static [UpstreamAuthScheme],
     pub upstream_protocols: &'static [UpstreamProtocolKind],
     pub form_fields: &'static [PlanFormField],
-    pub risk_notice: Option<PlanRiskNotice>,
 }
 
 const NAME_FIELD: PlanFormField = PlanFormField {
@@ -425,12 +281,6 @@ const NOTES_FIELD: PlanFormField = PlanFormField {
     required: false,
     immutable_after_create: false,
 };
-const ACKNOWLEDGEMENT_FIELD: PlanFormField = PlanFormField {
-    id: "acknowledgement",
-    kind: "acknowledgement",
-    required: true,
-    immutable_after_create: false,
-};
 const BASE_URL_FIELD: PlanFormField = PlanFormField {
     id: "base_url",
     kind: "url",
@@ -441,13 +291,13 @@ const PROTOCOL_FIELD: PlanFormField = PlanFormField {
     id: "upstream_protocol",
     kind: "select",
     required: true,
-    immutable_after_create: true,
+    immutable_after_create: false,
 };
 const AUTH_SCHEME_FIELD: PlanFormField = PlanFormField {
     id: "auth_scheme",
     kind: "select",
     required: true,
-    immutable_after_create: true,
+    immutable_after_create: false,
 };
 const MODELS_FIELD: PlanFormField = PlanFormField {
     id: "model_capabilities",
@@ -460,13 +310,6 @@ const GO_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
 const GOAT_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
-const SCNET_FORM_FIELDS: [PlanFormField; 5] = [
-    NAME_FIELD,
-    KEY_FIELD,
-    PURCHASE_DATE_FIELD,
-    NOTES_FIELD,
-    ACKNOWLEDGEMENT_FIELD,
-];
 const CUSTOM_FORM_FIELDS: [PlanFormField; 7] = [
     NAME_FIELD,
     KEY_FIELD,
@@ -489,22 +332,11 @@ const GOAT_PROTOCOLS: [UpstreamProtocolKind; 2] = [
     UpstreamProtocolKind::ChatCompletions,
     UpstreamProtocolKind::Messages,
 ];
-const SCNET_PROTOCOLS: [UpstreamProtocolKind; 2] = [
-    UpstreamProtocolKind::ChatCompletions,
-    UpstreamProtocolKind::Messages,
-];
 const CUSTOM_PROTOCOLS: [UpstreamProtocolKind; 3] = [
     UpstreamProtocolKind::ChatCompletions,
     UpstreamProtocolKind::Responses,
     UpstreamProtocolKind::Messages,
 ];
-
-const SCNET_RISK_NOTICE: PlanRiskNotice = PlanRiskNotice {
-    acknowledgement_id: SCNET_RISK_ACKNOWLEDGEMENT_ID,
-    version: SCNET_RISK_ACKNOWLEDGEMENT_VERSION,
-    source_url: SCNET_RISK_ACKNOWLEDGEMENT_SOURCE_URL,
-    body: SCNET_RISK_ACKNOWLEDGEMENT_BODY,
-};
 
 const fn key_offering(provider_id: &'static str, offering_id: &'static str) -> BuiltinOffering {
     BuiltinOffering {
@@ -516,7 +348,7 @@ const fn key_offering(provider_id: &'static str, offering_id: &'static str) -> B
     }
 }
 
-pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
+pub const BUILTIN_PLANS: [BuiltinPlan; 4] = [
     BuiltinPlan {
         offering: key_offering(OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
         display_name: "OpenCode Go",
@@ -536,7 +368,6 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         auth_schemes: &BEARER_AUTH,
         upstream_protocols: &GO_PROTOCOLS,
         form_fields: &GO_FORM_FIELDS,
-        risk_notice: None,
     },
     BuiltinPlan {
         offering: BuiltinOffering {
@@ -565,7 +396,6 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         auth_schemes: &[],
         upstream_protocols: &GO_PROTOCOLS,
         form_fields: &[],
-        risk_notice: None,
     },
     BuiltinPlan {
         offering: key_offering(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
@@ -586,70 +416,6 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         auth_schemes: &BEARER_AUTH,
         upstream_protocols: &GOAT_PROTOCOLS,
         form_fields: &GOAT_FORM_FIELDS,
-        risk_notice: None,
-    },
-    BuiltinPlan {
-        offering: key_offering(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
-        display_name: "SCNet Token Plan Basic",
-        display_family: "SCNet",
-        creation_availability: CreationAvailability::Unavailable,
-        creation_unavailable_reason: Some(SCNET_CREATION_UNAVAILABLE_REASON),
-        verification_policy: VerificationPolicy::Required,
-        verification_runtime_availability: "unavailable",
-        routable: false,
-        managed_registration: false,
-        pricing_availability: "unavailable",
-        usage_availability: "unavailable",
-        manual_usage_calibration: false,
-        quota_unit: "credits",
-        model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
-        key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
-        auth_schemes: &BEARER_AUTH,
-        upstream_protocols: &SCNET_PROTOCOLS,
-        form_fields: &SCNET_FORM_FIELDS,
-        risk_notice: Some(SCNET_RISK_NOTICE),
-    },
-    BuiltinPlan {
-        offering: key_offering(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID),
-        display_name: "SCNet Token Plan Standard",
-        display_family: "SCNet",
-        creation_availability: CreationAvailability::Unavailable,
-        creation_unavailable_reason: Some(SCNET_CREATION_UNAVAILABLE_REASON),
-        verification_policy: VerificationPolicy::Required,
-        verification_runtime_availability: "unavailable",
-        routable: false,
-        managed_registration: false,
-        pricing_availability: "unavailable",
-        usage_availability: "unavailable",
-        manual_usage_calibration: false,
-        quota_unit: "credits",
-        model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
-        key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
-        auth_schemes: &BEARER_AUTH,
-        upstream_protocols: &SCNET_PROTOCOLS,
-        form_fields: &SCNET_FORM_FIELDS,
-        risk_notice: Some(SCNET_RISK_NOTICE),
-    },
-    BuiltinPlan {
-        offering: key_offering(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID),
-        display_name: "SCNet Token Plan Premium",
-        display_family: "SCNet",
-        creation_availability: CreationAvailability::Unavailable,
-        creation_unavailable_reason: Some(SCNET_CREATION_UNAVAILABLE_REASON),
-        verification_policy: VerificationPolicy::Required,
-        verification_runtime_availability: "unavailable",
-        routable: false,
-        managed_registration: false,
-        pricing_availability: "unavailable",
-        usage_availability: "unavailable",
-        manual_usage_calibration: false,
-        quota_unit: "credits",
-        model_source: SCNET_TOKEN_PLAN_MODEL_SOURCE,
-        key_prefix: Some(SCNET_TOKEN_PLAN_KEY_PREFIX),
-        auth_schemes: &BEARER_AUTH,
-        upstream_protocols: &SCNET_PROTOCOLS,
-        form_fields: &SCNET_FORM_FIELDS,
-        risk_notice: Some(SCNET_RISK_NOTICE),
     },
     BuiltinPlan {
         offering: key_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
@@ -670,18 +436,14 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         auth_schemes: &CUSTOM_AUTH,
         upstream_protocols: &CUSTOM_PROTOCOLS,
         form_fields: &CUSTOM_FORM_FIELDS,
-        risk_notice: None,
     },
 ];
 
-pub const BUILTIN_OFFERINGS: [BuiltinOffering; 7] = [
+pub const BUILTIN_OFFERINGS: [BuiltinOffering; 4] = [
     BUILTIN_PLANS[0].offering,
     BUILTIN_PLANS[1].offering,
     BUILTIN_PLANS[2].offering,
     BUILTIN_PLANS[3].offering,
-    BUILTIN_PLANS[4].offering,
-    BUILTIN_PLANS[5].offering,
-    BUILTIN_PLANS[6].offering,
 ];
 
 pub fn default_provider_id() -> String {
@@ -718,16 +480,14 @@ pub enum ProviderAdapterKind {
     OpenCodeGo,
     ZenFree,
     CommandCodeGoat,
-    Scnet,
     ConfigurableHttp,
 }
 
 impl ProviderAdapterKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 4] = [
         Self::OpenCodeGo,
         Self::ZenFree,
         Self::CommandCodeGoat,
-        Self::Scnet,
         Self::ConfigurableHttp,
     ];
 
@@ -736,9 +496,6 @@ impl ProviderAdapterKind {
             (OPENCODE_PROVIDER_ID, GO_OFFERING_ID) => Some(Self::OpenCodeGo),
             (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => Some(Self::ZenFree),
             (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => Some(Self::CommandCodeGoat),
-            (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-            | (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID)
-            | (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID) => Some(Self::Scnet),
             (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID) => Some(Self::ConfigurableHttp),
             _ => None,
         }
@@ -749,7 +506,6 @@ impl ProviderAdapterKind {
             Self::OpenCodeGo => "opencode_go",
             Self::ZenFree => "zen_free",
             Self::CommandCodeGoat => "command_code_goat",
-            Self::Scnet => "scnet",
             Self::ConfigurableHttp => "configurable_http",
         }
     }
@@ -761,7 +517,6 @@ impl ProviderAdapterKind {
             Self::OpenCodeGo => Some(OPENCODE_PROVIDER_ID),
             Self::ZenFree => Some(OPENCODE_ZEN_FREE_PROVIDER_ID),
             Self::CommandCodeGoat => Some(COMMAND_CODE_PROVIDER_ID),
-            Self::Scnet => Some(SCNET_PROVIDER_ID),
             Self::ConfigurableHttp => None,
         }
     }
@@ -771,14 +526,13 @@ impl ProviderAdapterKind {
             Self::OpenCodeGo | Self::ZenFree | Self::CommandCodeGoat | Self::ConfigurableHttp => {
                 true
             }
-            Self::Scnet => false,
         }
     }
 
     pub const fn protocol_probe_supported(self) -> bool {
         match self {
             Self::OpenCodeGo | Self::ZenFree | Self::ConfigurableHttp => true,
-            Self::CommandCodeGoat | Self::Scnet => false,
+            Self::CommandCodeGoat => false,
         }
     }
 }
@@ -797,38 +551,10 @@ pub struct ZenFreeAdapter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CommandCodeGoatAdapter;
 
-/// Zero-sized SCNet Token Plan adapter identity. Production stays fail-closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ScnetAdapter;
-
 /// Zero-sized Configurable HTTP adapter identity (Custom API). Not a base class
 /// other adapters inherit from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConfigurableHttpAdapter;
-
-pub fn is_scnet_token_plan(provider_id: &str, offering_id: &str) -> bool {
-    matches!(
-        ProviderAdapterKind::from_offering(provider_id, offering_id),
-        Some(ProviderAdapterKind::Scnet)
-    )
-}
-
-pub fn scnet_token_plan_official_offering_name(offering_id: &str) -> Option<&'static str> {
-    match offering_id {
-        SCNET_TOKEN_PLAN_BASIC_OFFERING_ID => Some(SCNET_TOKEN_PLAN_OFFICIAL_BASIC_NAME),
-        SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID => Some(SCNET_TOKEN_PLAN_OFFICIAL_STANDARD_NAME),
-        SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID => Some(SCNET_TOKEN_PLAN_OFFICIAL_PREMIUM_NAME),
-        _ => None,
-    }
-}
-
-/// Shared official snapshot for every Token Plan offering. None for other Plans.
-pub fn scnet_token_plan_model_snapshot(
-    provider_id: &str,
-    offering_id: &str,
-) -> Option<ScnetTokenPlanModelSnapshot> {
-    is_scnet_token_plan(provider_id, offering_id).then_some(SCNET_TOKEN_PLAN_MODEL_SNAPSHOT)
-}
 
 pub fn is_command_code_goat(provider_id: &str, offering_id: &str) -> bool {
     matches!(
@@ -995,7 +721,6 @@ pub enum ModelCatalogKind {
     BuiltinGoProtocolTable,
     ZenFreePersistedSnapshot,
     BuiltinCommandCodeProtocolTable,
-    OfficialTokenPlanUsableModels,
     AccountDeclaredCapabilities,
 }
 
@@ -1049,19 +774,17 @@ pub struct InferenceRoutingDescriptor {
 pub enum ProtocolMatrixKind {
     OpenCodeModelProtocols,
     CommandCodeNative,
-    DocumentedChatAndMessages,
     AccountDeclaredProtocol,
 }
 
 /// Immutable adapter ceiling for explicit protocol probes. Distinct from
 /// static/preset verified support, which still begins from `MODEL_PROTOCOLS`
-/// (OpenCode/Zen), Command Code native rows, SCNet documented surfaces, or
-/// the Custom account's declared protocol.
+/// (OpenCode/Zen), Command Code native rows, or the Custom account's declared
+/// protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuralProbeCeiling {
-    /// GOAT/SCNet: request-path probes are unavailable. GOAT production uses
-    /// saved GET `/models` facts plus hard-coded family rules. SCNet stays
-    /// unroutable.
+    /// GOAT: request-path probes are unavailable. GOAT production uses saved
+    /// GET `/models` facts plus hard-coded family rules.
     Unavailable,
     /// Known OpenCode Go models: Chat Completions, Responses, and Messages
     /// all have constructable `/v1/...` paths and OpenCode auth.
@@ -1148,7 +871,6 @@ pub struct CardActionsDescriptor {
     pub manual_usage_calibration: bool,
     pub connection_verify: CardVerifyAction,
     pub protocol_and_auth_immutable_after_create: bool,
-    pub risk_acknowledgement: bool,
     pub protocol_probe: bool,
     pub catalog_refresh: bool,
 }
@@ -1160,7 +882,6 @@ mod sealed {
 impl sealed::Sealed for OpenCodeGoAdapter {}
 impl sealed::Sealed for ZenFreeAdapter {}
 impl sealed::Sealed for CommandCodeGoatAdapter {}
-impl sealed::Sealed for ScnetAdapter {}
 impl sealed::Sealed for ConfigurableHttpAdapter {}
 
 /// Static model-catalog capability contract. Sealed to the five concrete
@@ -1241,7 +962,6 @@ impl ProviderAdapterKind {
             Self::OpenCodeGo => ProviderCapabilities::compose(OpenCodeGoAdapter, plan),
             Self::ZenFree => ProviderCapabilities::compose(ZenFreeAdapter, plan),
             Self::CommandCodeGoat => ProviderCapabilities::compose(CommandCodeGoatAdapter, plan),
-            Self::Scnet => ProviderCapabilities::compose(ScnetAdapter, plan),
             Self::ConfigurableHttp => ProviderCapabilities::compose(ConfigurableHttpAdapter, plan),
         }
     }
@@ -1354,7 +1074,6 @@ impl CardCapabilities for OpenCodeGoAdapter {
             manual_usage_calibration: plan.manual_usage_calibration,
             connection_verify: CardVerifyAction::Optional,
             protocol_and_auth_immutable_after_create: false,
-            risk_acknowledgement: plan.risk_notice.is_some(),
             protocol_probe: true,
             catalog_refresh: true,
         }
@@ -1462,7 +1181,6 @@ impl CardCapabilities for ZenFreeAdapter {
             manual_usage_calibration: plan.manual_usage_calibration,
             connection_verify: CardVerifyAction::NotApplicable,
             protocol_and_auth_immutable_after_create: false,
-            risk_acknowledgement: plan.risk_notice.is_some(),
             protocol_probe: true,
             catalog_refresh: true,
         }
@@ -1570,117 +1288,8 @@ impl CardCapabilities for CommandCodeGoatAdapter {
             manual_usage_calibration: plan.manual_usage_calibration,
             connection_verify: CardVerifyAction::AvailableThenExplicitEnable,
             protocol_and_auth_immutable_after_create: false,
-            risk_acknowledgement: plan.risk_notice.is_some(),
             protocol_probe: false,
             catalog_refresh: true,
-        }
-    }
-}
-
-impl ModelCatalogAdapter for ScnetAdapter {
-    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
-        ModelCatalogDescriptor {
-            kind: ModelCatalogKind::OfficialTokenPlanUsableModels,
-            catalog_source: plan.model_source,
-            publishes_client_aliases: false,
-            admin_explicit_refresh: false,
-            overlays_declared_ids: false,
-            snapshot_is_adapter_input_only: true,
-        }
-    }
-}
-
-impl InferenceAdapter for ScnetAdapter {
-    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
-        InferenceRoutingDescriptor {
-            catalog_routable: plan.routable,
-            production_inference: false,
-            channel: Some(InferenceChannelKind::Go),
-            credential_kind: plan.offering.credential_kind,
-            quota_scope: plan.offering.quota_scope,
-            auth: InferenceAuthDescriptor::Bearer,
-            follow_redirects: false,
-            origin: InferenceOriginKind::None,
-            loopback_test_seam_only: false,
-        }
-    }
-}
-
-impl ProtocolProbeAdapter for ScnetAdapter {
-    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
-        ProtocolProbeDescriptor {
-            request_path_may_trial: false,
-            matrix: ProtocolMatrixKind::DocumentedChatAndMessages,
-            unknown_zen_free_defaults_to_chat: false,
-            fallback_priority: PROTOCOL_FALLBACK_CHAT_MESSAGES,
-            explicit_probe: false,
-            structural_ceiling: StructuralProbeCeiling::Unavailable,
-        }
-    }
-}
-
-impl VerificationAdapter for ScnetAdapter {
-    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
-        VerificationDescriptor {
-            policy: plan.verification_policy,
-            runtime_availability: plan.verification_runtime_availability,
-            never_auto_enable: true,
-            probe_first_declared_model: false,
-            uses_get_models: false,
-        }
-    }
-}
-
-impl UsageAdapter for ScnetAdapter {
-    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
-        UsageDescriptor {
-            catalog_availability: plan.usage_availability,
-            contract: UsageContractKind::Unavailable,
-            endpoint: None,
-            experimental: false,
-            automatic_sync: false,
-            authoritative_for_quota: false,
-            affects_inference_eligibility: false,
-            publishes_capability: false,
-            manual_calibration: plan.manual_usage_calibration,
-        }
-    }
-}
-
-impl PricingAdapter for ScnetAdapter {
-    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
-        catalog_pricing(plan)
-    }
-}
-
-impl ErrorPolicyAdapter for ScnetAdapter {
-    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
-        ErrorCooldownDescriptor {
-            parse_opencode_go_windows_on_429: false,
-            schedule_official_go_usage_after_429: false,
-            generic_provider_key_cooldown: false,
-            egress_ip_shared_free_cooldown: false,
-            inference_401_passthrough: false,
-            success_cost_state_free: false,
-        }
-    }
-}
-
-impl CardCapabilities for ScnetAdapter {
-    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
-        CardActionsDescriptor {
-            persisted_enable_allowed: plan.routable,
-            enable_requires_verification: true,
-            managed_registration: plan.managed_registration,
-            fetch_zen_models: false,
-            discover_models: false,
-            usage_refresh: false,
-            manual_usage_calibration: plan.manual_usage_calibration,
-            connection_verify: CardVerifyAction::UnavailableNotImplemented,
-            protocol_and_auth_immutable_after_create: false,
-            risk_acknowledgement: plan.risk_notice.is_some(),
-            protocol_probe: false,
-            catalog_refresh: false,
         }
     }
 }
@@ -1778,23 +1387,18 @@ impl CardCapabilities for ConfigurableHttpAdapter {
     fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
         CardActionsDescriptor {
             persisted_enable_allowed: plan.routable,
-            enable_requires_verification: true,
+            enable_requires_verification: false,
             managed_registration: plan.managed_registration,
             fetch_zen_models: false,
             discover_models: true,
             usage_refresh: false,
             manual_usage_calibration: plan.manual_usage_calibration,
             connection_verify: CardVerifyAction::AvailableThenExplicitEnable,
-            protocol_and_auth_immutable_after_create: true,
-            risk_acknowledgement: plan.risk_notice.is_some(),
+            protocol_and_auth_immutable_after_create: false,
             protocol_probe: true,
             catalog_refresh: true,
         }
     }
-}
-
-pub fn acknowledgement_content_hash(body: &str) -> String {
-    format!("{:x}", Sha256::digest(body.as_bytes()))
 }
 
 pub fn default_verification_status(plan: BuiltinPlan) -> ConnectionVerificationStatus {
@@ -2028,10 +1632,7 @@ mod tests {
     use crate::ids::{
         ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GO_OFFERING_ID,
-        GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID,
-        SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, SCNET_TOKEN_PLAN_OFFERING_IDS,
-        SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID,
-        ZEN_FREE_ACCOUNT_ID,
+        GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
     };
 
     #[test]
@@ -2135,7 +1736,7 @@ mod tests {
 
     #[test]
     fn catalog_hardcodes_plans_and_keeps_unverified_offerings_unroutable() {
-        assert_eq!(BUILTIN_PLANS.len(), 7);
+        assert_eq!(BUILTIN_PLANS.len(), 4);
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert!(goat.routable);
         assert_eq!(goat.verification_policy, VerificationPolicy::Required);
@@ -2168,28 +1769,6 @@ mod tests {
             GOAT_OFFERING_ID
         ));
         assert!(!is_command_code_goat(OPENCODE_PROVIDER_ID, GO_OFFERING_ID));
-
-        let basic = builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
-        assert!(!basic.routable);
-        assert_eq!(
-            basic.creation_availability,
-            CreationAvailability::Unavailable
-        );
-        assert_eq!(
-            basic.creation_unavailable_reason,
-            Some(SCNET_CREATION_UNAVAILABLE_REASON)
-        );
-        assert_eq!(
-            basic.risk_notice.unwrap().acknowledgement_id,
-            SCNET_RISK_ACKNOWLEDGEMENT_ID
-        );
-        assert!(
-            validate_plan_key(basic, "sk-live-not-token")
-                .unwrap_err()
-                .to_string()
-                .contains(SCNET_TOKEN_PLAN_KEY_PREFIX)
-        );
-        assert!(validate_plan_key(basic, "sk-tp-live").is_ok());
 
         let custom = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
         assert!(custom.routable);
@@ -2312,185 +1891,6 @@ mod tests {
     }
 
     #[test]
-    fn scnet_acknowledgement_hash_is_stable() {
-        let notice = SCNET_RISK_NOTICE;
-        assert_eq!(notice.acknowledgement_id, SCNET_RISK_ACKNOWLEDGEMENT_ID);
-        assert_eq!(notice.version, SCNET_RISK_ACKNOWLEDGEMENT_VERSION);
-        assert_eq!(notice.source_url, SCNET_RISK_ACKNOWLEDGEMENT_SOURCE_URL);
-        assert_eq!(notice.body, SCNET_RISK_ACKNOWLEDGEMENT_BODY);
-        assert_eq!(
-            notice.content_hash(),
-            SCNET_RISK_ACKNOWLEDGEMENT_CONTENT_HASH
-        );
-        assert_eq!(
-            notice.content_hash(),
-            acknowledgement_content_hash(SCNET_RISK_ACKNOWLEDGEMENT_BODY)
-        );
-        assert_ne!(notice.content_hash(), acknowledgement_content_hash("other"));
-    }
-
-    #[test]
-    fn scnet_token_plans_share_official_usable_model_snapshot() {
-        assert_eq!(
-            SCNET_TOKEN_PLAN_USABLE_MODELS,
-            [
-                "GLM-5.2",
-                "GLM-5",
-                "GLM-5.1",
-                "Kimi-K3",
-                "Kimi-K2.7-Code",
-                "Kimi-K2.6",
-                "Kimi-K2.5",
-                "DeepSeek-V4-Flash",
-                "DeepSeek-V3.2",
-                "MiniMax-M3",
-                "MiniMax-M2.7",
-                "MiniMax-M2.5",
-                "MiMo-V2.5-Pro",
-            ]
-        );
-        let expected = SCNET_TOKEN_PLAN_MODEL_SNAPSHOT;
-        let mut previous: Option<BuiltinPlan> = None;
-        for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
-            let plan = builtin_plan(SCNET_PROVIDER_ID, offering_id).unwrap();
-            assert!(is_scnet_token_plan(
-                plan.offering.provider_id,
-                plan.offering.offering_id
-            ));
-            assert_eq!(
-                plan.creation_availability,
-                CreationAvailability::Unavailable
-            );
-            assert_eq!(
-                plan.creation_unavailable_reason,
-                Some(SCNET_CREATION_UNAVAILABLE_REASON)
-            );
-            assert!(!plan.routable);
-            assert_eq!(plan.model_source, SCNET_TOKEN_PLAN_MODEL_SOURCE);
-            assert_eq!(
-                scnet_token_plan_model_snapshot(
-                    plan.offering.provider_id,
-                    plan.offering.offering_id
-                ),
-                Some(expected)
-            );
-            assert!(std::ptr::eq(
-                expected.upstream_models,
-                SCNET_TOKEN_PLAN_USABLE_MODELS
-            ));
-            if let Some(previous) = previous {
-                assert_eq!(previous.model_source, plan.model_source);
-                assert_eq!(
-                    scnet_token_plan_model_snapshot(
-                        previous.offering.provider_id,
-                        previous.offering.offering_id
-                    )
-                    .unwrap()
-                    .upstream_models,
-                    expected.upstream_models
-                );
-            }
-            previous = Some(plan);
-        }
-        assert_eq!(
-            scnet_token_plan_official_offering_name(SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
-            Some(SCNET_TOKEN_PLAN_OFFICIAL_BASIC_NAME)
-        );
-        assert_eq!(
-            scnet_token_plan_official_offering_name(SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID),
-            Some(SCNET_TOKEN_PLAN_OFFICIAL_STANDARD_NAME)
-        );
-        assert_eq!(
-            scnet_token_plan_official_offering_name(SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID),
-            Some(SCNET_TOKEN_PLAN_OFFICIAL_PREMIUM_NAME)
-        );
-    }
-
-    #[test]
-    fn scnet_token_plan_excludes_pricing_table_and_faq_extras() {
-        for extra in SCNET_TOKEN_PLAN_EXCLUDED_PRICING_TABLE_OR_FAQ_MODELS {
-            assert!(
-                !SCNET_TOKEN_PLAN_USABLE_MODELS.contains(extra),
-                "{extra} is a pricing-table/FAQ extra and must not enter the usable snapshot"
-            );
-        }
-        assert!(!SCNET_TOKEN_PLAN_USABLE_MODELS.contains(&"glm-5.2"));
-        assert!(!SCNET_TOKEN_PLAN_USABLE_MODELS.contains(&"DeepSeek-V4-Pro"));
-        assert!(!SCNET_TOKEN_PLAN_USABLE_MODELS.contains(&"Qwen3-235B-A22B"));
-    }
-
-    #[test]
-    fn scnet_token_plans_stay_fail_closed_without_quota_windows() {
-        for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
-            let plan = builtin_plan(SCNET_PROVIDER_ID, offering_id).unwrap();
-            assert!(!plan.routable);
-            assert_eq!(plan.verification_policy, VerificationPolicy::Required);
-            assert_eq!(plan.verification_runtime_availability, "unavailable");
-            assert_eq!(plan.pricing_availability, "unavailable");
-            assert_eq!(plan.usage_availability, "unavailable");
-            assert_eq!(plan.quota_unit, "credits");
-            assert_ne!(plan.quota_unit, QUOTA_WINDOW_FIVE_HOURS);
-            assert_ne!(plan.quota_unit, QUOTA_WINDOW_WEEK);
-            assert_eq!(plan.key_prefix, Some(SCNET_TOKEN_PLAN_KEY_PREFIX));
-            assert_eq!(plan.auth_schemes, &BEARER_AUTH);
-            assert_eq!(
-                plan.upstream_protocols,
-                &[
-                    UpstreamProtocolKind::ChatCompletions,
-                    UpstreamProtocolKind::Messages
-                ]
-            );
-            assert!(
-                !plan
-                    .upstream_protocols
-                    .contains(&UpstreamProtocolKind::Responses)
-            );
-            assert!(validate_plan_key(plan, "sk-tp-live").is_ok());
-            assert!(
-                validate_plan_key(plan, "sk-live-not-token")
-                    .unwrap_err()
-                    .to_string()
-                    .contains(SCNET_TOKEN_PLAN_KEY_PREFIX)
-            );
-        }
-        const {
-            assert!(!SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.quota_status_rest_established);
-            assert!(!SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.non_billable_verification_established);
-            assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.custom_application_backends_prohibited);
-            assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.automation_scripts_prohibited);
-            assert!(SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.non_interactive_batch_calls_prohibited);
-            assert!(
-                SCNET_TOKEN_PLAN_USAGE_RESTRICTIONS.curl_style_non_interactive_calls_prohibited
-            );
-        };
-        assert_eq!(
-            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.auth_scheme,
-            UpstreamAuthScheme::Bearer
-        );
-        assert_eq!(
-            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.openai_base_url,
-            "https://api.scnet.cn/api/llm/v1"
-        );
-        assert_eq!(
-            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.anthropic_base_url,
-            "https://api.scnet.cn/api/llm/anthropic"
-        );
-        assert_eq!(
-            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.chat_completions_path,
-            "/chat/completions"
-        );
-        assert_eq!(
-            SCNET_TOKEN_PLAN_DOCUMENTED_ENDPOINTS.messages_path,
-            "/v1/messages"
-        );
-        let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        assert_eq!(goat.model_source, COMMAND_CODE_GOAT_MODEL_SOURCE);
-        assert!(
-            scnet_token_plan_model_snapshot(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none()
-        );
-    }
-
-    #[test]
     fn provider_registry_is_exhaustive_for_plans_and_adapter_kinds() {
         let mut seen = std::collections::HashSet::new();
         assert_eq!(ProviderRegistry::iter().count(), BUILTIN_PLANS.len());
@@ -2562,15 +1962,6 @@ mod tests {
                     assert!(descriptor.inference.production_inference);
                     assert!(descriptor.inference.catalog_routable);
                 }
-                ProviderAdapterKind::Scnet => {
-                    assert!(!descriptor.inference.production_inference);
-                    assert!(!descriptor.inference.catalog_routable);
-                    assert_eq!(descriptor.verification.runtime_availability, "unavailable");
-                    assert_eq!(
-                        descriptor.card_actions.connection_verify,
-                        CardVerifyAction::UnavailableNotImplemented
-                    );
-                }
             }
         }
         for kind in ProviderAdapterKind::ALL {
@@ -2582,7 +1973,7 @@ mod tests {
         assert_eq!(seen.len(), ProviderAdapterKind::ALL.len());
         assert!(ProviderAdapterKind::from_offering("unknown", "unknown").is_none());
         assert!(ProviderRegistry::get("unknown", "unknown").is_none());
-        assert_eq!(ProviderAdapterKind::ALL.len(), 5);
+        assert_eq!(ProviderAdapterKind::ALL.len(), 4);
     }
 
     #[test]
@@ -2677,24 +2068,6 @@ mod tests {
         assert!(goat.verification.uses_get_models);
         assert!(goat.verification.never_auto_enable);
 
-        let scnet =
-            ProviderRegistry::get(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
-        assert_eq!(scnet.kind, ProviderAdapterKind::Scnet);
-        assert!(scnet.model_catalog.snapshot_is_adapter_input_only);
-        assert!(!scnet.usage.publishes_capability);
-        assert_eq!(scnet.inference.origin, InferenceOriginKind::None);
-        assert!(scnet.card_actions.risk_acknowledgement);
-        assert_eq!(
-            scnet.protocol_probe.matrix,
-            ProtocolMatrixKind::DocumentedChatAndMessages
-        );
-        assert!(!scnet.protocol_probe.explicit_probe);
-        assert_eq!(
-            scnet.protocol_probe.structural_ceiling,
-            StructuralProbeCeiling::Unavailable
-        );
-        assert!(!scnet.card_actions.protocol_probe);
-
         let custom = ProviderRegistry::get(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
         assert_eq!(custom.kind, ProviderAdapterKind::ConfigurableHttp);
         assert_eq!(
@@ -2714,7 +2087,8 @@ mod tests {
             custom.card_actions.connection_verify,
             CardVerifyAction::AvailableThenExplicitEnable
         );
-        assert!(custom.card_actions.protocol_and_auth_immutable_after_create);
+        assert!(!custom.card_actions.protocol_and_auth_immutable_after_create);
+        assert!(!custom.card_actions.enable_requires_verification);
         assert!(custom.card_actions.discover_models);
         assert!(custom.card_actions.protocol_probe);
         assert!(custom.card_actions.catalog_refresh);
@@ -2727,7 +2101,6 @@ mod tests {
         assert_ne!(go.kind, ProviderAdapterKind::ConfigurableHttp);
         assert_ne!(zen.kind, ProviderAdapterKind::ConfigurableHttp);
         assert_ne!(goat.kind, ProviderAdapterKind::ConfigurableHttp);
-        assert_ne!(scnet.kind, ProviderAdapterKind::ConfigurableHttp);
         assert_eq!(
             ProviderAdapterKind::from_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
             Some(ProviderAdapterKind::ConfigurableHttp)
@@ -2760,7 +2133,6 @@ mod tests {
                 ProviderAdapterKind::OpenCodeGo => compose(OpenCodeGoAdapter, plan),
                 ProviderAdapterKind::ZenFree => compose(ZenFreeAdapter, plan),
                 ProviderAdapterKind::CommandCodeGoat => compose(CommandCodeGoatAdapter, plan),
-                ProviderAdapterKind::Scnet => compose(ScnetAdapter, plan),
                 ProviderAdapterKind::ConfigurableHttp => compose(ConfigurableHttpAdapter, plan),
             };
             let descriptor =
@@ -2791,9 +2163,6 @@ mod tests {
         let goat_plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert!(CommandCodeGoatAdapter::inference(goat_plan).production_inference);
         assert!(CommandCodeGoatAdapter::verification(goat_plan).uses_get_models);
-        let scnet_plan =
-            builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
-        assert!(!ScnetAdapter::inference(scnet_plan).production_inference);
         let zen_plan =
             builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();
         assert!(ZenFreeAdapter::protocol_probe(zen_plan).unknown_zen_free_defaults_to_chat);
@@ -2874,12 +2243,12 @@ mod tests {
         );
         assert_eq!(
             ProviderBindingError::KeyPrefixMismatch {
-                provider_id: "scnet".into(),
-                offering_id: "token-plan-basic".into(),
-                prefix: "sk-tp-".into(),
+                provider_id: "custom".into(),
+                offering_id: "api".into(),
+                prefix: "x-".into(),
             }
             .to_string(),
-            "provider offering `scnet/token-plan-basic` requires key prefix `sk-tp-`"
+            "provider offering `custom/api` requires key prefix `x-`"
         );
         assert_eq!(
             ProviderBindingError::InvalidCustomBaseUrl("base URL is required".into()).to_string(),
@@ -2936,10 +2305,6 @@ mod tests {
                 .is_ok_and(|models| models == ["gpt-5.4"])
         );
         assert!(ensure_offering_can_enable(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_ok());
-        assert!(
-            ensure_offering_can_enable(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-                .is_err()
-        );
     }
 
     #[test]

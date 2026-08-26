@@ -212,14 +212,12 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 | OpenCode Go | `opencode` / `go` | 是 | 只接受官方分发 Key |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 无凭据单例，数据库持有 |
 | Command Code GOAT | `command-code` / `goat` | 否 | 禁用 `pending` 草稿；验证 `501` |
-| SCNet Token Plans | `scnet` / `token-plan-basic\|standard\|premium` | 否 | `sk-tp-` 前缀；验证 `501` |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地 |
 
-所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会禁用遗留的已启用 GOAT 与全部三个 SCNet tier，且不改 `updated_at`；未验证 GOAT 重置为 `pending`。Custom 的 enabled 状态保留。Go、Zen Free 与未知 pair 不受影响。
+所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会禁用遗留的已启用 GOAT，且不改 `updated_at`；未验证 GOAT 重置为 `pending`。Custom 的 enabled 状态保留。Go、Zen Free 与未知 pair 不受影响。
 
-Custom API（`custom.rs` + `custom_http.rs`）接受任意语法合法的 HTTP 或 HTTPS 源；拒绝 URL 内嵌凭据、query 与 fragment。不跟随重定向，不转发 dashboard 或客户端鉴权，只构造已配置的 Bearer 或 `x-api-key`。拼接 endpoint 必须保持 scheme、host、port 与 base-path 前缀。`connect_timeout_secs` 夹到 5–60 秒。创建/更新后仍为禁用 `pending`。验证对第一个声明模型发一次协议正确的最小非流式请求；只有 `2xx` JSON object 成功。验证不发现或改写能力，也不会自动启用。验证成功后需显式启用。Key、base URL 或能力变更会使验证失效并禁用账号；协议与鉴权方案创建后固定不变。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
+Custom API（`custom.rs` + `custom_http.rs`）接受任意语法合法的 HTTP 或 HTTPS 源；拒绝 URL 内嵌凭据、query 与 fragment。不跟随重定向，不转发 dashboard 或客户端鉴权，只构造已配置的 Bearer 或 `x-api-key`。拼接 endpoint 必须保持 scheme、host、port 与 base-path 前缀。`connect_timeout_secs` 夹到 5–60 秒。账号通过表单复选框声明 1–3 个协议（chat_completions / responses / messages），对该账号所有模型统一生效；声明的协议立即作为预设证据参与路由。Custom 验证为可选：`verification_status` 为 `pending` 时仍可启用。verify 动作用第一个声明模型探测每个已选协议，只有全部返回 `2xx` JSON object 才算成功，不会发现/改写能力，也不会自动启用。修改 Key、base URL、声明能力、协议集或鉴权方案会把 `verification_status` 重置为 `pending`，但账号保持启用。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
 
-SCNet 官方可用模型快照 `2026-08-21`（大小写与顺序与代码保持一致，只作适配器输入，不会作为 `model_aliases`）：`GLM-5.2`、`GLM-5`、`GLM-5.1`、`Kimi-K3`、`Kimi-K2.7-Code`、`Kimi-K2.6`、`Kimi-K2.5`、`DeepSeek-V4-Flash`、`DeepSeek-V3.2`、`MiniMax-M3`、`MiniMax-M2.7`、`MiniMax-M2.5`、`MiMo-V2.5-Pro`。价格表 / FAQ 里 **不在** 该表的额外名称：`DeepSeek-V4-Pro`、`DeepSeek-V4-Flash-0731`、`Qwen3.8-max`、`Qwen3-235B-A22B`。文档记载的 base 是 `https://api.scnet.cn/api/llm/v1` 与 `https://api.scnet.cn/api/llm/anthropic`。风险确认 id `scnet-token-plan-restrictions`，版本 `2026-08-21`。本 crate 不会对 Token Plan 发真实请求。
 
 ## 控制面
 
@@ -247,7 +245,7 @@ Vue SPA 是当前唯一的面板客户端，走 HTTP Dashboard V3。CLI 调用�
   account_control / gateway_keys / settings / ...
            |
            v
-  SQLite schema v27
+  SQLite schema v30
            ^
            |
   ocg-manager-cli  同一组服务，无 argv CAS

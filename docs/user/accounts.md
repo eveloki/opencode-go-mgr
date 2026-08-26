@@ -25,27 +25,23 @@ The registry is sealed. Built-in Plan families are:
 | OpenCode Go | `opencode` / `go` | Yes | One officially distributable API key per card; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
 | Command Code GOAT | `command-code` / `goat` | Yes | Create disabled `pending`; verify the Key through official `GET /models`, then explicitly enable; model access defaults to the included `goat` catalog and can switch to `all` |
-| SCNet Token Plans | `scnet` / `token-plan-basic`, `token-plan-standard`, `token-plan-premium` | No | Archived; legacy rows remain disabled and cannot verify, enable, route, or report usage |
-| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; create/update stay disabled `pending`; verify then explicit enable; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; declare 1–3 upstream protocols via checkboxes, uniform across all models; protocol and auth scheme editable after create; verification is optional but shows an unverified hint; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
-Every persistent mutation path rejects `enabled=true` for a catalogued
-`routable=false` offering (all SCNet tiers) before it mutates the row,
-revision, or timestamps. GOAT and Custom are catalog-routable, but
-create/update still leave the card disabled and `pending`; enable is rejected
-until verification status is `verified`. Disabled drafts remain saveable. The
-desktop UI uses Dashboard V3 HTTP and has no separate Tauri invoke mutation
-path.
+Every persistent mutation path rejects `enabled=true` for the catalogued
+`routable=false` offering (Command Code GOAT) before it mutates the row,
+revision, or timestamps. GOAT is catalog-routable but create/update still leave
+the card disabled and `pending`; enable is rejected until verification status is
+`verified`. Custom API is catalog-routable and can be enabled even while
+verification is `pending`; editing config/capabilities/key/protocol/auth resets
+verification status to `pending` but keeps the enabled state. Disabled drafts
+remain saveable. The desktop UI uses Dashboard V3 HTTP and has no separate
+Tauri invoke mutation path.
 
 Use only the official provider API **Key** for OpenCode Go or Command Code
 GOAT. Browser cookies and reverse-proxy credentials are not account Keys. GOAT
 is a separate provider mapping and its Key is sent only to the fixed Command
-Code Provider API, never to OpenCode. SCNet is archived and accepts no new
-credentials or routing. Custom API is a separate trusted-administrator
+Code Provider API, never to OpenCode. Custom API is a separate trusted-administrator
 destination and must not send its key to an OpenCode endpoint.
-
-Legacy SCNet Token Plan rows and their historical acknowledgement records are
-retained for compatibility, but the family is archived. It has no add, verify,
-enable, routing, model-publication, pricing, or usage path.
 
 GOAT verification performs one authenticated, non-billable `GET /models` and
 saves the returned account catalog without enabling the card. After verify,
@@ -54,9 +50,10 @@ set (default) or the full `all` catalog. Changing the Key invalidates
 verification and disables the account; switching `goat`/`all` does not.
 
 Custom API is a live trusted-administrator destination. The card stores a base
-URL, one upstream protocol (Chat Completions, Responses, or Messages), one auth
-scheme (Bearer or `x-api-key`), and at least one model capability. Use **Fetch
-models** only as an explicit form action: it sends `GET /models` to the
+URL, a protocol set (Chat Completions, Responses, Messages — choose at least one
+via checkboxes), one auth scheme (Bearer or `x-api-key`), and at least one model
+capability. The selected protocols are uniform across every model on the
+account. Use **Fetch models** only as an explicit form action: it sends `GET /models` to the
 configured base URL with the entered Key (or, while editing, the stored Custom
 Key), merges valid returned IDs into the editable list, and does not save,
 verify, enable, or otherwise change the account. The fetch is bounded and may
@@ -72,23 +69,25 @@ Custom HTTP uses the same process-wide Direct / Manual / Auto proxy policy;
 connect and request timeouts are bounded from the configured connect timeout
 (clamped 5–60 seconds).
 
-Create and update leave the card disabled and `pending`. Verification sends one
-protocol-correct, non-stream, token-bounded JSON request to the first declared
-model; only a `2xx` JSON object succeeds. Verification does not discover or
-mutate capabilities and never auto-enables the account. You must enable the card
-explicitly after a successful verify. Eligible accounts (enabled + verified +
-ready + non-empty key) expose their declared model IDs on authenticated `GET
-/v1/models` and can be selected for those IDs. Declared capability IDs are both
-the client-facing names and the upstream model names; matching is case-insensitive
-for kebab IDs, and names with `/`, `_`, or whitespace never fold onto a kebab
-alias. Custom overlay never steals a published Go or Zen Free alias. Overlap
-with another Plan's unique raw ID returns `ambiguous_model_id` and does not call
-upstream. Undeclared names stay unknown (`400`). Changing the base URL, key, or
-declared capabilities re-pends verification and disables the account. Upstream
-protocol and auth scheme are fixed at create. Custom traffic is unpriced: logs
-record `cost_state=unknown` with no quota debit, and Custom has no provider usage
-refresh. `MODEL_PROTOCOLS` remains Go-specific; Custom converts the client
-protocol to the account's declared upstream protocol.
+Verification is optional. A Custom account can be created, saved, and enabled
+without verifying; when enabled but unverified the card shows an unverified
+hint. The **Verify** action remains available and sends one protocol-correct,
+non-stream, token-bounded JSON request to the first declared model for every
+selected protocol; only a `2xx` JSON object for each succeeds. Verification does
+not discover or mutate capabilities and never auto-enables the account.
+Eligible accounts (enabled + ready + non-empty key) expose their declared model
+IDs on authenticated `GET /v1/models` and can be selected for those IDs.
+Declared capability IDs are both the client-facing names and the upstream model
+names; matching is case-insensitive for kebab IDs, and names with `/`, `_`, or
+whitespace never fold onto a kebab alias. Custom overlay never steals a
+published Go or Zen Free alias. Overlap with another Plan's unique raw ID
+returns `ambiguous_model_id` and does not call upstream. Undeclared names stay
+unknown (`400`). Changing the base URL, key, declared capabilities, protocol
+set, or auth scheme re-pends verification but leaves the account enabled.
+Upstream protocol and auth scheme can be edited after create. Custom traffic is
+unpriced: logs record `cost_state=unknown` with no quota debit, and Custom has
+no provider usage refresh. `MODEL_PROTOCOLS` remains Go-specific; Custom
+converts the client protocol to each selected upstream protocol.
 
 **Add account** is a grouped plan list with a detail pane (**Ready to add** /
 **Draft plans** / **Unavailable**), not a card grid. Zen Free is a backend-owned

@@ -40,7 +40,6 @@ function account(overrides: Partial<Account>): Account {
     plan_routable: true,
     custom_config: null,
     model_capabilities: [],
-    acknowledgements: [],
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-01T00:00:00Z",
     ...overrides,

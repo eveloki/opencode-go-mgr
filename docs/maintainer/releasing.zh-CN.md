@@ -52,9 +52,9 @@
       上游。`/v1/models` 是当前可路由已公布别名加上合格 Custom ID；
       `application-models` 是 Go 可路由别名 ∩ 当前价格快照（highspeed 继承基价
       行），不返回 Custom ID。未知模型在 Chat / Responses / Messages / Gemini
-      上返回 `400`，除非命中该 `/v1/models` 列表。Command Code GOAT / SCNet
-      Token Plan 草稿保持禁用、不可路由（`routable=false`）、验证 `501`。冒烟测试
-      不覆盖 GOAT 或 SCNet 的路由、用量、计价或供应商教程。这些本地
+      上返回 `400`，除非命中该 `/v1/models` 列表。Command Code GOAT
+      草稿保持禁用、不可路由（`routable=false`）、验证 `501`。冒烟测试
+      不覆盖 GOAT 的路由、用量、计价或供应商教程。这些本地
       列表与 fail-closed 检查不需要真实供应商 Key。
 - [ ] 有界假上游 Custom API 冒烟（不需要真实供应商 Key）：拒绝 URL 内嵌凭据；
       `2xx` JSON object 验证成功；账号仍保持禁用；必须显式启用；声明的模型/协议

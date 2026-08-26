@@ -28,9 +28,8 @@ use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
 
 use super::types::{
-    Account, AccountAcknowledgement, AccountAcknowledgementCreate, AccountCreate,
-    AccountCustomConfig, AccountCustomConfigUpdate, AccountCustomConfigWrite,
-    AccountGoatModelAccessUpdate, AccountList, AccountManagedCreate,
+    Account, AccountCreate, AccountCustomConfig, AccountCustomConfigUpdate,
+    AccountCustomConfigWrite, AccountGoatModelAccessUpdate, AccountList, AccountManagedCreate,
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
     AccountMutation, AccountOrder, AccountSetupUpdate, AccountUpdate, MutationExpectation,
 };
@@ -155,15 +154,6 @@ pub(super) async fn put_account_model_capabilities(
     put_capabilities_locked(&state, &id, input).map(Json)
 }
 
-pub(super) async fn create_account_acknowledgement(
-    State(state): State<CoreState>,
-    Path(id): Path<String>,
-    body: Bytes,
-) -> Result<Json<AccountMutation>, V3ApiError> {
-    let input = parse_mutation_json::<AccountAcknowledgementCreate>(&body)?;
-    create_acknowledgement_locked(&state, &id, input).map(Json)
-}
-
 fn create_account_locked(
     state: &CoreState,
     input: AccountCreate,
@@ -228,7 +218,7 @@ fn create_account_locked(
             None => {
                 return Err(V3ApiError::invalid_request_at(
                     state,
-                    "Custom API accounts require a base URL, upstream protocol, and auth scheme",
+                    "Custom API accounts require a base URL, at least one upstream protocol, and an auth scheme",
                 ));
             }
         }
@@ -241,14 +231,12 @@ fn create_account_locked(
         for capability in &model_capabilities {
             crate::provider::validate_custom_model_id(&capability.model_id)
                 .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-            if let Some(config) = custom_config.as_ref()
-                && capability.protocol != config.upstream_protocol
-            {
-                return Err(V3ApiError::invalid_request_at(
-                    state,
-                    "model capability protocol must match account custom_config.upstream_protocol",
-                ));
-            }
+        }
+        if let Some(config) = custom_config.as_ref() {
+            let protocols = crate::models::normalize_upstream_protocols(&config.upstream_protocols)
+                .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+            crate::custom::validate_custom_capability_expansion(&protocols, &model_capabilities)
+                .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
         }
     } else {
         if custom_config.is_some() {
@@ -261,17 +249,6 @@ fn create_account_locked(
             return Err(V3ApiError::invalid_request_at(
                 state,
                 "model capabilities are only available for Custom API accounts",
-            ));
-        }
-    }
-    if let Some(notice) = plan.risk_notice {
-        let accepted = input.acknowledgements.iter().any(|item| {
-            item.acknowledgement_id == notice.acknowledgement_id && item.version == notice.version
-        });
-        if !accepted {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "this Plan requires a matching versioned risk acknowledgement before create",
             ));
         }
     }
@@ -323,13 +300,8 @@ fn create_account_locked(
     };
     {
         let db = state.db.lock();
-        db.create_account_with_contract(
-            &account,
-            custom_config.as_ref(),
-            &model_capabilities,
-            plan.risk_notice,
-        )
-        .map_err(|error| map_account_write_error(state, error))?;
+        db.create_account_with_contract(&account, custom_config.as_ref(), &model_capabilities)
+            .map_err(|error| map_account_write_error(state, error))?;
         let _ = db.log_gateway(
             "info",
             "account",
@@ -634,13 +606,17 @@ fn put_custom_config_locked(
     )?;
     let config = AccountCustomConfigInput {
         base_url: input.base_url,
-        upstream_protocol: input.upstream_protocol.into(),
+        upstream_protocols: input
+            .upstream_protocols
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         auth_scheme: input.auth_scheme.into(),
     };
     state
         .db
         .lock()
-        .commit_account_custom_config(id, &config, false)
+        .commit_account_custom_config(id, &config, true)
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     mutation_after_commit(state, id, true)
 }
@@ -691,33 +667,6 @@ fn put_capabilities_locked(
         .commit_account_model_capabilities(id, &capabilities)
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     mutation_after_commit(state, id, true)
-}
-
-fn create_acknowledgement_locked(
-    state: &CoreState,
-    id: &str,
-    input: AccountAcknowledgementCreate,
-) -> Result<AccountMutation, V3ApiError> {
-    let _settings_update = state.settings_update.lock();
-    check_expectation(state, &input.expectation)?;
-    let account = load_model_account(state, id)?;
-    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
-        .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
-    let notice = plan.risk_notice.ok_or_else(|| {
-        V3ApiError::invalid_request_at(state, "this Plan does not require a risk acknowledgement")
-    })?;
-    if notice.acknowledgement_id != input.acknowledgement_id || notice.version != input.version {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "acknowledgement id and version must match the current catalog notice",
-        ));
-    }
-    state
-        .db
-        .lock()
-        .commit_account_acknowledgement(id, notice, Utc::now())
-        .map_err(V3ApiError::internal)?;
-    mutation_after_commit(state, id, false)
 }
 
 fn ensure_account_can_enable(state: &CoreState, account: &ModelAccount) -> Result<(), V3ApiError> {
@@ -920,11 +869,6 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
             .into_iter()
             .map(capability_from_model)
             .collect(),
-        acknowledgements: contract
-            .acknowledgements
-            .into_iter()
-            .map(acknowledgement_from_model)
-            .collect(),
     })
 }
 
@@ -932,7 +876,11 @@ fn custom_config_from_model(config: crate::models::AccountCustomConfig) -> Accou
     AccountCustomConfig {
         account_id: config.account_id,
         base_url: config.base_url,
-        upstream_protocol: config.upstream_protocol.into(),
+        upstream_protocols: config
+            .upstream_protocols
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         auth_scheme: config.auth_scheme.into(),
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
@@ -951,22 +899,15 @@ fn capability_from_model(
     }
 }
 
-fn acknowledgement_from_model(
-    acknowledgement: crate::models::AccountAcknowledgement,
-) -> AccountAcknowledgement {
-    AccountAcknowledgement {
-        account_id: acknowledgement.account_id,
-        acknowledgement_id: acknowledgement.acknowledgement_id,
-        version: acknowledgement.version,
-        content_hash: acknowledgement.content_hash,
-        accepted_at: acknowledgement.accepted_at.to_rfc3339(),
-    }
-}
-
 fn custom_config_write_to_input(write: &AccountCustomConfigWrite) -> AccountCustomConfigInput {
     AccountCustomConfigInput {
         base_url: write.base_url.clone(),
-        upstream_protocol: write.upstream_protocol.into(),
+        upstream_protocols: write
+            .upstream_protocols
+            .iter()
+            .copied()
+            .map(Into::into)
+            .collect(),
         auth_scheme: write.auth_scheme.into(),
     }
 }
@@ -1014,6 +955,7 @@ fn map_account_write_error(state: &CoreState, error: anyhow::Error) -> V3ApiErro
         || message.contains("model id")
         || message.contains("model capability")
         || message.contains("protocol and auth")
+        || message.contains("upstream protocol")
         || message.contains("duplicate model")
     {
         V3ApiError::invalid_request_at(state, message)

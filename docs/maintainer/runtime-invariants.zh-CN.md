@@ -7,7 +7,7 @@
 ## Gateway 与模型列表
 
 - Core Gateway：Axum + Tokio + reqwest。同一端口暴露 OpenAI Chat Completions / Responses、Anthropic Messages、Gemini `generateContent` 客户端入口，以及 Claude Desktop 别名入口。
-- 已认证的 `GET /v1/models` 首先列出当前可路由的已发布别名（OpenCode Go 与上次成功保存的 Zen Free 模型快照），然后合并符合条件的 Custom 账号声明的模型 ID（enabled+verified+ready+非空 Key）；受保护的 `GET /dashboard/api/v3/application-models` 仍是 **Go 可路由别名 ∩ 当前定价快照**（highspeed 继承 base-price 行；空交集为 `[]`），不含 Custom。两条 GET 路径都不会请求上游；只有当管理员在 Providers 页点击 Zen Free “获取模型” (Fetch Models) 时，才会命中固定官方目录。Custom ID 来自符合条件账号的声明能力。未知模型名（既不是已发布别名，也不是符合条件的 Custom ID）在所有支持的客户端格式上返回 `400`。
+- 已认证的 `GET /v1/models` 首先列出当前可路由的已发布别名（OpenCode Go 与上次成功保存的 Zen Free 模型快照），然后合并符合条件的 Custom 账号声明的模型 ID（enabled+ready+非空 Key；验证为可选）；受保护的 `GET /dashboard/api/v3/application-models` 仍是 **Go 可路由别名 ∩ 当前定价快照**（highspeed 继承 base-price 行；空交集为 `[]`），不含 Custom。两条 GET 路径都不会请求上游；只有当管理员在 Providers 页点击 Zen Free “获取模型” (Fetch Models) 时，才会命中固定官方目录。Custom ID 来自符合条件账号的声明能力。未知模型名（既不是已发布别名，也不是符合条件的 Custom ID）在所有支持的客户端格式上返回 `400`。
 - Gemini 客户端使用 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`（`/v1/models/...` 也接受），可以用 `x-goog-api-key` 认证；Gemini 只是一种客户端格式，Gateway 总是把请求转换成目标模型的推荐上游协议。未知模型名在 Chat / Responses / Messages / Gemini 上返回 `400`；禁止探测协议。
 - 模型协议能力硬编码在 `ocg_domain::protocol` 的 `MODEL_PROTOCOLS` 中（`ocg-core` 的 `kernel/protocol.rs` 与 `gateway/protocol.rs` 是 facade/host 转换）：`preferred` 与官方 Go 文档端点表一致，`supported` 来自测试账号探测结论。当客户端协议 ∈ supported 时直接透传，否则路由到 preferred；请求路径不得探测协议（避免重复计费）。`grok-4.5` 的 `supported` 只有 Responses（Chat 入口必须转换）。`gpt-5.6-luna` 的 preferred 仍是 Responses，但 Chat 现在可以透传。`MODEL_PROTOCOLS` 目前仍只服务于 OpenCode Go；Zen Free 刷新得到的新 `-free` ID 若表中未知，默认物化为 Chat，且不会使用计费请求探测协议。整篇 JSON 转换内核在 `ocg-gateway` 中。
 
@@ -20,13 +20,13 @@
 
 ## 访问 Key 与认证
 
-- 从 schema v27 起，权威表是 SQLite `access_keys`（主 Key 固定 id `gateway_keys::PRIMARY_KEY_ID` / `00000000-0000-0000-0000-000000000001`，名称快照为 "Primary"，永不可禁用/删除；子 Key 是非主行，活跃上限 64，软删除保留名称但清空明文）。消毒后的配置 JSON 把 `gateway_key` 存为 `""`，不再是 DB 权威；进程内 `AppConfig.gateway_key` 与 `GET /dashboard/api/v3/connection` 仍暴露 live 主 Key。生命周期只能通过 `/dashboard/api/v3/keys*`（包括 `POST /keys/primary/regenerate`）。主/子 Key 值互斥由 `gateway_keys::ensure_primary_value_allowed` 强制执行。`sub_gateway_keys` 只出现在迁移到 v27 之前的历史库中，迁移后即丢弃；不要把它描述为当前权威表。
+- 从 schema v30 起，权威表是 SQLite `access_keys`（主 Key 固定 id `gateway_keys::PRIMARY_KEY_ID` / `00000000-0000-0000-0000-000000000001`，名称快照为 "Primary"，永不可禁用/删除；子 Key 是非主行，活跃上限 64，软删除保留名称但清空明文）。消毒后的配置 JSON 把 `gateway_key` 存为 `""`，不再是 DB 权威；进程内 `AppConfig.gateway_key` 与 `GET /dashboard/api/v3/connection` 仍暴露 live 主 Key。生命周期只能通过 `/dashboard/api/v3/keys*`（包括 `POST /keys/primary/regenerate`）。主/子 Key 值互斥由 `gateway_keys::ensure_primary_value_allowed` 强制执行。`sub_gateway_keys` 只出现在迁移到 v27 之前的历史库中，迁移后即丢弃；不要把它描述为当前权威表。
 - 认证收集所有非空候选头 Bearer / x-api-key / x-goog-api-key；任一匹配凭据快照（`CoreStateInner.credential_snapshot`，含主 Key 与已启用子 Key）即通过，归因按候选头顺序中的第一个匹配；同一快照也用于转发日志名称快照。
 - 非 loopback 监听器使用单管理员登录。Docker 可通过 `OCG_ADMIN_USERNAME` 与 `OCG_ADMIN_PASSWORD` 首次初始化（两者必须同时设置；只设一个会导致启动错误）；未提供时，首个注册用户成为管理员。
 
 ## 持久化
 
-- SQLite，当前 schema **v27**。历史库必须先规范迁移到 v26，再写入 v27：把主 Key 与 `sub_gateway_keys` 复制进 `access_keys`，并删除 `accounts` 上遗留的五个 `usage_sync_*` 列（官方用量同步元数据现位于 `provider_usage_sync_state`）。已有非空库在任意 v27 写入前会生成同目录下不覆盖的 `data.sqlite.pre-v3.<UTC>.bak` 及 `.sha256` sidecar；全新空库直接创建 v27，不生成该副本。从 v24 起 `forward_logs.route`（`auto`/`proxy`/`direct`，历史空字符串 = 未记录）；v25 供应商模型目录快照；v26 供应商契约范围与模型协议表。GUI 数据目录在 Windows 为 `%USERPROFILE%\.ocg-mgr`，macOS/Linux 为 `~/.ocg-mgr`；CLI 默认为 `~/.ocg-mgr-cli`。升级、备份哈希与失败回滚详见 `docs/maintainer/storage-migration.zh-CN.md`。
+- SQLite，当前 schema **v30**。历史库在原地迁移；v27 把主 Key 与 `sub_gateway_keys` 复制进 `access_keys`，并删除 `accounts` 上遗留的五个 `usage_sync_*` 列（官方用量同步元数据现位于 `provider_usage_sync_state`）。v29 从目录中移除 SCNet Token Plans 并删除所有现有 SCNet 账号行。v30 将 `account_custom_configs.upstream_protocol` 回填为 JSON `upstream_protocols` 集合，且 Custom 配置/能力编辑保持账号启用、仅将 `verification_status` 重置为 `pending`。已有非空库在跨越主要 schema 边界的任意迁移写入前会生成同目录下不覆盖的 `data.sqlite.pre-v3.<UTC>.bak` 及 `.sha256` sidecar；全新空库直接创建到当前 schema，不生成该副本。从 v24 起 `forward_logs.route`（`auto`/`proxy`/`direct`，历史空字符串 = 未记录）；v25 供应商模型目录快照；v26 供应商契约范围与模型协议表。GUI 数据目录在 Windows 为 `%USERPROFILE%\.ocg-mgr`，macOS/Linux 为 `~/.ocg-mgr`；CLI 默认为 `~/.ocg-mgr-cli`。升级、备份哈希与失败回滚详见 `docs/maintainer/storage-migration.zh-CN.md`。
 - 下游访问根 URL 优先级：非空 `OCG_CLIENT_ROOT_URL` > SQLite 手动值 > 前端从生产 origin / 开发 Gateway 端口自动推导。环境变量覆盖是只读的，不得写回 SQLite。
 
 ## 桌面端宿主
@@ -40,8 +40,8 @@
 
 ## 套餐目录与 Custom API 边界
 
-- 套餐目录位于静态 `ocg_domain::provider` 的 `BUILTIN_PLANS`：OpenCode Go、Zen Free、Command Code GOAT、SCNet Token Plans（`token-plan-basic|standard|premium`，Key 前缀 `sk-tp-`，官方交互式使用限制），以及 Custom API。内部身份是 `provider_id` + `offering_id`。GOAT 与所有 SCNet 套餐都是禁用的 `pending` 草稿（`routable=false`）；`POST /dashboard/api/v3/accounts/{id}/verify` 对这些套餐返回 `501`。所有持久化变更路径（DB 关卡 / 面板 / CLI 共享服务）在写入、revision 或 timestamp 变更前，拒绝为任何 `routable=false` 的套餐设置 `enabled=true`；桌面 UI 只通过 Dashboard V3 HTTP 变更，没有单独的 invoke 变更路径。每次 `Database::open` 仅禁用旧版 GOAT 与全部三个 SCNet 层级的 `enabled` 行而不修改 `updated_at`；Custom 的 enabled 状态保留；只把已存在的未验证 GOAT 重置为 `pending`。Go、Zen Free 与未知对不受影响。SCNet 官方可用模型表与端点快照只是适配器输入，不得作为客户端别名发布。
-- Custom API（`custom`/`api`，`routable=true`）是可信管理员目标：可配置任何语法有效的 HTTP/HTTPS 上游（包括 LAN、loopback 与自选定目标）；拒绝含嵌入凭据、query 或 fragment 的 URL；永不跟随重定向；永不转发面板/客户端认证；只构造配置的 Bearer 或 `x-api-key`；组装端点必须保留 scheme/host/port/base-path 前缀。创建/更新后仍保持 disabled `pending`；verify 向第一个声明模型发送一条最小非流式请求，使用正确协议，仅在 2xx JSON object 时成功，不发现/重写能力，也不会自动启用。verify 成功后仍需显式 enable。符合条件的账号（enabled+verified+ready+非空 Key）动态路由其声明的模型 ID/协议。Custom 成本/用量未定价/未知，不扣除供应商配额。Key、base URL 或声明能力变更会使验证失效并禁用账号；协议与认证方案创建后不可更改。不要用 GOAT/SCNet 反滥用框架来描述 Custom 的可信管理员边界。
+- 套餐目录位于静态 `ocg_domain::provider` 的 `BUILTIN_PLANS`：OpenCode Go、Zen Free、Command Code GOAT 与 Custom API。内部身份是 `provider_id` + `offering_id`。GOAT 是禁用的 `pending` 草稿（`routable=false`）；`POST /dashboard/api/v3/accounts/{id}/verify` 对该套餐返回 `501`。所有持久化变更路径（DB 关卡 / 面板 / CLI 共享服务）在写入、revision 或 timestamp 变更前，拒绝为任何 `routable=false` 的套餐设置 `enabled=true`；桌面 UI 只通过 Dashboard V3 HTTP 变更，没有单独的 invoke 变更路径。每次 `Database::open` 仅禁用旧版 GOAT 的 `enabled` 行而不修改 `updated_at`；Custom 的 enabled 状态保留；只把已存在的未验证 GOAT 重置为 `pending`。Go、Zen Free 与未知对不受影响。
+- Custom API（`custom`/`api`，`routable=true`）是可信管理员目标：可配置任何语法有效的 HTTP/HTTPS 上游（包括 LAN、loopback 与自选定目标）；拒绝含嵌入凭据、query 或 fragment 的 URL；永不跟随重定向；永不转发面板/客户端认证；只构造配置的 Bearer 或 `x-api-key`；组装端点必须保留 scheme/host/port/base-path 前缀；静止时 Key 混淆；base URL 在出站前经语法校验；上游错误经脱敏处理。账号通过表单复选框声明一组 1–3 个协议（chat_completions / responses / messages），对该账号所有模型统一生效；存储按 model × protocol 展开，并拒绝部分展开。声明即真理：声明的协议立即作为预设证据参与路由。Custom 连接验证为可选：`verification_status` 为 `pending` 时仍可启用账号；verify 动作仍保留，并用第一个声明模型探测每个已选协议，只有全部返回 `2xx` JSON object 才算成功，不发现/改写能力，也不会自动启用。修改 Key、base URL、声明能力、上游协议集或鉴权方案会把 `verification_status` 重置为 `pending`，但账号保持启用。Custom 端点范围的协议开关可通过 `PUT /dashboard/api/v3/provider-contracts/custom-endpoint/{scope_id}/protocols/{protocol}` 写入，CAS 语义与 Provider 范围相同。符合条件的账号（enabled+ready+非空 Key）动态路由其声明的模型 ID/协议。Custom 成本/用量未定价/未知，不扣除供应商配额。Custom 账号级按协议探测暂无 V3 对应端点。不要用 GOAT 反滥用框架来描述 Custom 的可信管理员边界。
 
 ## 别名
 

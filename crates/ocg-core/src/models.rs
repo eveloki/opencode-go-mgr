@@ -84,11 +84,40 @@ pub fn normalize_account_notes(value: &str) -> Result<Option<String>, AccountNot
 
 impl std::error::Error for PurchaseDateError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpstreamProtocolsError;
+
+impl fmt::Display for UpstreamProtocolsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("custom config requires at least one upstream protocol")
+    }
+}
+
+impl std::error::Error for UpstreamProtocolsError {}
+
+/// Validates an account-level upstream protocol set: non-empty, de-duplicated
+/// in first-seen order. Values are already typed, so only known protocols can
+/// reach this point.
+pub fn normalize_upstream_protocols(
+    protocols: &[UpstreamProtocolKind],
+) -> Result<Vec<UpstreamProtocolKind>, UpstreamProtocolsError> {
+    let mut normalized = Vec::with_capacity(protocols.len());
+    for protocol in protocols {
+        if !normalized.contains(protocol) {
+            normalized.push(*protocol);
+        }
+    }
+    if normalized.is_empty() {
+        return Err(UpstreamProtocolsError);
+    }
+    Ok(normalized)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountCustomConfig {
     pub account_id: String,
     pub base_url: String,
-    pub upstream_protocol: UpstreamProtocolKind,
+    pub upstream_protocols: Vec<UpstreamProtocolKind>,
     pub auth_scheme: UpstreamAuthScheme,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -97,7 +126,7 @@ pub struct AccountCustomConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountCustomConfigInput {
     pub base_url: String,
-    pub upstream_protocol: UpstreamProtocolKind,
+    pub upstream_protocols: Vec<UpstreamProtocolKind>,
     pub auth_scheme: UpstreamAuthScheme,
 }
 
@@ -107,7 +136,7 @@ pub struct AccountCustomConfigInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomModelDiscoveryInput {
     pub base_url: String,
-    pub upstream_protocol: UpstreamProtocolKind,
+    pub upstream_protocols: Vec<UpstreamProtocolKind>,
     pub auth_scheme: UpstreamAuthScheme,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -139,21 +168,6 @@ pub struct AccountModelCapabilityInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountAcknowledgement {
-    pub account_id: String,
-    pub acknowledgement_id: String,
-    pub version: String,
-    pub content_hash: String,
-    pub accepted_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountAcknowledgementInput {
-    pub acknowledgement_id: String,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountVerificationState {
     pub account_id: String,
     pub status: ConnectionVerificationStatus,
@@ -177,7 +191,6 @@ pub struct AccountContractState {
     pub verification: AccountVerificationState,
     pub custom_config: Option<AccountCustomConfig>,
     pub model_capabilities: Vec<AccountModelCapability>,
-    pub acknowledgements: Vec<AccountAcknowledgement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

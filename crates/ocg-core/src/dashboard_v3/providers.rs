@@ -51,9 +51,9 @@ use super::types::{
     EffectiveModelProtocols, EffectiveProtocolEvidence, MutationExpectation, ProbeResultKind,
     ProtocolProbeRequest, ProtocolProbeResponse, ProtocolProbeResult, ProtocolSwitchUpdate,
     ProtocolSwitches, ProviderAccountChoice, ProviderCatalog, ProviderCatalogEntry,
-    ProviderCatalogFormField, ProviderCatalogRiskNotice, ProviderContractGroup, ProviderContracts,
-    ProviderModelCapability, ProviderModels, ProviderModelsRefreshUpdate, ProviderOfferingChoice,
-    ZenFreeModel, ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
+    ProviderCatalogFormField, ProviderContractGroup, ProviderContracts, ProviderModelCapability,
+    ProviderModels, ProviderModelsRefreshUpdate, ProviderOfferingChoice, ZenFreeModel,
+    ZenFreeModels, ZenFreeSettings, ZenFreeSettingsUpdate,
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
@@ -370,10 +370,35 @@ pub(super) async fn put_provider_protocol_switch(
     let protocol = provider_contracts::parse_upstream_protocol(&protocol)
         .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
     validate_provider_scope(&state, &scope)?;
+    commit_protocol_switch(&state, &scope, protocol, input.enabled)
+}
+
+pub(super) async fn put_custom_endpoint_protocol_switch(
+    State(state): State<CoreState>,
+    Path((scope_id, protocol)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<Json<ProviderContracts>, V3ApiError> {
+    let input = parse_mutation_json::<ProtocolSwitchUpdate>(&body)?;
+    let _settings_update = state.settings_update.lock();
+    check_expectation(&state, &input.expectation)?;
+    let scope = ContractScope::parse(provider_contracts::SCOPE_KIND_CUSTOM_ENDPOINT, &scope_id)
+        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+    let protocol = provider_contracts::parse_upstream_protocol(&protocol)
+        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+    validate_custom_endpoint_scope(&state, &scope)?;
+    commit_protocol_switch(&state, &scope, protocol, input.enabled)
+}
+
+fn commit_protocol_switch(
+    state: &CoreState,
+    scope: &ContractScope,
+    protocol: crate::provider::UpstreamProtocolKind,
+    enabled: bool,
+) -> Result<Json<ProviderContracts>, V3ApiError> {
     let now = Utc::now();
     {
         let db = state.db.lock();
-        db.set_protocol_switch(&scope, protocol, input.enabled, now)
+        db.set_protocol_switch(scope, protocol, enabled, now)
             .map_err(V3ApiError::internal)?;
         state
             .reload_provider_contracts_locked(&db)
@@ -382,9 +407,9 @@ pub(super) async fn put_provider_protocol_switch(
     state.routing.reset();
     let _revision = state.bump_settings_revision();
     let contracts = state.provider_contracts();
-    let (accounts, statuses) = load_accounts_with_verification(&state)?;
+    let (accounts, statuses) = load_accounts_with_verification(state)?;
     Ok(Json(provider_contracts_from_state(
-        &state, &contracts, &accounts, &statuses,
+        state, &contracts, &accounts, &statuses,
     )))
 }
 
@@ -549,9 +574,7 @@ fn prepare_protocol_probe(
                 ));
             }
         },
-        ProviderAdapterKind::ConfigurableHttp
-        | ProviderAdapterKind::CommandCodeGoat
-        | ProviderAdapterKind::Scnet => {
+        ProviderAdapterKind::ConfigurableHttp | ProviderAdapterKind::CommandCodeGoat => {
             unreachable!("zero-call adapters return before account resolution")
         }
     };
@@ -602,14 +625,6 @@ fn prepare_protocol_probe(
 fn validate_provider_scope(state: &CoreState, scope: &ContractScope) -> Result<(), V3ApiError> {
     match scope {
         ContractScope::Provider(provider_id)
-            if provider_id == crate::provider::SCNET_PROVIDER_ID =>
-        {
-            Err(V3ApiError::invalid_request_at(
-                state,
-                "SCNet Token Plans are archived; protocol switches are read-only",
-            ))
-        }
-        ContractScope::Provider(provider_id)
             if provider_contracts::builtin_provider_scope_ids().contains(&provider_id.as_str()) =>
         {
             Ok(())
@@ -622,6 +637,31 @@ fn validate_provider_scope(state: &CoreState, scope: &ContractScope) -> Result<(
             state,
             "protocol switches on this path are limited to provider scopes",
         )),
+    }
+}
+
+fn validate_custom_endpoint_scope(
+    state: &CoreState,
+    scope: &ContractScope,
+) -> Result<(), V3ApiError> {
+    let ContractScope::CustomEndpoint(account_id) = scope else {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "protocol switches on this path are limited to custom endpoint scopes",
+        ));
+    };
+    let account = load_model_account(state, account_id)?;
+    let plan = crate::provider::builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| {
+            V3ApiError::not_found_at(state, "custom endpoint contract scope not found")
+        })?;
+    if crate::provider::plan_requires_custom_config(plan) {
+        Ok(())
+    } else {
+        Err(V3ApiError::not_found_at(
+            state,
+            "custom endpoint contract scope not found",
+        ))
     }
 }
 
@@ -682,13 +722,6 @@ fn catalog_entry(plan: &BuiltinPlan, zen_models: &[String]) -> ProviderCatalogEn
                 immutable_after_create: field.immutable_after_create,
             })
             .collect(),
-        risk_notice: plan.risk_notice.map(|notice| ProviderCatalogRiskNotice {
-            acknowledgement_id: notice.acknowledgement_id.to_string(),
-            version: notice.version.to_string(),
-            source_url: notice.source_url.to_string(),
-            body: notice.body.to_string(),
-            content_hash: notice.content_hash(),
-        }),
         model_aliases: alias::routeable_aliases_for_with_zen(
             plan.offering.provider_id,
             plan.offering.offering_id,

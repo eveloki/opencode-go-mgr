@@ -10,7 +10,6 @@ pub const DEFAULT_ACCOUNT_TEST_MODEL: &str = "mimo-v2.5";
 pub const OPENCODE_PROVIDER_ID: &str = "opencode";
 pub const COMMAND_CODE_PROVIDER_ID: &str = "command-code";
 pub const OPENCODE_ZEN_FREE_PROVIDER_ID: &str = "opencode-zen-free";
-pub const SCNET_PROVIDER_ID: &str = "scnet";
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
 
 pub const GO_OFFERING_ID: &str = "go";
@@ -23,15 +22,6 @@ pub const CUSTOM_API_OFFERING_ID: &str = "api";
 pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS: &str = "deepseek-v4-flash";
 /// Unique exact upstream raw ID for Command Code GOAT.
 pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM: &str = "deepseek/deepseek-v4-flash";
-
-pub const SCNET_TOKEN_PLAN_BASIC_OFFERING_ID: &str = "token-plan-basic";
-pub const SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID: &str = "token-plan-standard";
-pub const SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID: &str = "token-plan-premium";
-pub const SCNET_TOKEN_PLAN_OFFERING_IDS: [&str; 3] = [
-    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-    SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID,
-    SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
-];
 
 /// Reserved account row representing the egress-IP-scoped OpenCode Zen free
 /// route. It is created by schema migration, never by the generic account API.

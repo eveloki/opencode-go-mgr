@@ -15,7 +15,7 @@ rebind → compensation) is acquired before `gateway_lifecycle` when a
 settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits.
 
-Two credential tiers share one `access_keys` table (schema v27) and one
+Two credential tiers share one `access_keys` table (schema v30) and one
 auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
@@ -104,9 +104,9 @@ Only `usage_sync.rs` handles usage sync. There is no Profile Cookie or HTML
 console usage path.
 
 Zen Free is database-owned: it can be enabled, disabled, and reordered,
-but cannot be created or deleted through generic account APIs. GOAT /
-SCNet drafts stay disabled and unroutable. Custom is catalog-routable
-after verify-then-enable.
+but cannot be created or deleted through generic account APIs. GOAT
+drafts stay disabled and unroutable. Custom is catalog-routable after
+declaration; verification is optional.
 
 Browser: `GET /dashboard/api/v3/browser/capabilities`,
 `POST /accounts/{id}/browser`, `DELETE /accounts/{id}/browser-profile`,
@@ -147,7 +147,7 @@ and profile are removed.
 ## Persistence
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
-queries. Current schema is **v27**. `provider_contracts.rs` owns provider
+queries. Current schema is **v30**. `provider_contracts.rs` owns provider
 contract scopes and model-protocol evidence. `models.rs` defines shared
 serde types and `AppConfig`. Key obfuscation is `ocg-infra::crypto`
 (facade `ocg_core::crypto`): this is lightweight obfuscation, not a KMS.
@@ -166,7 +166,7 @@ Historical versions still matter on upgrade:
 - v22: immutable provider/offering bindings, provider pricing/usage,
   quota windows, provider-aware forward logs.
 - v23: Plan verification, Alias / upstream log identity, optional native
-  cost, Custom config tables, SCNet acknowledgements.
+  cost, Custom config tables.
 - v24: actual proxy route leg on forward logs (`auto` / `proxy` /
   `direct`; historical empty string = unrecorded).
 - v25: `provider_model_catalogs` (last successful Zen Free snapshot).
@@ -180,6 +180,12 @@ Historical versions still matter on upgrade:
   write**. A brand-new empty directory creates v27 directly and does not
   write that copy. Operator recovery:
   [storage-migration.md](storage-migration.md).
+- **v29:** removes SCNet Token Plans from the catalog and deletes any
+  existing SCNet account rows during migration.
+- **v30:** backfills `account_custom_configs.upstream_protocol` into a
+  JSON `upstream_protocols` set (1–3 of chat_completions / responses /
+  messages); Custom config/capability edits keep the account enabled but
+  reset `verification_status` to `pending`.
 
 GUI data directory: Windows `%USERPROFILE%\.ocg-mgr` or macOS/Linux
 `~/.ocg-mgr`. CLI default: `~/.ocg-mgr-cli`. Docker stores SQLite, keys,

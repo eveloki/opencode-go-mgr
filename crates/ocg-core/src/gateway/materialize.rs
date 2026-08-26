@@ -43,9 +43,7 @@ use crate::kernel::ids::normalize_model_name;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::ProviderAdapterKind;
-use crate::provider_contracts::{
-    ContractScope, EffectiveContractSet, NO_ENABLED_UPSTREAM_PROTOCOL,
-};
+use crate::provider_contracts::{ContractScope, EffectiveContractSet};
 use axum::http::StatusCode;
 use bytes::Bytes;
 
@@ -316,7 +314,7 @@ fn materialize_mapping_plan(
     let channel = if adapter_kind == Some(ProviderAdapterKind::ZenFree) {
         UpstreamChannel::Free
     } else {
-        // GOAT / SCNet / Configurable HTTP share the Go channel discriminator.
+        // GOAT / Configurable HTTP share the Go channel discriminator.
         // Custom is rematerialized per account with that account's configured
         // protocol. Configurable HTTP is not a base class.
         UpstreamChannel::Go
@@ -404,7 +402,7 @@ fn materialize_custom_account_plan(
 ) -> Result<RequestPlan, ProtocolError> {
     let runtime = runtime.ok_or_else(|| {
         ProtocolError::new(format!(
-            "Custom account `{}` is missing a persisted base URL, protocol, and auth scheme",
+            "Custom account `{}` is missing a persisted base URL, protocol set, and auth scheme",
             account.name
         ))
     })?;
@@ -423,7 +421,6 @@ fn materialize_custom_account_plan(
     let resolved_alias = resolved_alias
         .filter(|alias| !alias.is_empty())
         .or_else(|| Some(capability.model_id.clone()));
-    let protocol = runtime.config.upstream_protocol;
     let contract = contracts
         .scope(&ContractScope::custom_endpoint(&account.id))
         .ok_or_else(|| {
@@ -432,11 +429,15 @@ fn materialize_custom_account_plan(
                 account.id
             ))
         })?;
-    if !contract.switches.is_enabled(protocol)
-        || !contract.model_has_enabled_protocol(&capability.model_id)
-    {
-        return Err(ProtocolError::new(NO_ENABLED_UPSTREAM_PROTOCOL));
-    }
+    // Declared capabilities are expanded model x protocol rows; the contract
+    // selects among the account-level protocol set, passing the client wire
+    // format through when the account declared it.
+    let upstream = crate::provider_contracts::select_upstream_protocol(
+        contract,
+        parsed.client,
+        &capability.model_id,
+    )
+    .map_err(|error| ProtocolError::new(error.message))?;
     materialize_channel_plan(
         config,
         parsed,
@@ -446,7 +447,7 @@ fn materialize_custom_account_plan(
         UpstreamChannel::Go,
         None,
         false,
-        Some(crate::custom::api_format_for_custom_protocol(protocol)),
+        Some(upstream),
         Some(CustomRouteSpec {
             base_url: runtime.config.base_url.clone(),
             auth_scheme: runtime.config.auth_scheme,
@@ -1193,6 +1194,14 @@ mod tests {
         model_id: &str,
         protocol: UpstreamProtocolKind,
     ) -> CustomAccountRuntime {
+        custom_runtime_multi(account_id, model_id, &[protocol])
+    }
+
+    fn custom_runtime_multi(
+        account_id: &str,
+        model_id: &str,
+        protocols: &[UpstreamProtocolKind],
+    ) -> CustomAccountRuntime {
         CustomAccountRuntime {
             account_id: account_id.into(),
             enabled: true,
@@ -1202,18 +1211,21 @@ mod tests {
             config: AccountCustomConfig {
                 account_id: account_id.into(),
                 base_url: "http://127.0.0.1:9".into(),
-                upstream_protocol: protocol,
+                upstream_protocols: protocols.to_vec(),
                 auth_scheme: UpstreamAuthScheme::Bearer,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
-            capabilities: vec![AccountModelCapability {
-                account_id: account_id.into(),
-                model_id: model_id.into(),
-                protocol,
-                verified_at: None,
-                source: "manual".into(),
-            }],
+            capabilities: protocols
+                .iter()
+                .map(|protocol| AccountModelCapability {
+                    account_id: account_id.into(),
+                    model_id: model_id.into(),
+                    protocol: *protocol,
+                    verified_at: None,
+                    source: "manual".into(),
+                })
+                .collect(),
         }
     }
 
@@ -1380,6 +1392,58 @@ mod tests {
         assert_eq!(set.routes[0].plan.upstream, ApiFormat::Messages);
         let upstream: serde_json::Value = serde_json::from_slice(&set.routes[0].plan.body).unwrap();
         assert_eq!(upstream["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn custom_dual_protocol_passes_each_client_wire_format_through() {
+        fn route_upstream(client: ApiFormat, body: Bytes) -> ApiFormat {
+            let parsed = parse_client_request(client, body.clone()).unwrap();
+            let resolved =
+                alias::resolve_with_custom("local-custom", &["local-custom".into()]).unwrap();
+            let account = custom_account("custom-dual");
+            let runtime = custom_runtime_multi(
+                "custom-dual",
+                "local-custom",
+                &[
+                    UpstreamProtocolKind::ChatCompletions,
+                    UpstreamProtocolKind::Messages,
+                ],
+            );
+            let contracts = contracts_for(std::slice::from_ref(&runtime));
+            let mut runtimes = std::collections::HashMap::new();
+            runtimes.insert(account.id.clone(), runtime);
+            let set = materialize_account_routes(
+                &[account],
+                &AppConfig::default(),
+                &parsed,
+                &resolved,
+                &parsed.requested_model,
+                "local-custom",
+                &body,
+                false,
+                &runtimes,
+                &std::collections::HashMap::new(),
+                &contracts,
+            )
+            .expect("declared dual-protocol account must route both client formats");
+            assert_eq!(set.routes.len(), 1);
+            set.routes[0].plan.upstream
+        }
+
+        let chat = route_upstream(ApiFormat::ChatCompletions, chat_body("local-custom"));
+        assert_eq!(chat, ApiFormat::ChatCompletions);
+        let messages = route_upstream(
+            ApiFormat::Messages,
+            Bytes::from(
+                serde_json::to_vec(&json!({
+                    "model": "local-custom",
+                    "max_tokens": 4,
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .unwrap(),
+            ),
+        );
+        assert_eq!(messages, ApiFormat::Messages);
     }
 
     #[test]

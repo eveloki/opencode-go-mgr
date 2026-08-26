@@ -12,7 +12,7 @@
 - Responses 端点是无状态。`previous_response_id`、`conversation`、 `store: true`、`background: true` 直接返回 `400`，不会静默忽略。这是有意为之，详见 `protocol.rs` 和[用户指南](../USER.zh-CN.md)。
 - Gemini 是客户端兼容格式，不是原生上游协议。仅 `generateContent` 与 `streamGenerateContent` 会转发；`countTokens` 与 `embedContent` 返回 `501`。非空 `safetySettings`、`cachedContent`、文件媒体、Google-hosted 工具等无法跨协议转换的语义返回 `400`。`topK`、`thinkingConfig` 仅为兼容提示，不保证在 Chat Completions 或 Messages 上游等价生效；其余非空 `generationConfig` 字段必须显式映射或返回 `400`，不会静默丢弃。
 - Claude Desktop 只公布三个固定 Claude 别名，再映射到受支持的实际模型；它不代表 OCG Manager 提供了原生 Claude 4.6 模型或完整 Anthropic Models API。
-- Command Code GOAT 与 SCNet Token Plans 只是 schema/UI 草稿。它们创建禁用的 `pending` 账号；验证为 `501`；Alias 路由不会选中它们。SCNet 官方可用模型表与 endpoint 快照只作适配器输入，不会作为客户端别名公布。不要把这些家族当作已上线支持来文档化或交付。Custom API 已在受信管理员边界下上线（`custom.rs` + `custom_http.rs`）；GOAT/SCNet 防滥用口径不包含这条路径。
+- Command Code GOAT 只是 schema/UI 草稿。它创建禁用的 `pending` 账号；验证为 `501`；Alias 路由不会选中它。不要把它当作已上线支持来文档化或交付。Custom API 已在受信管理员边界下上线（`custom.rs` + `custom_http.rs`）；GOAT 防滥用口径不包含这条路径。
 - Custom 的供应商范围协议探测不在 V3；V2 账号侧探测路径已 410。Custom 验证与模型发现是现行路径。
 
 ## 明确非目标
@@ -21,7 +21,7 @@
 - 远端节点同步、Admin API 或多租户控制面。
 - Tauri `invoke` 不是面板数据路径；WebView command 保持移除。
 - 不会在 `GET /v1/models` 或 `GET /dashboard/api/v3/application-models` 上做请求时上游发现。
-- 已上线的 GOAT 或 SCNet 路由、用量、计价、验证或供应商教程。
+- 已上线的 GOAT 路由、用量、计价、验证或供应商教程。
 - `/embeddings`、Gemini `embedContent`（501），或把 Gemini `countTokens` 做成真实上游计数（501 供 Gemini CLI 回退本地估算）。
 - Gemini 不作为上游协议使用。
 - 自动轮询价格或 Zen 目录。

@@ -165,7 +165,7 @@ async fn refresh_go_pricing(
     let official = {
         #[cfg(debug_assertions)]
         {
-            official_pricing_fetch::fetch(&state).await
+            official_pricing_fetch::fetch(state).await
         }
         #[cfg(not(debug_assertions))]
         {

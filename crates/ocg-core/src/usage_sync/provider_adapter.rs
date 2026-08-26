@@ -225,8 +225,7 @@ mod tests {
         use crate::provider::{
             ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
             CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
-            OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, SCNET_PROVIDER_ID,
-            SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+            OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind,
         };
 
         let go = provider_usage_capability(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
@@ -243,10 +242,6 @@ mod tests {
         assert!(!zen.experimental);
         assert!(!zen.authoritative_for_quota);
 
-        assert!(
-            provider_usage_capability(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-                .is_none()
-        );
         assert!(provider_usage_capability(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).is_none());
         for descriptor in crate::provider::ProviderRegistry::iter() {
             let capability =
@@ -266,7 +261,7 @@ mod tests {
                     assert!(!capability.experimental);
                     assert!(!capability.automatic_sync);
                 }
-                ProviderAdapterKind::Scnet | ProviderAdapterKind::ConfigurableHttp => {
+                ProviderAdapterKind::ConfigurableHttp => {
                     assert!(capability.is_none());
                 }
             }
@@ -279,8 +274,7 @@ mod tests {
             ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
             CUSTOM_PROVIDER_ID, CommandCodeGoatAdapter, ConfigurableHttpAdapter, GO_OFFERING_ID,
             GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-            OpenCodeGoAdapter, SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ScnetAdapter,
-            UsageAdapter, ZenFreeAdapter, builtin_plan,
+            OpenCodeGoAdapter, UsageAdapter, ZenFreeAdapter, builtin_plan,
         };
 
         let go_plan = builtin_plan(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
@@ -304,9 +298,6 @@ mod tests {
         assert!(zen_usage.publishes_capability);
         assert!(!zen_usage.authoritative_for_quota);
 
-        let scnet_plan =
-            builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID).unwrap();
-        assert!(!ScnetAdapter::usage(scnet_plan).publishes_capability);
         let custom_plan = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
         assert!(!ConfigurableHttpAdapter::usage(custom_plan).publishes_capability);
     }

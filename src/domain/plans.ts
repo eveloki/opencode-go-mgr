@@ -17,10 +17,9 @@ export type PlanId =
   | "opencode-go"
   | "zen-free"
   | "command-code-goat"
-  | "scnet"
   | "custom-endpoint";
 
-export type PlanKind = "quota" | "free" | "api-key" | "subscription" | "custom";
+export type PlanKind = "quota" | "free" | "api-key" | "custom";
 
 export interface PlanDefinition {
   id: PlanId;
@@ -69,16 +68,6 @@ export const PLAN_DEFINITIONS: readonly PlanDefinition[] = [
     legacy: false,
   },
   {
-    id: "scnet",
-    provider_id: "scnet",
-    offering_ids: ["token-plan-basic", "token-plan-standard", "token-plan-premium"],
-    label: "SCNet",
-    kind: "subscription",
-    singleton: false,
-    managed_registration: false,
-    legacy: false,
-  },
-  {
     id: "custom-endpoint",
     provider_id: "custom",
     offering_ids: ["api"],
@@ -105,8 +94,7 @@ export function findCatalogEntry(
 
 /**
  * Find a family definition by the exact backend provider/offering pair.
- * SCNet offerings all map to the "scnet" family; custom/api maps to
- * "custom-endpoint".
+ * Custom/api maps to "custom-endpoint".
  */
 export function findPlanDefinition(
   providerId: string,
@@ -205,15 +193,13 @@ export function planRoutable(
   return entry?.routable ?? false;
 }
 
-export type PlanUseWarning = "subscription" | "endpoint-risk" | null;
+export type PlanUseWarning = "endpoint-risk" | null;
 
 /**
- * Persistent risk semantics per plan kind: subscription plans (SCNet-style)
- * keep a visible subscription warning after creation; custom endpoints keep an
+ * Persistent risk semantics per plan kind: custom endpoints keep an
  * endpoint-risk note.
  */
 export function planUseWarning(plan: PlanDefinition): PlanUseWarning {
-  if (plan.kind === "subscription") return "subscription";
   if (plan.kind === "custom") return "endpoint-risk";
   return null;
 }

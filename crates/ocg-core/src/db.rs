@@ -60,7 +60,7 @@ pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// v26 and before any v27 write. Not created for a brand-new empty database.
 pub const PRE_V3_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v3.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 28;
+pub const CURRENT_SCHEMA_VERSION: i32 = 30;
 pub const V27_SCHEMA_VERSION: i32 = 27;
 /// Schema the v27 rewrite expects as its committed source. Historical databases
 /// always migrate through this version first.
@@ -1250,7 +1250,7 @@ fn v27_fault(point: V27MigrationFault) -> Result<()> {
 
 fn migrate_to_v28(conn: &Connection) -> Result<()> {
     let version = schema_version_on(conn)?;
-    if version >= CURRENT_SCHEMA_VERSION {
+    if version >= 28 {
         return Ok(());
     }
     anyhow::ensure!(
@@ -1270,6 +1270,102 @@ fn migrate_to_v28(conn: &Connection) -> Result<()> {
         [],
     )?;
     tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (28);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v29(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 29 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        version == 28,
+        "v29 requires a canonical schema v28 source, found {version}"
+    );
+    let tx = conn.unchecked_transaction()?;
+    // Mirror the child-table cleanup that delete_account performs so no rows
+    // referencing deleted SCNet account ids survive the migration.
+    tx.execute(
+        "DELETE FROM quota_windows WHERE account_id IN (SELECT id FROM accounts WHERE provider_id = 'scnet')",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM credit_balances WHERE account_id IN (SELECT id FROM accounts WHERE provider_id = 'scnet')",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_usage_sync_state WHERE account_id IN (SELECT id FROM accounts WHERE provider_id = 'scnet')",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM account_custom_configs WHERE account_id IN (SELECT id FROM accounts WHERE provider_id = 'scnet')",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM account_model_capabilities WHERE account_id IN (SELECT id FROM accounts WHERE provider_id = 'scnet')",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_contract_model_protocols WHERE scope_kind = 'provider' AND scope_id = 'scnet'",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_contract_scopes WHERE scope_kind = 'provider' AND scope_id = 'scnet'",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_pricing_snapshots WHERE provider_id = 'scnet'",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM provider_model_catalogs WHERE provider_id = 'scnet'",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE forward_logs SET provider_id = NULL, offering_id = NULL WHERE provider_id = 'scnet'",
+        [],
+    )?;
+    tx.execute("DELETE FROM accounts WHERE provider_id = 'scnet'", [])?;
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS idx_account_acknowledgements_account;
+         DROP TABLE IF EXISTS account_acknowledgements;",
+    )?;
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (29);")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// v30: Custom accounts become account-level multi-protocol. The single
+/// `upstream_protocol` value is backfilled into a one-element JSON array in
+/// the new `upstream_protocols` column, then the old column is dropped.
+fn migrate_to_v30(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 30 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        version == 29,
+        "v30 requires a canonical schema v29 source, found {version}"
+    );
+    let tx = conn.unchecked_transaction()?;
+    ensure_column(
+        &tx,
+        "account_custom_configs",
+        "upstream_protocols",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    if table_has_column(&tx, "account_custom_configs", "upstream_protocol")? {
+        tx.execute(
+            "UPDATE account_custom_configs SET upstream_protocols = json_array(upstream_protocol)",
+            [],
+        )?;
+        tx.execute(
+            "ALTER TABLE account_custom_configs DROP COLUMN upstream_protocol",
+            [],
+        )?;
+    }
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (30);")?;
     tx.commit()?;
     Ok(())
 }
@@ -1402,6 +1498,27 @@ fn insert_account_row(
     Ok(())
 }
 
+fn upstream_protocols_json(protocols: &[UpstreamProtocolKind]) -> Result<String> {
+    Ok(serde_json::to_string(
+        &protocols
+            .iter()
+            .map(|protocol| protocol.as_str())
+            .collect::<Vec<_>>(),
+    )?)
+}
+
+fn parse_upstream_protocols_json(value: &str) -> Result<Vec<UpstreamProtocolKind>> {
+    let raw: Vec<String> = serde_json::from_str(value)?;
+    let mut protocols = Vec::with_capacity(raw.len());
+    for item in raw {
+        protocols.push(
+            UpstreamProtocolKind::try_from(item.as_str())
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
+    }
+    Ok(protocols)
+}
+
 fn persist_account_custom_config_on(
     conn: &Connection,
     account_id: &str,
@@ -1409,29 +1526,30 @@ fn persist_account_custom_config_on(
     allow_protocol_auth_change: bool,
 ) -> Result<()> {
     let base_url = validate_custom_base_url(&input.base_url)?;
+    let protocols = normalize_upstream_protocols(&input.upstream_protocols)?;
+    let protocols_json = upstream_protocols_json(&protocols)?;
     let now = Utc::now().to_rfc3339();
     let existing = conn
         .query_row(
-            "SELECT upstream_protocol, auth_scheme FROM account_custom_configs WHERE account_id = ?1",
+            "SELECT upstream_protocols, auth_scheme FROM account_custom_configs WHERE account_id = ?1",
             [account_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
-    if let Some((protocol, auth_scheme)) = existing {
+    if let Some((protocols, auth_scheme)) = existing {
         anyhow::ensure!(
             allow_protocol_auth_change
-                || (protocol == input.upstream_protocol.as_str()
-                    && auth_scheme == input.auth_scheme.as_str()),
+                || (protocols == protocols_json && auth_scheme == input.auth_scheme.as_str()),
             "Custom protocol and auth scheme cannot be changed after create"
         );
         conn.execute(
             "UPDATE account_custom_configs
-             SET base_url = ?2, upstream_protocol = ?3, auth_scheme = ?4, updated_at = ?5
+             SET base_url = ?2, upstream_protocols = ?3, auth_scheme = ?4, updated_at = ?5
              WHERE account_id = ?1",
             params![
                 account_id,
                 base_url,
-                input.upstream_protocol.as_str(),
+                protocols_json,
                 input.auth_scheme.as_str(),
                 now,
             ],
@@ -1439,12 +1557,12 @@ fn persist_account_custom_config_on(
     } else {
         conn.execute(
             "INSERT INTO account_custom_configs (
-                account_id, base_url, upstream_protocol, auth_scheme, created_at, updated_at
+                account_id, base_url, upstream_protocols, auth_scheme, created_at, updated_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
             params![
                 account_id,
                 base_url,
-                input.upstream_protocol.as_str(),
+                protocols_json,
                 input.auth_scheme.as_str(),
                 now,
             ],
@@ -1454,15 +1572,15 @@ fn persist_account_custom_config_on(
     Ok(())
 }
 
-/// Re-open a verification-required account as a disabled pending draft.
-/// Go (`not_required`) rows are left untouched.
+/// Re-open a verification-required account as a pending draft. Enablement is
+/// left untouched: for Custom, verification is an optional tool rather than an
+/// enablement gate. Go (`not_required`) rows are left untouched.
 fn mark_required_verification_stale_on(conn: &Connection, account_id: &str) -> Result<()> {
     conn.execute(
         "UPDATE accounts
          SET verification_status = 'pending',
              connection_verified_at = NULL,
              verification_error = NULL,
-             enabled = 0,
              updated_at = ?2
          WHERE id = ?1 AND verification_status <> 'not_required'",
         params![account_id, Utc::now().to_rfc3339()],
@@ -1571,24 +1689,21 @@ fn persist_account_model_capabilities_on(
     capabilities: &[AccountModelCapabilityInput],
 ) -> Result<()> {
     if !capabilities.is_empty() {
-        let expected_protocol: String = conn
+        let expected_json: String = conn
             .query_row(
-                "SELECT upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
+                "SELECT upstream_protocols FROM account_custom_configs WHERE account_id = ?1",
                 [account_id],
                 |row| row.get(0),
             )
             .optional()?
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Custom model capabilities require a persisted custom_config.upstream_protocol"
+                    "Custom model capabilities require a persisted custom_config.upstream_protocols"
                 )
             })?;
-        for capability in capabilities {
-            anyhow::ensure!(
-                capability.protocol.as_str() == expected_protocol,
-                "model capability protocol must match account custom_config.upstream_protocol"
-            );
-        }
+        let expected_protocols = parse_upstream_protocols_json(&expected_json)?;
+        crate::custom::validate_custom_capability_expansion(&expected_protocols, capabilities)
+            .map_err(|message| anyhow::anyhow!(message))?;
     }
     conn.execute(
         "DELETE FROM account_model_capabilities WHERE account_id = ?1",
@@ -1617,32 +1732,6 @@ fn persist_account_model_capabilities_on(
         )?;
     }
     mark_required_verification_stale_on(conn, account_id)?;
-    Ok(())
-}
-
-fn persist_account_acknowledgement_on(
-    conn: &Connection,
-    account_id: &str,
-    notice: PlanRiskNotice,
-    accepted_at: DateTime<Utc>,
-) -> Result<()> {
-    let hash = notice.content_hash();
-    conn.execute(
-        "INSERT INTO account_acknowledgements (
-            account_id, acknowledgement_id, version, content_hash, accepted_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(account_id, acknowledgement_id) DO UPDATE SET
-            version = excluded.version,
-            content_hash = excluded.content_hash,
-            accepted_at = excluded.accepted_at",
-        params![
-            account_id,
-            notice.acknowledgement_id,
-            notice.version,
-            hash,
-            accepted_at.to_rfc3339(),
-        ],
-    )?;
     Ok(())
 }
 
@@ -1820,6 +1909,8 @@ impl Database {
         db.migrate()?;
         migrate_to_v27(&db.conn, &db_path, cipher, is_fresh)?;
         migrate_to_v28(&db.conn)?;
+        migrate_to_v29(&db.conn)?;
+        migrate_to_v30(&db.conn)?;
         Ok(db)
     }
 
@@ -2859,7 +2950,7 @@ impl Database {
                 "CREATE TABLE IF NOT EXISTS account_custom_configs (
                     account_id TEXT PRIMARY KEY,
                     base_url TEXT NOT NULL,
-                    upstream_protocol TEXT NOT NULL,
+                    upstream_protocols TEXT NOT NULL,
                     auth_scheme TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -2874,19 +2965,8 @@ impl Database {
                     PRIMARY KEY (account_id, model_id, protocol),
                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
                 );
-                CREATE TABLE IF NOT EXISTS account_acknowledgements (
-                    account_id TEXT NOT NULL,
-                    acknowledgement_id TEXT NOT NULL,
-                    version TEXT NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    accepted_at TEXT NOT NULL,
-                    PRIMARY KEY (account_id, acknowledgement_id),
-                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-                );
                 CREATE INDEX IF NOT EXISTS idx_account_model_capabilities_account
-                    ON account_model_capabilities(account_id);
-                CREATE INDEX IF NOT EXISTS idx_account_acknowledgements_account
-                    ON account_acknowledgements(account_id);",
+                    ON account_model_capabilities(account_id);",
             )?;
 
             if table_has_column(&tx, "accounts", "provider_id")?
@@ -3023,7 +3103,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS account_custom_configs (
                 account_id TEXT PRIMARY KEY,
                 base_url TEXT NOT NULL,
-                upstream_protocol TEXT NOT NULL,
+                upstream_protocols TEXT NOT NULL,
                 auth_scheme TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -3036,15 +3116,6 @@ impl Database {
                 verified_at TEXT,
                 source TEXT NOT NULL DEFAULT 'manual',
                 PRIMARY KEY (account_id, model_id, protocol),
-                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS account_acknowledgements (
-                account_id TEXT NOT NULL,
-                acknowledgement_id TEXT NOT NULL,
-                version TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                accepted_at TEXT NOT NULL,
-                PRIMARY KEY (account_id, acknowledgement_id),
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
             );",
         )?;
@@ -3490,16 +3561,14 @@ impl Database {
         Ok(())
     }
 
-    /// Persist the account row together with Custom config/capabilities and a
-    /// required SCNet acknowledgement in one SQLite transaction. A crash or
-    /// constraint failure leaves no orphan account and does not rely on
-    /// compensating deletes.
+    /// Persist the account row together with Custom config/capabilities in one
+    /// SQLite transaction. A crash or constraint failure leaves no orphan account
+    /// and does not rely on compensating deletes.
     pub fn create_account_with_contract(
         &self,
         account: &Account,
         custom_config: Option<&AccountCustomConfigInput>,
         capabilities: &[AccountModelCapabilityInput],
-        risk_notice: Option<PlanRiskNotice>,
     ) -> Result<()> {
         anyhow::ensure!(
             account.id != ZEN_FREE_ACCOUNT_ID,
@@ -3516,7 +3585,7 @@ impl Database {
         if plan_requires_custom_config(plan) {
             anyhow::ensure!(
                 custom_config.is_some(),
-                "Custom API accounts require a base URL, upstream protocol, and auth scheme"
+                "Custom API accounts require a base URL, at least one upstream protocol, and an auth scheme"
             );
             anyhow::ensure!(
                 !capabilities.is_empty(),
@@ -3532,16 +3601,6 @@ impl Database {
                 "model capabilities are only available for Custom API accounts"
             );
         }
-        if let Some(required) = plan.risk_notice {
-            let accepted = risk_notice.is_some_and(|notice| {
-                notice.acknowledgement_id == required.acknowledgement_id
-                    && notice.version == required.version
-            });
-            anyhow::ensure!(
-                accepted,
-                "this Plan requires a matching versioned risk acknowledgement before create"
-            );
-        }
         let purchase_date = if account.purchase_date.trim().is_empty() {
             local_today()
         } else {
@@ -3555,9 +3614,6 @@ impl Database {
         }
         if !capabilities.is_empty() {
             persist_account_model_capabilities_on(&tx, &account.id, capabilities)?;
-        }
-        if let Some(notice) = plan.risk_notice {
-            persist_account_acknowledgement_on(&tx, &account.id, notice, Utc::now())?;
         }
         tx.commit()?;
         Ok(())
@@ -3607,10 +3663,16 @@ impl Database {
         let key_replaced = key_cipher.is_some();
         let requires_verification = builtin_plan(&existing.provider_id, &existing.offering_id)
             .is_some_and(|plan| plan.verification_policy == VerificationPolicy::Required);
-        // Gate the value that will actually persist. Verification-required key
+        // Key replacement invalidates verification for every Required plan,
+        // but only Plans whose card descriptor gates enablement on verification
+        // (GOAT) are also forced off. Custom stays enabled as a pending draft.
+        let verification_gates_enablement = requires_verification
+            && ProviderRegistry::get(&existing.provider_id, &existing.offering_id)
+                .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+        // Gate the value that will actually persist. Verification-gated key
         // replacement still forces enabled=0 in SQL; that write is not an
         // enablement of an unroutable Plan.
-        let enabled = if key_replaced && requires_verification {
+        let enabled = if key_replaced && verification_gates_enablement {
             false
         } else {
             requested_enabled
@@ -3620,7 +3682,7 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE accounts SET name = ?1, username = ?2, password_cipher = ?3, key_cipher = ?4,
-             enabled = CASE WHEN ?10 AND ?13 THEN 0 ELSE ?5 END, referral_code = ?6, recharge_date = ?7, notes = ?8,
+             enabled = CASE WHEN ?10 AND ?14 THEN 0 ELSE ?5 END, referral_code = ?6, recharge_date = ?7, notes = ?8,
              usage_month_window_cost_offset = CASE WHEN ?9 THEN 0 ELSE usage_month_window_cost_offset END,
              auth_error = CASE WHEN ?10 THEN NULL ELSE auth_error END,
              verification_status = CASE WHEN ?10 AND ?13 THEN 'pending' ELSE verification_status END,
@@ -3641,6 +3703,7 @@ impl Database {
                 Utc::now().to_rfc3339(),
                 id,
                 requires_verification,
+                verification_gates_enablement,
             ],
         )?;
         if key_replaced
@@ -3750,10 +3813,6 @@ impl Database {
             [id],
         )?;
         tx.execute(
-            "DELETE FROM account_acknowledgements WHERE account_id = ?1",
-            [id],
-        )?;
-        tx.execute(
             "DELETE FROM provider_contract_model_protocols
              WHERE scope_kind = ?1 AND scope_id = ?2",
             params![SCOPE_KIND_CUSTOM_ENDPOINT, id],
@@ -3803,7 +3862,6 @@ impl Database {
             verification,
             custom_config: self.account_custom_config(account_id)?,
             model_capabilities: self.list_account_model_capabilities(account_id)?,
-            acknowledgements: self.list_account_acknowledgements(account_id)?,
         })
     }
 
@@ -3847,7 +3905,7 @@ impl Database {
         };
         let config = self.account_custom_config(account_id)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "Custom API accounts require a persisted base URL, protocol, and auth scheme"
+                "Custom API accounts require a persisted base URL, protocol set, and auth scheme"
             )
         })?;
         let capabilities = self.list_account_model_capabilities_declared(account_id)?;
@@ -3919,7 +3977,7 @@ impl Database {
     pub fn account_custom_config(&self, account_id: &str) -> Result<Option<AccountCustomConfig>> {
         self.conn
             .query_row(
-                "SELECT account_id, base_url, upstream_protocol, auth_scheme, created_at, updated_at
+                "SELECT account_id, base_url, upstream_protocols, auth_scheme, created_at, updated_at
                  FROM account_custom_configs WHERE account_id = ?1",
                 [account_id],
                 account_custom_config_from_row,
@@ -3987,7 +4045,7 @@ impl Database {
     pub fn list_custom_account_runtimes(&self) -> Result<Vec<crate::custom::CustomAccountRuntime>> {
         let mut stmt = self.conn.prepare(
             "SELECT a.id, a.enabled, a.verification_status, a.setup_step, a.key_cipher,
-                    c.account_id, c.base_url, c.upstream_protocol, c.auth_scheme,
+                    c.account_id, c.base_url, c.upstream_protocols, c.auth_scheme,
                     c.created_at, c.updated_at
              FROM accounts a
              INNER JOIN account_custom_configs c ON c.account_id = a.id
@@ -4014,10 +4072,14 @@ impl Database {
             let config = AccountCustomConfig {
                 account_id: row.get(5)?,
                 base_url: row.get(6)?,
-                upstream_protocol: {
+                upstream_protocols: {
                     let value = row.get::<_, String>(7)?;
-                    UpstreamProtocolKind::try_from(value.as_str()).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
+                    parse_upstream_protocols_json(&value).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            7,
+                            Type::Text,
+                            error.to_string().into(),
+                        )
                     })?
                 },
                 auth_scheme: {
@@ -4300,68 +4362,6 @@ impl Database {
         persist_account_model_capabilities_on(&tx, account_id, capabilities)?;
         tx.commit()?;
         Ok(())
-    }
-
-    pub fn list_account_acknowledgements(
-        &self,
-        account_id: &str,
-    ) -> Result<Vec<AccountAcknowledgement>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT account_id, acknowledgement_id, version, content_hash, accepted_at
-             FROM account_acknowledgements
-             WHERE account_id = ?1
-             ORDER BY acknowledgement_id ASC",
-        )?;
-        let rows = stmt.query_map([account_id], account_acknowledgement_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub fn record_account_acknowledgement(
-        &self,
-        account_id: &str,
-        notice: PlanRiskNotice,
-        accepted_at: DateTime<Utc>,
-    ) -> Result<AccountAcknowledgement> {
-        self.commit_account_acknowledgement(account_id, notice, accepted_at)?;
-        self.list_account_acknowledgements(account_id)?
-            .into_iter()
-            .find(|row| row.acknowledgement_id == notice.acknowledgement_id)
-            .ok_or_else(|| anyhow::anyhow!("acknowledgement was not persisted"))
-    }
-
-    /// Persist and commit a risk acknowledgement without performing a
-    /// fallible post-commit read. See [`Self::commit_account_custom_config`].
-    pub(crate) fn commit_account_acknowledgement(
-        &self,
-        account_id: &str,
-        notice: PlanRiskNotice,
-        accepted_at: DateTime<Utc>,
-    ) -> Result<()> {
-        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
-        let tx = self.conn.unchecked_transaction()?;
-        persist_account_acknowledgement_on(&tx, account_id, notice, accepted_at)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn account_has_acknowledgement(
-        &self,
-        account_id: &str,
-        notice: PlanRiskNotice,
-    ) -> Result<bool> {
-        let hash = notice.content_hash();
-        let found = self.conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM account_acknowledgements
-                 WHERE account_id = ?1
-                   AND acknowledgement_id = ?2
-                   AND version = ?3
-                   AND content_hash = ?4
-             )",
-            params![account_id, notice.acknowledgement_id, notice.version, hash],
-            |row| row.get::<_, i64>(0),
-        )?;
-        Ok(found != 0)
     }
 
     pub fn forward_log_native_attribution(
@@ -6783,9 +6783,9 @@ fn custom_verification_contract_still_matches_on(
     {
         return Ok(false);
     }
-    let Some((base_url, protocol, auth_scheme)): Option<(String, String, String)> = conn
+    let Some((base_url, protocols_json, auth_scheme)): Option<(String, String, String)> = conn
         .query_row(
-            "SELECT base_url, upstream_protocol, auth_scheme
+            "SELECT base_url, upstream_protocols, auth_scheme
              FROM account_custom_configs WHERE account_id = ?1",
             [&contract.account_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -6794,8 +6794,9 @@ fn custom_verification_contract_still_matches_on(
     else {
         return Ok(false);
     };
+    let protocols = parse_upstream_protocols_json(&protocols_json)?;
     if base_url != contract.base_url
-        || protocol != contract.upstream_protocol.as_str()
+        || protocols != contract.upstream_protocols
         || auth_scheme != contract.auth_scheme.as_str()
     {
         return Ok(false);
@@ -6820,9 +6821,9 @@ fn custom_verification_contract_still_matches_on(
 }
 
 fn account_custom_config_from_row(row: &Row<'_>) -> rusqlite::Result<AccountCustomConfig> {
-    let protocol_value = row.get::<_, String>(2)?;
-    let protocol = UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+    let protocols_value = row.get::<_, String>(2)?;
+    let protocols = parse_upstream_protocols_json(&protocols_value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, Type::Text, error.to_string().into())
     })?;
     let auth_value = row.get::<_, String>(3)?;
     let auth_scheme = UpstreamAuthScheme::try_from(auth_value.as_str()).map_err(|error| {
@@ -6831,7 +6832,7 @@ fn account_custom_config_from_row(row: &Row<'_>) -> rusqlite::Result<AccountCust
     Ok(AccountCustomConfig {
         account_id: row.get(0)?,
         base_url: row.get(1)?,
-        upstream_protocol: protocol,
+        upstream_protocols: protocols,
         auth_scheme,
         created_at: parse_datetime(row.get::<_, String>(4)?),
         updated_at: parse_datetime(row.get::<_, String>(5)?),
@@ -6849,16 +6850,6 @@ fn account_model_capability_from_row(row: &Row<'_>) -> rusqlite::Result<AccountM
         protocol,
         verified_at: row.get::<_, Option<String>>(3)?.map(parse_datetime),
         source: row.get(4)?,
-    })
-}
-
-fn account_acknowledgement_from_row(row: &Row<'_>) -> rusqlite::Result<AccountAcknowledgement> {
-    Ok(AccountAcknowledgement {
-        account_id: row.get(0)?,
-        acknowledgement_id: row.get(1)?,
-        version: row.get(2)?,
-        content_hash: row.get(3)?,
-        accepted_at: parse_datetime(row.get::<_, String>(4)?),
     })
 }
 
@@ -7053,14 +7044,12 @@ mod tests {
              DROP INDEX IF EXISTS idx_forward_logs_route_account;
              DROP INDEX IF EXISTS idx_forward_logs_provider_offering;
              DROP INDEX IF EXISTS idx_account_model_capabilities_account;
-             DROP INDEX IF EXISTS idx_account_acknowledgements_account;
              DROP TABLE IF EXISTS provider_usage_sync_state;
              DROP TABLE IF EXISTS provider_pricing_snapshots;
              DROP TABLE IF EXISTS credit_balances;
              DROP TABLE IF EXISTS quota_windows;
              DROP TABLE IF EXISTS account_custom_configs;
              DROP TABLE IF EXISTS account_model_capabilities;
-             DROP TABLE IF EXISTS account_acknowledgements;
              ALTER TABLE accounts DROP COLUMN verification_error;
              ALTER TABLE accounts DROP COLUMN connection_verified_at;
              ALTER TABLE accounts DROP COLUMN verification_status;
@@ -7283,7 +7272,7 @@ mod tests {
                 &draft,
                 Some(&AccountCustomConfigInput {
                     base_url: "https://api.example.com/v1".into(),
-                    upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                    upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                     auth_scheme: UpstreamAuthScheme::Bearer,
                 }),
                 &[AccountModelCapabilityInput {
@@ -7291,12 +7280,10 @@ mod tests {
                     protocol: UpstreamProtocolKind::ChatCompletions,
                     source: None,
                 }],
-                plan.risk_notice,
             )
             .unwrap();
         } else {
-            db.create_account_with_contract(&draft, None, &[], plan.risk_notice)
-                .unwrap();
+            db.create_account_with_contract(&draft, None, &[]).unwrap();
         }
     }
 
@@ -11391,10 +11378,8 @@ mod tests {
              CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_gateway_keys_key
                 ON sub_gateway_keys(key) WHERE deleted_at IS NULL AND key <> '';
              DROP INDEX IF EXISTS idx_account_model_capabilities_account;
-             DROP INDEX IF EXISTS idx_account_acknowledgements_account;
              DROP TABLE IF EXISTS account_custom_configs;
              DROP TABLE IF EXISTS account_model_capabilities;
-             DROP TABLE IF EXISTS account_acknowledgements;
              ALTER TABLE accounts DROP COLUMN verification_error;
              ALTER TABLE accounts DROP COLUMN connection_verified_at;
              ALTER TABLE accounts DROP COLUMN verification_status;
@@ -11460,11 +11445,12 @@ mod tests {
     fn newer_unsupported_schema_is_rejected_without_writes() {
         let dir = temp_data_dir("schema-too-new");
         let db = Database::open(dir.clone()).unwrap();
+        let too_new = CURRENT_SCHEMA_VERSION + 1;
         db.conn
-            .execute_batch(
+            .execute_batch(&format!(
                 "DELETE FROM schema_version;
-                 INSERT INTO schema_version (version) VALUES (29);",
-            )
+                     INSERT INTO schema_version (version) VALUES ({too_new});"
+            ))
             .unwrap();
         drop(db);
 
@@ -11477,7 +11463,7 @@ mod tests {
             "{error}"
         );
         let conn = Connection::open(dir.join("data.sqlite")).unwrap();
-        assert_eq!(schema_version_on(&conn).unwrap(), 29);
+        assert_eq!(schema_version_on(&conn).unwrap(), too_new);
         drop(conn);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -11832,33 +11818,7 @@ mod tests {
     }
 
     #[test]
-    fn scnet_offerings_share_one_persisted_provider_scope() {
-        let dir = temp_data_dir("v26-shared-scnet");
-        let db = Database::open(dir.clone()).unwrap();
-        let now = Utc::now();
-        let scope = ContractScope::from_offering(
-            SCNET_PROVIDER_ID,
-            SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-            None,
-        )
-        .unwrap();
-        db.set_protocol_switch(&scope, UpstreamProtocolKind::ChatCompletions, false, now)
-            .unwrap();
-        let premium = ContractScope::from_offering(
-            SCNET_PROVIDER_ID,
-            SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
-            None,
-        )
-        .unwrap();
-        assert_eq!(scope, premium);
-        let loaded = db.load_persisted_scope(&premium).unwrap().unwrap();
-        assert!(!loaded.switches.chat_completions);
-        drop(db);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn v23_persists_verification_custom_config_capabilities_and_acks() {
+    fn v23_persists_verification_custom_config_and_capabilities() {
         let dir = temp_data_dir("v23-contracts");
         let db = Database::open(dir.clone()).unwrap();
         let mut goat = account("goat-draft");
@@ -11881,7 +11841,7 @@ mod tests {
             "custom-1",
             &AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             },
             true,
@@ -11891,7 +11851,7 @@ mod tests {
             "custom-1",
             &AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::Messages,
+                upstream_protocols: vec![UpstreamProtocolKind::Messages],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             },
             false,
@@ -11911,21 +11871,6 @@ mod tests {
         .unwrap();
         let capabilities = db.list_account_model_capabilities("custom-1").unwrap();
         assert_eq!(capabilities[0].model_id, "deepseek/deepseek-v4-flash");
-
-        let mut scnet = account("scnet-1");
-        scnet.provider_id = SCNET_PROVIDER_ID.to_string();
-        scnet.offering_id = SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.to_string();
-        scnet.enabled = false;
-        db.create_account(&scnet).unwrap();
-        let scnet_notice = builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-            .and_then(|plan| plan.risk_notice)
-            .expect("SCNet plans require a versioned risk notice");
-        db.record_account_acknowledgement("scnet-1", scnet_notice, Utc::now())
-            .unwrap();
-        assert!(
-            db.account_has_acknowledgement("scnet-1", scnet_notice)
-                .unwrap()
-        );
 
         db.set_account_verification(
             "custom-1",
@@ -12143,7 +12088,7 @@ mod tests {
                 &custom,
                 Some(&AccountCustomConfigInput {
                     base_url: "https://api.example.com/v1".into(),
-                    upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                    upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                     auth_scheme: UpstreamAuthScheme::Bearer,
                 }),
                 &[AccountModelCapabilityInput {
@@ -12151,7 +12096,6 @@ mod tests {
                     protocol: UpstreamProtocolKind::ChatCompletions,
                     source: None,
                 }],
-                None,
             )
             .expect_err("forced custom config failure should abort the create");
         assert!(
@@ -12173,7 +12117,7 @@ mod tests {
             &custom,
             Some(&AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             }),
             &[AccountModelCapabilityInput {
@@ -12181,7 +12125,6 @@ mod tests {
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
-            None,
         )
         .unwrap();
         assert!(db.get_account("custom-atomic").unwrap().is_some());
@@ -12192,11 +12135,10 @@ mod tests {
             &go,
             Some(&AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             }),
             &[],
-            None,
         );
         assert!(rejected.is_err(), "non-Custom accounts must reject config");
         assert!(db.get_account("go-rejects-custom").unwrap().is_none());
@@ -12211,7 +12153,6 @@ mod tests {
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
-            None,
         );
         assert!(
             rejected_caps.is_err(),
@@ -12227,11 +12168,10 @@ mod tests {
             &custom_empty,
             Some(&AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             }),
             &[],
-            None,
         );
         assert!(
             empty_caps.is_err(),
@@ -12244,7 +12184,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_capability_protocol_must_match_config_and_mismatch_is_atomic() {
+    fn custom_capability_protocols_must_expand_the_config_protocol_set() {
         let dir = temp_data_dir("custom-protocol-mismatch");
         let db = Database::open(dir.clone()).unwrap();
         let mut custom = account("custom-protocol");
@@ -12255,7 +12195,7 @@ mod tests {
             &custom,
             Some(&AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::Messages,
+                upstream_protocols: vec![UpstreamProtocolKind::Messages],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             }),
             &[AccountModelCapabilityInput {
@@ -12263,21 +12203,25 @@ mod tests {
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
-            None,
         );
         assert!(
             mismatch
                 .unwrap_err()
                 .to_string()
-                .contains("must match account custom_config.upstream_protocol")
+                .contains("must be in account custom_config.upstream_protocols")
         );
         assert!(db.get_account("custom-protocol").unwrap().is_none());
 
-        db.create_account_with_contract(
+        // A partial expansion (only one protocol of the declared set) is
+        // rejected atomically as well.
+        let partial = db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::Messages,
+                upstream_protocols: vec![
+                    UpstreamProtocolKind::ChatCompletions,
+                    UpstreamProtocolKind::Messages,
+                ],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             }),
             &[AccountModelCapabilityInput {
@@ -12285,36 +12229,92 @@ mod tests {
                 protocol: UpstreamProtocolKind::Messages,
                 source: None,
             }],
-            None,
+        );
+        assert!(
+            partial
+                .unwrap_err()
+                .to_string()
+                .contains("must expand every declared model over every selected upstream protocol")
+        );
+        assert!(db.get_account("custom-protocol").unwrap().is_none());
+
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocols: vec![
+                    UpstreamProtocolKind::ChatCompletions,
+                    UpstreamProtocolKind::Messages,
+                ],
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[
+                AccountModelCapabilityInput {
+                    model_id: "org/model".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                },
+                AccountModelCapabilityInput {
+                    model_id: "org/model".into(),
+                    protocol: UpstreamProtocolKind::Messages,
+                    source: None,
+                },
+            ],
         )
         .unwrap();
+        let stored = db
+            .list_account_model_capabilities("custom-protocol")
+            .unwrap();
+        assert_eq!(stored.len(), 2);
+        assert!(
+            stored
+                .iter()
+                .any(|row| row.protocol == UpstreamProtocolKind::ChatCompletions)
+        );
+        assert!(
+            stored
+                .iter()
+                .any(|row| row.protocol == UpstreamProtocolKind::Messages)
+        );
+
         let rejected = db.replace_account_model_capabilities(
             "custom-protocol",
-            &[AccountModelCapabilityInput {
-                model_id: "org/other".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                source: None,
-            }],
+            &[
+                AccountModelCapabilityInput {
+                    model_id: "org/other".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                },
+                AccountModelCapabilityInput {
+                    model_id: "org/other".into(),
+                    protocol: UpstreamProtocolKind::Messages,
+                    source: None,
+                },
+                AccountModelCapabilityInput {
+                    model_id: "org/other".into(),
+                    protocol: UpstreamProtocolKind::Responses,
+                    source: None,
+                },
+            ],
         );
         assert!(
             rejected
                 .unwrap_err()
                 .to_string()
-                .contains("must match account custom_config.upstream_protocol")
+                .contains("must be in account custom_config.upstream_protocols")
         );
         let kept = db
             .list_account_model_capabilities("custom-protocol")
             .unwrap();
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].model_id, "org/model");
-        assert_eq!(kept[0].protocol, UpstreamProtocolKind::Messages);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|row| row.model_id == "org/model"));
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn custom_mutations_repend_and_disable_verified_accounts() {
+    fn custom_mutations_repend_but_keep_verified_accounts_enabled() {
         let dir = temp_data_dir("custom-lifecycle-stale");
         let db = Database::open(dir.clone()).unwrap();
         let mut custom = account("custom-stale");
@@ -12325,7 +12325,7 @@ mod tests {
             &custom,
             Some(&AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             }),
             &[AccountModelCapabilityInput {
@@ -12333,7 +12333,6 @@ mod tests {
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
-            None,
         )
         .unwrap();
         db.set_account_verification(
@@ -12354,7 +12353,7 @@ mod tests {
             "custom-stale",
             &AccountCustomConfigInput {
                 base_url: "https://api.example.net/v2".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             },
             false,
@@ -12365,7 +12364,7 @@ mod tests {
             .account_verification_state("custom-stale")
             .unwrap()
             .unwrap();
-        assert!(!after_url.enabled);
+        assert!(after_url.enabled);
         assert_eq!(
             after_url_state.status,
             ConnectionVerificationStatus::Pending
@@ -12400,7 +12399,7 @@ mod tests {
             .account_verification_state("custom-stale")
             .unwrap()
             .unwrap();
-        assert!(!after_caps.enabled);
+        assert!(after_caps.enabled);
         assert_eq!(
             after_caps_state.status,
             ConnectionVerificationStatus::Pending
@@ -12436,7 +12435,7 @@ mod tests {
             .account_verification_state("custom-stale")
             .unwrap()
             .unwrap();
-        assert!(!after_key.enabled);
+        assert!(after_key.enabled);
         assert_eq!(
             after_key_state.status,
             ConnectionVerificationStatus::Pending
@@ -12464,7 +12463,7 @@ mod tests {
             &custom,
             Some(&AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             }),
             &[AccountModelCapabilityInput {
@@ -12472,7 +12471,6 @@ mod tests {
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
-            None,
         )
         .unwrap();
 
@@ -12518,7 +12516,7 @@ mod tests {
             "custom-cas",
             &AccountCustomConfigInput {
                 base_url: "https://api.example.net/v2".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             },
             false,
@@ -12602,7 +12600,7 @@ mod tests {
             &leftover,
             Some(&AccountCustomConfigInput {
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
             }),
             &[AccountModelCapabilityInput {
@@ -12610,7 +12608,6 @@ mod tests {
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
-            None,
         )
         .unwrap();
         let deleted_contract = db
@@ -12670,7 +12667,7 @@ mod tests {
                     &draft,
                     Some(&AccountCustomConfigInput {
                         base_url: "https://api.example.com/v1".into(),
-                        upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                        upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                         auth_scheme: UpstreamAuthScheme::Bearer,
                     }),
                     &[AccountModelCapabilityInput {
@@ -12678,12 +12675,10 @@ mod tests {
                         protocol: UpstreamProtocolKind::ChatCompletions,
                         source: None,
                     }],
-                    plan.risk_notice,
                 )
                 .unwrap();
             } else {
-                db.create_account_with_contract(&draft, None, &[], plan.risk_notice)
-                    .unwrap();
+                db.create_account_with_contract(&draft, None, &[]).unwrap();
             }
             let stored = db.get_account(&id).unwrap().unwrap();
             assert!(!stored.enabled, "{id} draft must stay disabled");
@@ -12772,11 +12767,7 @@ mod tests {
                 .iter()
                 .map(|plan| (plan.offering.provider_id, plan.offering.offering_id))
                 .collect::<Vec<_>>(),
-            vec![
-                (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
-                (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID),
-                (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID),
-            ]
+            Vec::<(&str, &str)>::new()
         );
         assert!(
             builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
@@ -12841,23 +12832,6 @@ mod tests {
                 [],
             )
             .unwrap();
-
-        for plan in unroutable.iter().filter(|plan| {
-            !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
-                && plan.offering.offering_id == GOAT_OFFERING_ID)
-        }) {
-            let id = format!("draft-{}", plan.offering.offering_id);
-            persist_unroutable_draft(&db, *plan, &id, &format!("{id}-notes"));
-            leftover_enable(&db, &id);
-            if plan.offering.offering_id == SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID {
-                db.conn
-                    .execute(
-                        "UPDATE accounts SET verification_status = 'verified' WHERE id = ?1",
-                        [&id],
-                    )
-                    .unwrap();
-            }
-        }
 
         persist_unroutable_draft(
             &db,
@@ -12931,22 +12905,6 @@ mod tests {
             Some("boom")
         );
 
-        for plan in unroutable.iter().filter(|plan| {
-            !(plan.offering.provider_id == COMMAND_CODE_PROVIDER_ID
-                && plan.offering.offering_id == GOAT_OFFERING_ID)
-        }) {
-            let id = format!("draft-{}", plan.offering.offering_id);
-            let after = sanitation_snapshot(&db, &id);
-            assert!(!after.enabled, "{id} leftover must be disabled");
-            assert_eq!(after.name, id);
-            assert_eq!(after.notes.as_deref(), Some(format!("{id}-notes").as_str()));
-            if plan.offering.offering_id == SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID {
-                assert_eq!(after.verification, ConnectionVerificationStatus::Verified);
-            } else {
-                assert_eq!(after.verification, ConnectionVerificationStatus::Pending);
-            }
-        }
-
         let custom_after = sanitation_snapshot(&db, "draft-api");
         assert_eq!(custom_after, custom_before);
         assert!(
@@ -12961,9 +12919,6 @@ mod tests {
             "goat-pending",
             "goat-verified",
             "goat-failed",
-            "draft-token-plan-basic",
-            "draft-token-plan-standard",
-            "draft-token-plan-premium",
             "draft-api",
         ]
         .into_iter()
@@ -12979,20 +12934,6 @@ mod tests {
                 "second open must be idempotent for {id}"
             );
         }
-
-        db.update_account(
-            "draft-token-plan-basic",
-            &AccountUpdate {
-                name: Some("draft-token-plan-basic-renamed".into()),
-                ..AccountUpdate::default()
-            },
-            None,
-            None,
-        )
-        .unwrap();
-        let recovered = db.get_account("draft-token-plan-basic").unwrap().unwrap();
-        assert!(!recovered.enabled);
-        assert_eq!(recovered.name, "draft-token-plan-basic-renamed");
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -13222,7 +13163,7 @@ mod tests {
         assert!(!table_has_column(&conn, "accounts", "goat_model_access").unwrap());
 
         migrate_to_v28(&conn).unwrap();
-        assert_eq!(schema_version_on(&conn).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(schema_version_on(&conn).unwrap(), 28);
         assert!(table_has_column(&conn, "accounts", "goat_model_access").unwrap());
         let default_value: String = conn
             .query_row(
@@ -13237,6 +13178,129 @@ mod tests {
         }
 
         drop(conn);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v28_to_v29_purges_scnet_accounts_and_acknowledgements() {
+        let dir = temp_data_dir("v28-v29-scnet-purge");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut leftover = account("scnet-leftover");
+        leftover.provider_id = OPENCODE_PROVIDER_ID.into();
+        leftover.offering_id = GO_OFFERING_ID.into();
+        db.create_account(&leftover).unwrap();
+        db.conn
+            .execute(
+                "UPDATE accounts
+                 SET provider_id = 'scnet', offering_id = 'scnet-token-plan-basic'
+                 WHERE id = 'scnet-leftover'",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "CREATE TABLE account_acknowledgements (
+                    account_id TEXT NOT NULL,
+                    acknowledgement_id TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    accepted_at TEXT NOT NULL,
+                    PRIMARY KEY (account_id, acknowledgement_id)
+                )",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO account_acknowledgements
+                 (account_id, acknowledgement_id, version, content_hash, accepted_at)
+                 VALUES ('scnet-leftover', 'ack-scnet', '1', 'hash', ?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "DELETE FROM schema_version;
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (28);",
+            )
+            .unwrap();
+        drop(db);
+
+        let db = Database::open(dir.clone()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        assert!(
+            db.get_account("scnet-leftover").unwrap().is_none(),
+            "v29 must delete SCNet account rows"
+        );
+        let ack_table_exists: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'account_acknowledgements'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !ack_table_exists,
+            "v29 must drop the account_acknowledgements table"
+        );
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v29_to_v30_backfills_custom_protocol_set_and_drops_single_column() {
+        let dir = temp_data_dir("v29-v30-protocol-set");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut custom = account("custom-v29");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.enabled = false;
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocols: vec![UpstreamProtocolKind::Messages],
+                auth_scheme: UpstreamAuthScheme::Bearer,
+            }),
+            &[AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: UpstreamProtocolKind::Messages,
+                source: None,
+            }],
+        )
+        .unwrap();
+        // Rebuild the v29 single-protocol shape: one TEXT value per row.
+        db.conn
+            .execute_batch(
+                "ALTER TABLE account_custom_configs ADD COLUMN upstream_protocol TEXT;
+                 UPDATE account_custom_configs SET upstream_protocol = 'messages';
+                 ALTER TABLE account_custom_configs DROP COLUMN upstream_protocols;
+                 DELETE FROM schema_version;
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (29);",
+            )
+            .unwrap();
+        drop(db);
+
+        let db = Database::open(dir.clone()).unwrap();
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        assert!(
+            !table_has_column(&db.conn, "account_custom_configs", "upstream_protocol").unwrap(),
+            "v30 must drop the single-protocol column"
+        );
+        let config = db.account_custom_config("custom-v29").unwrap().unwrap();
+        assert_eq!(
+            config.upstream_protocols,
+            vec![UpstreamProtocolKind::Messages],
+            "v30 must backfill the single value as a one-element JSON array"
+        );
+        assert_eq!(config.base_url, "https://api.example.com/v1");
+        assert_eq!(config.auth_scheme, UpstreamAuthScheme::Bearer);
+
+        drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
 

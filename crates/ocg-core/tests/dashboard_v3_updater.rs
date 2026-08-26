@@ -326,8 +326,8 @@ fn github_tag_body(tag: &str) -> String {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[test]

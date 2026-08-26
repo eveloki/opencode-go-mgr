@@ -35,8 +35,8 @@ use crate::state::CoreState;
 use crate::upstream_limit::{parse_reset, parse_usage_limit_window};
 
 use super::types::{
-    Account, AccountAcknowledgement, AccountCustomConfig, AccountManagedKeyVerify,
-    AccountModelCapability, AccountMutation, MutationExpectation,
+    Account, AccountCustomConfig, AccountManagedKeyVerify, AccountModelCapability, AccountMutation,
+    MutationExpectation,
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
@@ -195,6 +195,7 @@ fn prepare_managed_key_verify(
     key_cipher: String,
 ) -> Result<PreparedVerify, V3ApiError> {
     let account = load_waiting_managed_account(state, id)?;
+    ensure_managed_registration(state, &account)?;
     ensure_plan_can_enable(state, &account)?;
     let (_protocol, path, body) = go_verification_request()?;
     let config = state.config();
@@ -238,6 +239,21 @@ fn require_waiting_managed(state: &CoreState, account: &ModelAccount) -> Result<
 fn ensure_plan_can_enable(state: &CoreState, account: &ModelAccount) -> Result<(), V3ApiError> {
     provider::ensure_offering_can_enable(&account.provider_id, &account.offering_id)
         .map_err(|error| map_enablement_error(state, error))
+}
+
+fn ensure_managed_registration(
+    state: &CoreState,
+    account: &ModelAccount,
+) -> Result<(), V3ApiError> {
+    let is_managed = provider::builtin_plan(&account.provider_id, &account.offering_id)
+        .is_some_and(|plan| plan.managed_registration);
+    if !is_managed {
+        return Err(V3ApiError::conflict_at(
+            state,
+            "managed key verification is only available for managed-registration offerings",
+        ));
+    }
+    Ok(())
 }
 
 fn map_enablement_error(state: &CoreState, error: ProviderBindingError) -> V3ApiError {
@@ -646,11 +662,6 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
             .into_iter()
             .map(capability_from_model)
             .collect(),
-        acknowledgements: contract
-            .acknowledgements
-            .into_iter()
-            .map(acknowledgement_from_model)
-            .collect(),
     })
 }
 
@@ -658,7 +669,11 @@ fn custom_config_from_model(config: crate::models::AccountCustomConfig) -> Accou
     AccountCustomConfig {
         account_id: config.account_id,
         base_url: config.base_url,
-        upstream_protocol: config.upstream_protocol.into(),
+        upstream_protocols: config
+            .upstream_protocols
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         auth_scheme: config.auth_scheme.into(),
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
@@ -674,18 +689,6 @@ fn capability_from_model(
         protocol: capability.protocol.into(),
         verified_at: capability.verified_at.map(|value| value.to_rfc3339()),
         source: capability.source,
-    }
-}
-
-fn acknowledgement_from_model(
-    acknowledgement: crate::models::AccountAcknowledgement,
-) -> AccountAcknowledgement {
-    AccountAcknowledgement {
-        account_id: acknowledgement.account_id,
-        acknowledgement_id: acknowledgement.acknowledgement_id,
-        version: acknowledgement.version,
-        content_hash: acknowledgement.content_hash,
-        accepted_at: acknowledgement.accepted_at.to_rfc3339(),
     }
 }
 

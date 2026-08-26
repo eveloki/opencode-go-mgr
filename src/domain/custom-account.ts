@@ -3,6 +3,7 @@ import type {
   AccountCustomConfigInput,
   AccountModelCapability,
   AccountModelCapabilityInput,
+  AccountProtocol,
   AccountUpdate,
 } from "../api/dashboard.ts";
 import type { MessageKey } from "../i18n/index.ts";
@@ -49,7 +50,7 @@ export const CUSTOM_CAPABILITY_ISSUE_KEYS = {
   duplicate_model_id: "模型 ID 不能重复",
   model_id_too_long: "模型 ID 最多 200 个字符",
   model_id_has_control_character: "模型 ID 不能包含控制字符",
-  protocol_mismatch: "模型能力必须与上游协议一致",
+  protocol_mismatch: "模型能力协议必须属于所选上游协议",
 } as const satisfies Record<CustomCapabilityIssue, MessageKey>;
 
 export class CustomCapabilityError extends Error {
@@ -97,17 +98,47 @@ export function canonicalCustomBaseUrl(value: string): string {
 }
 
 /**
+ * Canonical protocol ordering for a Custom account's declared set. The first
+ * element doubles as the discovery dialect, so submissions always use this
+ * fixed priority instead of click order.
+ */
+export const CUSTOM_PROTOCOLS: readonly AccountProtocol[] = [
+  "chat_completions",
+  "responses",
+  "messages",
+];
+
+/** De-dupe and order a checked protocol set into the canonical priority. */
+export function canonicalCustomProtocols(
+  protocols: readonly AccountProtocol[],
+): AccountProtocol[] {
+  return CUSTOM_PROTOCOLS.filter((protocol) => protocols.includes(protocol));
+}
+
+/** Expand a plain model-ID list into the model × protocol rows the backend persists. */
+export function expandCustomModelCapabilities(
+  modelIds: readonly string[],
+  upstreamProtocols: readonly AccountProtocol[],
+): Pick<AccountModelCapabilityInput, "model_id" | "protocol">[] {
+  const protocols = canonicalCustomProtocols(upstreamProtocols);
+  return modelIds.flatMap((model_id) => protocols.map((protocol) => ({ model_id, protocol })));
+}
+
+/**
  * Mirror the Custom capability constraints enforced by the backend before any
  * account mutation is sent. The normalized model ID is the backend's trimmed
  * value, so duplicates are caught even when users only differ by whitespace.
+ * Every row's protocol must belong to the account's declared protocol set.
  */
 export function normalizeCustomCapabilities(
   capabilities: readonly Pick<AccountModelCapabilityInput, "model_id" | "protocol">[],
-  upstreamProtocol: AccountCustomConfigInput["upstream_protocol"],
+  upstreamProtocols: readonly AccountProtocol[],
 ): AccountModelCapabilityInput[] {
   if (capabilities.length === 0) throw new CustomCapabilityError("missing");
+  const allowedProtocols = new Set(upstreamProtocols);
+  if (allowedProtocols.size === 0) throw new CustomCapabilityError("protocol_mismatch");
 
-  const seenModelIds = new Set<string>();
+  const seenRows = new Set<string>();
   return capabilities.map((capability) => {
     const model_id = capability.model_id.trim();
     if (Array.from(model_id).length > MAX_CUSTOM_MODEL_ID_CHARS) {
@@ -116,14 +147,15 @@ export function normalizeCustomCapabilities(
     if (/[\u0000-\u001F\u007F-\u009F]/u.test(model_id)) {
       throw new CustomCapabilityError("model_id_has_control_character");
     }
-    if (!model_id || seenModelIds.has(model_id)) {
-      throw new CustomCapabilityError(!model_id ? "missing" : "duplicate_model_id");
-    }
-    seenModelIds.add(model_id);
-    if (capability.protocol !== upstreamProtocol) {
+    if (!allowedProtocols.has(capability.protocol)) {
       throw new CustomCapabilityError("protocol_mismatch");
     }
-    return { model_id, protocol: upstreamProtocol, source: "manual" };
+    const rowKey = `${model_id} ${capability.protocol}`;
+    if (!model_id || seenRows.has(rowKey)) {
+      throw new CustomCapabilityError(!model_id ? "missing" : "duplicate_model_id");
+    }
+    seenRows.add(rowKey);
+    return { model_id, protocol: capability.protocol, source: "manual" };
   });
 }
 
@@ -132,6 +164,8 @@ export type CustomAccountEditInput = {
   notes?: string;
   key?: string;
   base_url?: string;
+  upstream_protocols?: readonly AccountProtocol[];
+  auth_scheme?: "bearer" | "x-api-key";
   model_capabilities?: readonly Pick<AccountModelCapabilityInput, "model_id" | "protocol">[];
 };
 
@@ -157,6 +191,14 @@ function sameCapabilities(
   ));
 }
 
+function sameProtocolSet(
+  saved: readonly AccountProtocol[],
+  next: readonly AccountProtocol[],
+): boolean {
+  const ordered = canonicalCustomProtocols(next);
+  return saved.length === ordered.length && saved.every((protocol, index) => protocol === ordered[index]);
+}
+
 /**
  * Compute only the Custom account sections that actually changed. Validation
  * intentionally runs first so invalid capabilities cannot leave a metadata
@@ -175,25 +217,38 @@ export function planCustomAccountEdit(
   const canonicalBaseUrl = canonicalCustomBaseUrl(base_url);
   const canonicalSavedBaseUrl = canonicalCustomBaseUrl(config.base_url);
 
+  // Protocol set and auth scheme are editable after create; a change re-opens
+  // verification as pending on the backend without disabling the account.
+  const upstream_protocols = canonicalCustomProtocols(
+    input.upstream_protocols ?? config.upstream_protocols,
+  );
+  if (upstream_protocols.length === 0) {
+    throw new CustomCapabilityError("protocol_mismatch");
+  }
+  const auth_scheme = input.auth_scheme ?? config.auth_scheme;
+
   const capabilities = normalizeCustomCapabilities(
     input.model_capabilities ?? account.model_capabilities,
-    config.upstream_protocol,
+    upstream_protocols,
   );
   const name = input.name.trim();
   const notes = input.notes ?? "";
   const keyReplacement = input.key !== undefined;
   const metadataChanged = name !== account.name || notes !== account.notes || keyReplacement;
+  const configChanged = canonicalBaseUrl !== canonicalSavedBaseUrl
+    || !sameProtocolSet(config.upstream_protocols, upstream_protocols)
+    || auth_scheme !== config.auth_scheme;
 
   return {
     ...(metadataChanged
       ? { account: { name, notes, ...(input.key === undefined ? {} : { key: input.key }) } }
       : {}),
-    ...(canonicalBaseUrl !== canonicalSavedBaseUrl
+    ...(configChanged
       ? {
         customConfig: {
           base_url,
-          upstream_protocol: config.upstream_protocol,
-          auth_scheme: config.auth_scheme,
+          upstream_protocols,
+          auth_scheme,
         },
       }
       : {}),
@@ -228,14 +283,4 @@ export function customAccountNeedsVerification(
 ): boolean {
   return isCustomApiAccount(account)
     && (account.verification_status === "pending" || account.verification_status === "failed");
-}
-
-/**
- * Verification is never enablement: the normal enable switch only becomes
- * interactive once the backend reports the connection as verified.
- */
-export function customAccountToggleBlocked(
-  account: Pick<Account, "provider_id" | "offering_id" | "verification_status">,
-): boolean {
-  return isCustomApiAccount(account) && account.verification_status !== "verified";
 }

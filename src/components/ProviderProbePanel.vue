@@ -79,7 +79,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -88,6 +88,7 @@ import {
   NSelect,
 } from "naive-ui";
 import type {
+  EffectiveModelContract,
   ProtocolProbeResult,
   ProviderAccountChoice,
   ProviderProtocol,
@@ -104,6 +105,7 @@ const props = defineProps<{
   inFlight: boolean;
   accounts: readonly ProviderAccountChoice[];
   models: readonly string[];
+  modelContracts: readonly EffectiveModelContract[];
   results: readonly ProtocolProbeResult[];
 }>();
 
@@ -115,7 +117,13 @@ const emit = defineEmits<{
   probe: [];
 }>();
 
-const protocolList = PROVIDER_PROTOCOLS;
+// Only protocols inside the selected model's safety ceiling (available
+// evidence) are probe candidates; anything else is rejected by the backend.
+const protocolList = computed<ProviderProtocol[]>(() => {
+  const contract = props.modelContracts.find((model) => model.model_id === props.modelId);
+  if (!contract) return [];
+  return PROVIDER_PROTOCOLS.filter((protocol) => contract.protocols[protocol]?.available);
+});
 const accountOptions = computed(() => props.accounts.map((account) => ({
   label: account.name,
   value: account.id,
@@ -124,6 +132,12 @@ const modelOptions = computed(() => props.models.map((modelId) => ({
   label: modelId,
   value: modelId,
 })));
+
+// A model switch can leave checked protocols outside the new ceiling.
+watch(protocolList, (allowed) => {
+  const pruned = props.protocols.filter((protocol) => allowed.includes(protocol));
+  if (pruned.length !== props.protocols.length) emit("update:protocols", pruned);
+});
 
 function toggleProtocol(protocol: ProviderProtocol, checked: boolean) {
   const next = checked

@@ -43,12 +43,6 @@
                 size="small"
                 :bordered="false"
               >{{ t("免费 · 出口 IP 共享") }}</n-tag>
-              <n-tag
-                v-else-if="group.plan.kind === 'subscription' && group.content.kind !== 'scnet-reference'"
-                type="info"
-                size="small"
-                :bordered="false"
-              >{{ t("订阅制") }}</n-tag>
             </h2>
             <n-alert
               v-if="pricingDisplay(group).state === 'error'"
@@ -139,11 +133,6 @@
           v-if="group.content.kind === 'goat-reference' && refreshError"
           type="warning"
           :title="t('刷新额度价格表失败: {error}', { error: refreshError })"
-        />
-
-        <ProviderPricingReference
-          v-else-if="group.content.kind === 'scnet-reference'"
-          kind="scnet"
         />
 
         <template v-else-if="pricingDisplay(group).state === 'available-table' && group.content.snapshot">
@@ -314,7 +303,6 @@ async function loadProviderSnapshots(catalogValue: ProviderCatalogEntry[]) {
     return { plan, entry };
   }).filter(({ plan, entry }) => (
     plan.id !== "opencode-go"
-    && plan.id !== "scnet"
     && entry?.pricing_availability === "available"
   ));
 

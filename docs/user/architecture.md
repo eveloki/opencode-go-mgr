@@ -2,7 +2,7 @@
 
 # Architecture Diagrams
 
-These are text maps of a single local node, current as of HEAD. Live routes: OpenCode Go, Zen Free, and Custom API. Command Code GOAT and SCNet Token Plans are still disabled drafts — routing traffic there will only earn you a `501`. Each diagram points to the chapter that owns the details; when a picture and a chapter disagree, trust the chapter and the code.
+These are text maps of a single local node, current as of HEAD. Live routes: OpenCode Go, Zen Free, and Custom API. Command Code GOAT is still a disabled draft — routing traffic there will only earn you a `501`. Each diagram points to the chapter that owns the details; when a picture and a chapter disagree, trust the chapter and the code.
 
 ## Contents
 
@@ -39,7 +39,7 @@ Desktop, CLI, and Docker are just three ways to host the same `ocg-core` process
                    \                      /
                     \                    /
              +----------------+------------------+
-             |         SQLite schema v27         |
+             |         SQLite schema v30         |
              |  GUI  ~/.ocg-mgr                  |
              |  CLI  ~/.ocg-mgr-cli              |
              +-----------------------------------+
@@ -91,28 +91,29 @@ Every account card is one Plan (`provider_id` + `offering_id`). Live Plans carry
   -----------------                       ------------------
   OpenCode Go                             Command Code GOAT
     official key, /zen/go                 verify 501
-  Zen Free                                SCNet Token Plans
-    no upstream key                       (basic / standard / premium)
-    catalog refresh on Providers          verify 501
+  Zen Free
+    no upstream key
+    catalog refresh on Providers
   Custom API
     trusted-admin HTTP/HTTPS origin
 
 
   Custom API lifecycle
 
-    save / update  ->  disabled pending
+    save / update  ->  can be enabled while pending
            |
            v
-    verify first declared model
-    (one minimal non-stream request;
-     2xx JSON object only)
+    verify every selected protocol
+    with the first declared model
+    (one minimal non-stream request per protocol;
+     2xx JSON object for each)
            |
            v
-    explicit enable  ->  eligible for routing
+    verification status becomes verified
+    (account may already be routable)
 
-  Key, base URL, or declared capability change
-  re-pends verification and disables the card.
-  Protocol and auth scheme are fixed at create.
+  Key, base URL, declared capability, protocol set, or auth scheme change
+  re-pends verification but keeps the card enabled.
 ```
 
 Zen Free has only an enable switch; turn the card off if you do not want it. Catalog refresh is a Providers action, not an account-card action. For accounts and providers, see [Accounts](accounts.md) and [Providers](providers.md).
@@ -138,7 +139,7 @@ The sidebar has seven views. `browser` is a hosted-session overlay, not a hidden
 
     AI client --Key--> this node --account credential--> Plan
 
-    Key            access_keys (schema v27)
+    Key            access_keys (schema v30)
                    Primary + optional sub keys (64 active cap)
     Account cred   Go key, Custom key, or Zen Free (none)
 ```
@@ -154,7 +155,7 @@ Neither GET makes an upstream discovery call. The one exception is Zen Free cata
     published Go aliases
       union last saved Zen Free aliases
       union eligible Custom declared IDs
-    eligible Custom = enabled + verified + ready + non-empty key
+    eligible Custom = enabled + ready + non-empty key (verification optional)
     Custom IDs must not steal published Go/Zen aliases
 
   GET /dashboard/api/v3/application-models   (dashboard session)

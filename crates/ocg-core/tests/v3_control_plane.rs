@@ -284,7 +284,7 @@ async fn dashboard_custom_create_stays_disabled_pending_unlike_tauri_shaped_db_c
             "key": "custom-key",
             "customConfig": {
                 "baseUrl": "http://127.0.0.1:1",
-                "upstreamProtocol": "chat_completions",
+                "upstreamProtocols": ["chat_completions"],
                 "authScheme": "bearer"
             },
             "modelCapabilities": [{

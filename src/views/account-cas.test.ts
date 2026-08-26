@@ -59,5 +59,5 @@ test("unroutable cards are fail-closed without provider-specific draft branches"
   assert.match(card, /v-else-if="isDraft" class="provider-unconfigured"/);
   assert.match(card, /v-if="isGo && accountIsReady\(account\)"/);
   assert.match(card, /accountRoutingDraftDescription\(props\.account\)/);
-  assert.doesNotMatch(card, /provider_id === "command-code"|provider_id === "scnet"|provider_id === "custom"/);
+  assert.doesNotMatch(card, /provider_id === "command-code"|provider_id === "custom"/);
 });

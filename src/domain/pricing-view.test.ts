@@ -208,13 +208,12 @@ test("pricing catalog keeps refresh explicit and exposes accessible grouped mult
   assert.doesNotMatch(catalog, /本地条件价格最后叠加/);
   assert.doesNotMatch(catalog, /official_price_multiplier|表价已含|Go 倍率/);
   assert.match(catalog, /kind="goat"/);
-  assert.match(catalog, /kind="scnet"/);
+  assert.doesNotMatch(catalog, /kind="scnet"/);
   assert.match(catalog, /:snapshot="group\.content\.snapshot"/);
-  assert.match(catalog, /plan\.id !== "scnet"/);
   assert.doesNotMatch(catalog, /plan\.id !== "command-code-goat"/);
 });
 
-test("legacy offering sections keep GOAT unpriced and omit SCNet Credits", () => {
+test("legacy offering sections keep GOAT unpriced", () => {
   const sections = buildPricingOfferingSections(null);
   assert.deepEqual(
     sections.map(({ provider_id, offering_id, presentation }) => (
@@ -226,7 +225,6 @@ test("legacy offering sections keep GOAT unpriced and omit SCNet Credits", () =>
       "opencode-zen-free/anonymous-free:free",
     ],
   );
-  assert.ok(sections.every(({ offering_id }) => offering_id !== "token-plan-basic"));
 });
 
 test("GOAT usage helper does not apply legacy window quotas or load GOAT calibration", () => {

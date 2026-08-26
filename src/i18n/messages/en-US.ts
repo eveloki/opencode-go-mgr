@@ -214,7 +214,6 @@ export const enUSMessages = {
   "选择模型 ID": "Select a model ID",
   "选择 Alias（模型 ID）": "Select an Alias (model ID)",
   "等待支持": "Awaiting support",
-  "创建后不可修改": "Cannot be changed after creation",
   "账号创建失败，请重试": "Failed to create the account. Please try again.",
   "未返回可用模型": "No available models were returned",
   "一键导入": "Import directly",
@@ -689,7 +688,6 @@ export const enUSMessages = {
   "Base URL": "Base URL",
   "https://api.example.com/v1": "https://api.example.com/v1",
   "上游协议": "Upstream protocol",
-  "选择上游协议": "Select an upstream protocol",
   "鉴权方式": "Auth scheme",
   "选择鉴权方式": "Select an auth scheme",
   "查看完整条款": "View full terms",
@@ -712,14 +710,12 @@ export const enUSMessages = {
   "模型 ID 不能重复": "Model IDs must be unique",
   "模型 ID 最多 200 个字符": "Model ID must be at most 200 characters",
   "模型 ID 不能包含控制字符": "Model ID cannot contain control characters",
-  "模型能力必须与上游协议一致": "Model capabilities must use the upstream protocol",
 
   "创建为禁用草稿；验证与路由尚未就绪": "Creates a disabled draft; verification and routing are not ready yet",
   "路由尚未就绪": "Routing is not ready yet",
   "已归档": "Archived",
   "该方案已归档，暂不支持创建": "This plan is archived and cannot be created",
   "该方案已归档，不支持启用": "This plan is archived and cannot be enabled",
-  "SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。": "SCNet Token Plans are archived: historical drafts are view-only and cannot be verified, enabled, routed, or metered.",
 
   "该方案暂不可路由": "This plan is not routable yet",
   "该方案暂不可路由。": "This plan is not routable yet.",
@@ -791,7 +787,6 @@ export const enUSMessages = {
   "基础版": "Basic",
   "标准版": "Standard",
   "高级版": "Premium",
-  "额度用尽不会转按量计费，到期未用额度不结转；实际价格和余额以 SCNet 控制台为准。": "Exhausted credits do not fall back to metered billing, and unused credits do not roll over; actual pricing and balances are shown in the SCNet console.",
   "仅限 AI 工具内交互式使用；禁止共享账号、自动化脚本、自定义应用后端及非交互批量调用。": "Interactive use inside AI tools only; account sharing, automation scripts, custom application backends, and non-interactive batch calls are prohibited.",
   "查看使用限制": "View usage restrictions",
   "当前仍是禁用草稿；这里仅展示官方参考，不代表 OCG Manager 已支持路由、验证或实时用量。": "This remains a disabled draft. This official reference does not mean OCG Manager supports routing, verification, or live usage for it.",
@@ -867,6 +862,12 @@ export const enUSMessages = {
   "发现结果已截断": "Discovery results were truncated",
   "生产状态": "Production state",
   "选择供应商范围": "Select a provider scope",
+  "请至少选择一个上游协议": "Select at least one upstream protocol",
+  "至少选择一个协议；所选协议对该账号下全部模型统一生效。": "Select at least one protocol; the selection applies uniformly to every model on this account.",
+  "模型能力协议必须属于所选上游协议": "Model capability protocols must belong to the selected upstream protocols",
+  "协议：{protocol}": "Protocol: {protocol}",
+  "{count} 个模型可用": "{count} models available",
+  "尚未验证连接：账号可先启用，也可先验证连接。": "Connection not verified yet: you can enable the account now or verify the connection first.",
 } as const;
 
 export type MessageKey = keyof typeof enUSMessages;

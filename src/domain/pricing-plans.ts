@@ -24,10 +24,8 @@ export type PricingAvailability = "available" | "unavailable" | "not_applicable"
 export type PlanPricingContent =
   | { kind: "opencode-go"; snapshot: PricingSnapshot | null }
   | { kind: "goat-reference"; snapshot: ProviderNeutralPricingSnapshot | null }
-  | { kind: "scnet-reference"; snapshot: null }
   | { kind: "free"; snapshot: null }
   | { kind: "api-key"; snapshot: StoredProviderPricingSnapshot | null }
-  | { kind: "subscription"; snapshot: StoredProviderPricingSnapshot | null }
   | { kind: "custom"; snapshot: StoredProviderPricingSnapshot | null };
 
 export interface PlanPricingGroup {
@@ -94,10 +92,6 @@ function buildContent(
     };
   }
 
-  if (plan.id === "scnet") {
-    return { kind: "scnet-reference", snapshot: null };
-  }
-
   if (plan.id === "zen-free") {
     return { kind: "free", snapshot: null };
   }
@@ -108,8 +102,6 @@ function buildContent(
   switch (plan.kind) {
     case "api-key":
       return { kind: "api-key", snapshot };
-    case "subscription":
-      return { kind: "subscription", snapshot };
     case "custom":
       return { kind: "custom", snapshot };
     default:
@@ -143,21 +135,12 @@ export function resolvePlanPricingDisplay(
       error: null,
     };
   }
-  if (group.content.kind === "scnet-reference") {
-    return {
-      state: "unavailable",
-      messageKey: "实验性接入，尚未配置价格目录，不展示价格表。",
-      error: null,
-    };
-  }
   if (group.pricingAvailability === "unavailable") {
     const messageKey = group.content.kind === "api-key"
       ? "实验性接入，尚未配置价格目录，不展示价格表。"
-      : group.content.kind === "subscription"
-        ? "订阅制方案：额度、计费与续费由服务商订阅条款管理。"
-        : group.content.kind === "custom"
-          ? "自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。"
-          : "暂无该方案的价格数据";
+      : group.content.kind === "custom"
+        ? "自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。"
+        : "暂无该方案的价格数据";
     return { state: "unavailable", messageKey, error: null };
   }
   if (group.pricingAvailability === "unpriced") {
@@ -191,9 +174,9 @@ export function resolvePlanPricingDisplay(
 }
 
 /**
- * Groups the pricing page by Go and GOAT. Zen Free has no price, Custom API
- * pricing belongs to its administrator, and archived SCNet Credits are not a
- * pricing option, so those families stay out of the default Pricing tabs.
+ * Groups the pricing page by Go and GOAT. Zen Free has no price and Custom API
+ * pricing belongs to its administrator, so those families stay out of the
+ * default Pricing tabs.
  *
  * The OpenCode Go group is always rendered when a Go pricing snapshot has been
  * fetched, even if the provider catalog is still loading, failed, or empty.

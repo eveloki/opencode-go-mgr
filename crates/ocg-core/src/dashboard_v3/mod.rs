@@ -61,8 +61,7 @@ pub use proxy_test::PROXY_TEST_TARGET;
 #[cfg(debug_assertions)]
 pub use proxy_test::{ProxyTestTargetGuard, install_proxy_test_target_for_tests};
 pub use types::{
-    Account, AccountAcknowledgement, AccountAcknowledgementCreate, AccountAcknowledgementWrite,
-    AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
+    Account, AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
     AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountGoatModelAccess,
     AccountGoatModelAccessUpdate, AccountList, AccountManagedCreate, AccountManagedKeyVerify,
     AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
@@ -196,10 +195,6 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             put(accounts::put_account_model_capabilities),
         )
         .route(
-            "/accounts/{id}/acknowledgements",
-            post(accounts::create_account_acknowledgement),
-        )
-        .route(
             "/accounts/{id}/usage",
             get(usage::get_account_usage).patch(usage::patch_account_usage),
         )
@@ -243,6 +238,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route(
             "/provider-contracts/provider/{scope_id}/protocols/{protocol}",
             put(providers::put_provider_protocol_switch),
+        )
+        .route(
+            "/provider-contracts/custom-endpoint/{scope_id}/protocols/{protocol}",
+            put(providers::put_custom_endpoint_protocol_switch),
         )
         .route(
             "/providers/{provider_id}/protocol-probes",

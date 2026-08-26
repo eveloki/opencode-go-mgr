@@ -14,7 +14,7 @@ use ocg_core::custom::MAX_CUSTOM_VERIFICATION_BODY_BYTES;
 use ocg_core::dashboard_v3::install_custom_verify_probe_for_tests;
 use ocg_core::dashboard_v3::{
     AccountMutation, AccountVerificationStatus, ERROR_CONFLICT, ERROR_INVALID_JSON,
-    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_NOT_IMPLEMENTED,
+    ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
     ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
 };
 use ocg_core::db::CURRENT_SCHEMA_VERSION;
@@ -23,8 +23,7 @@ use ocg_core::goat::MAX_GOAT_VERIFICATION_BODY_BYTES;
 use ocg_core::models::ProxyMode;
 use ocg_core::provider::{
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
-    CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, SCNET_PROVIDER_ID,
-    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
+    CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -386,18 +385,6 @@ fn force_direct_proxy(harness: &V3Harness) {
     harness.state.set_config(config).unwrap();
 }
 
-fn scnet_ack() -> Value {
-    let notice =
-        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-            .unwrap()
-            .risk_notice
-            .unwrap();
-    json!({
-        "acknowledgementId": notice.acknowledgement_id,
-        "version": notice.version
-    })
-}
-
 async fn create_go_account(harness: &V3Harness) -> String {
     let (status, created) = send_json(
         harness,
@@ -439,74 +426,6 @@ async fn create_goat_account(harness: &V3Harness) -> String {
         .to_string()
 }
 
-fn insert_scnet_leftover(harness: &V3Harness, id: &str) {
-    let plan =
-        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-            .unwrap();
-    let now = chrono::Utc::now();
-    harness
-        .state
-        .db
-        .lock()
-        .create_account_with_contract(
-            &ocg_core::models::Account {
-                id: id.into(),
-                provider_id: SCNET_PROVIDER_ID.into(),
-                offering_id: SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
-                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
-                quota_scope: ocg_core::provider::QuotaScope::Key,
-                name: id.into(),
-                username: None,
-                password_cipher: None,
-                key_cipher: harness.state.encrypt_key("sk-tp-verify").unwrap(),
-                enabled: false,
-                account_type: ocg_core::models::AccountType::Key,
-                setup_step: ocg_core::models::AccountSetupStep::Ready,
-                referral_code: None,
-                purchase_date: String::new(),
-                expires_on: String::new(),
-                cooldown_until: None,
-                cooldown_generic_until: None,
-                cooldown_5h_until: None,
-                cooldown_week_until: None,
-                cooldown_month_until: None,
-                cooldown_free_until: None,
-                last_error: None,
-                auth_error: None,
-                notes: None,
-                created_at: now,
-                updated_at: now,
-            },
-            None,
-            &[],
-            plan.risk_notice,
-        )
-        .expect("preserved SCNet leftover draft");
-}
-
-async fn create_scnet_account(harness: &V3Harness) -> String {
-    let (status, created) = send_json(
-        harness,
-        Method::POST,
-        "/accounts",
-        &cas(
-            harness,
-            json!({
-                "name": "SCNet verify",
-                "key": "sk-tp-verify",
-                "providerId": SCNET_PROVIDER_ID,
-                "offeringId": SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-                "acknowledgements": [scnet_ack()]
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{created}");
-    let id = "scnet-leftover-verify".to_string();
-    insert_scnet_leftover(harness, &id);
-    id
-}
-
 async fn create_custom_account(
     harness: &V3Harness,
     name: &str,
@@ -538,7 +457,7 @@ async fn create_custom_account(
                 "offeringId": CUSTOM_API_OFFERING_ID,
                 "customConfig": {
                     "baseUrl": base_url,
-                    "upstreamProtocol": protocol,
+                    "upstreamProtocols": [protocol],
                     "authScheme": auth_scheme
                 },
                 "modelCapabilities": capabilities
@@ -557,8 +476,8 @@ async fn create_custom_account(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[test]
@@ -733,12 +652,11 @@ async fn go_and_zen_verify_are_not_required_no_ops_without_a_revision_bump() {
 }
 
 #[tokio::test]
-async fn goat_scnet_and_unknown_offerings_fail_closed_with_zero_upstream() {
+async fn goat_and_unknown_offerings_fail_closed_with_zero_upstream() {
     let harness = start_loopback("verify-fail-closed").await;
     force_direct_proxy(&harness);
     let origin = start_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     let goat_id = create_goat_account(&harness).await;
-    let scnet_id = create_scnet_account(&harness).await;
     let unknown_id = create_go_account(&harness).await;
     {
         let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
@@ -749,16 +667,6 @@ async fn goat_scnet_and_unknown_offerings_fail_closed_with_zero_upstream() {
         .unwrap();
     }
     let before = harness.state.settings_revision();
-
-    let (status, scnet) = send_json(
-        &harness,
-        Method::POST,
-        &verify_path(&scnet_id),
-        &cas(&harness, json!({})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{scnet}");
-    assert_v3_error(&scnet, ERROR_NOT_IMPLEMENTED);
 
     let (status, unknown) = send_json(
         &harness,
@@ -1245,6 +1153,66 @@ async fn custom_verify_x_api_key_does_not_forward_dashboard_auth() {
     assert!(calls[0].authorization.is_none());
     assert_eq!(calls[0].x_api_key.as_deref(), Some(CUSTOM_KEY));
     assert!(calls[0].cookie.is_none());
+    assert_secret_free(&body, &[CUSTOM_KEY]);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn custom_verify_probes_every_declared_protocol_with_the_first_model() {
+    let harness = start_loopback("verify-custom-dual").await;
+    force_direct_proxy(&harness);
+    let origin = start_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
+    let (status, created) = send_json(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &harness,
+            json!({
+                "name": "custom-dual",
+                "key": CUSTOM_KEY,
+                "providerId": CUSTOM_PROVIDER_ID,
+                "offeringId": CUSTOM_API_OFFERING_ID,
+                "customConfig": {
+                    "baseUrl": origin.url,
+                    "upstreamProtocols": ["chat_completions", "messages"],
+                    "authScheme": "bearer"
+                },
+                "modelCapabilities": [
+                    { "modelId": CUSTOM_MODEL, "protocol": "chat_completions" },
+                    { "modelId": CUSTOM_MODEL, "protocol": "messages" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["account"]["id"].as_str().unwrap().to_string();
+
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &verify_path(&id),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        mutation_account(&body).verification_status,
+        AccountVerificationStatus::Verified
+    );
+    let calls = origin.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "one probe per declared protocol: {calls:?}");
+    assert_eq!(calls[0].method, "POST");
+    assert_eq!(calls[0].path, "/chat/completions");
+    assert_eq!(calls[1].method, "POST");
+    assert_eq!(calls[1].path, "/messages");
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.body.contains(CUSTOM_MODEL) && call.body.contains("\"stream\":false")),
+        "each protocol probes the first declared model: {calls:?}"
+    );
     assert_secret_free(&body, &[CUSTOM_KEY]);
     harness.stop();
 }

@@ -8,16 +8,15 @@ use crate::alias::ProviderMapping;
 use crate::custom::CustomAccountRuntime;
 use crate::kernel::ids::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, custom_model_id_matches,
-    normalize_model_name,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, custom_model_id_matches, normalize_model_name,
 };
 use crate::kernel::protocol::{ApiFormat, is_known_model, supported_model_protocol_profiles};
 use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::Account;
 use crate::provider::{
     BUILTIN_PLANS, COMMAND_CODE_GOAT_BASE_URL, OPENCODE_CONSTRUCTABLE_PROTOCOLS,
-    ProviderAdapterKind, ProviderRegistry, SCNET_TOKEN_PLAN_USABLE_MODELS, StructuralProbeCeiling,
-    UpstreamProtocolKind,
+    PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES, ProviderAdapterKind, ProviderRegistry,
+    StructuralProbeCeiling, UpstreamProtocolKind,
 };
 use crate::redaction::sanitize_upstream_error_value_with_known_secret;
 use chrono::{DateTime, Utc};
@@ -138,12 +137,11 @@ impl ContractScope {
     }
 }
 
-pub fn builtin_provider_scope_ids() -> [&'static str; 4] {
+pub fn builtin_provider_scope_ids() -> [&'static str; 3] {
     [
         OPENCODE_PROVIDER_ID,
         OPENCODE_ZEN_FREE_PROVIDER_ID,
         COMMAND_CODE_PROVIDER_ID,
-        SCNET_PROVIDER_ID,
     ]
 }
 
@@ -152,7 +150,6 @@ pub fn adapter_kind_for_provider_scope(provider_id: &str) -> Option<ProviderAdap
         OPENCODE_PROVIDER_ID => Some(ProviderAdapterKind::OpenCodeGo),
         OPENCODE_ZEN_FREE_PROVIDER_ID => Some(ProviderAdapterKind::ZenFree),
         COMMAND_CODE_PROVIDER_ID => Some(ProviderAdapterKind::CommandCodeGoat),
-        SCNET_PROVIDER_ID => Some(ProviderAdapterKind::Scnet),
         CUSTOM_PROVIDER_ID => Some(ProviderAdapterKind::ConfigurableHttp),
         _ => None,
     }
@@ -577,19 +574,6 @@ pub fn static_verified_protocols(
                 .filter_map(protocol_from_api)
                 .collect()
         }
-        ProviderAdapterKind::Scnet => {
-            if SCNET_TOKEN_PLAN_USABLE_MODELS
-                .iter()
-                .any(|id| id.eq_ignore_ascii_case(model_id.trim()))
-            {
-                vec![
-                    UpstreamProtocolKind::ChatCompletions,
-                    UpstreamProtocolKind::Messages,
-                ]
-            } else {
-                Vec::new()
-            }
-        }
         ProviderAdapterKind::ConfigurableHttp => declared
             .iter()
             .filter(|(id, _)| custom_model_id_matches(id, model_id))
@@ -862,19 +846,6 @@ fn merge_provider_scope(
                 models,
             )
         }
-        ProviderAdapterKind::Scnet => {
-            let models = Vec::new();
-            (
-                EffectiveCatalog {
-                    source: CATALOG_SOURCE_STATIC.to_string(),
-                    source_url: String::new(),
-                    refreshed_at: None,
-                    models: models.clone(),
-                    refresh_supported: false,
-                },
-                models,
-            )
-        }
         ProviderAdapterKind::ConfigurableHttp => unreachable!("custom uses merge_custom_scope"),
     };
 
@@ -893,16 +864,14 @@ fn merge_provider_scope(
             ),
         );
     }
-    if adapter != ProviderAdapterKind::Scnet {
-        overlay_probe_confirmed_models(
-            &mut models,
-            adapter,
-            &[],
-            evidence,
-            switches,
-            descriptor.inference.catalog_routable && descriptor.inference.production_inference,
-        );
-    }
+    overlay_probe_confirmed_models(
+        &mut models,
+        adapter,
+        &[],
+        evidence,
+        switches,
+        descriptor.inference.catalog_routable && descriptor.inference.production_inference,
+    );
 
     let mut disabled_reasons = Vec::new();
     if !descriptor.inference.catalog_routable {
@@ -910,9 +879,6 @@ fn merge_provider_scope(
     }
     if !descriptor.inference.production_inference {
         disabled_reasons.push("production inference is disabled".to_string());
-    }
-    if adapter == ProviderAdapterKind::Scnet {
-        disabled_reasons.push("SCNet Token Plans are archived".to_string());
     }
 
     EffectiveScopeContract {
@@ -1019,12 +985,20 @@ fn preferred_protocol(
                 .and_then(protocol_from_api)
                 .unwrap_or(UpstreamProtocolKind::ChatCompletions)
         }
-        ProviderAdapterKind::Scnet => UpstreamProtocolKind::ChatCompletions,
-        ProviderAdapterKind::ConfigurableHttp => declared
-            .iter()
-            .find(|(id, _)| custom_model_id_matches(id, model_id))
-            .map(|(_, protocol)| *protocol)
-            .unwrap_or(UpstreamProtocolKind::ChatCompletions),
+        ProviderAdapterKind::ConfigurableHttp => {
+            // Preferred = first of the fixed priority order that the account
+            // declared for this model.
+            let declared_protocols: Vec<UpstreamProtocolKind> = declared
+                .iter()
+                .filter(|(id, _)| custom_model_id_matches(id, model_id))
+                .map(|(_, protocol)| *protocol)
+                .collect();
+            PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES
+                .iter()
+                .copied()
+                .find(|protocol| declared_protocols.contains(protocol))
+                .unwrap_or(UpstreamProtocolKind::ChatCompletions)
+        }
     }
 }
 
@@ -1177,22 +1151,6 @@ mod tests {
             .providers
             .remove(OPENCODE_PROVIDER_ID)
             .unwrap()
-    }
-
-    #[test]
-    fn scnet_offerings_share_one_provider_scope() {
-        let basic = ContractScope::from_offering(
-            SCNET_PROVIDER_ID,
-            crate::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-            Some("a"),
-        );
-        let premium = ContractScope::from_offering(
-            SCNET_PROVIDER_ID,
-            crate::provider::SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
-            Some("b"),
-        );
-        assert_eq!(basic, premium);
-        assert_eq!(basic, Some(ContractScope::provider(SCNET_PROVIDER_ID)));
     }
 
     #[test]
@@ -1422,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn goat_is_production_routable_and_scnet_stays_closed_after_probe_success() {
+    fn goat_is_production_routable_after_probe_success() {
         let now = Utc::now();
         let mut persisted = empty_persisted();
         let goat_scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
@@ -1453,20 +1411,6 @@ mod tests {
                 last_probe_error: None,
             }],
         );
-        persisted.evidence.insert(
-            ContractScope::provider(SCNET_PROVIDER_ID),
-            vec![PersistedModelProtocol {
-                scope: ContractScope::provider(SCNET_PROVIDER_ID),
-                model_id: "GLM-5.2".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                source: ContractEvidenceSource::ProbeConfirmed,
-                verified_at: Some(now),
-                observed_at: Some(now),
-                last_probe_result: Some(ProbeResultKind::Success),
-                last_probe_at: Some(now),
-                last_probe_error: None,
-            }],
-        );
         let set = build_effective_contracts(&zen_seed(), &[], persisted);
         let goat = set.providers.get(COMMAND_CODE_PROVIDER_ID).unwrap();
         assert!(goat.catalog_routable);
@@ -1476,12 +1420,7 @@ mod tests {
                 .unwrap()
                 .routable
         );
-        let scnet = set.providers.get(SCNET_PROVIDER_ID).unwrap();
-        assert!(!scnet.catalog_routable);
-        assert!(scnet.catalog.models.is_empty());
-        assert!(scnet.models.is_empty());
         assert!(!ProviderAdapterKind::CommandCodeGoat.protocol_probe_supported());
-        assert!(!ProviderAdapterKind::Scnet.protocol_probe_supported());
     }
 
     #[test]
@@ -1495,7 +1434,7 @@ mod tests {
             config: AccountCustomConfig {
                 account_id: "custom-1".into(),
                 base_url: "https://api.example.com/v1".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: UpstreamAuthScheme::Bearer,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -1533,6 +1472,80 @@ mod tests {
         );
         assert!(custom.model("declared-model").unwrap().routable);
         assert!(custom.model("discovered-only").is_none());
+    }
+
+    #[test]
+    fn custom_declared_protocol_set_expands_ceiling_and_selects_pass_through() {
+        let declared = vec![
+            ("declared-model".to_string(), UpstreamProtocolKind::Messages),
+            (
+                "declared-model".to_string(),
+                UpstreamProtocolKind::ChatCompletions,
+            ),
+        ];
+        let runtime = CustomAccountRuntime {
+            account_id: "custom-dual".into(),
+            enabled: true,
+            verification_status: ConnectionVerificationStatus::Verified,
+            setup_ready: true,
+            has_key: true,
+            config: AccountCustomConfig {
+                account_id: "custom-dual".into(),
+                base_url: "https://api.example.com/v1".into(),
+                upstream_protocols: vec![
+                    UpstreamProtocolKind::Messages,
+                    UpstreamProtocolKind::ChatCompletions,
+                ],
+                auth_scheme: UpstreamAuthScheme::Bearer,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            capabilities: declared
+                .iter()
+                .map(|(model_id, protocol)| AccountModelCapability {
+                    account_id: "custom-dual".into(),
+                    model_id: model_id.clone(),
+                    protocol: *protocol,
+                    verified_at: None,
+                    source: "manual".into(),
+                })
+                .collect(),
+        };
+        let ceiling = safety_ceiling_protocols(
+            ProviderAdapterKind::ConfigurableHttp,
+            "declared-model",
+            &declared,
+        );
+        assert!(ceiling.contains(&UpstreamProtocolKind::ChatCompletions));
+        assert!(ceiling.contains(&UpstreamProtocolKind::Messages));
+        assert!(!ceiling.contains(&UpstreamProtocolKind::Responses));
+
+        let set = build_effective_contracts(&zen_seed(), &[runtime], empty_persisted());
+        let custom = set.custom_endpoints.get("custom-dual").unwrap();
+        let model = custom.model("declared-model").unwrap();
+        assert!(model.routable);
+        assert_eq!(
+            model.preferred_protocol,
+            UpstreamProtocolKind::ChatCompletions,
+            "preferred follows the fixed priority, not declaration order"
+        );
+        let scope = ContractScope::custom_endpoint("custom-dual");
+        let selected = set
+            .select_upstream(&scope, ApiFormat::Messages, "declared-model")
+            .unwrap();
+        assert_eq!(selected, ApiFormat::Messages);
+        let selected = set
+            .select_upstream(&scope, ApiFormat::ChatCompletions, "declared-model")
+            .unwrap();
+        assert_eq!(selected, ApiFormat::ChatCompletions);
+        let selected = set
+            .select_upstream(&scope, ApiFormat::Responses, "declared-model")
+            .unwrap();
+        assert_eq!(
+            selected,
+            ApiFormat::ChatCompletions,
+            "an undeclared client protocol falls back to the preferred protocol"
+        );
     }
 
     #[test]

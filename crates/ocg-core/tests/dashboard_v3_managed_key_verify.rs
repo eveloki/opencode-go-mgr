@@ -17,8 +17,8 @@ use ocg_core::models::{
     Account as ModelAccount, AccountSetupStep as ModelSetupStep, AccountType as ModelAccountType,
 };
 use ocg_core::provider::{
-    ConnectionVerificationStatus, GO_OFFERING_ID, OPENCODE_PROVIDER_ID, SCNET_PROVIDER_ID,
-    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+    COMMAND_CODE_PROVIDER_ID, ConnectionVerificationStatus, GO_OFFERING_ID, GOAT_OFFERING_ID,
+    OPENCODE_PROVIDER_ID,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -440,8 +440,8 @@ fn assert_no_secret_logs(harness: &V3Harness, extra: &[&str]) {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[test]
@@ -670,10 +670,10 @@ async fn dashboard_v3_managed_key_verify_rejects_unknown_wrong_step_and_unroutab
     key_acct.key_cipher = "cipher-key-1".into();
     key_acct.enabled = true;
     harness.state.db.lock().create_account(&key_acct).unwrap();
-    let mut scnet = managed_waiting("scnet-1");
-    scnet.provider_id = SCNET_PROVIDER_ID.into();
-    scnet.offering_id = SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into();
-    harness.state.db.lock().create_account(&scnet).unwrap();
+    let mut goat = managed_waiting("goat-1");
+    goat.provider_id = COMMAND_CODE_PROVIDER_ID.into();
+    goat.offering_id = GOAT_OFFERING_ID.into();
+    harness.state.db.lock().create_account(&goat).unwrap();
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -719,16 +719,16 @@ async fn dashboard_v3_managed_key_verify_rejects_unknown_wrong_step_and_unroutab
     let (status, body) = send_json(
         &harness,
         Method::POST,
-        &verify_path("scnet-1"),
+        &verify_path("goat-1"),
         &cas(&harness, json!({ "key": OPAQUE_KEY })),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_v3_error(&body, ERROR_CONFLICT);
-    let scnet_stored = stored_account(&harness, "scnet-1");
-    assert!(!scnet_stored.enabled);
-    assert_eq!(scnet_stored.setup_step, ModelSetupStep::KeyVerification);
-    assert!(scnet_stored.key_cipher.is_empty());
+    let goat_stored = stored_account(&harness, "goat-1");
+    assert!(!goat_stored.enabled);
+    assert_eq!(goat_stored.setup_step, ModelSetupStep::KeyVerification);
+    assert!(goat_stored.key_cipher.is_empty());
     assert_eq!(harness.state.settings_revision(), before);
     assert_secret_free(&body, &[OPAQUE_KEY]);
 
@@ -1384,10 +1384,10 @@ async fn dashboard_v3_invalid_stale_and_wrong_step_never_call_upstream() {
     let mut draft = managed_waiting("draft-1");
     draft.setup_step = ModelSetupStep::Payment;
     harness.state.db.lock().create_account(&draft).unwrap();
-    let mut scnet = managed_waiting("scnet-1");
-    scnet.provider_id = SCNET_PROVIDER_ID.into();
-    scnet.offering_id = SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into();
-    harness.state.db.lock().create_account(&scnet).unwrap();
+    let mut goat = managed_waiting("goat-1");
+    goat.provider_id = COMMAND_CODE_PROVIDER_ID.into();
+    goat.offering_id = GOAT_OFFERING_ID.into();
+    harness.state.db.lock().create_account(&goat).unwrap();
     let before = harness.state.settings_revision();
     let generation = harness.state.process_generation();
 
@@ -1416,14 +1416,14 @@ async fn dashboard_v3_invalid_stale_and_wrong_step_never_call_upstream() {
     let unroutable = send_json(
         &harness,
         Method::POST,
-        &verify_path("scnet-1"),
+        &verify_path("goat-1"),
         &cas(&harness, json!({ "key": OPAQUE_KEY })),
     )
     .await;
     assert_eq!(unroutable.0, StatusCode::CONFLICT, "{}", unroutable.1);
     assert_eq!(origin.call_count(), 0);
     assert_still_pending(&harness, "managed-1", before);
-    assert!(stored_account(&harness, "scnet-1").key_cipher.is_empty());
+    assert!(stored_account(&harness, "goat-1").key_cipher.is_empty());
 
     harness.stop();
 }

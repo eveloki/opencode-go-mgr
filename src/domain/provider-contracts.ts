@@ -437,6 +437,28 @@ export function enabledProtocols(scope: Pick<ProviderScopeView, "protocols" | "m
   ));
 }
 
+/**
+ * Protocols that structurally belong to a scope: any protocol with evidence
+ * on at least one model, plus any protocol whose switch is currently off so
+ * it can always be switched back on. Switches render only this set.
+ */
+export function structuralProtocols(
+  scope: Pick<ProviderScopeView, "protocols" | "models">,
+): ProviderProtocol[] {
+  return PROVIDER_PROTOCOLS.filter((protocol) => (
+    !scope.protocols[protocol]
+    || scope.models.some((model) => model.protocols[protocol] !== undefined)
+  ));
+}
+
+/** Models effectively usable through a protocol right now (evidence enabled after switches). */
+export function availableModelCount(
+  scope: Pick<ProviderScopeView, "models">,
+  protocol: ProviderProtocol,
+): number {
+  return scope.models.filter((model) => model.protocols[protocol]?.enabled).length;
+}
+
 export function allSupplierProtocolsDisabled(switches: ProtocolSwitches): boolean {
   return PROVIDER_PROTOCOLS.every((protocol) => !switches[protocol]);
 }

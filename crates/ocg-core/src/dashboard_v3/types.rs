@@ -59,7 +59,6 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AccountMutation",
     "AccountCustomConfig",
     "AccountModelCapability",
-    "AccountAcknowledgement",
     "AccountCreate",
     "AccountManagedCreate",
     "AccountUpdate",
@@ -70,12 +69,9 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AccountCustomConfigWrite",
     "AccountModelCapabilitiesUpdate",
     "AccountModelCapabilityWrite",
-    "AccountAcknowledgementCreate",
-    "AccountAcknowledgementWrite",
     "ProviderCatalog",
     "ProviderCatalogEntry",
     "ProviderCatalogFormField",
-    "ProviderCatalogRiskNotice",
     "ProviderModelCapability",
     "ZenFreeSettings",
     "ZenFreeSettingsUpdate",
@@ -726,7 +722,6 @@ pub struct Account {
     pub goat_model_access: Option<AccountGoatModelAccess>,
     pub custom_config: Option<AccountCustomConfig>,
     pub model_capabilities: Vec<AccountModelCapability>,
-    pub acknowledgements: Vec<AccountAcknowledgement>,
 }
 
 /// GET `/accounts` and PUT `/accounts/order` envelope.
@@ -756,7 +751,7 @@ pub struct AccountMutation {
 pub struct AccountCustomConfig {
     pub account_id: String,
     pub base_url: String,
-    pub upstream_protocol: AccountUpstreamProtocol,
+    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
     pub auth_scheme: AccountAuthScheme,
     pub created_at: String,
     pub updated_at: String,
@@ -772,18 +767,6 @@ pub struct AccountModelCapability {
     pub protocol: AccountUpstreamProtocol,
     pub verified_at: Option<String>,
     pub source: String,
-}
-
-/// One persisted Plan risk acknowledgement as returned on an account.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-#[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AccountAcknowledgement {
-    pub account_id: String,
-    pub acknowledgement_id: String,
-    pub version: String,
-    pub content_hash: String,
-    pub accepted_at: String,
 }
 
 /// POST `/accounts` body. CAS tokens and `name` are required. `key`,
@@ -812,8 +795,6 @@ pub struct AccountCreate {
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_config: Option<AccountCustomConfigWrite>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acknowledgements: Vec<AccountAcknowledgementWrite>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_capabilities: Vec<AccountModelCapabilityWrite>,
 }
@@ -900,8 +881,8 @@ pub struct AccountManagedKeyVerify {
     pub key: String,
 }
 
-/// PUT `/accounts/{id}/custom-config` body. Protocol and auth scheme are
-/// immutable after create; the handler enforces that.
+/// PUT `/accounts/{id}/custom-config` body. Protocol set and auth scheme are
+/// editable; a change re-opens verification as pending without disabling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -909,7 +890,7 @@ pub struct AccountCustomConfigUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
     pub base_url: String,
-    pub upstream_protocol: AccountUpstreamProtocol,
+    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
     pub auth_scheme: AccountAuthScheme,
 }
 
@@ -919,7 +900,7 @@ pub struct AccountCustomConfigUpdate {
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountCustomConfigWrite {
     pub base_url: String,
-    pub upstream_protocol: AccountUpstreamProtocol,
+    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
     pub auth_scheme: AccountAuthScheme,
 }
 
@@ -942,26 +923,6 @@ pub struct AccountModelCapabilityWrite {
     pub protocol: AccountUpstreamProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-}
-
-/// POST `/accounts/{id}/acknowledgements` body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AccountAcknowledgementCreate {
-    #[serde(flatten)]
-    pub expectation: MutationExpectation,
-    pub acknowledgement_id: String,
-    pub version: String,
-}
-
-/// Create-time Plan risk acknowledgement. Nested under `AccountCreate`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AccountAcknowledgementWrite {
-    pub acknowledgement_id: String,
-    pub version: String,
 }
 
 /// POST `/accounts/{id}/verify` body. CAS tokens are required. Unknown
@@ -1219,7 +1180,6 @@ pub struct ProviderCatalogEntry {
     pub auth_schemes: Vec<AccountAuthScheme>,
     pub upstream_protocols: Vec<AccountUpstreamProtocol>,
     pub form_fields: Vec<ProviderCatalogFormField>,
-    pub risk_notice: Option<ProviderCatalogRiskNotice>,
     pub model_aliases: Vec<String>,
 }
 
@@ -1247,7 +1207,7 @@ pub struct ProviderCatalogRiskNotice {
     pub content_hash: String,
 }
 
-/// One Go protocol-table capability. GOAT/SCNet must not reuse these rows.
+/// One Go protocol-table capability. GOAT must not reuse these rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -1320,7 +1280,7 @@ pub struct ProviderContracts {
     pub pricing_revision: String,
 }
 
-/// One built-in provider scope. SCNet is a single group with three offerings.
+/// One built-in provider scope.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -1552,7 +1512,7 @@ pub struct ProtocolProbeResponse {
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CustomModelDiscoveryRequest {
     pub base_url: String,
-    pub upstream_protocol: AccountUpstreamProtocol,
+    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
     pub auth_scheme: AccountAuthScheme,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -1963,7 +1923,7 @@ pub struct ApplicationModels {
     pub pricing_revision: String,
 }
 
-/// Dashboard home totals. Custom/GOAT/SCNet cards are not "available".
+/// Dashboard home totals. Custom/GOAT cards are not "available".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -2440,11 +2400,9 @@ pub fn contract_schema() -> Value {
     include_type::<AccountMutation>(&mut serialize);
     include_type::<AccountCustomConfig>(&mut serialize);
     include_type::<AccountModelCapability>(&mut serialize);
-    include_type::<AccountAcknowledgement>(&mut serialize);
     include_type::<ProviderCatalog>(&mut serialize);
     include_type::<ProviderCatalogEntry>(&mut serialize);
     include_type::<ProviderCatalogFormField>(&mut serialize);
-    include_type::<ProviderCatalogRiskNotice>(&mut serialize);
     include_type::<ProviderModelCapability>(&mut serialize);
     include_type::<ZenFreeSettings>(&mut serialize);
     include_type::<ZenFreeModels>(&mut serialize);
@@ -2526,8 +2484,6 @@ pub fn contract_schema() -> Value {
     include_type::<AccountCustomConfigWrite>(&mut deserialize);
     include_type::<AccountModelCapabilitiesUpdate>(&mut deserialize);
     include_type::<AccountModelCapabilityWrite>(&mut deserialize);
-    include_type::<AccountAcknowledgementCreate>(&mut deserialize);
-    include_type::<AccountAcknowledgementWrite>(&mut deserialize);
     include_type::<AccountVerify>(&mut deserialize);
     include_type::<ZenFreeSettingsUpdate>(&mut deserialize);
     include_type::<ProtocolSwitchUpdate>(&mut deserialize);
@@ -2984,7 +2940,6 @@ mod tests {
             goat_model_access: None,
             custom_config: None,
             model_capabilities: Vec::new(),
-            acknowledgements: Vec::new(),
         };
         let value = serde_json::to_value(&account).unwrap();
         let object = value.as_object().unwrap();
@@ -3257,7 +3212,6 @@ mod tests {
         "AccountMutation",
         "AccountCustomConfig",
         "AccountModelCapability",
-        "AccountAcknowledgement",
         "AccountCreate",
         "AccountManagedCreate",
         "AccountUpdate",
@@ -3268,8 +3222,6 @@ mod tests {
         "AccountCustomConfigWrite",
         "AccountModelCapabilitiesUpdate",
         "AccountModelCapabilityWrite",
-        "AccountAcknowledgementCreate",
-        "AccountAcknowledgementWrite",
     ];
 
     fn json_field_names(value: &Value) -> Vec<&str> {
@@ -3361,43 +3313,57 @@ mod tests {
 
     fn sample_catalog_entry() -> ProviderCatalogEntry {
         ProviderCatalogEntry {
-            provider_id: "scnet".into(),
-            offering_id: "token-plan-basic".into(),
-            display_name: "SCNet Token Plan Basic".into(),
-            display_family: "SCNet".into(),
+            provider_id: "opencode".into(),
+            offering_id: "go".into(),
+            display_name: "OpenCode Go".into(),
+            display_family: "OpenCode".into(),
             credential_kind: AccountCredentialKind::ApiKey,
             quota_scope: AccountQuotaScope::Key,
             singleton: false,
             creation_availability: "available".into(),
             creation_unavailable_reason: None,
-            verification_policy: "required".into(),
-            verification_runtime_availability: "unavailable".into(),
-            routable: false,
-            managed_registration: false,
-            pricing_availability: "unavailable".into(),
-            usage_availability: "unavailable".into(),
+            verification_policy: "not_required".into(),
+            verification_runtime_availability: "optional".into(),
+            routable: true,
+            managed_registration: true,
+            pricing_availability: "available".into(),
+            usage_availability: "available".into(),
             manual_usage_calibration: false,
-            quota_unit: "credits".into(),
-            model_source: "official_token_plan_usable_models_2026_08_21".into(),
-            key_prefix: Some("sk-tp-".into()),
+            quota_unit: "usd".into(),
+            model_source: "builtin_go_protocol_table".into(),
+            key_prefix: None,
             auth_schemes: vec![AccountAuthScheme::Bearer],
             upstream_protocols: vec![
                 AccountUpstreamProtocol::ChatCompletions,
+                AccountUpstreamProtocol::Responses,
                 AccountUpstreamProtocol::Messages,
             ],
-            form_fields: vec![ProviderCatalogFormField {
-                id: "name".into(),
-                kind: "text".into(),
-                required: true,
-                immutable_after_create: false,
-            }],
-            risk_notice: Some(ProviderCatalogRiskNotice {
-                acknowledgement_id: "scnet-token-plan-restrictions".into(),
-                version: "2026-08-21".into(),
-                source_url: "https://www.scnet.cn/docs".into(),
-                body: "interactive use only".into(),
-                content_hash: "abc".into(),
-            }),
+            form_fields: vec![
+                ProviderCatalogFormField {
+                    id: "name".into(),
+                    kind: "text".into(),
+                    required: true,
+                    immutable_after_create: false,
+                },
+                ProviderCatalogFormField {
+                    id: "key".into(),
+                    kind: "secret".into(),
+                    required: true,
+                    immutable_after_create: false,
+                },
+                ProviderCatalogFormField {
+                    id: "purchase_date".into(),
+                    kind: "date".into(),
+                    required: false,
+                    immutable_after_create: false,
+                },
+                ProviderCatalogFormField {
+                    id: "notes".into(),
+                    kind: "text".into(),
+                    required: false,
+                    immutable_after_create: false,
+                },
+            ],
             model_aliases: Vec::new(),
         }
     }
@@ -3468,62 +3434,8 @@ mod tests {
             disabled_reasons: vec!["offering is not routable".into()],
             revision: 2,
         };
-        let scnet = ProviderContractGroup {
-            scope_kind: ContractScopeKind::Provider,
-            scope_id: "scnet".into(),
-            provider_id: "scnet".into(),
-            offerings: vec![
-                ProviderOfferingChoice {
-                    offering_id: "token-plan-basic".into(),
-                    display_name: "SCNet Token Plan Basic".into(),
-                    routable: false,
-                    accounts: Vec::new(),
-                },
-                ProviderOfferingChoice {
-                    offering_id: "token-plan-standard".into(),
-                    display_name: "SCNet Token Plan Standard".into(),
-                    routable: false,
-                    accounts: Vec::new(),
-                },
-                ProviderOfferingChoice {
-                    offering_id: "token-plan-premium".into(),
-                    display_name: "SCNet Token Plan Premium".into(),
-                    routable: false,
-                    accounts: Vec::new(),
-                },
-            ],
-            catalog: EffectiveCatalog {
-                source: "static".into(),
-                source_url: String::new(),
-                refreshed_at: None,
-                models: Vec::new(),
-                refresh_supported: false,
-            },
-            models: Vec::new(),
-            protocols: ProtocolSwitches {
-                chat_completions: true,
-                responses: false,
-                messages: true,
-            },
-            pricing: CapabilitySummary {
-                availability: "unavailable".into(),
-            },
-            usage: CapabilitySummary {
-                availability: "unavailable".into(),
-            },
-            card: CardCapabilitySummary {
-                fetch_zen_models: false,
-                discover_models: false,
-                protocol_probe: false,
-                catalog_refresh: false,
-            },
-            catalog_routable: false,
-            production_inference: false,
-            disabled_reasons: vec!["offering is not routable".into()],
-            revision: 3,
-        };
         ProviderContracts {
-            providers: vec![goat, scnet],
+            providers: vec![goat],
             custom_endpoints: vec![CustomEndpointContract {
                 scope_kind: ContractScopeKind::CustomEndpoint,
                 scope_id: "custom-1".into(),
@@ -3580,7 +3492,6 @@ mod tests {
             "ProviderCatalog",
             "ProviderCatalogEntry",
             "ProviderCatalogFormField",
-            "ProviderCatalogRiskNotice",
             "ProviderModelCapability",
             "ZenFreeSettings",
             "ZenFreeSettingsUpdate",
@@ -3658,8 +3569,7 @@ mod tests {
                 "planRoutable",
                 "goatModelAccess",
                 "customConfig",
-                "modelCapabilities",
-                "acknowledgements"
+                "modelCapabilities"
             ])
         );
     }
@@ -3675,18 +3585,13 @@ mod tests {
         let value = serde_json::to_value(&catalog).unwrap();
         assert_eq!(value["processGeneration"], 9);
         assert_eq!(value["pricingRevision"], "seed");
-        assert_eq!(value["entries"][0]["providerId"], "scnet");
-        assert_eq!(
-            value["entries"][0]["creationUnavailableReason"],
-            Value::Null
-        );
-        assert_eq!(value["entries"][0]["keyPrefix"], "sk-tp-");
-        assert_eq!(value["entries"][0]["verificationPolicy"], "required");
+        assert_eq!(value["entries"][0]["providerId"], "opencode");
+        assert_eq!(value["entries"][0]["verificationPolicy"], "not_required");
         assert_eq!(
             value["entries"][0]["verificationRuntimeAvailability"],
-            "unavailable"
+            "optional"
         );
-        assert_eq!(value["entries"][0]["routable"], false);
+        assert_eq!(value["entries"][0]["routable"], true);
         assert_eq!(
             value["entries"][0]["upstreamProtocols"][0],
             "chat_completions"
@@ -3699,7 +3604,7 @@ mod tests {
         let required = schema["$defs"]["ProviderCatalogEntry"]["required"]
             .as_array()
             .unwrap();
-        for field in ["creationUnavailableReason", "keyPrefix", "riskNotice"] {
+        for field in ["creationUnavailableReason", "keyPrefix"] {
             assert!(
                 required.iter().any(|value| value == field),
                 "{field} must stay required so responses emit T|null"
@@ -3758,11 +3663,11 @@ mod tests {
             "custom_endpoint"
         );
         assert_eq!(
-            contracts_value["providers"][1]["offerings"]
+            contracts_value["providers"][0]["offerings"]
                 .as_array()
                 .unwrap()
                 .len(),
-            3
+            1
         );
         assert_eq!(
             contracts_value["providers"][0]["protocols"],
@@ -3965,15 +3870,15 @@ mod tests {
     fn custom_model_discovery_is_an_operational_probe_without_cas() {
         let request: CustomModelDiscoveryRequest = serde_json::from_value(json!({
             "baseUrl": "https://api.example.com/v1",
-            "upstreamProtocol": "chat_completions",
+            "upstreamProtocols": ["chat_completions"],
             "authScheme": "bearer",
             "apiKey": "sk-secret"
         }))
         .unwrap();
         assert_eq!(request.base_url, "https://api.example.com/v1");
         assert_eq!(
-            request.upstream_protocol,
-            AccountUpstreamProtocol::ChatCompletions
+            request.upstream_protocols,
+            vec![AccountUpstreamProtocol::ChatCompletions]
         );
         assert_eq!(request.auth_scheme, AccountAuthScheme::Bearer);
         assert_eq!(request.api_key.as_deref(), Some("sk-secret"));
@@ -3981,7 +3886,7 @@ mod tests {
 
         let with_account: CustomModelDiscoveryRequest = serde_json::from_value(json!({
             "baseUrl": "http://127.0.0.1:9/v1",
-            "upstreamProtocol": "messages",
+            "upstreamProtocols": ["messages"],
             "authScheme": "x-api-key",
             "accountId": "acct-1"
         }))
@@ -3992,7 +3897,7 @@ mod tests {
         assert!(
             serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
                 "baseUrl": "https://api.example.com/v1",
-                "upstreamProtocol": "chat_completions",
+                "upstreamProtocols": ["chat_completions"],
                 "authScheme": "bearer",
                 "expectedRevision": 11
             }))
@@ -4001,7 +3906,7 @@ mod tests {
         assert!(
             serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
                 "base_url": "https://api.example.com/v1",
-                "upstreamProtocol": "chat_completions",
+                "upstreamProtocols": ["chat_completions"],
                 "authScheme": "bearer"
             }))
             .is_err()
@@ -4009,7 +3914,7 @@ mod tests {
         assert!(
             serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
                 "baseUrl": "https://api.example.com/v1",
-                "upstreamProtocol": "chat_completions",
+                "upstreamProtocols": ["chat_completions"],
                 "authScheme": "bearer",
                 "key": "sk-secret"
             }))
@@ -4039,7 +3944,8 @@ mod tests {
         assert_eq!(request_schema["additionalProperties"], false);
         let required = request_schema["required"].as_array().unwrap();
         assert!(required.iter().any(|value| value == "baseUrl"));
-        assert!(required.iter().any(|value| value == "upstreamProtocol"));
+        assert!(required.iter().any(|value| value == "upstreamProtocols"));
+        assert!(!required.iter().any(|value| value == "upstreamProtocol"));
         assert!(required.iter().any(|value| value == "authScheme"));
         assert!(!required.iter().any(|value| value == "apiKey"));
         assert!(!required.iter().any(|value| value == "accountId"));
@@ -4245,7 +4151,6 @@ mod tests {
         "ProviderCatalog",
         "ProviderCatalogEntry",
         "ProviderCatalogFormField",
-        "ProviderCatalogRiskNotice",
         "ProviderModelCapability",
         "ZenFreeSettings",
         "ZenFreeSettingsUpdate",

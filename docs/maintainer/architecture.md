@@ -345,41 +345,31 @@ concurrent settings changes affect only later requests.
 | OpenCode Go | `opencode` / `go` | yes | Official keys only |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | yes | Credentialless singleton, DB-owned |
 | Command Code GOAT | `command-code` / `goat` | no | Disabled `pending` draft; verify `501` |
-| SCNet Token Plans | `scnet` / `token-plan-basic\|standard\|premium` | no | `sk-tp-` prefix; verify `501` |
 | Custom API | `custom` / `api` | yes | Trusted-admin destination |
 
 Every persistent mutation path rejects `enabled=true` for a
 `routable=false` offering before touching the row, revision, or
-timestamps. On every `Database::open`, leftover enabled GOAT and all three
-SCNet tiers are disabled without changing `updated_at`; unverified GOAT is
-reset to `pending`. Custom enabled state is preserved. Go, Zen Free, and
-unknown pairs are untouched.
+timestamps. On every `Database::open`, leftover enabled GOAT is disabled
+without changing `updated_at`; unverified GOAT is reset to `pending`. Custom
+enabled state is preserved. Go, Zen Free, and unknown pairs are untouched.
 
 Custom API (`custom.rs` + `custom_http.rs`) accepts any syntactically
 valid HTTP or HTTPS origin; URL-embedded credentials, query, and fragment
 are rejected. It does not follow redirects and does not forward dashboard
 or client auth; only the configured Bearer or `x-api-key` is sent. Joined
 endpoints must preserve scheme, host, port, and base-path containment.
-`connect_timeout_secs` is clamped to 5–60 seconds. Create/update leave
-Custom disabled `pending`. Verification sends one protocol-correct minimal
-non-stream request to the first declared model; only a `2xx` JSON object
-succeeds. Verification does not discover or mutate capabilities and does
-not auto-enable. Explicit enable is required after verification. Key, base
-URL, or capability changes re-pend verification and disable the account;
-protocol and auth scheme are fixed at create. Custom costs and usage are
-unpriced/unknown with no provider quota debit.
+`connect_timeout_secs` is clamped to 5–60 seconds. The account declares a
+protocol set of 1–3 of chat_completions / responses / messages (chosen via
+checkboxes in the account form), uniform across all its models; declared
+protocols route immediately as preset evidence. Verification is optional:
+a Custom account can be enabled while `verification_status` is `pending`.
+The verify action probes every selected protocol with the first declared
+model, succeeding only on a `2xx` JSON object for each, without discovering
+or rewriting capabilities and without auto-enabling. Editing the Key, base
+URL, declared capabilities, protocol set, or auth scheme resets
+`verification_status` to `pending` but keeps the account enabled. Custom
+costs and usage are unpriced/unknown with no provider quota debit.
 
-SCNet official usable-model snapshot `2026-08-21` (exact case and order,
-adapter input only, never `model_aliases`): `GLM-5.2`, `GLM-5`,
-`GLM-5.1`, `Kimi-K3`, `Kimi-K2.7-Code`, `Kimi-K2.6`, `Kimi-K2.5`,
-`DeepSeek-V4-Flash`, `DeepSeek-V3.2`, `MiniMax-M3`, `MiniMax-M2.7`,
-`MiniMax-M2.5`, `MiMo-V2.5-Pro`. Pricing-table / FAQ names not in that
-list: `DeepSeek-V4-Pro`, `DeepSeek-V4-Flash-0731`, `Qwen3.8-max`,
-`Qwen3-235B-A22B`. Documented bases:
-`https://api.scnet.cn/api/llm/v1` and
-`https://api.scnet.cn/api/llm/anthropic`. Risk acknowledgement id
-`scnet-token-plan-restrictions`, version `2026-08-21`. This crate must not
-issue live Token Plan requests.
 
 ## Control plane
 

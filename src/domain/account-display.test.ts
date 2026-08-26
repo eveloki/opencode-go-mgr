@@ -42,7 +42,6 @@ function draftAccount(overrides: Partial<Account> = {}): Account {
     verification_error: null,
     plan_routable: false,
     model_capabilities: [],
-    acknowledgements: [],
     ...overrides,
   };
 }

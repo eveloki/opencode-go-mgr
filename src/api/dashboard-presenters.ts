@@ -36,7 +36,7 @@ export type GoatModelAccess = "goat" | "all";
 export interface AccountCustomConfig {
   account_id: string;
   base_url: string;
-  upstream_protocol: AccountProtocol;
+  upstream_protocols: AccountProtocol[];
   auth_scheme: "bearer" | "x-api-key";
   created_at: string;
   updated_at: string;
@@ -48,14 +48,6 @@ export interface AccountModelCapability {
   protocol: AccountProtocol;
   verified_at: string | null;
   source: string;
-}
-
-export interface AccountAcknowledgement {
-  account_id: string;
-  acknowledgement_id: string;
-  version: string;
-  content_hash: string;
-  accepted_at: string;
 }
 
 /** Explicit UI projection. Write-only credentials are always empty strings. */
@@ -95,12 +87,11 @@ export interface Account {
   goat_model_access?: GoatModelAccess | null;
   custom_config?: AccountCustomConfig | null;
   model_capabilities: AccountModelCapability[];
-  acknowledgements: AccountAcknowledgement[];
 }
 
 export interface AccountCustomConfigInput {
   base_url: string;
-  upstream_protocol: AccountProtocol;
+  upstream_protocols: AccountProtocol[];
   auth_scheme: "bearer" | "x-api-key";
 }
 
@@ -108,11 +99,6 @@ export interface AccountModelCapabilityInput {
   model_id: string;
   protocol: AccountProtocol;
   source?: string;
-}
-
-export interface AccountAcknowledgementInput {
-  acknowledgement_id: string;
-  version: string;
 }
 
 export interface AccountInput {
@@ -125,7 +111,6 @@ export interface AccountInput {
   purchase_date?: string;
   notes?: string;
   custom_config?: AccountCustomConfigInput;
-  acknowledgements?: AccountAcknowledgementInput[];
   model_capabilities?: AccountModelCapabilityInput[];
   /** Page-local stale value is ignored; the controlPlane store owns CAS. */
   expected_revision?: number;
@@ -152,7 +137,7 @@ export interface ManagedAccountInput {
 
 export interface CustomModelDiscoveryInput {
   base_url: string;
-  upstream_protocol: AccountProtocol;
+  upstream_protocols: AccountProtocol[];
   auth_scheme: "bearer" | "x-api-key";
   api_key?: string;
   account_id?: string;
@@ -500,7 +485,7 @@ export function presentAccount(value: V3Account): Account {
     custom_config: value.customConfig === null ? null : {
       account_id: value.customConfig.accountId,
       base_url: value.customConfig.baseUrl,
-      upstream_protocol: value.customConfig.upstreamProtocol,
+      upstream_protocols: [...value.customConfig.upstreamProtocols],
       auth_scheme: value.customConfig.authScheme,
       created_at: value.customConfig.createdAt,
       updated_at: value.customConfig.updatedAt,
@@ -511,13 +496,6 @@ export function presentAccount(value: V3Account): Account {
       protocol: capability.protocol,
       verified_at: capability.verifiedAt,
       source: capability.source,
-    })),
-    acknowledgements: value.acknowledgements.map((acknowledgement) => ({
-      account_id: acknowledgement.accountId,
-      acknowledgement_id: acknowledgement.acknowledgementId,
-      version: acknowledgement.version,
-      content_hash: acknowledgement.contentHash,
-      accepted_at: acknowledgement.acceptedAt,
     })),
   };
 }
@@ -534,13 +512,9 @@ export function accountCreateInput(value: AccountInput): Omit<V3AccountCreate, "
     notes: value.notes,
     customConfig: value.custom_config ? {
       baseUrl: value.custom_config.base_url,
-      upstreamProtocol: value.custom_config.upstream_protocol,
+      upstreamProtocols: [...value.custom_config.upstream_protocols],
       authScheme: value.custom_config.auth_scheme,
     } : undefined,
-    acknowledgements: value.acknowledgements?.map((acknowledgement) => ({
-      acknowledgementId: acknowledgement.acknowledgement_id,
-      version: acknowledgement.version,
-    })),
     modelCapabilities: value.model_capabilities?.map((capability) => ({
       modelId: capability.model_id,
       protocol: capability.protocol,

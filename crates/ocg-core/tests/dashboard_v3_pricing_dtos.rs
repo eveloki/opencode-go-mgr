@@ -24,7 +24,6 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "AccountMutation",
     "AccountCustomConfig",
     "AccountModelCapability",
-    "AccountAcknowledgement",
     "AccountCreate",
     "AccountManagedCreate",
     "AccountUpdate",
@@ -35,15 +34,12 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "AccountCustomConfigWrite",
     "AccountModelCapabilitiesUpdate",
     "AccountModelCapabilityWrite",
-    "AccountAcknowledgementCreate",
-    "AccountAcknowledgementWrite",
 ];
 
 const PROVIDER_CATALOG_TYPES: &[&str] = &[
     "ProviderCatalog",
     "ProviderCatalogEntry",
     "ProviderCatalogFormField",
-    "ProviderCatalogRiskNotice",
     "ProviderModelCapability",
     "ZenFreeSettings",
     "ZenFreeSettingsUpdate",

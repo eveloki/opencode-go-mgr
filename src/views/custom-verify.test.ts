@@ -47,7 +47,6 @@ function customAccount(overrides: Partial<Account> = {}): Account {
     verification_error: null,
     plan_routable: true,
     model_capabilities: [],
-    acknowledgements: [],
     ...overrides,
   };
 }
@@ -109,32 +108,40 @@ test("no Go usage or official refresh is ever requested for Custom accounts", ()
   assert.match(usage, /async function retryQuotaLimits[\s\S]*?account\.provider_id === "opencode"[\s\S]*?account\.offering_id === "go"/);
 });
 
-test("the card exposes verify for pending/failed Custom accounts and gates the enable switch", () => {
+test("the card exposes verify for pending/failed Custom accounts without gating the enable switch", () => {
   assert.match(card, /customAccountNeedsVerification\(props\.account\)/);
   assert.match(card, /@click="emit\('verify'\)"/);
   assert.match(card, /:loading="verifying"/);
-  assert.match(card, /customAccountToggleBlocked\(props\.account\)/);
+  // Custom verification is optional: the enable switch is never blocked, and a
+  // pending/failed account shows an unverified warning hint instead.
+  assert.doesNotMatch(card, /customAccountToggleBlocked/);
+  assert.match(card, /尚未验证连接：账号可先启用，也可先验证连接。/);
+  assert.match(card, /custom-endpoint__status--unverified/);
   assert.match(card, /:disabled="!!toggleBlockedReason"/);
   // Go-only controls stay Go-gated, and purchase/expiry tags are limited to plans that carry them.
   assert.match(card, /v-if="isGo && accountIsReady\(account\)"/);
-  assert.match(card, /\(isGo \|\| isScnet\) && accountIsReady\(account\)/);
+  assert.doesNotMatch(card, /isScnet/);
   // The persistent warning carries the administrator-trust risk copy.
   assert.match(card, /目标端点由管理员自行选择并负责/);
 });
 
-test("the form binds every capability to its selected protocol and reserves verification for the saved card", () => {
+test("the form declares an account-level protocol set and expands it over plain model IDs", () => {
   assert.match(form, /目标端点由管理员自行选择并负责/);
   assert.doesNotMatch(form, /\$emit\('verify'\)/);
-  assert.match(form, /\{\{ capabilityProtocol \}\}/);
-  assert.match(form, /capability\.protocol = protocol/);
+  // Protocol selection is a checkbox group; capabilities carry no per-row protocol.
+  assert.match(form, /<n-checkbox-group/);
+  assert.match(form, /v-model:value="form\.upstreamProtocols"/);
+  assert.match(form, /至少选择一个协议；所选协议对该账号下全部模型统一生效。/);
+  assert.doesNotMatch(form, /capabilityProtocol/);
+  // Protocol and auth scheme stay editable after create; no immutability hints.
+  assert.doesNotMatch(form, /fieldImmutableAfterCreate/);
+  assert.doesNotMatch(form, /创建后不可修改/);
   // Base URL validation delegates to the shared trusted-URL helper.
   assert.match(form, /customBaseUrlIssue\(value \?\? ""\)/);
-  // Edit mode forwards base URL and capabilities in the payload.
+  // Edit mode forwards base URL, protocol set, auth scheme, and the expanded rows.
   assert.match(form, /payload\.base_url = form\.value\.baseUrl\.trim\(\)/);
-  assert.match(form, /payload\.model_capabilities = form\.value\.modelCapabilities\.map/);
-  // Protocol and auth scheme remain immutable after create.
-  assert.match(form, /:disabled="fieldImmutableAfterCreate\('upstream_protocol'\)"/);
-  assert.match(form, /:disabled="fieldImmutableAfterCreate\('auth_scheme'\)"/);
+  assert.match(form, /payload\.upstream_protocols = canonicalCustomProtocols/);
+  assert.match(form, /payload\.model_capabilities = expandCustomModelCapabilities\(/);
 });
 
 test("model discovery ignores responses after the form context changes", () => {

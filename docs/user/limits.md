@@ -56,14 +56,14 @@ Every gateway draws a line somewhere. This page is that line — a running list 
   publish `linux/amd64` and `linux/arm64`. Updater-enabled installed desktop
   builds can install signed releases from Settings; 1.4.1, development
   builds, the CLI, and Docker use the direct/manual upgrade path.
-- Command Code GOAT and SCNet Token Plans can be saved as disabled `pending`
-  drafts (`routable=false`). Connection verification returns `501`; they have
-  no live inference, usage, pricing, verification runtime, or production
-  routing and cannot be promoted by probes. They appear on **Providers** as
-  non-routable scopes. Custom API is live under the trusted-administrator
-  boundary in [Accounts](accounts.md); it is unpriced, has no official usage
-  path, and its catalog, protocol, and pricing controls live on **Providers**
-  as isolated `CustomEndpoint` scopes.
+- Command Code GOAT can be saved as a disabled `pending` draft
+  (`routable=false`). Connection verification returns `501`; it has no live
+  inference, usage, pricing, verification runtime, or production routing and
+  cannot be promoted by probes. It appears on **Providers** as a non-routable
+  scope. Custom API is live under the trusted-administrator boundary in
+  [Accounts](accounts.md); it is unpriced, has no official usage path, and its
+  catalog, protocol, and pricing controls live on **Providers** as isolated
+  `CustomEndpoint` scopes.
 - Unknown model names return `400` on every supported client format. Clients
   should send published aliases or eligible Custom IDs from authenticated
   `GET /v1/models` that currently have an effective enabled protocol.

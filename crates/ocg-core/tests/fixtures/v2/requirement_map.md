@@ -8,7 +8,7 @@ WebSocket families (`dashboard_v2_rest_retirement.rs`).
 
 | Test | Accepted requirement |
 | --- | --- |
-| `providers_catalog_is_the_only_plan_source` | The V3 public catalog (`GET /dashboard/api/v3/providers`) is the one Plan source. Entries publish `display_name`/`display_family`, `creation_availability`, `verification_policy`, `verification_runtime_availability`, `routable`, `form_fields`, `risk_notice` (when required), `model_aliases`, `pricing_availability`, `usage_availability`, and `manual_usage_calibration`. `model_aliases` is the Alias registry's currently routeable mappings for that offering (deterministic order, no raw IDs). GOAT/SCNet are `verification_policy=required` and unroutable with empty aliases; GOAT alone exposes manual usage calibration because it has no machine-readable usage endpoint. Custom is `verification_policy=required`, `verification_runtime_availability=available`, and catalog-routable with empty static aliases (client IDs come from account capabilities). SCNet offerings are `token-plan-basic`/`token-plan-standard`/`token-plan-premium`. |
+| `providers_catalog_is_the_only_plan_source` | The V3 public catalog (`GET /dashboard/api/v3/providers`) is the one Plan source. Entries publish `display_name`/`display_family`, `creation_availability`, `verification_policy`, `verification_runtime_availability`, `routable`, `form_fields`, `risk_notice` (when required), `model_aliases`, `pricing_availability`, `usage_availability`, and `manual_usage_calibration`. `model_aliases` is the Alias registry's currently routeable mappings for that offering (deterministic order, no raw IDs). GOAT is `verification_policy=required`, unroutable with empty aliases, and exposes manual usage calibration because it has no machine-readable usage endpoint. Custom is `verification_policy=required`, `verification_runtime_availability=available`, and catalog-routable with empty static aliases (client IDs come from account capabilities). |
 | `unknown_offering_create_fails_closed` | Unknown provider/offering is rejected; no account is persisted. |
 | `client_models_list_exposes_aliases_not_raw_upstream_ids` | Outbound `/v1/models` is a local routeable Alias registry list (deterministic order, `owned_by` = routeable `provider_id`). Zero Go accounts is enough; it never calls, filters, or restores upstream `/v1/models`, and never advertises raw IDs. |
 | `claude_desktop_models_remain_role_aliases` | Claude Desktop still advertises only the three role aliases (not the Plan model union). |
@@ -18,15 +18,13 @@ WebSocket families (`dashboard_v2_rest_retirement.rs`).
 | `go_alias_request_still_routes_and_logs_opencode_go` | OpenCode Go alias routing remains compatible. |
 | `zen_free_explicit_free_model_stays_anonymous` | Zen Free stays anonymous (no account Key) and compatible. |
 | `go_import_remains_immediately_routable_without_verification` | Go import stays `not_required` and enabled after create. |
-| `goat_and_scnet_create_disabled_pending_drafts` | GOAT / SCNet / Custom create as disabled pending drafts. SCNet create sends `acknowledgements:[{acknowledgement_id,version}]` matching catalog `risk_notice`. Custom create sends `custom_config:{base_url,upstream_protocol,auth_scheme}` plus non-empty `model_capabilities`. Custom is catalog-routable but create still does not auto-enable. |
+| `goat_and_custom_create_disabled_pending_drafts` | GOAT / Custom create as disabled pending drafts. Custom create sends `custom_config:{base_url,upstream_protocol,auth_scheme}` plus non-empty `model_capabilities`. Custom is catalog-routable but create still does not auto-enable. |
 | `disabled_draft_is_not_selected_for_alias_routing` | Disabled drafts are not selected for alias routing. |
-| `verify_runtime_unavailable_leaves_draft_unchanged` | `POST /accounts/{id}/verify` is 501 for GOAT/SCNet; the draft stays disabled/`pending`. Custom verification runtime is available and is covered by the Custom trusted-admin black-box tests. |
-| `scnet_create_requires_versioned_acknowledgement` | SCNet create requires a catalog-versioned risk acknowledgement. |
-| `scnet_acknowledgement_persists_and_does_not_runtime_block` | Acknowledgement is persisted as `acknowledgement_id`/`version`/`content_hash`/`accepted_at` and does not itself runtime-block after confirmation. |
+| `verify_runtime_unavailable_leaves_goat_draft_unchanged` | `POST /accounts/{id}/verify` is 501 for GOAT; the draft stays disabled/`pending`. Custom verification runtime is available and is covered by the Custom trusted-admin black-box tests. |
 | `account_secrets_absent_from_json_errors_and_logs` | Account Keys never appear in dashboard JSON, errors, or logs. |
 | `forward_logs_distinguish_requested_alias_and_upstream_model` | Logs distinguish `requested_model`, `resolved_alias`, `upstream_model`, `provider_id`, `offering_id`. |
 | `alias_stream_does_not_cross_account_retry_after_output` | After downstream output, the gateway must not retry across accounts. |
 
-Out of scope for this requirement map: live GOAT / SCNet network behavior. Custom
+Out of scope for this requirement map: live GOAT network behavior. Custom
 trusted-admin runtime coverage lives in `custom_trusted_admin.rs`; V2 REST
 retirement and the preserved host families live in `dashboard_v2_rest_retirement.rs`.

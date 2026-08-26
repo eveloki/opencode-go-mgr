@@ -15,7 +15,7 @@ use ocg_core::dashboard_v3::ERROR_CONFLICT;
 #[cfg(debug_assertions)]
 use ocg_core::dashboard_v3::set_zen_models_source_url_override_for_tests;
 use ocg_core::dashboard_v3::{
-    AccountUpstreamProtocol, ContractScopeKind, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
+    AccountUpstreamProtocol, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
     ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
     ProviderCatalog, ProviderContracts, ProviderModelCapability, ZenFreeModels, ZenFreeSettings,
 };
@@ -26,8 +26,7 @@ use ocg_core::models::ProxyMode;
 use ocg_core::provider::{
     BUILTIN_PLANS, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID,
     GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-    SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
-    SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
+    ZEN_FREE_ACCOUNT_ID,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -310,7 +309,7 @@ fn custom_create_body() -> Value {
         "offeringId": CUSTOM_API_OFFERING_ID,
         "customConfig": {
             "baseUrl": "https://api.example.com/v1",
-            "upstreamProtocol": "messages",
+            "upstreamProtocols": ["messages"],
             "authScheme": "x-api-key"
         },
         "modelCapabilities": [{
@@ -321,8 +320,8 @@ fn custom_create_body() -> Value {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[tokio::test]
@@ -412,7 +411,6 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
     assert!(body.get("provider_id").is_none());
 
     let parsed: ProviderCatalog = serde_json::from_value(body.clone()).expect("ProviderCatalog");
-    assert_eq!(parsed.entries.len(), 7);
     assert_eq!(parsed.entries.len(), BUILTIN_PLANS.len());
 
     for (plan, entry) in BUILTIN_PLANS.iter().zip(parsed.entries.iter()) {
@@ -456,7 +454,6 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
         for field in [
             "creationUnavailableReason",
             "keyPrefix",
-            "riskNotice",
             "providerId",
             "offeringId",
             "modelAliases",
@@ -484,7 +481,6 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
     assert_eq!(goat["verificationRuntimeAvailability"], "available");
     assert_eq!(goat["modelAliases"], json!([]));
     assert_eq!(goat["keyPrefix"], Value::Null);
-    assert_eq!(goat["riskNotice"], Value::Null);
 
     let custom = entries
         .iter()
@@ -496,29 +492,6 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
     assert_eq!(custom["routable"], true);
     assert_eq!(custom["pricingAvailability"], "unpriced");
     assert_eq!(custom["verificationRuntimeAvailability"], "available");
-
-    let scnet: Vec<_> = entries
-        .iter()
-        .filter(|entry| entry["providerId"] == SCNET_PROVIDER_ID)
-        .collect();
-    assert_eq!(scnet.len(), 3);
-    for offering in [
-        SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-        SCNET_TOKEN_PLAN_STANDARD_OFFERING_ID,
-        SCNET_TOKEN_PLAN_PREMIUM_OFFERING_ID,
-    ] {
-        assert!(scnet.iter().any(|entry| entry["offeringId"] == offering));
-    }
-    assert_eq!(scnet[0]["routable"], false);
-    assert_eq!(scnet[0]["creationAvailability"], "unavailable");
-    assert!(
-        scnet[0]["creationUnavailableReason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("archived") || reason.contains("unsupported"))
-    );
-    assert_eq!(scnet[0]["modelAliases"], json!([]));
-    assert_eq!(scnet[0]["keyPrefix"], "sk-tp-");
-    assert!(scnet[0]["riskNotice"].is_object());
 
     let zen = entries
         .iter()
@@ -578,7 +551,7 @@ async fn dashboard_v3_provider_contracts_project_four_scopes_and_custom_endpoint
     assert_secret_free(&body, &[]);
     assert_revision_snapshot(&body, &harness);
     let parsed: ProviderContracts = serde_json::from_value(body.clone()).expect("contracts");
-    assert_eq!(parsed.providers.len(), 4);
+    assert_eq!(parsed.providers.len(), 3);
     let ids: Vec<_> = parsed
         .providers
         .iter()
@@ -590,19 +563,8 @@ async fn dashboard_v3_provider_contracts_project_four_scopes_and_custom_endpoint
             OPENCODE_PROVIDER_ID,
             OPENCODE_ZEN_FREE_PROVIDER_ID,
             COMMAND_CODE_PROVIDER_ID,
-            SCNET_PROVIDER_ID,
         ]
     );
-    let scnet = parsed
-        .providers
-        .iter()
-        .find(|group| group.provider_id == SCNET_PROVIDER_ID)
-        .unwrap();
-    assert_eq!(scnet.scope_kind, ContractScopeKind::Provider);
-    assert_eq!(scnet.scope_id, SCNET_PROVIDER_ID);
-    assert_eq!(scnet.offerings.len(), 3);
-    assert!(scnet.catalog.models.is_empty());
-    assert!(scnet.models.is_empty());
     assert!(parsed.custom_endpoints.is_empty());
     assert!(body["providers"][0].get("scope_kind").is_none());
     assert_eq!(body["providers"][0]["scopeKind"], "provider");
@@ -1121,22 +1083,6 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
     assert_v3_error(&unknown_scope, ERROR_NOT_FOUND);
     assert_eq!(harness.state.settings_revision(), before);
 
-    let (status, archived_scnet) = send_json(
-        &harness,
-        Method::PUT,
-        "/provider-contracts/provider/scnet/protocols/chat_completions",
-        &cas(&harness, json!({ "enabled": false })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{archived_scnet}");
-    assert_v3_error(&archived_scnet, ERROR_INVALID_REQUEST);
-    assert!(
-        archived_scnet["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("archived"))
-    );
-    assert_eq!(harness.state.settings_revision(), before);
-
     let (status, switched) = send_json(
         &harness,
         Method::PUT,
@@ -1204,6 +1150,80 @@ async fn dashboard_v3_protocol_put_enforces_cas_and_reloads_provider_scope_only(
 }
 
 #[tokio::test]
+async fn dashboard_v3_custom_endpoint_protocol_put_enforces_cas_and_persists() {
+    let harness = start_loopback("providers-custom-switch").await;
+    let (status, created) = send_json(
+        &harness,
+        Method::POST,
+        "/accounts",
+        &cas(&harness, custom_create_body()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let custom_id = created["account"]["id"].as_str().unwrap().to_string();
+    let path = format!("/provider-contracts/custom-endpoint/{custom_id}/protocols/messages");
+    let before = harness.state.settings_revision();
+
+    let (status, stale) = send_json(
+        &harness,
+        Method::PUT,
+        &path,
+        &json!({
+            "enabled": false,
+            "expectedRevision": 1,
+            "processGeneration": harness.state.process_generation()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_v3_error(&stale, ERROR_REVISION_CONFLICT);
+    assert_eq!(harness.state.settings_revision(), before);
+
+    let (status, missing) = send_json(
+        &harness,
+        Method::PUT,
+        "/provider-contracts/custom-endpoint/not-an-account/protocols/messages",
+        &cas(&harness, json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_v3_error(&missing, ERROR_NOT_FOUND);
+    assert_eq!(harness.state.settings_revision(), before);
+
+    let (status, switched) = send_json(
+        &harness,
+        Method::PUT,
+        &path,
+        &cas(&harness, json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{switched}");
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    let endpoint = switched["customEndpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|endpoint| endpoint["scopeId"] == custom_id)
+        .unwrap();
+    assert_eq!(endpoint["protocols"]["messages"], false);
+
+    let (status, after) = get_v3(&harness, "/provider-contracts").await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let endpoint = after["customEndpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|endpoint| endpoint["scopeId"] == custom_id)
+        .unwrap();
+    assert_eq!(
+        endpoint["protocols"]["messages"], false,
+        "custom endpoint switch must persist across reload"
+    );
+
+    harness.stop();
+}
+
+#[tokio::test]
 async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     let harness = start_loopback("providers-coexist").await;
 
@@ -1214,7 +1234,10 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     let (status, v3_catalog) = get_v3(&harness, "/providers").await;
     assert_eq!(status, StatusCode::OK, "{v3_catalog}");
     assert!(v3_catalog.get("entries").is_some());
-    assert_eq!(v3_catalog["entries"].as_array().unwrap().len(), 7);
+    assert_eq!(
+        v3_catalog["entries"].as_array().unwrap().len(),
+        BUILTIN_PLANS.len()
+    );
     assert!(v3_catalog["entries"][0].get("providerId").is_some());
     assert!(v3_catalog["entries"][0].get("provider_id").is_none());
 
@@ -1268,6 +1291,6 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     assert_eq!(v3_zen["enabled"], false);
     assert!(v3_zen.get("account").is_none());
 
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
     harness.stop();
 }

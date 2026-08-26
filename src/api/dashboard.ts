@@ -10,7 +10,6 @@ export type * from "./dashboard-presenters.ts";
 import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { isVersionAtLeast } from "../utils/version.ts";
 import type {
-  AccountAcknowledgementCreate,
   AccountCustomConfigUpdate,
   AccountManagedCreate,
   AccountModelCapabilitiesUpdate,
@@ -201,11 +200,11 @@ export const dashboardApi = {
 
   updateAccountCustomConfig: (
     id: string,
-    config: { base_url: string; upstream_protocol: AccountProtocol; auth_scheme: "bearer" | "x-api-key" },
+    config: { base_url: string; upstream_protocols: AccountProtocol[]; auth_scheme: "bearer" | "x-api-key" },
     _ignoredRevision?: number,
   ): Promise<Account> => mutatedAccount(withCas((expectation) => dashboardV3.putAccountCustomConfig(id, {
     baseUrl: config.base_url,
-    upstreamProtocol: config.upstream_protocol,
+    upstreamProtocols: [...config.upstream_protocols],
     authScheme: config.auth_scheme,
   } satisfies WithoutExpectation<AccountCustomConfigUpdate>, expectation))),
 
@@ -221,16 +220,10 @@ export const dashboardApi = {
     })),
   } satisfies WithoutExpectation<AccountModelCapabilitiesUpdate>, expectation))),
 
-  createAccountAcknowledgement: (id: string, acknowledgementId: string, version: string): Promise<Account> =>
-    mutatedAccount(withCas((expectation) => dashboardV3.createAccountAcknowledgement(id, {
-      acknowledgementId,
-      version,
-    } satisfies WithoutExpectation<AccountAcknowledgementCreate>, expectation))),
-
   discoverCustomModels: async (input: CustomModelDiscoveryInput) => {
     const result = await dashboardV3.discoverCustomModels({
       baseUrl: input.base_url,
-      upstreamProtocol: input.upstream_protocol,
+      upstreamProtocols: [...input.upstream_protocols],
       authScheme: input.auth_scheme,
       apiKey: input.api_key,
       accountId: input.account_id,

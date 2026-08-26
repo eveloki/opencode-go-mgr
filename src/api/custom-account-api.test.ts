@@ -46,7 +46,6 @@ function v3Account(id: string): Record<string, unknown> {
     planRoutable: true,
     customConfig: null,
     modelCapabilities: [],
-    acknowledgements: [],
   };
 }
 
@@ -98,7 +97,7 @@ test("custom config PUT sends the flattened config with CAS tokens", async () =>
 
   await dashboardApi.updateAccountCustomConfig("custom-1", {
     base_url: "http://192.168.1.10:8080/v1",
-    upstream_protocol: "chat_completions",
+    upstream_protocols: ["chat_completions", "messages"],
     auth_scheme: "bearer",
   });
 
@@ -106,7 +105,7 @@ test("custom config PUT sends the flattened config with CAS tokens", async () =>
   assert.equal(requests[0]?.method, "PUT");
   assert.deepEqual(requests[0]?.body, {
     baseUrl: "http://192.168.1.10:8080/v1",
-    upstreamProtocol: "chat_completions",
+    upstreamProtocols: ["chat_completions", "messages"],
     authScheme: "bearer",
     expectedRevision: 9,
     processGeneration: 99,
@@ -140,7 +139,7 @@ test("model discovery posts only the transient form fields to its protected rout
 
   await dashboardApi.discoverCustomModels({
     base_url: "https://api.example.com/v1",
-    upstream_protocol: "messages",
+    upstream_protocols: ["messages", "chat_completions"],
     auth_scheme: "x-api-key",
     api_key: "new-key",
     account_id: "custom-1",
@@ -150,7 +149,7 @@ test("model discovery posts only the transient form fields to its protected rout
   assert.equal(requests[0]?.method, "POST");
   assert.deepEqual(requests[0]?.body, {
     baseUrl: "https://api.example.com/v1",
-    upstreamProtocol: "messages",
+    upstreamProtocols: ["messages", "chat_completions"],
     authScheme: "x-api-key",
     apiKey: "new-key",
     accountId: "custom-1",

@@ -1,10 +1,9 @@
 //! POST `/accounts/{id}/verify`: V2 verification semantics behind the V3 CAS envelope.
 //!
 //! Network work (Custom's first declared model, GOAT GET `/models`) never
-//! holds `settings_update`. Go/Zen are `NotRequired` no-ops; SCNet stays 501
-//! with zero upstream calls. Debug builds may install a processGeneration-keyed
-//! loopback probe seam; that installer, map, and dyn dispatch are absent from
-//! release.
+//! holds `settings_update`. Go/Zen are `NotRequired` no-ops. Debug builds may
+//! install a processGeneration-keyed loopback probe seam; that installer, map,
+//! and dyn dispatch are absent from release.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -204,19 +203,7 @@ fn prepare_verify(
     {
         return Err(V3ApiError::invalid_request_at(
             state,
-            "Custom API accounts require a persisted base URL, protocol, and auth scheme",
-        ));
-    }
-    if let Some(notice) = plan.risk_notice
-        && !state
-            .db
-            .lock()
-            .account_has_acknowledgement(id, notice)
-            .map_err(V3ApiError::internal)?
-    {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "this Plan requires a matching versioned risk acknowledgement before verification",
+            "Custom API accounts require a persisted base URL, protocol set, and auth scheme",
         ));
     }
     if plan.verification_runtime_availability != "available"
@@ -274,7 +261,7 @@ fn capture_custom_verification_job(
         .ok_or_else(|| {
             V3ApiError::invalid_request_at(
                 state,
-                "Custom API accounts require a persisted base URL, protocol, and auth scheme",
+                "Custom API accounts require a persisted base URL, protocol set, and auth scheme",
             )
         })?;
     let capabilities = db

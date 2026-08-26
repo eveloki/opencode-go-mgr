@@ -49,9 +49,9 @@ currently routeable OpenCode Go aliases intersected with the active OpenCode Go
 pricing snapshot. Highspeed variants inherit the base model's pricing row. An
 empty intersection is `[]`, not an error. This is **not** authenticated
 `GET /v1/models`, which also includes the saved Zen Free catalog and eligible
-Custom declared IDs. Both endpoints are local reads: no SCNet spellings, no
-unpublished Command Code GOAT names, and no request-time upstream discovery or
-account selection. They publish only currently routable models that have an
+Custom declared IDs. Both endpoints are local reads: no unpublished Command
+Code GOAT names, and no request-time upstream discovery or account selection.
+They publish only currently routable models that have an
 effective enabled protocol. Zen Free catalog refresh is an explicit
 **Providers** action. A pricing refresh there can change which Go aliases
 appear here. The view reloads the list whenever you return. Per-app model

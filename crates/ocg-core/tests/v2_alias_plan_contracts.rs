@@ -2,14 +2,13 @@
 //!
 //! These tests drive public Gateway and dashboard HTTP/JSON. They are the
 //! independent acceptance slice for the accepted unified-alias / multi-Plan
-//! contracts. POST `/accounts/{id}/verify` stays 501 for SCNet. GOAT verify
-//! uses GET `/models`. Custom is catalog-routable with an available
-//! verification runtime; live Custom network coverage lives in
+//! contracts. GOAT verify uses GET `/models`. Custom is catalog-routable with
+//! an available verification runtime; live Custom network coverage lives in
 //! `custom_trusted_admin.rs`.
 //!
 //! Requirement map: `fixtures/v2/requirement_map.md`.
 //!
-//! Out of scope: live GOAT / SCNet network calls.
+//! Out of scope: live GOAT network calls.
 
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -580,9 +579,9 @@ async fn go_import_remains_immediately_routable_without_verification() {
     harness.shutdown();
 }
 
-/// GOAT, SCNet, and Custom create as disabled pending drafts.
+/// GOAT and Custom create as disabled pending drafts.
 #[tokio::test]
-async fn goat_and_scnet_create_disabled_pending_drafts() {
+async fn goat_and_custom_create_disabled_pending_drafts() {
     let harness = V2Harness::start().await;
     let catalog = harness.catalog().await;
 
@@ -620,32 +619,6 @@ async fn goat_and_scnet_create_disabled_pending_drafts() {
     assert_eq!(
         body["key"], "",
         "draft JSON must not return the Key: {body}"
-    );
-
-    let scnet = catalog_entry(&catalog, SCNET_PROVIDER_ID, SCNET_STANDARD_OFFERING_ID)
-        .or_else(|| scnet_entries(&catalog).into_iter().next())
-        .expect("v2-contract: catalog must include an SCNet Token Plan");
-    let notice = &scnet["risk_notice"];
-    let (status, body) = harness
-        .create_account(json!({
-            "provider_id": scnet["provider_id"],
-            "offering_id": scnet["offering_id"],
-            "name": "scnet-draft",
-            "key": SCNET_ACCOUNT_KEY,
-            "expected_revision": harness.settings_revision().await,
-            "acknowledgements": matching_acknowledgements(notice)
-        }))
-        .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "archived SCNet creation must fail closed: {body}"
-    );
-    assert!(
-        body["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("archived") || message.contains("unsupported")),
-        "{body}"
     );
 
     let (status, body) = harness
@@ -725,9 +698,9 @@ async fn disabled_draft_is_not_selected_for_alias_routing() {
     harness.shutdown();
 }
 
-/// POST `/accounts/{id}/verify` for SCNet stays 501; GOAT uses GET `/models`.
+/// GOAT draft stays unchanged when verify is unavailable.
 #[tokio::test]
-async fn verify_runtime_unavailable_leaves_draft_unchanged() {
+async fn verify_runtime_unavailable_leaves_goat_draft_unchanged() {
     let harness = V2Harness::start().await;
     let (status, draft) = harness
         .create_account(json!({
@@ -752,74 +725,6 @@ async fn verify_runtime_unavailable_leaves_draft_unchanged() {
         goat["verification_runtime_availability"].as_str(),
         Some("available")
     );
-    let scnet_id = "scnet-leftover";
-    harness
-        .state
-        .db
-        .lock()
-        .create_account_with_contract(
-            &ocg_core::models::Account {
-                id: scnet_id.into(),
-                provider_id: SCNET_PROVIDER_ID.into(),
-                offering_id: ocg_core::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
-                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
-                quota_scope: ocg_core::provider::QuotaScope::Key,
-                name: scnet_id.into(),
-                username: None,
-                password_cipher: None,
-                key_cipher: harness.state.encrypt_key(SCNET_ACCOUNT_KEY).unwrap(),
-                enabled: false,
-                account_type: ocg_core::models::AccountType::Key,
-                setup_step: ocg_core::models::AccountSetupStep::Ready,
-                referral_code: None,
-                purchase_date: String::new(),
-                expires_on: String::new(),
-                cooldown_until: None,
-                cooldown_generic_until: None,
-                cooldown_5h_until: None,
-                cooldown_week_until: None,
-                cooldown_month_until: None,
-                cooldown_free_until: None,
-                last_error: None,
-                auth_error: None,
-                notes: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            },
-            None,
-            &[],
-            ocg_core::provider::builtin_plan(
-                SCNET_PROVIDER_ID,
-                ocg_core::provider::SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-            )
-            .unwrap()
-            .risk_notice,
-        )
-        .expect("preserved SCNet leftover draft");
-    let (status, body) = harness
-        .post_json(
-            &format!("/accounts/{scnet_id}/verify"),
-            &json!({ "expected_revision": harness.settings_revision().await }),
-        )
-        .await;
-    assert_eq!(
-        status,
-        StatusCode::NOT_IMPLEMENTED,
-        "v2-contract: SCNet POST /accounts/{{id}}/verify must fail closed with 501: {body}"
-    );
-    assert_ne!(
-        body["enabled"], true,
-        "501 verify must not return an enabled account: {body}"
-    );
-    assert_ne!(
-        body["verification_status"].as_str(),
-        Some("verified"),
-        "501 verify must not mark the draft verified: {body}"
-    );
-    assert!(
-        !json_contains_secret(&body, SCNET_ACCOUNT_KEY),
-        "verify error leaked the Key: {body}"
-    );
 
     let stored = harness.account_by_id(&goat_id).await;
     assert_eq!(
@@ -839,158 +744,6 @@ async fn verify_runtime_unavailable_leaves_draft_unchanged() {
         "connection_verified_at must remain unset: {stored}"
     );
     assert_eq!(stored["key"], "", "{stored}");
-    harness.shutdown();
-}
-
-/// SCNet create requires the catalog's current acknowledgement version.
-#[tokio::test]
-async fn scnet_create_requires_versioned_acknowledgement() {
-    let harness = V2Harness::start().await;
-    let catalog = harness.catalog().await;
-    let scnet = catalog_entry(&catalog, SCNET_PROVIDER_ID, SCNET_STANDARD_OFFERING_ID)
-        .or_else(|| scnet_entries(&catalog).into_iter().next())
-        .expect("v2-contract: catalog must include SCNet");
-    let revision = harness.settings_revision().await;
-    let (status, body) = harness
-        .create_account(json!({
-            "provider_id": scnet["provider_id"],
-            "offering_id": scnet["offering_id"],
-            "name": "scnet-no-ack",
-            "key": SCNET_ACCOUNT_KEY,
-            "expected_revision": revision
-        }))
-        .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "SCNet create without acknowledgement must fail: {body}"
-    );
-
-    let (status, body) = harness
-        .create_account(json!({
-            "provider_id": scnet["provider_id"],
-            "offering_id": scnet["offering_id"],
-            "name": "scnet-stale-ack",
-            "key": SCNET_ACCOUNT_KEY,
-            "expected_revision": harness.settings_revision().await,
-            "acknowledgements": [{
-                "acknowledgement_id": "not-the-catalog-id",
-                "version": "0"
-            }]
-        }))
-        .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "stale acknowledgement version must fail: {body}"
-    );
-    harness.shutdown();
-}
-
-/// Acknowledgement is persisted and versioned. After confirmation it is a
-/// warning, not a runtime block.
-#[tokio::test]
-async fn scnet_acknowledgement_persists_and_does_not_runtime_block() {
-    let harness = V2Harness::start().await;
-    let catalog = harness.catalog().await;
-    let scnet = catalog_entry(&catalog, SCNET_PROVIDER_ID, SCNET_STANDARD_OFFERING_ID)
-        .or_else(|| scnet_entries(&catalog).into_iter().next())
-        .expect("v2-contract: catalog must include SCNet");
-    let notice = &scnet["risk_notice"];
-    let (status, body) = harness
-        .create_account(json!({
-            "provider_id": scnet["provider_id"],
-            "offering_id": scnet["offering_id"],
-            "name": "scnet-acked",
-            "key": SCNET_ACCOUNT_KEY,
-            "expected_revision": harness.settings_revision().await,
-            "acknowledgements": matching_acknowledgements(notice)
-        }))
-        .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "archived SCNet creation must fail closed: {body}"
-    );
-    let offering_id = scnet["offering_id"].as_str().unwrap();
-    let leftover_id = "scnet-acked";
-    let now = chrono::Utc::now();
-    harness
-        .state
-        .db
-        .lock()
-        .create_account_with_contract(
-            &ocg_core::models::Account {
-                id: leftover_id.into(),
-                provider_id: SCNET_PROVIDER_ID.into(),
-                offering_id: offering_id.into(),
-                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
-                quota_scope: ocg_core::provider::QuotaScope::Key,
-                name: leftover_id.into(),
-                username: None,
-                password_cipher: None,
-                key_cipher: harness.state.encrypt_key(SCNET_ACCOUNT_KEY).unwrap(),
-                enabled: false,
-                account_type: ocg_core::models::AccountType::Key,
-                setup_step: ocg_core::models::AccountSetupStep::Ready,
-                referral_code: None,
-                purchase_date: String::new(),
-                expires_on: String::new(),
-                cooldown_until: None,
-                cooldown_generic_until: None,
-                cooldown_5h_until: None,
-                cooldown_week_until: None,
-                cooldown_month_until: None,
-                cooldown_free_until: None,
-                last_error: None,
-                auth_error: None,
-                notes: None,
-                created_at: now,
-                updated_at: now,
-            },
-            None,
-            &[],
-            ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, offering_id)
-                .unwrap()
-                .risk_notice,
-        )
-        .expect("preserved SCNet leftover draft");
-    let body = harness.account_by_id(leftover_id).await;
-
-    let stored = body
-        .get("acknowledgements")
-        .cloned()
-        .unwrap_or_else(|| panic!("SCNet account must persist acknowledgements: {body}"));
-    let record = stored
-        .as_array()
-        .and_then(|items| items.first())
-        .cloned()
-        .unwrap_or_else(|| panic!("SCNet acknowledgements must be a non-empty array: {stored}"));
-    assert_eq!(
-        record["acknowledgement_id"], notice["acknowledgement_id"],
-        "{record}"
-    );
-    assert_eq!(record["version"], notice["version"], "{record}");
-    assert_eq!(record["content_hash"], notice["content_hash"], "{record}");
-    assert!(
-        record["accepted_at"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()),
-        "acknowledgement must record accepted_at: {record}"
-    );
-    assert_ne!(body["runtime_blocked"], true, "{body}");
-    assert_ne!(record["blocks_runtime"], true, "{record}");
-    if let Some(flag) = body.get("acknowledgement_blocks_runtime") {
-        assert_eq!(flag, false, "{body}");
-    }
-
-    // Confirmation is not a runtime gate. Verification runtime is unavailable
-    // in this slice, so the card stays a disabled draft; the acknowledgement
-    // itself must not add a runtime block.
-    assert_eq!(
-        body["enabled"], false,
-        "draft stays disabled while verification runtime is unavailable: {body}"
-    );
     harness.shutdown();
 }
 

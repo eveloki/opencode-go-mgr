@@ -2,7 +2,7 @@
 
 # 架构图
 
-这是一组单个本地节点的文字版图。按当前 HEAD：已上线路由是 OpenCode Go、Zen Free 与 Custom API。Command Code GOAT 与 SCNet Token Plans 仍是禁用草稿，往那边路由只会收到 `501`。每张图下面链接到负责详情的章节；图与章节冲突时，以章节和代码为准。
+这是一组单个本地节点的文字版图。按当前 HEAD：已上线路由是 OpenCode Go、Zen Free 与 Custom API。Command Code GOAT 仍是禁用草稿，往那边路由只会收到 `501`。每张图下面链接到负责详情的章节；图与章节冲突时，以章节和代码为准。
 
 ## 目录
 
@@ -39,7 +39,7 @@
                    \                      /
                     \                    /
              +----------------+------------------+
-             |         SQLite schema v27         |
+             |         SQLite schema v30         |
              |  桌面  ~/.ocg-mgr                 |
              |  CLI   ~/.ocg-mgr-cli             |
              +-----------------------------------+
@@ -91,28 +91,28 @@ Messages 与 Gemini generate / stream 上均为 `400`。重叠的原始 ID 返�
   ----------------                        ------------------
   OpenCode Go                             Command Code GOAT
     官方 Key，/zen/go                     验证 501
-  Zen Free                                SCNet Token Plans
-    无上游 Key                            （basic / standard / premium）
-    在供应商页刷新目录                    验证 501
+  Zen Free
+    无上游 Key
+    在供应商页刷新目录
   Custom API
     受信管理员 HTTP/HTTPS 目的地
 
 
   Custom API 生命周期
 
-    保存 / 更新  ->  禁用 pending
+    保存 / 更新  ->  pending 时也可启用
            |
            v
-    验证第一个声明模型
-    （一次协议正确的最小非流式请求；
-     仅 2xx JSON object 成功）
+    用第一个声明模型验证每个已选协议
+    （每个协议一次最小非流式请求；
+     每个都须 2xx JSON object）
            |
            v
-    显式启用  ->  可参与路由
+    验证状态变为 verified
+    （账号可能已在路由中）
 
-  Key、base URL 或声明能力变更
-  会使验证失效并禁用该卡。
-  协议与鉴权方案创建后不可改。
+  Key、base URL、声明能力、协议集或鉴权方案变更
+  会使验证状态变为 pending，但保持该卡启用。
 ```
 
 Zen Free 只有启用开关；不需要时直接关掉卡片。目录刷新在供应商页，不在账号卡上。账号与供应商见 [账号](accounts.zh-CN.md) 和 [供应商](providers.zh-CN.md)。
@@ -138,7 +138,7 @@ Zen Free 只有启用开关；不需要时直接关掉卡片。目录刷新在�
 
     AI 客户端 --Key--> 本节点 --账号凭据--> Plan
 
-    Key            access_keys（schema v27）
+    Key            access_keys（schema v30）
                    主 Key + 可选子 Key（活跃上限 64）
     账号凭据       Go Key、Custom Key，或 Zen Free（无）
 ```
@@ -154,7 +154,7 @@ Zen Free 只有启用开关；不需要时直接关掉卡片。目录刷新在�
     已公布 Go 别名
       ∪ 最后一次成功保存的 Zen Free 别名
       ∪ 合格 Custom 声明 ID
-    合格 Custom = enabled + verified + ready + 非空 Key
+    合格 Custom = enabled + ready + 非空 Key（验证为可选）
     Custom ID 不得抢走已公布的 Go/Zen 别名
 
   GET /dashboard/api/v3/application-models   （面板会话）

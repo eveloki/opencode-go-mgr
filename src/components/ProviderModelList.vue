@@ -11,7 +11,7 @@
         <template #header>
           <div class="model-contracts__header">
             <code>{{ model.model_id }}</code>
-            <span>{{ t("首选协议：{protocol}", { protocol: protocolDisplayName(model.preferred_protocol) }) }}</span>
+            <span>{{ protocolHeaderLabel(model) }}</span>
           </div>
         </template>
         <ul class="model-contracts__protocols">
@@ -57,6 +57,24 @@ const props = defineProps<{
 }>();
 
 const protocols = PROVIDER_PROTOCOLS;
+
+function enabledModelProtocols(model: EffectiveModelContract): ProviderProtocol[] {
+  return PROVIDER_PROTOCOLS.filter((protocol) => (
+    props.switches[protocol] && model.protocols[protocol]?.enabled
+  ));
+}
+
+// "Preferred" is only meaningful when the model can actually choose between
+// two or more enabled protocols; otherwise name the single effective one.
+function protocolHeaderLabel(model: EffectiveModelContract): string {
+  const enabled = enabledModelProtocols(model);
+  if (enabled.length >= 2) {
+    return t("首选协议：{protocol}", { protocol: protocolDisplayName(model.preferred_protocol) });
+  }
+  return t("协议：{protocol}", {
+    protocol: protocolDisplayName(enabled[0] ?? model.preferred_protocol),
+  });
+}
 
 const statusKeys: Record<string, MessageKey> = {
   globally_closed: "全局关闭",

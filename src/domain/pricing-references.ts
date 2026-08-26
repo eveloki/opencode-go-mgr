@@ -70,8 +70,3 @@ export const GOAT_PRICING_REFERENCE = {
   ] satisfies readonly GoatOfficialPricingRow[],
 } as const;
 
-/** SCNet is archived; keep URLs for identity/restriction callers, not Credits. */
-export const SCNET_PRICING_REFERENCE = {
-  sourceUrl: "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/token-plan.html",
-  restrictionsUrl: "https://www.scnet.cn/ac/openapi/doc/2.0/moduleapi/plans/faq.html",
-} as const;

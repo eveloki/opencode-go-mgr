@@ -22,7 +22,6 @@ export type DashboardApiV3 =
   | AccountMutation
   | AccountCustomConfig
   | AccountModelCapability
-  | AccountAcknowledgement
   | AccountCreate
   | AccountManagedCreate
   | AccountUpdate
@@ -33,12 +32,9 @@ export type DashboardApiV3 =
   | AccountCustomConfigWrite
   | AccountModelCapabilitiesUpdate
   | AccountModelCapabilityWrite
-  | AccountAcknowledgementCreate
-  | AccountAcknowledgementWrite
   | ProviderCatalog
   | ProviderCatalogEntry
   | ProviderCatalogFormField
-  | ProviderCatalogRiskNotice
   | ProviderModelCapability
   | ZenFreeSettings
   | ZenFreeSettingsUpdate
@@ -364,7 +360,6 @@ export interface KeyUpdate {
  */
 export interface Account {
   accountType: AccountType;
-  acknowledgements: AccountAcknowledgement[];
   authError: string | null;
   connectionVerifiedAt: string | null;
   cooldown5hUntil: string | null;
@@ -400,16 +395,6 @@ export interface Account {
   verificationStatus: AccountVerificationStatus;
 }
 /**
- * One persisted Plan risk acknowledgement as returned on an account.
- */
-export interface AccountAcknowledgement {
-  acceptedAt: string;
-  accountId: string;
-  acknowledgementId: string;
-  contentHash: string;
-  version: string;
-}
-/**
  * Nested Custom HTTP destination as returned on an account.
  */
 export interface AccountCustomConfig {
@@ -418,7 +403,7 @@ export interface AccountCustomConfig {
   baseUrl: string;
   createdAt: string;
   updatedAt: string;
-  upstreamProtocol: AccountUpstreamProtocol;
+  upstreamProtocols: AccountUpstreamProtocol[];
 }
 /**
  * One declared Custom model capability as returned on an account.
@@ -451,7 +436,6 @@ export interface AccountMutation {
  * `password`, and `referralCode` are write-only and never echoed.
  */
 export interface AccountCreate {
-  acknowledgements?: AccountAcknowledgementWrite[];
   customConfig?: AccountCustomConfigWrite | null;
   expectedRevision: number;
   key: string;
@@ -467,19 +451,12 @@ export interface AccountCreate {
   username?: string | null;
 }
 /**
- * Create-time Plan risk acknowledgement. Nested under `AccountCreate`.
- */
-export interface AccountAcknowledgementWrite {
-  acknowledgementId: string;
-  version: string;
-}
-/**
  * Create-time Custom destination (no timestamps). Nested under `AccountCreate`.
  */
 export interface AccountCustomConfigWrite {
   authScheme: AccountAuthScheme;
   baseUrl: string;
-  upstreamProtocol: AccountUpstreamProtocol;
+  upstreamProtocols: AccountUpstreamProtocol[];
 }
 /**
  * One declared Custom model capability on create or replace.
@@ -541,15 +518,15 @@ export interface AccountGoatModelAccessUpdate {
   processGeneration: number;
 }
 /**
- * PUT `/accounts/{id}/custom-config` body. Protocol and auth scheme are
- * immutable after create; the handler enforces that.
+ * PUT `/accounts/{id}/custom-config` body. Protocol set and auth scheme are
+ * editable; a change re-opens verification as pending without disabling.
  */
 export interface AccountCustomConfigUpdate {
   authScheme: AccountAuthScheme;
   baseUrl: string;
   expectedRevision: number;
   processGeneration: number;
-  upstreamProtocol: AccountUpstreamProtocol;
+  upstreamProtocols: AccountUpstreamProtocol[];
 }
 /**
  * PUT `/accounts/{id}/model-capabilities` body.
@@ -558,15 +535,6 @@ export interface AccountModelCapabilitiesUpdate {
   capabilities: AccountModelCapabilityWrite[];
   expectedRevision: number;
   processGeneration: number;
-}
-/**
- * POST `/accounts/{id}/acknowledgements` body.
- */
-export interface AccountAcknowledgementCreate {
-  acknowledgementId: string;
-  expectedRevision: number;
-  processGeneration: number;
-  version: string;
 }
 /**
  * Built-in Plan catalog. Model capabilities are a separate DTO.
@@ -601,7 +569,6 @@ export interface ProviderCatalogEntry {
   providerId: string;
   quotaScope: AccountQuotaScope;
   quotaUnit: string;
-  riskNotice: ProviderCatalogRiskNotice | null;
   routable: boolean;
   singleton: boolean;
   upstreamProtocols: AccountUpstreamProtocol[];
@@ -619,18 +586,7 @@ export interface ProviderCatalogFormField {
   required: boolean;
 }
 /**
- * Plan risk notice shown before create. `body` is the acknowledgement text,
- * not a secret.
- */
-export interface ProviderCatalogRiskNotice {
-  acknowledgementId: string;
-  body: string;
-  contentHash: string;
-  sourceUrl: string;
-  version: string;
-}
-/**
- * One Go protocol-table capability. GOAT/SCNet must not reuse these rows.
+ * One Go protocol-table capability. GOAT must not reuse these rows.
  */
 export interface ProviderModelCapability {
   modelId: string;
@@ -788,7 +744,7 @@ export interface ProtocolSwitches {
   responses: boolean;
 }
 /**
- * One built-in provider scope. SCNet is a single group with three offerings.
+ * One built-in provider scope.
  */
 export interface ProviderContractGroup {
   card: CardCapabilitySummary;
@@ -1026,7 +982,7 @@ export interface ApplicationModels {
   revision: number;
 }
 /**
- * Dashboard home totals. Custom/GOAT/SCNet cards are not "available".
+ * Dashboard home totals. Custom/GOAT cards are not "available".
  */
 export interface DashboardSummary {
   availableAccounts: number;
@@ -1382,7 +1338,7 @@ export interface CustomModelDiscoveryRequest {
   apiKey?: string | null;
   authScheme: AccountAuthScheme;
   baseUrl: string;
-  upstreamProtocol: AccountUpstreamProtocol;
+  upstreamProtocols: AccountUpstreamProtocol[];
 }
 /**
  * Custom model-list probe result. Identity tokens are the captured current

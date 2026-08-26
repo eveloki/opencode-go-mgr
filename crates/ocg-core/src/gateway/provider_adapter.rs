@@ -33,8 +33,8 @@ use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_HOST,
     COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, CommandCodeGoatAdapter,
     ConfigurableHttpAdapter, CredentialKind, InferenceAuthDescriptor, OpenCodeGoAdapter,
-    ProviderAdapterKind, ProviderRegistry, QuotaScope, ScnetAdapter, UpstreamAuthScheme,
-    ZEN_FREE_ACCOUNT_ID, ZenFreeAdapter,
+    ProviderAdapterKind, ProviderRegistry, QuotaScope, UpstreamAuthScheme, ZEN_FREE_ACCOUNT_ID,
+    ZenFreeAdapter,
 };
 use crate::provider_contracts::EffectiveContractSet;
 use std::collections::HashMap;
@@ -211,7 +211,6 @@ fn resolve_route_with_policy(
         Some(ProviderAdapterKind::CommandCodeGoat) => {
             CommandCodeGoatAdapter.resolve(account, config, plan, policy)
         }
-        Some(ProviderAdapterKind::Scnet) => ScnetAdapter.resolve(account, config, plan, policy),
         Some(ProviderAdapterKind::ConfigurableHttp) => {
             ConfigurableHttpAdapter.resolve(account, config, plan, policy)
         }
@@ -377,23 +376,6 @@ impl RuntimeRouteAdapter for CommandCodeGoatAdapter {
     }
 }
 
-impl RuntimeRouteAdapter for ScnetAdapter {
-    fn resolve(
-        self,
-        account: &Account,
-        _config: &AppConfig,
-        _plan: &RequestPlan,
-        policy: RoutePolicy<'_>,
-    ) -> Result<AttemptSpec, String> {
-        let _ = registered_descriptor(ProviderAdapterKind::Scnet, account)?;
-        let _ = policy;
-        Err(format!(
-            "unsupported provider offering `{}/{}`",
-            account.provider_id, account.offering_id
-        ))
-    }
-}
-
 impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
     fn resolve(
         self,
@@ -412,7 +394,7 @@ impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
             return Err("Custom API does not serve the Zen free channel".to_string());
         }
         let custom = plan.custom_route.as_ref().ok_or_else(|| {
-            "Custom API account is missing a persisted base URL, protocol, and auth scheme"
+            "Custom API account is missing a persisted base URL, protocol set, and auth scheme"
                 .to_string()
         })?;
         let protocol = protocol_kind_for(plan.upstream)?;
@@ -599,8 +581,7 @@ mod tests {
         ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_BASE_URL,
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID,
         CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID,
-        OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID,
-        SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_NAME,
+        OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_NAME,
     };
     use bytes::Bytes;
     use chrono::Utc;
@@ -859,29 +840,6 @@ mod tests {
         );
         assert!(goat_route.restricted_upstream_url());
 
-        let scnet = account(
-            "scnet-1",
-            SCNET_PROVIDER_ID,
-            SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-            CredentialKind::ApiKey,
-            QuotaScope::Key,
-        );
-        let scnet_err = resolve_route(
-            &scnet,
-            &config,
-            &chat_plan(
-                "GLM-5.2",
-                UpstreamChannel::Go,
-                ApiFormat::ChatCompletions,
-                None,
-            ),
-        )
-        .unwrap_err();
-        assert_eq!(
-            scnet_err,
-            "unsupported provider offering `scnet/token-plan-basic`"
-        );
-
         let custom = account(
             "custom-1",
             CUSTOM_PROVIDER_ID,
@@ -956,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_uses_the_same_five_concrete_adapter_identities() {
+    fn resolve_uses_the_same_four_concrete_adapter_identities() {
         use crate::provider::InferenceAdapter;
         let go_plan = crate::provider::builtin_plan(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
         let zen_plan = crate::provider::builtin_plan(
@@ -966,9 +924,6 @@ mod tests {
         .unwrap();
         let goat_plan =
             crate::provider::builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
-        let scnet_plan =
-            crate::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-                .unwrap();
         let custom_plan =
             crate::provider::builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
         assert!(OpenCodeGoAdapter::inference(go_plan).production_inference);
@@ -978,7 +933,6 @@ mod tests {
         );
         assert!(CommandCodeGoatAdapter::inference(goat_plan).production_inference);
         assert!(!CommandCodeGoatAdapter::inference(goat_plan).loopback_test_seam_only);
-        assert!(!ScnetAdapter::inference(scnet_plan).production_inference);
         assert_eq!(
             ConfigurableHttpAdapter::inference(custom_plan).auth,
             InferenceAuthDescriptor::ConfigurableBearerOrXApiKey
@@ -992,7 +946,6 @@ mod tests {
                 ProviderAdapterKind::OpenCodeGo
                 | ProviderAdapterKind::ZenFree
                 | ProviderAdapterKind::CommandCodeGoat
-                | ProviderAdapterKind::Scnet
                 | ProviderAdapterKind::ConfigurableHttp => {}
             }
             let descriptor = ProviderRegistry::iter()
@@ -1015,9 +968,6 @@ mod tests {
                     assert!(!descriptor.inference.follow_redirects);
                     assert!(descriptor.inference.production_inference);
                     assert!(!descriptor.inference.loopback_test_seam_only);
-                }
-                ProviderAdapterKind::Scnet => {
-                    assert!(!descriptor.inference.production_inference);
                 }
                 ProviderAdapterKind::ConfigurableHttp => {
                     assert_eq!(

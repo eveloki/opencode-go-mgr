@@ -13,8 +13,7 @@ import {
  * (Zen Free) are omitted: they are not created here. Remaining families stay
  * visible so unavailable choices still explain why they cannot be created.
  * Unroutable-but-creatable families appear as drafts instead of implying they
- * will route. SCNet is sealed: it stays visible as an archived, non-selectable
- * family regardless of what the catalog reports.
+ * will route.
  */
 
 export interface PlanOption {
@@ -77,17 +76,6 @@ export function buildPlanOptions(
   catalog: readonly ProviderCatalogEntry[] | null | undefined,
 ): PlanOption[] {
   return PLAN_DEFINITIONS.filter((plan) => !plan.singleton).map((plan) => {
-    // SCNet is archived: never creatable, with an explicit sealed reason.
-    if (plan.id === "scnet") {
-      return {
-        plan,
-        label: planFamilyLabel(plan, catalog),
-        disabled: true,
-        disabledReason: "该方案已归档，暂不支持创建",
-        creationHint: "",
-        managed: false,
-      };
-    }
     const reason = planCreateDisabledReason(plan, catalog);
     if (reason) {
       return {

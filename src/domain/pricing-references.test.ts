@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   GOAT_PRICING_REFERENCE,
   PRICING_REFERENCE_CHECKED_AT,
-  SCNET_PRICING_REFERENCE,
 } from "./pricing-references.ts";
 
 test("GOAT reference mirrors the official plan summary and 40 included models", () => {
@@ -41,13 +40,7 @@ test("GOAT reference mirrors the official plan summary and 40 included models", 
   assert.match(GOAT_PRICING_REFERENCE.pricingUrl, /commandcode\.ai\/docs\/plans\/goat#models-included$/);
 });
 
-test("SCNet reference keeps identity URLs and does not publish Credits tiers", () => {
-  assert.equal("tiers" in SCNET_PRICING_REFERENCE, false);
-  assert.match(SCNET_PRICING_REFERENCE.sourceUrl, /^https:\/\/www\.scnet\.cn\//);
-  assert.match(SCNET_PRICING_REFERENCE.restrictionsUrl, /^https:\/\/www\.scnet\.cn\//);
-});
-
-test("GOAT pricing is a display-only official reference and SCNet Credits stay absent", () => {
+test("GOAT pricing is a display-only official reference", () => {
   const files = [
     new URL("./pricing-references.ts", import.meta.url),
     new URL("../components/GoatQuotaReference.vue", import.meta.url),

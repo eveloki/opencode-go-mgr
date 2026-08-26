@@ -153,7 +153,6 @@ import {
   KeyOutlined,
   CloudOutlined,
   ApiOutlined,
-  CreditCardOutlined,
   SwapOutlined,
 } from "@vicons/antd";
 import { t, type MessageKey } from "../i18n/index.ts";
@@ -242,7 +241,6 @@ function onRailKeydown(event: KeyboardEvent): void {
 const ICONS: Record<string, Component> = {
   "opencode-go": CloudOutlined,
   "command-code-goat": ApiOutlined,
-  scnet: CreditCardOutlined,
   "custom-endpoint": SwapOutlined,
 };
 
@@ -251,8 +249,6 @@ function planIcon(planId: string): Component {
 }
 
 function planKindTag(plan: PlanDefinition): { label: string; type: "warning" | "default" } | null {
-  if (plan.id === "scnet") return { label: t("已归档"), type: "default" };
-  if (plan.kind === "subscription") return { label: t("订阅制"), type: "warning" };
   if (plan.kind === "custom") return { label: t("自定义端点"), type: "default" };
   return null;
 }
@@ -261,8 +257,6 @@ function planDescription(plan: PlanDefinition): string {
   switch (plan.id) {
     case "opencode-go":
       return t("已有 OpenCode Go Key，直接添加并参与账号路由。");
-    case "scnet":
-      return t("SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。");
     case "custom-endpoint":
       return t("自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。");
     default:

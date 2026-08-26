@@ -2,11 +2,12 @@
 //! per-account route identity.
 //!
 //! Account model capabilities are the client-facing IDs and the exact upstream
-//! IDs. Verification sends one protocol-correct non-stream request against the
-//! first declared model. Discovery never mutates the declared list.
+//! IDs, expanded over the account-level protocol set. Verification sends one
+//! protocol-correct non-stream request per declared protocol against the first
+//! declared model. Discovery never mutates the declared list.
 //! The adapter identity is Configurable HTTP, not a base class other providers
-//! inherit from. Custom keeps configurable URL/auth and
-//! verified-then-explicit-enable.
+//! inherit from. Custom keeps configurable URL/auth and explicit enablement;
+//! connection verification is an optional tool, not an enablement gate.
 
 use crate::custom_http::{
     self, CustomHttpClient, CustomHttpError, HttpInferenceTransport, InferenceHttpError,
@@ -15,8 +16,8 @@ use crate::custom_http::{
 use crate::kernel::ids::{CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID};
 use crate::kernel::protocol::ApiFormat;
 use crate::models::{
-    AccountCustomConfig, AccountCustomConfigInput, AccountModelCapability, AppConfig,
-    CustomModelDiscoveryResult,
+    AccountCustomConfig, AccountCustomConfigInput, AccountModelCapability,
+    AccountModelCapabilityInput, AppConfig, CustomModelDiscoveryResult,
 };
 use crate::provider::ConnectionVerificationStatus;
 use crate::provider::{
@@ -141,7 +142,7 @@ pub struct CustomVerificationContract {
     /// Encrypted key ciphertext, not the plaintext secret.
     pub key_cipher: String,
     pub base_url: String,
-    pub upstream_protocol: UpstreamProtocolKind,
+    pub upstream_protocols: Vec<UpstreamProtocolKind>,
     pub auth_scheme: UpstreamAuthScheme,
     /// Declared capability IDs in persistence order.
     pub capabilities: Vec<(String, UpstreamProtocolKind)>,
@@ -160,7 +161,7 @@ impl CustomVerificationContract {
             account_updated_at: account_updated_at.into(),
             key_cipher: key_cipher.into(),
             base_url: config.base_url.clone(),
-            upstream_protocol: config.upstream_protocol,
+            upstream_protocols: config.upstream_protocols.clone(),
             auth_scheme: config.auth_scheme,
             capabilities: capabilities
                 .iter()
@@ -228,7 +229,7 @@ async fn discover_custom_models_inner(
             message: format!("failed to build Custom HTTP client: {error}"),
         }
     })?;
-    let headers = model_discovery_headers(input.upstream_protocol);
+    let headers = model_discovery_headers(discovery_dialect(input)?);
     let timeout = Some(model_discovery_request_timeout(config));
     let mut models = Vec::new();
     let mut seen_models = HashSet::new();
@@ -294,6 +295,20 @@ fn model_discovery_request_timeout(config: &AppConfig) -> Duration {
             .non_stream_timeout_secs
             .min(CUSTOM_MODEL_DISCOVERY_TIMEOUT_SECS),
     )
+}
+
+/// Discovery keeps a single dialect: the first protocol of the declared set.
+/// `/models` list semantics are identical across the three dialects.
+fn discovery_dialect(
+    input: &AccountCustomConfigInput,
+) -> Result<UpstreamProtocolKind, CustomModelDiscoveryFailure> {
+    input
+        .upstream_protocols
+        .first()
+        .copied()
+        .ok_or_else(|| CustomModelDiscoveryFailure {
+            message: "custom config requires at least one upstream protocol".to_string(),
+        })
 }
 
 fn model_discovery_headers(protocol: UpstreamProtocolKind) -> reqwest::header::HeaderMap {
@@ -476,6 +491,47 @@ pub fn first_declared_capability(
     capabilities.first()
 }
 
+/// Write-expansion invariant: every capability protocol belongs to the
+/// account-level protocol set, and the written rows are exactly the full
+/// "declared model x selected protocol" expansion. Partial expansions are
+/// rejected so stored rows always mirror the account-level protocol set.
+pub fn validate_custom_capability_expansion(
+    protocols: &[UpstreamProtocolKind],
+    capabilities: &[AccountModelCapabilityInput],
+) -> Result<(), String> {
+    for capability in capabilities {
+        if !protocols.contains(&capability.protocol) {
+            return Err(
+                "model capability protocol must be in account custom_config.upstream_protocols"
+                    .to_string(),
+            );
+        }
+    }
+    let mut declared_models: Vec<&str> = Vec::new();
+    for capability in capabilities {
+        if !declared_models.contains(&capability.model_id.as_str()) {
+            declared_models.push(capability.model_id.as_str());
+        }
+    }
+    let mut expected_pairs = HashSet::new();
+    for model_id in &declared_models {
+        for protocol in protocols {
+            expected_pairs.insert((*model_id, protocol.as_str()));
+        }
+    }
+    let actual_pairs: HashSet<(&str, &str)> = capabilities
+        .iter()
+        .map(|capability| (capability.model_id.as_str(), capability.protocol.as_str()))
+        .collect();
+    if actual_pairs != expected_pairs {
+        return Err(
+            "model capabilities must expand every declared model over every selected upstream protocol"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub fn minimal_verification_body(
     protocol: UpstreamProtocolKind,
     model_id: &str,
@@ -506,32 +562,56 @@ pub fn minimal_verification_body(
     })
 }
 
-/// POST one protocol-correct non-stream request. Only a 2xx JSON object proves
-/// verified. Never uses GET /models and never mutates capabilities.
+/// POST one protocol-correct non-stream request per declared upstream
+/// protocol, each against the first declared model. Only a 2xx JSON object
+/// from every protocol proves verified. Never uses GET /models and never
+/// mutates capabilities.
 pub async fn probe_custom_connection(
     config: &AppConfig,
     custom_config: &AccountCustomConfig,
     first_capability: &AccountModelCapability,
     api_key: &str,
 ) -> Result<(), CustomVerifyFailure> {
-    if first_capability.protocol != custom_config.upstream_protocol {
+    if custom_config.upstream_protocols.is_empty() {
         return Err(CustomVerifyFailure {
-            message: "model capability protocol must match account custom_config.upstream_protocol"
-                .to_string(),
+            message: "custom config requires at least one upstream protocol".to_string(),
         });
     }
-    let url = join_custom_protocol_url(&custom_config.base_url, custom_config.upstream_protocol)
-        .map_err(|error| CustomVerifyFailure {
-            message: format!("invalid Custom verification endpoint: {error}"),
-        })?;
-    let body =
-        minimal_verification_body(custom_config.upstream_protocol, &first_capability.model_id)?;
     let client = CustomHttpClient::from_config(config)?;
+    for protocol in &custom_config.upstream_protocols {
+        probe_custom_protocol(
+            config,
+            custom_config,
+            *protocol,
+            &first_capability.model_id,
+            api_key,
+            &client,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn probe_custom_protocol(
+    config: &AppConfig,
+    custom_config: &AccountCustomConfig,
+    protocol: UpstreamProtocolKind,
+    model_id: &str,
+    api_key: &str,
+    client: &CustomHttpClient,
+) -> Result<(), CustomVerifyFailure> {
+    let url = join_custom_protocol_url(&custom_config.base_url, protocol).map_err(|error| {
+        CustomVerifyFailure {
+            message: format!("invalid Custom verification endpoint: {error}"),
+        }
+    })?;
+    let body = minimal_verification_body(protocol, model_id)?;
     let extra =
-        json_content_headers(custom_config.upstream_protocol == UpstreamProtocolKind::Messages)
-            .map_err(|error| CustomVerifyFailure {
+        json_content_headers(protocol == UpstreamProtocolKind::Messages).map_err(|error| {
+            CustomVerifyFailure {
                 message: error.to_string(),
-            })?;
+            }
+        })?;
     let response = client
         .send_isolated(
             reqwest::Method::POST,
@@ -749,8 +829,7 @@ mod tests {
         use crate::provider::{
             ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, ConfigurableHttpAdapter,
             GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-            ProviderAdapterKind, SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-            VerificationAdapter, builtin_plan,
+            ProviderAdapterKind, VerificationAdapter, builtin_plan,
         };
         assert_eq!(
             ProviderAdapterKind::from_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
@@ -760,7 +839,6 @@ mod tests {
             (OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
             (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID),
             (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
-            (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
         ] {
             assert_ne!(
                 ProviderAdapterKind::from_offering(provider_id, offering_id),
@@ -776,7 +854,7 @@ mod tests {
             config: AccountCustomConfig {
                 account_id: "acc".into(),
                 base_url: "http://127.0.0.1:9".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
                 auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -929,7 +1007,10 @@ mod tests {
         let config = AccountCustomConfig {
             account_id: "acc".into(),
             base_url: "http://127.0.0.1:9".into(),
-            upstream_protocol: UpstreamProtocolKind::Responses,
+            upstream_protocols: vec![
+                UpstreamProtocolKind::Responses,
+                UpstreamProtocolKind::Messages,
+            ],
             auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -954,6 +1035,13 @@ mod tests {
             CustomVerificationContract::from_parts("acc", "rev-1", "cipher-a", &config, &caps);
         assert_eq!(contract.account_updated_at, "rev-1");
         assert_eq!(contract.key_cipher, "cipher-a");
+        assert_eq!(
+            contract.upstream_protocols,
+            vec![
+                UpstreamProtocolKind::Responses,
+                UpstreamProtocolKind::Messages
+            ]
+        );
         assert_eq!(
             contract.capabilities,
             vec![
@@ -1006,7 +1094,7 @@ mod tests {
         let custom_config = AccountCustomConfig {
             account_id: "acc".into(),
             base_url: format!("http://127.0.0.1:{}", addr.port()),
-            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
             auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

@@ -22,7 +22,6 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "AccountMutation",
     "AccountCustomConfig",
     "AccountModelCapability",
-    "AccountAcknowledgement",
     "AccountCreate",
     "AccountManagedCreate",
     "AccountUpdate",
@@ -33,15 +32,12 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "AccountCustomConfigWrite",
     "AccountModelCapabilitiesUpdate",
     "AccountModelCapabilityWrite",
-    "AccountAcknowledgementCreate",
-    "AccountAcknowledgementWrite",
 ];
 
 const PROVIDER_CATALOG_TYPES: &[&str] = &[
     "ProviderCatalog",
     "ProviderCatalogEntry",
     "ProviderCatalogFormField",
-    "ProviderCatalogRiskNotice",
     "ProviderModelCapability",
     "ZenFreeSettings",
     "ZenFreeSettingsUpdate",
@@ -163,7 +159,7 @@ fn provider_schema_registers_nullable_responses_and_omittable_requests() {
     }
 
     let entry_required = required_fields(defs, "ProviderCatalogEntry");
-    for field in ["creationUnavailableReason", "keyPrefix", "riskNotice"] {
+    for field in ["creationUnavailableReason", "keyPrefix"] {
         assert!(
             entry_required.contains(&field),
             "ProviderCatalogEntry.{field} must stay required T|null"

@@ -6,11 +6,10 @@
 bookmark still ends in `?view=pricing`.
 
 Under the hood it is a static Provider Registry plus a handful of
-capability-specific adapters. Custom API is just one of those adapters, not a
-base class everyone inherits from. Scopes are split like this:
+capability-specific adapters. Custom API is a Configurable HTTP adapter, not a base class
+everyone inherits from. Scopes are split like this:
 
-- `Provider(provider_id)` for built-ins. SCNet's three token-plan offerings
-  share one SCNet scope.
+- `Provider(provider_id)` for built-ins.
 - `CustomEndpoint(account_id)` for each Custom destination. Custom endpoints
   stay isolated from each other and from the built-in families.
 
@@ -21,12 +20,11 @@ probe**, and scoped **Pricing**.
 **Overview** shows the selected provider, scope revision, production-inference
 state, catalog-routable state, disabled reasons, and each offering with its
 bound accounts (enabled/disabled and verification). Command Code GOAT routes
-only through verified, explicitly enabled accounts. SCNet remains archived
-and cannot be promoted to production routing.
+only through verified, explicitly enabled accounts.
 
 **Model catalog** is local. Sources are labeled Static catalog, Official Zen
 catalog, Custom discovery, or Account-declared; the URL and last refresh time
-are shown when available. Refresh never happens on its own:
+are shown when available. Refresh is never automatic:
 
 - OpenCode Go **Refresh model catalog** uses the selected Go account Key to
   call the official `GET /zen/go/v1/models` endpoint. The saved provider
@@ -43,7 +41,7 @@ are shown when available. Refresh never happens on its own:
 - Command Code GOAT **Refresh model catalog** uses a selected verified GOAT
   account to call the official `GET /provider/v1/models` endpoint. Success
   updates both that account's allowed catalog and the shared Provider catalog;
-  failure keeps the last good snapshot. SCNet does not refresh.
+  failure keeps the last good snapshot.
 
 Saved Go/GOAT catalogs feed local Alias resolution without another upstream
 call. A model is advertised only when its saved contract has an enabled,
@@ -52,22 +50,27 @@ catalog but fails closed for client routing. Zen Free still derives one extra
 alias by stripping `-free` from each saved ID, as described under
 [Zen Free models](routing.md#zen-free-models).
 
-**Upstream protocol policy** gives you three switches: Chat Completions,
-Responses, and Messages. Flipping one immediately applies to every account in
-this scope and changes production routing. Switches beat probe evidence and
-static support. Disabling an account keeps the saved contract intact;
-re-enabling restores the saved catalog, evidence, and switches.
+**Upstream protocol policy** renders switches for the scope's structural
+protocol set: protocols with model evidence plus currently-disabled switches.
+For built-in providers this is the three Chat Completions, Responses, and
+Messages switches; for a Custom endpoint the switches are exactly the account's
+declared protocols. Each switch shows the count of available models under it.
+Flipping a switch immediately applies to every account in this scope and
+changes production routing; Custom-endpoint switches are also writable through
+their account scope. Switches beat probe evidence and static support. Disabling
+an account keeps the saved contract intact; re-enabling restores the saved
+catalog, evidence, and switches.
 
-**Model contracts** list every local model with its preferred protocol and
-per-protocol status: Globally closed, Unavailable, Unsupported, Static,
-Preset, Probe confirmed, or Latest probe failed (with a sanitized error and
-timestamp). A probe can only confirm or add support inside the adapter's
-structural ceiling. A failed probe is recorded; it does not erase static
-capability.
+**Model contracts** list every local model with its protocol evidence.
+A single-protocol model shows that protocol directly; a model with two or more
+enabled protocols shows a preferred protocol among them. Per-protocol status is
+one of: Globally closed, Unavailable, Unsupported, Static, Preset, Probe
+confirmed, or Latest probe failed (with a sanitized error and timestamp). A
+probe can only confirm or add support inside the adapter's structural ceiling.
+A failed probe is recorded; it does not erase static capability.
 
 **Protocol probe** is an explicit action: pick a test account, send a real
-minimal request, and accept that it may spend quota. Client requests never
-probe. GOAT and SCNet show that probes are not available for this plan.
+minimal request, and accept that it may consume quota. Client requests never probe. GOAT shows that probes are not available for this plan.
 
 **Pricing** is scoped to the selected provider. **Refresh price table** only
 hits the official source owned by that Provider. OpenCode and Command Code
@@ -84,8 +87,7 @@ refreshes those Plans only. Refresh stays manual:
   persistent revision for later estimates.
 - Command Code GOAT shows its saved official subscription/rate snapshot from
   `https://commandcode.ai/docs/plans/goat`. It is display/reference data and
-  does not enter OpenCode Go quota debit or invent a GOAT usage API. SCNet is
-  archived and has no price table.
+  does not enter OpenCode Go quota debit or invent a GOAT usage API.
 - Zen Free has no price (egress-IP-shared free quota).
 - Custom API is unpriced: successful forwards log `cost_state=unknown` with
   no quota debit and no official usage refresh.

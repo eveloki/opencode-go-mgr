@@ -77,10 +77,6 @@ test("pricing copy is kind-aware and never turns missing data into a price table
     "实验性接入，尚未配置价格目录，不展示价格表。",
   );
   assert.equal(
-    resolvePlanPricingDisplay(group("scnet", "unavailable", { kind: "subscription", snapshot: null })).messageKey,
-    "订阅制方案：额度、计费与续费由服务商订阅条款管理。",
-  );
-  assert.equal(
     resolvePlanPricingDisplay(group("custom-endpoint", "unpriced", { kind: "custom", snapshot: null })).messageKey,
     "自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。",
   );
@@ -133,19 +129,6 @@ test("GOAT keeps local accounting unpriced while showing its official reference"
   assert.deepEqual(resolvePlanPricingDisplay(goat), {
     state: "reference",
     messageKey: "未知价格不会参与费用估算",
-    error: null,
-  });
-});
-
-test("scoped SCNet stays identity-only and never becomes a Credits price table", () => {
-  const groups = buildScopedPlanPricingGroups("scnet", null, goSnapshot(), {});
-  assert.deepEqual(groups.map(({ plan }) => plan.id), ["scnet"]);
-  const scnet = groups[0]!;
-  assert.equal(scnet.content.kind, "scnet-reference");
-  assert.equal(scnet.pricingAvailability, "unavailable");
-  assert.deepEqual(resolvePlanPricingDisplay(scnet), {
-    state: "unavailable",
-    messageKey: "实验性接入，尚未配置价格目录，不展示价格表。",
     error: null,
   });
 });

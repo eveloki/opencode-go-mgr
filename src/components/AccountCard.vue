@@ -60,14 +60,14 @@
             <n-tag v-else :type="accountStatusTagType(account, now)" size="small">
               {{ accountStatusLabel(account, now) }}
             </n-tag>
-            <n-tag v-if="(isGo || isScnet) && accountIsReady(account)" size="small" :bordered="false">
+            <n-tag v-if="isGo && accountIsReady(account)" size="small" :bordered="false">
               {{ t("购买于 {date}", { date: account.purchase_date }) }}
             </n-tag>
-            <n-tag v-if="(isGo || isScnet) && accountIsReady(account)" size="small" :bordered="false">
+            <n-tag v-if="isGo && accountIsReady(account)" size="small" :bordered="false">
               {{ t("到期于 {date}", { date: account.expires_on }) }}
             </n-tag>
             <n-tag
-              v-if="(isGo || isScnet) && accountIsReady(account)"
+              v-if="isGo && accountIsReady(account)"
               :type="accountExpiryTagType(account, now)"
               size="small"
               :bordered="false"
@@ -277,7 +277,11 @@
           {{ t("{count} 个模型", { count: account.model_capabilities.length }) }}
         </span>
       </div>
-      <p v-if="verificationCaption" class="custom-endpoint__status">{{ verificationCaption }}</p>
+      <p
+        v-if="verificationCaption"
+        class="custom-endpoint__status"
+        :class="{ 'custom-endpoint__status--unverified': customNeedsVerification }"
+      >{{ verificationCaption }}</p>
       <n-button
         v-if="customNeedsVerification"
         size="small"
@@ -393,10 +397,9 @@ import {
 } from "../domain/account-providers.ts";
 import {
   customAccountNeedsVerification,
-  customAccountToggleBlocked,
   isCustomApiAccount,
 } from "../domain/custom-account.ts";
-import { accountPlanWarning, planForAccount, planLabel } from "../domain/plans.ts";
+import { accountPlanWarning, planLabel } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
@@ -442,7 +445,6 @@ const emit = defineEmits<{
 
 const isZen = computed(() => isZenFreeAccount(props.account));
 const isGoat = computed(() => isCommandCodeGoatAccount(props.account));
-const isScnet = computed(() => planForAccount(props.account)?.id === "scnet");
 const isGo = computed(() => (
   props.account.provider_id === "opencode" && props.account.offering_id === "go"
 ));
@@ -471,15 +473,19 @@ const goatToggleBlocked = computed(() => (
   && props.account.verification_status !== "not_required"
 ));
 const toggleBlockedReason = computed(() => {
-  if (isScnet.value) return t("该方案已归档，不支持启用");
   if (!props.account.plan_routable) return t("该方案暂不可路由");
-  if (customAccountToggleBlocked(props.account)) return t("验证连接成功后才能启用");
   if (goatToggleBlocked.value) return t("验证连接成功后才能启用");
   return "";
 });
 const verificationCaption = computed(() => {
   const status = props.account.verification_status;
-  if (status === "pending") return t("账号待验证，验证通过前保持禁用。");
+  if (status === "pending") {
+    // Custom verification is optional: pending accounts may be enabled, so the
+    // card shows an unverified hint instead of a hard gate.
+    return isCustom.value
+      ? t("尚未验证连接：账号可先启用，也可先验证连接。")
+      : t("账号待验证，验证通过前保持禁用。");
+  }
   if (status === "failed") return t("上次验证失败，请检查 Key 与端点配置后重试。");
   if (status === "verified") {
     const at = props.account.connection_verified_at;
@@ -496,11 +502,6 @@ const isDraft = computed(() => (
 ));
 
 const draftDescription = computed(() => {
-  // Archived plans get an explicit sealed reason instead of draft copy that
-  // could imply pending verification, enablement, routing, or usage support.
-  if (isScnet.value) {
-    return t("SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。");
-  }
   const key = accountRoutingDraftDescription(props.account);
   return key ? t(key) : "";
 });
@@ -511,21 +512,7 @@ const verificationError = computed(() => {
 });
 
 const planWarning = computed(() => {
-  if (isScnet.value) {
-    return {
-      type: "info" as const,
-      title: t("已归档"),
-      message: t("SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。"),
-    };
-  }
   const warning = accountPlanWarning(props.account);
-  if (warning === "subscription") {
-    return {
-      type: "warning" as const,
-      title: t("订阅制"),
-      message: t("订阅制方案：额度、计费与续费由服务商订阅条款管理。"),
-    };
-  }
   if (warning === "endpoint-risk") {
     return {
       type: "warning" as const,
@@ -677,6 +664,10 @@ const usageEditorAvailable = computed(() => {
   margin: 0;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
+}
+
+.custom-endpoint__status--unverified {
+  color: var(--ocg-warning);
 }
 
 .account-plan-warning {

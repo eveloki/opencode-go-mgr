@@ -33,7 +33,7 @@ mod dependency_guard {
     use syn::{Attribute, Item, Meta, Token, UseTree, Visibility};
     use toml::{Table, Value};
 
-    const ALLOWED_DOMAIN_DEPENDENCIES: &[&str] = &["chrono", "serde", "serde_json", "sha2"];
+    const ALLOWED_DOMAIN_DEPENDENCIES: &[&str] = &["chrono", "serde", "serde_json"];
     const ALLOWED_CHRONO_FEATURES: &[&str] = &["serde", "std"];
     const FORBIDDEN_EXTERNAL_CRATES: &[&str] =
         &["reqwest", "rusqlite", "tokio", "axum", "ocg_core"];
@@ -109,10 +109,6 @@ mod dependency_guard {
             "ocg-domain provider.rs must exist"
         );
         let domain_provider_source = production_source(&read_to_string(&domain_provider));
-        assert!(
-            domain_provider_source.contains("sha2") && domain_provider_source.contains("Sha256"),
-            "domain provider.rs must use sha2 for acknowledgement hashing"
-        );
         for needle in ["reqwest", "ocg_core", "rusqlite", "tokio", "axum"] {
             assert!(
                 !domain_provider_source.contains(needle),
@@ -489,8 +485,8 @@ mod dependency_guard {
             "db production source must not reference gateway_keys"
         );
         assert!(
-            db_source.contains("CURRENT_SCHEMA_VERSION: i32 = 28"),
-            "schema version must remain 28"
+            db_source.contains("CURRENT_SCHEMA_VERSION: i32 = 30"),
+            "schema version must remain 30"
         );
 
         let graph = production_graph(&src_root, &modules);
@@ -1012,7 +1008,6 @@ mod dependency_guard {
             chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
             serde = { version = "1", features = ["derive"] }
             serde_json = "1"
-            sha2 = "0.10"
         "#
     }
 
@@ -1051,7 +1046,7 @@ mod dependency_guard {
                 }
             }
         }
-        for required in ["chrono", "serde", "serde_json", "sha2"] {
+        for required in ["chrono", "serde", "serde_json"] {
             assert!(
                 names.contains(required),
                 "{} must declare `{required}`",

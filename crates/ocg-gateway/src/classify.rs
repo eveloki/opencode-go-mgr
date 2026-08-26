@@ -176,10 +176,6 @@ fn policy_for_kind(kind: ProviderAdapterKind) -> ProviderErrorPolicy {
                 rate_limit_429: RateLimit429Policy::GenericFiveMinute,
             }
         }
-        ProviderAdapterKind::Scnet => ProviderErrorPolicy {
-            inference_401: Auth401Policy::RotatePersistAuthError,
-            rate_limit_429: RateLimit429Policy::GoWindow,
-        },
     }
 }
 
@@ -295,8 +291,7 @@ mod tests {
     use super::*;
     use ocg_domain::ids::{
         ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
-        CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, SCNET_PROVIDER_ID,
-        SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
+        CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID,
     };
 
     fn classify(
@@ -376,10 +371,6 @@ mod tests {
                     assert_eq!(policy.inference_401, Auth401Policy::RotatePersistAuthError);
                     assert_eq!(policy.rate_limit_429, RateLimit429Policy::GenericFiveMinute);
                 }
-                ProviderAdapterKind::Scnet => {
-                    assert_eq!(policy.inference_401, Auth401Policy::RotatePersistAuthError);
-                    assert_eq!(policy.rate_limit_429, RateLimit429Policy::GoWindow);
-                }
             }
         }
     }
@@ -417,7 +408,6 @@ mod tests {
         for (provider_id, offering_id) in [
             (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
             (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
-            (SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID),
             ("unknown-provider", "unknown-offering"),
         ] {
             assert_eq!(
@@ -470,18 +460,6 @@ mod tests {
             ),
             ProviderErrorClass::RateLimited {
                 policy: RateLimitPolicy::GenericFiveMinute
-            }
-        );
-        assert_eq!(
-            classify(
-                429,
-                SCNET_PROVIDER_ID,
-                SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-                false,
-                false
-            ),
-            ProviderErrorClass::RateLimited {
-                policy: RateLimitPolicy::GoWindow
             }
         );
         assert!(schedule_go_usage_sync(ProviderErrorClass::RateLimited {

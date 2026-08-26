@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   CUSTOM_BASE_URL_ISSUE_KEYS,
+  canonicalCustomProtocols,
   customAccountNeedsVerification,
-  customAccountToggleBlocked,
   customBaseUrlIssue,
+  expandCustomModelCapabilities,
   isCustomApiAccount,
+  normalizeCustomCapabilities,
+  CustomCapabilityError,
 } from "./custom-account.ts";
 import type { Account } from "../api/dashboard.ts";
 
@@ -47,7 +50,7 @@ test("base URL validation only rejects malformed, non-http(s), and credentialed 
   }
 });
 
-test("verification gating only applies to Custom API accounts", () => {
+test("verification state only applies to Custom API accounts and never blocks enablement", () => {
   assert.ok(isCustomApiAccount({ provider_id: "custom", offering_id: "api" }));
   assert.ok(!isCustomApiAccount({ provider_id: "opencode", offering_id: "go" }));
   assert.ok(!isCustomApiAccount({ provider_id: "custom", offering_id: "other" }));
@@ -61,16 +64,42 @@ test("verification gating only applies to Custom API accounts", () => {
     offering_id: "goat",
     verification_status: "pending",
   }));
+});
 
-  // Verification is never enablement: only a verified Custom account may use
-  // the normal enable switch.
-  assert.ok(customAccountToggleBlocked(customAccount("pending")));
-  assert.ok(customAccountToggleBlocked(customAccount("failed")));
-  assert.ok(customAccountToggleBlocked(customAccount("not_required")));
-  assert.ok(!customAccountToggleBlocked(customAccount("verified")));
-  assert.ok(!customAccountToggleBlocked({
-    provider_id: "opencode",
-    offering_id: "go",
-    verification_status: "not_required",
-  }));
+test("protocol sets are canonicalized and model IDs expand into model × protocol rows", () => {
+  assert.deepEqual(canonicalCustomProtocols(["messages", "chat_completions", "messages"]), [
+    "chat_completions",
+    "messages",
+  ]);
+  assert.deepEqual(canonicalCustomProtocols([]), []);
+  assert.deepEqual(expandCustomModelCapabilities(["m1", "m2"], ["messages", "chat_completions"]), [
+    { model_id: "m1", protocol: "chat_completions" },
+    { model_id: "m1", protocol: "messages" },
+    { model_id: "m2", protocol: "chat_completions" },
+    { model_id: "m2", protocol: "messages" },
+  ]);
+});
+
+test("capability rows must belong to the declared protocol set; duplicates are per (model, protocol)", () => {
+  const rows = expandCustomModelCapabilities(["model-a"], ["chat_completions", "messages"]);
+  assert.deepEqual(normalizeCustomCapabilities(rows, ["chat_completions", "messages"]), [
+    { model_id: "model-a", protocol: "chat_completions", source: "manual" },
+    { model_id: "model-a", protocol: "messages", source: "manual" },
+  ]);
+
+  assert.throws(
+    () => normalizeCustomCapabilities([{ model_id: "model-a", protocol: "responses" }], ["chat_completions"]),
+    (error) => error instanceof CustomCapabilityError && error.issue === "protocol_mismatch",
+  );
+  assert.throws(
+    () => normalizeCustomCapabilities(rows, []),
+    (error) => error instanceof CustomCapabilityError && error.issue === "protocol_mismatch",
+  );
+  assert.throws(
+    () => normalizeCustomCapabilities(
+      [...rows, { model_id: " model-a ", protocol: "messages" }],
+      ["chat_completions", "messages"],
+    ),
+    (error) => error instanceof CustomCapabilityError && error.issue === "duplicate_model_id",
+  );
 });

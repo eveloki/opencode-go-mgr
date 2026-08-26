@@ -79,7 +79,7 @@ async fn create_verified_enabled_custom(
             "expected_revision": harness.settings_revision().await,
             "custom_config": {
                 "base_url": origin,
-                "upstream_protocol": protocol,
+                "upstream_protocols": [protocol],
                 "auth_scheme": auth_scheme
             },
             "model_capabilities": [{
@@ -152,8 +152,16 @@ async fn verification_failure_persists_failed_without_enabling() {
             .is_some_and(|error| !error.is_empty()),
         "{body}"
     );
+    // Verification is an optional tool: even a failed Custom account may be
+    // enabled explicitly; the failed status itself is preserved.
     let (toggle_status, toggle_body) = toggle_account(&harness, &id).await;
-    assert_eq!(toggle_status, StatusCode::CONFLICT, "{toggle_body}");
+    assert_eq!(toggle_status, StatusCode::OK, "{toggle_body}");
+    assert_eq!(toggle_body["enabled"], true, "{toggle_body}");
+    assert_eq!(
+        toggle_body["verification_status"].as_str(),
+        Some("failed"),
+        "{toggle_body}"
+    );
     harness.shutdown();
 }
 
@@ -478,13 +486,16 @@ async fn same_custom_model_uses_account_order_and_config_change_stales() {
             &format!("/accounts/{}/custom-config", first["id"].as_str().unwrap()),
             &json!({
                 "base_url": format!("{}/v2", custom_origin(&harness)),
-                "upstream_protocol": "chat_completions",
+                "upstream_protocols": ["chat_completions"],
                 "auth_scheme": "bearer"
             }),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
-    assert_eq!(updated["enabled"], false, "{updated}");
+    assert_eq!(
+        updated["enabled"], true,
+        "config edits keep the account enabled: {updated}"
+    );
     assert_eq!(
         updated["verification_status"].as_str(),
         Some("pending"),
@@ -507,7 +518,7 @@ async fn custom_stream_does_not_cross_account_retry_after_output() {
                 "expected_revision": harness.settings_revision().await,
                 "custom_config": {
                     "base_url": origin,
-                    "upstream_protocol": "chat_completions",
+                    "upstream_protocols": ["chat_completions"],
                     "auth_scheme": "bearer"
                 },
                 "model_capabilities": [{
@@ -544,7 +555,7 @@ async fn custom_stream_does_not_cross_account_retry_after_output() {
                 "expected_revision": harness.settings_revision().await,
                 "custom_config": {
                     "base_url": origin,
-                    "upstream_protocol": "chat_completions",
+                    "upstream_protocols": ["chat_completions"],
                     "auth_scheme": "bearer"
                 },
                 "model_capabilities": [{
@@ -649,7 +660,7 @@ async fn create_pending_custom(
             "expected_revision": harness.settings_revision().await,
             "custom_config": {
                 "base_url": base_url,
-                "upstream_protocol": protocol,
+                "upstream_protocols": [protocol],
                 "auth_scheme": auth_scheme
             },
             "model_capabilities": [{
@@ -881,7 +892,7 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
                 &format!("/accounts/{id}/custom-config"),
                 &json!({
                     "base_url": "http://127.0.0.1:1",
-                    "upstream_protocol": "chat_completions",
+                    "upstream_protocols": ["chat_completions"],
                     "auth_scheme": "bearer"
                 }),
             )

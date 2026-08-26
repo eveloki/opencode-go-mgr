@@ -27,17 +27,9 @@ export { isRevisionConflict };
 
 export interface ProviderCatalogFormField {
   id: string;
-  kind: "text" | "secret" | "date" | "acknowledgement" | "url" | "select" | "models";
+  kind: "text" | "secret" | "date" | "url" | "select" | "models";
   required: boolean;
   immutable_after_create: boolean;
-}
-
-export interface ProviderCatalogRiskNotice {
-  acknowledgement_id: string;
-  version: string;
-  source_url: string;
-  body: string;
-  content_hash: string;
 }
 
 export interface ProviderCatalogEntry {
@@ -63,7 +55,6 @@ export interface ProviderCatalogEntry {
   auth_schemes: ("bearer" | "x-api-key")[];
   upstream_protocols: ("chat_completions" | "responses" | "messages")[];
   form_fields: ProviderCatalogFormField[];
-  risk_notice?: ProviderCatalogRiskNotice | null;
   model_aliases: string[];
 }
 
@@ -359,7 +350,7 @@ function usageAvailability(value: string): ProviderCatalogEntry["usage_availabil
 }
 
 function formFieldKind(value: string): ProviderCatalogFormField["kind"] {
-  if (value === "secret" || value === "date" || value === "acknowledgement"
+  if (value === "secret" || value === "date"
     || value === "url" || value === "select" || value === "models") return value;
   return "text";
 }
@@ -393,13 +384,6 @@ export function presentCatalogEntry(value: V3ProviderCatalogEntry): ProviderCata
       required: field.required,
       immutable_after_create: field.immutableAfterCreate,
     })),
-    risk_notice: value.riskNotice === null ? null : {
-      acknowledgement_id: value.riskNotice.acknowledgementId,
-      version: value.riskNotice.version,
-      source_url: value.riskNotice.sourceUrl,
-      body: value.riskNotice.body,
-      content_hash: value.riskNotice.contentHash,
-    },
     model_aliases: [...value.modelAliases],
   };
 }
@@ -500,8 +484,9 @@ export function presentContracts(value: V3ProviderContracts): ProviderContractsR
       usage: { availability: scope.usage.availability },
       card: {
         ...presentCard(scope.card),
-        // V3 currently exposes only the provider-scoped switch/probe routes.
-        // Keep Custom endpoint protocol controls visible as read-only facts.
+        // Custom per-protocol probing has no V3 endpoint yet (deferred); the
+        // protocol switches themselves are writable via the custom-endpoint
+        // route, so only the probe capability is masked here.
         protocol_probe: false,
       },
       catalog_routable: scope.catalogRoutable,
@@ -677,7 +662,7 @@ export const providerApi = {
       accountId,
       baseUrl: config.baseUrl,
       authScheme: config.authScheme,
-      upstreamProtocol: config.upstreamProtocol,
+      upstreamProtocols: [...config.upstreamProtocols],
     });
     return {
       scope_kind: "custom_endpoint",
@@ -722,19 +707,19 @@ export const providerApi = {
     }
   },
   updateProviderContractProtocol: async (
-    _scopeKind: ContractScopeKind,
+    scopeKind: ContractScopeKind,
     scopeId: string,
     protocol: ProviderProtocol,
     update: ProtocolSwitchUpdate,
   ) => {
-    if (_scopeKind === "custom_endpoint") {
-      throw new Error("Custom API 协议变更尚未纳入 Dashboard V3 合同");
-    }
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
     try {
-      return presentContracts(await control.runMutation((expectation) =>
-        dashboardV3.putProviderProtocolSwitch(scopeId, protocol, update.enabled, expectation)));
+      return presentContracts(await control.runMutation((expectation) => (
+        scopeKind === "custom_endpoint"
+          ? dashboardV3.putCustomEndpointProtocolSwitch(scopeId, protocol, update.enabled, expectation)
+          : dashboardV3.putProviderProtocolSwitch(scopeId, protocol, update.enabled, expectation)
+      )));
     } catch (cause) {
       if (isRevisionConflict(cause)) await dashboardV3.getProviderContracts();
       throw cause;

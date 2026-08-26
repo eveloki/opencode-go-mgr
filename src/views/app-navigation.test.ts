@@ -16,9 +16,9 @@ test("legacy pricing view keys resolve to providers without inventing a second e
 });
 
 test("provider deep-link query fields round-trip on the providers view", () => {
-  assert.deepEqual(readProviderScopeQuery("?view=providers&scope_kind=provider&scope_id=scnet"), {
+  assert.deepEqual(readProviderScopeQuery("?view=providers&scope_kind=provider&scope_id=command-code"), {
     scope_kind: "provider",
-    scope_id: "scnet",
+    scope_id: "command-code",
   });
   const url = applyAppViewSearchParams(
     new URL("http://127.0.0.1:9042/dashboard/?view=accounts"),

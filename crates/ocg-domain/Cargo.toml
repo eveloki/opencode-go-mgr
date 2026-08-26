@@ -12,4 +12,3 @@ description = "Pure domain identities, catalogs, protocol policy, and Zen model 
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"

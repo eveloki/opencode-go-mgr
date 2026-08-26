@@ -12,8 +12,7 @@ use ocg_core::dashboard_v3::{
 use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID,
-    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID,
-    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, ZEN_FREE_ACCOUNT_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -193,67 +192,10 @@ fn mutation_account(body: &Value) -> Account {
     mutation.account.expect("mutation should return an account")
 }
 
-fn scnet_ack() -> Value {
-    let notice =
-        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-            .unwrap()
-            .risk_notice
-            .unwrap();
-    json!({
-        "acknowledgementId": notice.acknowledgement_id,
-        "version": notice.version
-    })
-}
-
-fn insert_scnet_leftover(harness: &V3Harness, id: &str, name: &str, key: &str) {
-    let plan =
-        ocg_core::provider::builtin_plan(SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_BASIC_OFFERING_ID)
-            .unwrap();
-    let now = Utc::now();
-    harness
-        .state
-        .db
-        .lock()
-        .create_account_with_contract(
-            &ocg_core::models::Account {
-                id: id.into(),
-                provider_id: SCNET_PROVIDER_ID.into(),
-                offering_id: SCNET_TOKEN_PLAN_BASIC_OFFERING_ID.into(),
-                credential_kind: ocg_core::provider::CredentialKind::ApiKey,
-                quota_scope: ocg_core::provider::QuotaScope::Key,
-                name: name.into(),
-                username: None,
-                password_cipher: None,
-                key_cipher: harness.state.encrypt_key(key).unwrap(),
-                enabled: false,
-                account_type: ocg_core::models::AccountType::Key,
-                setup_step: ocg_core::models::AccountSetupStep::Ready,
-                referral_code: None,
-                purchase_date: String::new(),
-                expires_on: String::new(),
-                cooldown_until: None,
-                cooldown_generic_until: None,
-                cooldown_5h_until: None,
-                cooldown_week_until: None,
-                cooldown_month_until: None,
-                cooldown_free_until: None,
-                last_error: None,
-                auth_error: None,
-                notes: None,
-                created_at: now,
-                updated_at: now,
-            },
-            None,
-            &[],
-            plan.risk_notice,
-        )
-        .expect("preserved SCNet leftover draft");
-}
-
 fn custom_write() -> Value {
     json!({
         "baseUrl": "https://api.example.com/v1",
-        "upstreamProtocol": "messages",
+        "upstreamProtocols": ["messages"],
         "authScheme": "x-api-key"
     })
 }
@@ -310,17 +252,12 @@ fn mutation_routes(id: &str) -> Vec<(Method, String, Value)> {
             format!("/accounts/{id}/model-capabilities"),
             json!({ "capabilities": [custom_capability()] }),
         ),
-        (
-            Method::POST,
-            format!("/accounts/{id}/acknowledgements"),
-            scnet_ack(),
-        ),
     ]
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[tokio::test]
@@ -666,7 +603,7 @@ async fn dashboard_v3_list_and_detail_are_secret_free() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_create_gates_for_go_custom_goat_scnet_and_zen() {
+async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     let harness = start_loopback("accounts-create-gates").await;
     let before = harness.state.settings_revision();
 
@@ -710,49 +647,6 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_scnet_and_zen() {
     assert_eq!(goat.verification_status, AccountVerificationStatus::Pending);
     assert!(goat.plan_routable);
     assert_eq!(goat.goat_model_access, Some(AccountGoatModelAccess::Goat));
-
-    let (status, scnet_err) = send_json(
-        &harness,
-        Method::POST,
-        "/accounts",
-        &cas(
-            &harness,
-            json!({
-                "name": "SCNet",
-                "key": "sk-tp-basic",
-                "providerId": SCNET_PROVIDER_ID,
-                "offeringId": SCNET_TOKEN_PLAN_BASIC_OFFERING_ID
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet_err}");
-    assert_v3_error(&scnet_err, ERROR_INVALID_REQUEST);
-
-    let (status, scnet) = send_json(
-        &harness,
-        Method::POST,
-        "/accounts",
-        &cas(
-            &harness,
-            json!({
-                "name": "SCNet",
-                "key": "sk-tp-basic",
-                "providerId": SCNET_PROVIDER_ID,
-                "offeringId": SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-                "acknowledgements": [scnet_ack()]
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet}");
-    assert_v3_error(&scnet, ERROR_INVALID_REQUEST);
-    assert!(
-        scnet["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("archived") || message.contains("unsupported")),
-        "{scnet}"
-    );
 
     let (status, custom_err) = send_json(
         &harness,
@@ -1138,7 +1032,7 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
             &harness,
             json!({
                 "baseUrl": "https://api.example.net/v2",
-                "upstreamProtocol": "messages",
+                "upstreamProtocols": ["messages"],
                 "authScheme": "x-api-key"
             }),
         ),
@@ -1146,7 +1040,10 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
     .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
     let updated = mutation_account(&updated);
-    assert!(!updated.enabled);
+    assert!(
+        updated.enabled,
+        "config edits keep the account enabled: {updated:?}"
+    );
     assert_eq!(
         updated.verification_status,
         AccountVerificationStatus::Pending
@@ -1154,7 +1051,9 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
     assert!(updated.connection_verified_at.is_none());
     assert!(updated.verification_error.is_none());
 
-    let before_protocol_rejection = harness.state.settings_revision();
+    // Protocol and auth scheme are editable after create; the change commits,
+    // advances CAS, and re-opens verification as pending while staying enabled.
+    let before_protocol_change = harness.state.settings_revision();
     let (status, protocol) = send_json(
         &harness,
         Method::PUT,
@@ -1163,17 +1062,23 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
             &harness,
             json!({
                 "baseUrl": "https://api.example.net/v2",
-                "upstreamProtocol": "chat_completions",
+                "upstreamProtocols": ["chat_completions"],
                 "authScheme": "x-api-key"
             }),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{protocol}");
+    assert_eq!(status, StatusCode::OK, "{protocol}");
+    let protocol = mutation_account(&protocol);
+    assert!(protocol.enabled);
+    assert_eq!(
+        protocol.verification_status,
+        AccountVerificationStatus::Pending
+    );
     assert_eq!(
         harness.state.settings_revision(),
-        before_protocol_rejection,
-        "a pre-commit custom-config validation failure must not advance CAS"
+        before_protocol_change + 1,
+        "a committed protocol change must advance CAS"
     );
 
     harness
@@ -1197,7 +1102,7 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
             json!({
                 "capabilities": [{
                     "modelId": "org/wrong-protocol",
-                    "protocol": "chat_completions"
+                    "protocol": "messages"
                 }]
             }),
         ),
@@ -1219,7 +1124,7 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
             json!({
                 "capabilities": [{
                     "modelId": "org/other",
-                    "protocol": "messages"
+                    "protocol": "chat_completions"
                 }]
             }),
         ),
@@ -1227,21 +1132,23 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
     .await;
     assert_eq!(status, StatusCode::OK, "{caps}");
     let caps = mutation_account(&caps);
-    assert!(!caps.enabled);
+    assert!(caps.enabled);
     assert_eq!(caps.verification_status, AccountVerificationStatus::Pending);
     assert_eq!(caps.model_capabilities[0].model_id, "org/other");
 
+    // Custom verification is an optional tool: a pending Custom account may be
+    // enabled explicitly without verifying first.
     let before_enable = harness.state.settings_revision();
-    let (status, verify_first) = send_json(
+    let (status, enable_pending) = send_json(
         &harness,
         Method::PATCH,
         &format!("/accounts/{custom_id}"),
         &cas(&harness, json!({ "enabled": true })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{verify_first}");
-    assert_v3_error(&verify_first, ERROR_CONFLICT);
-    assert_eq!(harness.state.settings_revision(), before_enable);
+    assert_eq!(status, StatusCode::OK, "{enable_pending}");
+    assert!(mutation_account(&enable_pending).enabled);
+    assert_eq!(harness.state.settings_revision(), before_enable + 1);
 
     let (status, goat) = send_json(
         &harness,
@@ -1277,57 +1184,6 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
     );
     assert_eq!(harness.state.settings_revision(), before_goat);
 
-    let (status, scnet) = send_json(
-        &harness,
-        Method::POST,
-        "/accounts",
-        &cas(
-            &harness,
-            json!({
-                "name": "SCNet ack later",
-                "key": "sk-tp-later",
-                "providerId": SCNET_PROVIDER_ID,
-                "offeringId": SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-                "acknowledgements": [scnet_ack()]
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet}");
-    assert!(
-        scnet["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("archived") || message.contains("unsupported")),
-        "{scnet}"
-    );
-    let scnet_id = "scnet-ack-later".to_string();
-    insert_scnet_leftover(&harness, &scnet_id, "SCNet ack later", "sk-tp-later");
-    let before_ack_rejection = harness.state.settings_revision();
-    let mut wrong_ack = scnet_ack();
-    wrong_ack["version"] = json!("wrong-version");
-    let (status, rejected_ack) = send_json(
-        &harness,
-        Method::POST,
-        &format!("/accounts/{scnet_id}/acknowledgements"),
-        &cas(&harness, wrong_ack),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected_ack}");
-    assert_eq!(
-        harness.state.settings_revision(),
-        before_ack_rejection,
-        "a pre-commit acknowledgement validation failure must not advance CAS"
-    );
-    let (status, ack) = send_json(
-        &harness,
-        Method::POST,
-        &format!("/accounts/{scnet_id}/acknowledgements"),
-        &cas(&harness, scnet_ack()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{ack}");
-    assert_eq!(mutation_account(&ack).acknowledgements.len(), 1);
-
     harness.stop();
 }
 
@@ -1360,7 +1216,7 @@ async fn dashboard_v3_custom_config_commit_advances_revision_before_post_read_fa
          AFTER UPDATE OF base_url ON account_custom_configs
          BEGIN
              UPDATE account_custom_configs
-                SET upstream_protocol = 'invalid-after-commit'
+                SET upstream_protocols = '[\"invalid-after-commit\"]'
               WHERE account_id = NEW.account_id;
          END;",
     )
@@ -1375,7 +1231,7 @@ async fn dashboard_v3_custom_config_commit_advances_revision_before_post_read_fa
             &harness,
             json!({
                 "baseUrl": "https://committed.example.com/v2",
-                "upstreamProtocol": "messages",
+                "upstreamProtocols": ["messages"],
                 "authScheme": "x-api-key"
             }),
         ),
@@ -1386,13 +1242,13 @@ async fn dashboard_v3_custom_config_commit_advances_revision_before_post_read_fa
     assert_eq!(harness.state.settings_revision(), before + 1);
     let stored: (String, String) = conn
         .query_row(
-            "SELECT base_url, upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
+            "SELECT base_url, upstream_protocols FROM account_custom_configs WHERE account_id = ?1",
             [&custom_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert_eq!(stored.0, "https://committed.example.com/v2");
-    assert_eq!(stored.1, "invalid-after-commit");
+    assert_eq!(stored.1, "[\"invalid-after-commit\"]");
 
     drop(conn);
     harness.stop();
@@ -1463,71 +1319,6 @@ async fn dashboard_v3_capabilities_commit_advances_revision_before_post_read_fai
         .unwrap();
     assert_eq!(stored.0, "org/committed");
     assert_eq!(stored.1, "invalid-after-commit");
-
-    drop(conn);
-    harness.stop();
-}
-
-#[tokio::test]
-async fn dashboard_v3_ack_commit_advances_revision_before_post_read_failure() {
-    let harness = start_loopback("accounts-ack-post-read").await;
-    let (status, scnet) = send_json(
-        &harness,
-        Method::POST,
-        "/accounts",
-        &cas(
-            &harness,
-            json!({
-                "name": "SCNet ack post-read",
-                "key": "sk-tp-post-read",
-                "providerId": SCNET_PROVIDER_ID,
-                "offeringId": SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-                "acknowledgements": [scnet_ack()]
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{scnet}");
-    let scnet_id = "scnet-ack-post-read".to_string();
-    insert_scnet_leftover(
-        &harness,
-        &scnet_id,
-        "SCNet ack post-read",
-        "sk-tp-post-read",
-    );
-    let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
-    conn.busy_timeout(Duration::from_secs(5)).unwrap();
-    conn.execute_batch(
-        "CREATE TRIGGER corrupt_ack_post_read
-         AFTER UPDATE OF accepted_at ON account_acknowledgements
-         BEGIN
-             UPDATE account_acknowledgements
-                SET version = zeroblob(1)
-              WHERE account_id = NEW.account_id
-                AND acknowledgement_id = NEW.acknowledgement_id;
-         END;",
-    )
-    .unwrap();
-
-    let before = harness.state.settings_revision();
-    let (status, body) = send_json(
-        &harness,
-        Method::POST,
-        &format!("/accounts/{scnet_id}/acknowledgements"),
-        &cas(&harness, scnet_ack()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert_v3_error(&body, ERROR_INTERNAL);
-    assert_eq!(harness.state.settings_revision(), before + 1);
-    let stored_type: String = conn
-        .query_row(
-            "SELECT typeof(version) FROM account_acknowledgements WHERE account_id = ?1",
-            [&scnet_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(stored_type, "blob");
 
     drop(conn);
     harness.stop();

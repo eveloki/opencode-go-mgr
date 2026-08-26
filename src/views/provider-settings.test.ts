@@ -145,10 +145,10 @@ test("pricing catalog uses one keyboard-accessible plan-family tab switcher with
   assert.match(catalog, /const activePlanId = ref<PlanId>\("opencode-go"\)/);
   assert.match(catalog, /PRICING_PLAN_DEFINITIONS/);
   assert.match(catalog, /kind="goat"/);
-  assert.match(catalog, /kind="scnet"/);
+  assert.doesNotMatch(catalog, /kind="scnet"/);
   assert.doesNotMatch(catalog, /<section\s+v-for="group in planGroups"/);
   assert.doesNotMatch(reference, /provider-usage|used|remaining|percentage/);
-  assert.match(reference, /SCNet Token Plan 已归档/);
+  assert.doesNotMatch(reference, /SCNet Token Plan 已归档/);
   assert.doesNotMatch(reference, /当前仍是禁用草稿|实验性接入|每月 Credits/);
   // GOAT delegates to the provider pricing snapshot, never a live meter.
   assert.match(reference, /<GoatQuotaReference :snapshot="snapshot" \/>/);
@@ -168,11 +168,10 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.match(accountForm, /label: entry\.display_name/);
   assert.match(accountForm, /t\("添加 \{plan\} 账号"/);
   assert.match(accountForm, /'aria-label': `\$\{t\('模型 ID'\)\} \$\{index \+ 1\}`/);
-  assert.match(accountForm, /<n-tag size="small" :bordered="false">\{\{ capabilityProtocol \}\}<\/n-tag>/);
+  assert.match(accountForm, /<n-checkbox-group/);
   assert.match(accountForm, /:aria-label="`\$\{t\('删除'\)\} \$\{t\('模型能力'\)\} \$\{index \+ 1\}`"/);
-  assert.match(accountForm, /:disabled="fieldImmutableAfterCreate\('upstream_protocol'\)"/);
-  assert.match(accountForm, /:disabled="fieldImmutableAfterCreate\('auth_scheme'\)"/);
-  assert.equal(accountForm.match(/t\("创建后不可修改"\)/g)?.length, 2);
+  assert.doesNotMatch(accountForm, /fieldImmutableAfterCreate/);
+  assert.doesNotMatch(accountForm, /创建后不可修改/);
   assert.match(accountForm, /t\(accountCreatePayloadErrorKey\(error\)\)/);
   assert.match(accountForm, /path="key"[\s\S]*?class="full-width-field"/);
   assert.match(accountForm, /\.full-width-field,[\s\S]*?grid-column: 1 \/ -1;/);
@@ -253,7 +252,6 @@ test("GOAT account states surface pending, verified, disabled, and enabled hones
     verification_error: null,
     plan_routable: true,
     model_capabilities: [],
-    acknowledgements: [],
     ...overrides,
   });
 
@@ -265,23 +263,6 @@ test("GOAT account states surface pending, verified, disabled, and enabled hones
   assert.equal(accountStatusLabel(goat({ verification_status: "verified", enabled: true })), "可用");
   // An unroutable catalog still renders the backend-owned draft state.
   assert.equal(accountStatusLabel(goat({ plan_routable: false })), "待验证");
-});
-
-test("SCNet is presented as archived and never implies verify/enable/route/usage", () => {
-  const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
-  const providers = readFileSync(new URL("./Providers.vue", import.meta.url), "utf8");
-  const chooser = readFileSync(new URL("../components/AccountAddModal.vue", import.meta.url), "utf8");
-
-  assert.match(card, /该方案已归档，不支持启用/);
-  assert.equal(
-    card.match(/SCNet Token Plan 已归档：历史草稿仅供查看，不支持验证、启用、路由或用量。/g)?.length,
-    2,
-  );
-  assert.match(providers, /activeScope\.provider_id === 'scnet'/);
-  assert.match(providers, /SCNet Token Plan 已归档/);
-  assert.match(providers, /const scnetArchived = computed/);
-  assert.match(providers, /<template v-if="!scnetArchived">/);
-  assert.match(chooser, /t\("已归档"\)/);
 });
 
 test("Applications labels all model selectors as Alias-first", () => {

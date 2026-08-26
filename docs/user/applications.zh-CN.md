@@ -18,7 +18,7 @@
 
 Codex 的 `~/.codex/ocg-model-catalog.json`、`~/.codex/ocg.config.toml` 和 `~/.codex/config.toml` 都属于本机配置。覆盖或合并前先分别备份；如果使用 CC Switch 的代理模式，请按 CC Switch 保存的配置目录单独备份，并把 OCG 直连配置和代理配置保存在各自独立的目录。
 
-选择器列表来自受保护的 `GET /dashboard/api/v3/application-models`：当前可路由的 OpenCode Go 别名与当前价格快照求交。highspeed 变体继承基价行。空交集是 `[]`，不是错误。它 **不是** 带鉴权的 `GET /v1/models`：后者公布当前可路由的 Go 别名、已保存 Zen Free 目录与合格 Custom 声明 ID。两条路径都是本地读取：不含 SCNet 官方可用模型表拼写、未公布的 Command Code GOAT 名称，也不在上游实时抓目录或挑账号。只返回当前可路由且协议有效启用的模型。Zen Free 目录刷新是 **供应商** 页上的显式动作；价格刷新后，这里的 Go 别名可能变化。每次返回应用页都会重新加载这份本地列表。模型选择和编辑过的代码片段按应用缓存在当前页面会话里，刷新即重置。**恢复默认** 重置当前应用的模型选择与片段草稿。
+选择器列表来自受保护的 `GET /dashboard/api/v3/application-models`：当前可路由的 OpenCode Go 别名与当前价格快照求交。highspeed 变体继承基价行。空交集是 `[]`，不是错误。它 **不是** 带鉴权的 `GET /v1/models`：后者公布当前可路由的 Go 别名、已保存 Zen Free 目录与合格 Custom 声明 ID。两条路径都是本地读取：不含未公布的 Command Code GOAT 名称，也不在上游实时抓目录或挑账号。只返回当前可路由且协议有效启用的模型。Zen Free 目录刷新是 **供应商** 页上的显式动作；价格刷新后，这里的 Go 别名可能变化。每次返回应用页都会重新加载这份本地列表。模型选择和编辑过的代码片段按应用缓存在当前页面会话里，刷新即重置。**恢复默认** 重置当前应用的模型选择与片段草稿。
 
 ## 模型能力
 

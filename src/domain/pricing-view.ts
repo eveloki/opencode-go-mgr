@@ -272,7 +272,7 @@ export function buildPricingTableRows(
 /**
  * How an offering is presented on the pricing page: the full OpenCode Go
  * table, GOAT as an unpriced placeholder (no invented prices),
- * or the Zen Free zero-cost semantics block. Archived SCNet is not listed.
+ * or the Zen Free zero-cost semantics block.
  */
 export type PricingOfferingPresentation = "table" | "unpriced" | "free";
 

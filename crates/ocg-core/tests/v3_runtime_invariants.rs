@@ -14,8 +14,8 @@ use ocg_core::gateway;
 use ocg_core::models::{Account, ProxyMode, RoutingMode, UsageWindowKind};
 use ocg_core::provider::{
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
-    CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, SCNET_PROVIDER_ID,
-    SCNET_TOKEN_PLAN_BASIC_OFFERING_ID, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
+    CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, UpstreamProtocolKind,
+    ZEN_FREE_ACCOUNT_ID,
 };
 use ocg_core::provider_contracts::ContractScope;
 use ocg_core::state::CoreStateInner;
@@ -783,7 +783,7 @@ async fn create_verified_custom(
             "key": key,
             "customConfig": {
                 "baseUrl": origin,
-                "upstreamProtocol": "chat_completions",
+                "upstreamProtocols": ["chat_completions"],
                 "authScheme": "bearer"
             },
             "modelCapabilities": [{
@@ -1037,7 +1037,7 @@ async fn free_gates_close_only_free_candidates_on_shared_alias() {
 }
 
 #[tokio::test]
-async fn goat_and_scnet_drafts_are_absent_and_goat_raw_has_no_route() {
+async fn goat_draft_is_absent_and_goat_raw_has_no_route() {
     let (base_url, calls, stop) = start_scripted_upstream(
         vec![ScriptedReply {
             status: 200,
@@ -1055,20 +1055,11 @@ async fn goat_and_scnet_drafts_are_absent_and_goat_raw_has_no_route() {
         GOAT_OFFERING_ID,
         "goat-key",
     );
-    insert_disabled_offering(
-        &state,
-        "acct-1",
-        "scnet-draft",
-        SCNET_PROVIDER_ID,
-        SCNET_TOKEN_PLAN_BASIC_OFFERING_ID,
-        "sk-tp-basic",
-    );
     state
         .db
         .lock()
         .reorder_accounts(&[
             "goat-draft".into(),
-            "scnet-draft".into(),
             "acct-1".into(),
             ZEN_FREE_ACCOUNT_ID.into(),
         ])
@@ -1082,9 +1073,8 @@ async fn goat_and_scnet_drafts_are_absent_and_goat_raw_has_no_route() {
     assert_eq!(logs.len(), 1, "{logs:?}");
     assert_eq!(logs[0].account_id, "acct-1");
     assert!(
-        logs.iter()
-            .all(|log| log.account_id != "goat-draft" && log.account_id != "scnet-draft"),
-        "GOAT/SCNet drafts must stay off the production route set: {logs:?}"
+        logs.iter().all(|log| log.account_id != "goat-draft"),
+        "GOAT draft must stay off the production route set: {logs:?}"
     );
 
     let (status, body) = chat(port, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).await;
@@ -1094,13 +1084,6 @@ async fn goat_and_scnet_drafts_are_absent_and_goat_raw_has_no_route() {
         1,
         "unroutable GOAT must not reach upstream"
     );
-    let (status, body) = chat(port, "scnet/token-plan-basic").await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "SCNet catalog ids are not client aliases: {body}"
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop.send(());

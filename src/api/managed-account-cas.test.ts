@@ -40,7 +40,6 @@ function v3Account(id: string, overrides: Record<string, unknown> = {}): Record<
     planRoutable: true,
     customConfig: null,
     modelCapabilities: [],
-    acknowledgements: [],
     ...overrides,
   };
 }

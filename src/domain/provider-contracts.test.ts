@@ -14,6 +14,7 @@ import {
   accountProviderScope,
   allSupplierProtocolsDisabled,
   applyModelContractToResponse,
+  availableModelCount,
   catalogRefreshSupported,
   enabledProtocols,
   flattenProviderScopes,
@@ -25,6 +26,7 @@ import {
   protocolProbeSupported,
   providerScopeKey,
   selectProviderScope,
+  structuralProtocols,
   uniqueProtocols,
 } from "./provider-contracts.ts";
 
@@ -214,13 +216,12 @@ function account(overrides: Partial<Account> = {}): Account {
     verification_error: null,
     plan_routable: true,
     model_capabilities: [],
-    acknowledgements: [],
     ...overrides,
   };
 }
 
 test("scope keys round-trip and distinguish Custom endpoints from shared providers", () => {
-  assert.equal(providerScopeKey("provider", "scnet"), "provider:scnet");
+  assert.equal(providerScopeKey("provider", "command-code"), "provider:command-code");
   assert.deepEqual(parseProviderScopeKey("custom_endpoint:abc"), {
     scope_kind: "custom_endpoint",
     scope_id: "abc",
@@ -238,13 +239,6 @@ test("scope keys round-trip and distinguish Custom endpoints from shared provide
     scope_kind: "custom_endpoint",
     scope_id: "c1",
   });
-  assert.deepEqual(accountProviderScope(account({
-    provider_id: "scnet",
-    offering_id: "token-plan-premium",
-  })), {
-    scope_kind: "provider",
-    scope_id: "scnet",
-  });
 });
 
 test("flatten keeps built-in providers grouped and Custom endpoints unflattened", () => {
@@ -255,14 +249,6 @@ test("flatten keeps built-in providers grouped and Custom endpoints unflattened"
   const scopes = flattenProviderScopes(normalizeProviderContractsResponse(contracts({
     providers: [
       providerGroup(),
-      providerGroup({
-        scope_id: "scnet",
-        provider_id: "scnet",
-        offerings: [
-          { offering_id: "token-plan-basic", display_name: "SCNet Basic", routable: false, accounts: [] },
-          { offering_id: "token-plan-standard", display_name: "SCNet Standard", routable: false, accounts: [] },
-        ],
-      }),
     ],
     custom_endpoints: [
       customEndpoint(),
@@ -275,13 +261,11 @@ test("flatten keeps built-in providers grouped and Custom endpoints unflattened"
 
   assert.deepEqual(scopes.map(({ key }) => key), [
     "provider:opencode",
-    "provider:scnet",
     "custom_endpoint:custom-1",
     "custom_endpoint:custom-2",
   ]);
-  assert.equal(scopes[1]?.offerings.length, 2);
-  assert.equal(scopes[2]?.label, "Home Lab");
-  assert.equal(scopes[3]?.label, "Office");
+  assert.equal(scopes[1]?.label, "Home Lab");
+  assert.equal(scopes[2]?.label, "Office");
 });
 
 test("stale or missing scope selection falls back to the first scope", () => {
@@ -406,6 +390,33 @@ test("unique protocols drop duplicates and unknown values before a probe payload
     "messages",
   ]);
   assert.equal(protocolDisplayName("chat_completions"), "Chat Completions");
+});
+
+test("structural protocols cover model evidence plus switched-off protocols; counts track enabled evidence", () => {
+  const scope = flattenProviderScopes(normalizeProviderContractsResponse(contracts({
+    providers: [providerGroup({
+      models: [modelContract("gpt-5.6-luna", { chat_completions: true, responses: true })],
+      protocols: { chat_completions: true, responses: false, messages: true },
+    })],
+  })))[0]!;
+  // The fixture model carries evidence rows for all three protocols.
+  assert.deepEqual(structuralProtocols(scope), ["chat_completions", "responses", "messages"]);
+
+  const chatOnly = {
+    ...scope,
+    models: [{
+      ...scope.models[0]!,
+      protocols: { chat_completions: scope.models[0]!.protocols.chat_completions! },
+    }],
+  };
+  // Without evidence, responses stays only because its switch is off;
+  // messages (switch on, no evidence) is not structural.
+  assert.deepEqual(structuralProtocols(chatOnly), ["chat_completions", "responses"]);
+
+  assert.equal(availableModelCount(scope, "chat_completions"), 1);
+  assert.equal(availableModelCount(scope, "responses"), 1);
+  assert.equal(availableModelCount(scope, "messages"), 0);
+  assert.equal(availableModelCount(chatOnly, "responses"), 0);
 });
 
 test("source URLs with credentials are not treated as safe to render", () => {

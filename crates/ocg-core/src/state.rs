@@ -1019,7 +1019,7 @@ impl crate::account_control::AccountControlHost for CoreStateInner {
     fn create_account_with_contract(&self, account: &crate::models::Account) -> anyhow::Result<()> {
         self.db
             .lock()
-            .create_account_with_contract(account, None, &[], None)
+            .create_account_with_contract(account, None, &[])
     }
 
     fn update_account(

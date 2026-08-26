@@ -1337,7 +1337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_enable_rejects_pending_custom_until_verified() {
+    async fn cli_enable_allows_pending_custom_without_verification() {
         let dir = temp_dir("cli-custom-enable");
         let cipher = test_cipher();
         let state = build_state(dir.clone(), cipher.clone()).unwrap();
@@ -1355,13 +1355,10 @@ mod tests {
         assert_eq!(before.status, ConnectionVerificationStatus::Pending);
         let revision = state.settings_revision();
 
-        let error = toggle_account(&state, "cli-custom", true).unwrap_err();
-        assert!(
-            error.to_string().contains("verify the account connection"),
-            "{error}"
-        );
-        let disabled = state.db.lock().get_account("cli-custom").unwrap().unwrap();
-        assert!(!disabled.enabled);
+        toggle_account(&state, "cli-custom", true)
+            .expect("pending Custom may enable; verification is an optional tool");
+        let enabled = state.db.lock().get_account("cli-custom").unwrap().unwrap();
+        assert!(enabled.enabled);
         let after = state
             .db
             .lock()
@@ -1369,17 +1366,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(after.status, ConnectionVerificationStatus::Pending);
-        assert_eq!(state.settings_revision(), revision);
+        assert_eq!(state.settings_revision(), revision + 1);
 
         key_command(
             dir.clone(),
             cipher,
-            KeyAction::Enable {
+            KeyAction::Disable {
                 id: "cli-custom".into(),
             },
         )
         .await
-        .expect_err("CLI enable must use Dashboard verify-first policy");
+        .unwrap();
         assert!(
             !state
                 .db

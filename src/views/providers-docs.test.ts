@@ -43,7 +43,8 @@ test("DESIGN.md names Providers as the fourth of seven views", () => {
   );
   assert.doesNotMatch(design, /Accounts, Pricing, Applications/);
   assert.match(design, /Providers is the supplier control plane/);
-  assert.match(design, /Chat Completions \/ Responses \/ Messages switches/);
+  assert.match(design, /structural protocol switches with per-switch available-model counts/);
+  assert.match(design, /multi-select checkboxes \(Chat Completions, Responses, Messages\)/);
   assert.match(design, /may consume quota/);
   assert.match(design, /never automatic on page load/);
   assert.match(design, /Do call the access credential “Key”/);
@@ -90,8 +91,8 @@ test("USER guides describe the Providers control plane and drop stale locations"
   assert.match(userZh, /可能消耗\s*额度/);
   assert.match(userEn, /\?view=pricing/);
   assert.match(userZh, /\?view=pricing/);
-  assert.match(userEn, /schema v26/i);
-  assert.match(userZh, /schema v26/);
+  assert.match(userEn, /schema v29/i);
+  assert.match(userZh, /schema v29/);
   assert.match(userEn, /\*\*Open\s+provider\*\*/);
   assert.match(userZh, /\*\*前往供应商\*\*/);
   assert.doesNotMatch(userEn, /There is no separate provider page/);
@@ -100,11 +101,11 @@ test("USER guides describe the Providers control plane and drop stale locations"
   assert.doesNotMatch(userZh, /通过卡片的 \*\*获取模型\*\* 动作刷新/);
 });
 
-test("USER guides keep GOAT verified, SCNet archived, and refresh/probe manual-only", () => {
+test("USER guides keep GOAT verified and refresh/probe manual-only", () => {
   assert.match(userEn, /GOAT routes\s+only through verified, explicitly enabled accounts/);
   assert.match(userZh, /GOAT 只通过已验证且显式启用的账号路由/);
-  assert.match(userEn, /SCNet remains archived/);
-  assert.match(userZh, /SCNet 已归档/);
+  assert.doesNotMatch(userEn, /SCNet remains archived/);
+  assert.doesNotMatch(userZh, /SCNet 已归档/);
   assert.match(userEn, /Refresh is never automatic/);
   assert.match(userZh, /刷新绝不会自动发生/);
   assert.match(userEn, /Client requests never probe/);

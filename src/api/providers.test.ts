@@ -125,12 +125,21 @@ test("Go and GOAT model refresh use the selected account on the provider route",
   ]);
 });
 
-test("Custom endpoint protocol probe and switch are blocked before unsupported writes", async () => {
+test("Custom endpoint protocol probe stays blocked while the switch uses the custom-endpoint route", async () => {
   setActivePinia(createPinia());
   useControlPlaneStore().sync({ revision: 8, processGeneration: 42, pricingRevision: "p1" });
-  const requests = installFetch(({ url }) => {
+  const requests = installFetch(({ url, method }) => {
     if (url.endsWith("/accounts/custom-1")) {
       return { id: "custom-1", providerId: "custom", revision: 8, processGeneration: 42 };
+    }
+    if (url.endsWith("/provider-contracts/custom-endpoint/custom-1/protocols/chat_completions") && method === "PUT") {
+      return {
+        revision: 9,
+        processGeneration: 42,
+        pricingRevision: "p1",
+        providers: [],
+        customEndpoints: [],
+      };
     }
     throw new Error(`unsupported request ${url}`);
   });
@@ -142,18 +151,24 @@ test("Custom endpoint protocol probe and switch are blocked before unsupported w
     }),
     /尚未纳入 Dashboard V3 合同/,
   );
-  await assert.rejects(
-    () => providerApi.updateProviderContractProtocol(
-      "custom_endpoint",
-      "custom-1",
-      "chat_completions",
-      { enabled: false },
-    ),
-    /尚未纳入 Dashboard V3 合同/,
+  await providerApi.updateProviderContractProtocol(
+    "custom_endpoint",
+    "custom-1",
+    "chat_completions",
+    { enabled: false },
   );
   assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
     { method: "GET", url: "/dashboard/api/v3/accounts/custom-1" },
+    {
+      method: "PUT",
+      url: "/dashboard/api/v3/provider-contracts/custom-endpoint/custom-1/protocols/chat_completions",
+    },
   ]);
+  assert.deepEqual(requests[1]?.body, {
+    enabled: false,
+    expectedRevision: 8,
+    processGeneration: 42,
+  });
 });
 
 const ZEN_FREE_ACCOUNT_ID = "00000000-0000-0000-0000-000000000002";
@@ -193,7 +208,6 @@ function zenFreeAccountDto(overrides: Record<string, unknown> = {}) {
     planRoutable: true,
     customConfig: null,
     modelCapabilities: [],
-    acknowledgements: [],
     ...overrides,
   };
 }

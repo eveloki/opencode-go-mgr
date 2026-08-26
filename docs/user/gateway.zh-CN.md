@@ -39,11 +39,11 @@ Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api
 
 客户端发送 **别名**：本地注册表中的稳定小写 kebab-case 名称。现有 OpenCode Go 模型 ID 就是首选别名；大小写折叠的拼写如 `GLM-5.2` 也可接受。
 
-带鉴权的 `GET /v1/models` 先按注册表顺序列出当前可路由且有有效启用协议的已公布别名（OpenCode Go 与 Zen Free），再并入不与这些别名冲突、同样有有效启用协议的合格 Custom 能力 ID（`owned_by` 为 `custom`）。该端点不会发现、代理或缓存上游目录，也不会写转发日志或改路由状态。Zen 目录只在管理员于 **供应商** 页显式刷新时更新，本端点读取那份已保存快照。已公布的 Go 与 Zen Free 别名不依赖是否存在 Go 账号。合格 Custom ID 来自 enabled + verified + ready 且有 Key 的 Custom 账号。动态或探测确认的模型不会自动获得新的稳定别名。
+带鉴权的 `GET /v1/models` 先按注册表顺序列出当前可路由且有有效启用协议的已公布别名（OpenCode Go 与 Zen Free），再并入不与这些别名冲突、同样有有效启用协议的合格 Custom 能力 ID（`owned_by` 为 `custom`）。该端点不会发现、代理或缓存上游目录，也不会写转发日志或改路由状态。Zen 目录只在管理员于 **供应商** 页显式刷新时更新，本端点读取那份已保存快照。已公布的 Go 与 Zen Free 别名不依赖是否存在 Go 账号。合格 Custom ID 来自 enabled + ready 且有 Key 的 Custom 账号（验证为可选）。动态或探测确认的模型不会自动获得新的稳定别名。
 
 受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：当前可路由的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。空交集返回 `[]`。它不含 Custom ID，也不选账号、不调用上游。
 
-两份列表都不会公布 SCNet 官方可用模型拼写或未公布的 Command Code GOAT 名称。合格 Custom 声明 ID 即使含 `/` 也可以出现在 `/v1/models` 上；它们不会折成 kebab 别名。
+两份列表都不会公布未公布的 Command Code GOAT 名称。合格 Custom 声明 ID 即使含 `/` 也可以出现在 `/v1/models` 上；它们不会折成 kebab 别名。
 
 原始上游 ID 在注册表中恰好对应一个 mapping 时，会钉在该 mapping 上——不跨 Plan 回退，也不做 Zen prefer 覆盖——然后才检查可路由性。因此不可路由 mapping 会被识别，但不能产出生产路由。名称里含 `/`、`_` 或空白时一律视为原始 ID，不会折叠成 kebab 别名（`glm/5.2` 不是 `glm-5.2`）。映射到多个 Plan 的原始 ID（含合格 Custom 能力与另一 Plan）返回 `400`，错误码 `ambiguous_model_id`，且不会调用上游。未知名称——既非已公布别名也非合格 Custom ID——在所有受支持的客户端格式上返回 `400`：Chat Completions、Responses、Messages，以及 Gemini `generateContent` / `streamGenerateContent`。已公布的 kebab 别名 `deepseek-v4-flash` 仍归 Go；唯一原始 ID `deepseek/deepseek-v4-flash` 钉在 Command Code GOAT，不可作为生产路由，除非与合格 Custom ID 冲突而变为 `ambiguous_model_id`。
 

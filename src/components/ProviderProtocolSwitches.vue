@@ -18,6 +18,7 @@
           @update:value="(enabled: boolean) => emit('change', protocol, enabled)"
         />
         <span>{{ protocolDisplayName(protocol) }}</span>
+        <span class="protocol-switch__count">{{ t("{count} 个模型可用", { count: modelCounts[protocol] }) }}</span>
       </label>
     </div>
   </fieldset>
@@ -27,10 +28,12 @@
 import { NSwitch } from "naive-ui";
 import type { ProviderProtocol, ProtocolSwitches } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
-import { PROVIDER_PROTOCOLS, protocolDisplayName } from "../domain/provider-contracts.ts";
+import { protocolDisplayName } from "../domain/provider-contracts.ts";
 
 defineProps<{
   switches: ProtocolSwitches;
+  protocols: readonly ProviderProtocol[];
+  modelCounts: Record<ProviderProtocol, number>;
   loadingProtocol: ProviderProtocol | null;
   disabled: boolean;
 }>();
@@ -38,8 +41,6 @@ defineProps<{
 const emit = defineEmits<{
   change: [protocol: ProviderProtocol, enabled: boolean];
 }>();
-
-const protocols = PROVIDER_PROTOCOLS;
 </script>
 
 <style scoped>
@@ -73,5 +74,9 @@ const protocols = PROVIDER_PROTOCOLS;
   min-height: 40px;
   color: var(--ocg-ink);
   font-size: var(--ocg-font-md);
+}
+.protocol-switch__count {
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
 }
 </style>

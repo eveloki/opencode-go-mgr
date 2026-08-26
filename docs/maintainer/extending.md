@@ -18,8 +18,7 @@
    reqwest client.** Decrypt and HTTP stay in the Host resolver /
    `forward_once`.
 5. Fail closed until routing, verify, usage, and pricing are actually
-   implemented. GOAT/SCNet are the template for "catalog present, not
-   live".
+   implemented. GOAT is the template for "catalog present, not live".
 6. Run `cargo test -p ocg-domain`, `cargo test -p ocg-gateway`, and
    `cargo test -p ocg-core`. Purity/dependency guards will fail a
    forbidden import.
@@ -59,9 +58,9 @@ Add desktop capabilities in `src-tauri/src/host/` and register them into `CoreSt
 | Inference `401` unchanged, no failover | OpenCode Go/Zen `ModelError` or invalid key | Expected; ping/verify still record `auth_error` |
 | Zen `429` cools every Free card | Egress-IP shared pool | Wait for `cooldown_free_until`; later non-Free cards may still run |
 | `success_no_usage` | Upstream omitted usage chunks | Chat streams request `include_usage`; without a chunk the row stays missing usage |
-| Open fails: schema newer than 27 | Data directory from a newer binary | Restore a matching backup; do not run an older binary on v27 |
+| Open fails: schema newer than 29 | Data directory from a newer binary | Restore a matching backup; do not run an older binary on v29 |
 | Open fails: cipher / ciphertext | Wrong `.encryption-key` or machine-bound context | Restore the matching key; never rewrite ciphertext |
-| Interrupted v27 open | Transaction rolled back; pre-v3 backup may already exist | See [storage-migration.md](storage-migration.md) |
+| Interrupted v29 open | Transaction rolled back; pre-v3 backup may already exist | See [storage-migration.md](storage-migration.md) |
 | Settings port change bound the old port | Rebind failed; compensation restored config | Check gateway logs; concurrent writes are serialized by `settings_host_effects` |
 | Usage loop still running after `stop_gateway` | Listener stop does not cancel `ControlPlaneWorkers` | Drop `CoreState` (process exit) |
 ---

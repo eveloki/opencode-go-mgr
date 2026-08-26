@@ -11,7 +11,7 @@ use ocg_core::kernel::pricing::SOURCE_URL;
 use ocg_core::provider::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
     CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, SCNET_PROVIDER_ID, SCNET_TOKEN_PLAN_OFFERING_IDS,
+    OPENCODE_ZEN_FREE_PROVIDER_ID,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -272,8 +272,8 @@ fn mutated_official(harness: &V3Harness) -> ocg_core::kernel::pricing::PricingSn
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v28() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+fn dashboard_v3_schema_version_stays_at_v30() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 30);
 }
 
 #[tokio::test]
@@ -1076,19 +1076,6 @@ async fn dashboard_v3_provider_scoped_pricing_follows_catalog_facts() {
     assert_eq!(goat["pricingRevision"], pricing_revision);
     assert_eq!(goat["providerPricingRevision"], "uninitialized");
     assert_secret_free(&goat);
-
-    for offering_id in SCNET_TOKEN_PLAN_OFFERING_IDS {
-        let (status, scnet) = harness
-            .get_json(&format!(
-                "{}/providers/{SCNET_PROVIDER_ID}/{offering_id}/pricing",
-                harness.v3_base
-            ))
-            .await;
-        assert_eq!(status, StatusCode::OK, "{scnet}");
-        assert_eq!(scnet["availability"], "unavailable");
-        assert_eq!(scnet["snapshot"], Value::Null);
-        assert_secret_free(&scnet);
-    }
 
     let (status, custom) = harness
         .get_json(&format!(
