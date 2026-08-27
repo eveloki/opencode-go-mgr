@@ -62,16 +62,15 @@ pub use proxy_test::PROXY_TEST_TARGET;
 pub use proxy_test::{ProxyTestTargetGuard, install_proxy_test_target_for_tests};
 pub use types::{
     Account, AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
-    AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountGoatModelAccess,
-    AccountGoatModelAccessUpdate, AccountList, AccountManagedCreate, AccountManagedKeyVerify,
-    AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
-    AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep, AccountSetupUpdate,
-    AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
-    AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin, AuthLogout,
-    AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen, BrowserOpenRequest,
-    BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
-    ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey,
-    ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
+    AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountList, AccountManagedCreate,
+    AccountManagedKeyVerify, AccountModelCapabilitiesUpdate, AccountModelCapability,
+    AccountModelCapabilityWrite, AccountMutation, AccountOrder, AccountQuotaScope,
+    AccountSetupStep, AccountSetupUpdate, AccountType, AccountUpdate, AccountUpstreamProtocol,
+    AccountUsageUpdate, AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin,
+    AuthLogout, AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen,
+    BrowserOpenRequest, BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary,
+    CardCapabilitySummary, ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo,
+    ConnectionSubKey, ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
     CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyModelTokens,
     DailyTokensByModel, DailyTokensQuery, DashboardSummary, DesktopUpdate, DesktopUpdatePhase,
     ERROR_CONFLICT, ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE, ERROR_INTERNAL,
@@ -187,10 +186,6 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             put(accounts::put_account_custom_config),
         )
         .route(
-            "/accounts/{id}/goat-model-access",
-            put(accounts::put_account_goat_model_access),
-        )
-        .route(
             "/accounts/{id}/model-capabilities",
             put(accounts::put_account_model_capabilities),
         )
@@ -236,8 +231,16 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             get(providers::get_provider_contracts),
         )
         .route(
+            "/provider-contracts/{scope_kind}/{scope_id}/catalog/refresh",
+            post(providers::refresh_contract_catalog),
+        )
+        .route(
             "/provider-contracts/provider/{scope_id}/model-protocol-overrides",
             put(providers::put_provider_model_protocol_overrides),
+        )
+        .route(
+            "/provider-contracts/provider/{scope_id}/model-protocols/reset-static",
+            post(providers::reset_provider_model_protocols_to_static),
         )
         .route(
             "/provider-contracts/custom-endpoint/{scope_id}/model-protocol-overrides",

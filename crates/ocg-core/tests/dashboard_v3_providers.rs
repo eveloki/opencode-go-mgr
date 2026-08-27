@@ -20,6 +20,7 @@ use ocg_core::dashboard_v3::{
     ProviderCatalog, ProviderContracts, ProviderModelCapability, ZenFreeModels, ZenFreeSettings,
 };
 use ocg_core::db::CURRENT_SCHEMA_VERSION;
+use ocg_core::kernel::ids::is_free_model;
 use ocg_core::kernel::zen::ZEN_MODELS_SOURCE_URL;
 #[cfg(debug_assertions)]
 use ocg_core::models::ProxyMode;
@@ -27,6 +28,9 @@ use ocg_core::provider::{
     BUILTIN_PLANS, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID,
     GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
     ZEN_FREE_ACCOUNT_ID,
+};
+use ocg_core::provider_contracts::{
+    CATALOG_SOURCE_OFFICIAL_ZEN, CATALOG_SOURCE_OPENCODE_MODELS, ContractScope,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -473,7 +477,7 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
         })
         .unwrap();
     assert_eq!(goat["routable"], true);
-    assert_eq!(goat["verificationRuntimeAvailability"], "available");
+    assert_eq!(goat["verificationRuntimeAvailability"], "not_applicable");
     assert_eq!(goat["modelAliases"], json!([]));
     assert_eq!(goat["keyPrefix"], Value::Null);
 
@@ -496,10 +500,7 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
     assert_eq!(zen["singleton"], true);
     assert!(zen["creationUnavailableReason"].is_string());
     let aliases = zen["modelAliases"].as_array().unwrap();
-    assert!(
-        aliases.iter().any(|alias| alias == "mimo-v2.5-free"),
-        "{aliases:?}"
-    );
+    assert!(!aliases.iter().any(|alias| alias == "mimo-v2.5-free"));
     assert!(
         aliases.iter().any(|alias| alias == "mimo-v2.5"),
         "Zen aliases must include the de-suffixed snapshot alias: {aliases:?}"
@@ -587,6 +588,87 @@ async fn dashboard_v3_provider_contracts_project_four_scopes_and_custom_endpoint
     assert_eq!(projected.custom_endpoints[0].account.name, "Lan");
     assert_eq!(after["customEndpoints"][0]["scopeKind"], "custom_endpoint");
     assert!(after.get("custom_endpoints").is_none());
+
+    harness.stop();
+}
+
+#[tokio::test]
+async fn dashboard_v3_provider_contracts_hide_zen_free_models_from_go_scope() {
+    let harness = start_loopback("providers-contracts-go-free-filter").await;
+    // Simulate a persisted Go catalog row that still contains Zen Free ids
+    // (written before the refresh write filter existed).
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &ContractScope::provider(OPENCODE_PROVIDER_ID),
+            &[
+                "glm-5.3".to_string(),
+                "hy3-free".to_string(),
+                "deepseek-v4-flash-free".to_string(),
+                "ox-alpha-free".to_string(),
+            ],
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "http://127.0.0.1/provider/v1/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+
+    // The routing view is untouched: the effective contract set keeps the
+    // persisted catalog verbatim, free ids included.
+    let contracts = harness.state.provider_contracts();
+    let go_scope = contracts
+        .providers
+        .get(OPENCODE_PROVIDER_ID)
+        .expect("go scope");
+    assert!(go_scope.catalog.models.iter().any(|id| id == "hy3-free"));
+    assert!(go_scope.models.contains_key("hy3-free"));
+    drop(contracts);
+
+    let (status, body) = get_v3(&harness, "/provider-contracts").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: ProviderContracts = serde_json::from_value(body.clone()).expect("contracts");
+    let go = parsed
+        .providers
+        .iter()
+        .find(|group| group.provider_id == OPENCODE_PROVIDER_ID)
+        .expect("go group");
+    assert!(go.catalog.models.contains(&"glm-5.3".to_string()));
+    assert!(
+        go.catalog.models.contains(&"ox-alpha-free".to_string()),
+        "ox-alpha-free is a Go model, not a Zen Free model"
+    );
+    assert!(
+        !go.catalog.models.iter().any(|id| is_free_model(id)),
+        "{:?}",
+        go.catalog.models
+    );
+    assert!(go.models.iter().any(|model| model.model_id == "glm-5.3"));
+    assert!(
+        !go.models.iter().any(|model| is_free_model(&model.model_id)),
+        "{:?}",
+        go.models
+            .iter()
+            .map(|model| model.model_id.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // Zen Free keeps listing its own free models.
+    let zen = parsed
+        .providers
+        .iter()
+        .find(|group| group.provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID)
+        .expect("zen group");
+    assert!(zen.catalog.models.iter().any(|id| is_free_model(id)));
+    assert!(
+        zen.models
+            .iter()
+            .any(|model| is_free_model(&model.model_id))
+    );
 
     harness.stop();
 }
@@ -737,6 +819,52 @@ async fn dashboard_v3_zen_saved_models_are_the_persisted_snapshot() {
 
 #[cfg(debug_assertions)]
 #[tokio::test]
+async fn unified_zen_catalog_refresh_returns_the_shared_layout_with_new_models_off() {
+    let origin = start_zen_origin(
+        StatusCode::OK,
+        json!({ "data": [{ "id": "unified-new-free" }] }),
+    )
+    .await;
+    let harness = start_loopback("providers-unified-zen-refresh").await;
+    let _guard = override_zen_url(&harness, &origin.url);
+    let mut config = harness.state.config();
+    config.proxy_mode = ProxyMode::Direct;
+    harness.state.set_config(config).unwrap();
+
+    let (status, contracts) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/provider-contracts/provider/{OPENCODE_ZEN_FREE_PROVIDER_ID}/catalog/refresh"),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{contracts}");
+    assert_eq!(origin.call_count(), 1);
+    let zen = contracts["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"] == OPENCODE_ZEN_FREE_PROVIDER_ID)
+        .expect("Zen Free provider contract");
+    assert_eq!(zen["catalog"]["source"], CATALOG_SOURCE_OFFICIAL_ZEN);
+    assert_eq!(zen["catalog"]["models"], json!(["unified-new-free"]));
+    let model = zen["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "unified-new-free")
+        .expect("new Zen model stays visible");
+    assert_eq!(model["routable"], false);
+    for protocol in ["chat_completions", "responses", "messages"] {
+        assert_eq!(model["protocols"][protocol]["override"], "force_off");
+        assert_eq!(model["protocols"][protocol]["enabled"], false);
+    }
+
+    harness.stop();
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
 async fn dashboard_v3_zen_refresh_persists_on_success_and_preserves_state_on_failure_or_busy() {
     let success = start_zen_origin(
         StatusCode::OK,
@@ -811,7 +939,6 @@ async fn dashboard_v3_zen_refresh_persists_on_success_and_preserves_state_on_fai
         .find(|entry| entry["providerId"] == OPENCODE_ZEN_FREE_PROVIDER_ID)
         .unwrap();
     let aliases = zen["modelAliases"].as_array().unwrap();
-    assert!(aliases.iter().any(|alias| alias == "refresh-test-free"));
     assert!(aliases.iter().any(|alias| alias == "refresh-test"));
     assert!(!aliases.iter().any(|alias| alias == "mimo-v2.5-free"));
 

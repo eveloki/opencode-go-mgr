@@ -43,9 +43,9 @@ Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api
 
 受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：当前可路由的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。空交集返回 `[]`。它不含 Custom ID，也不选账号、不调用上游。
 
-两份列表都不会公布未公布的 Command Code GOAT 名称。合格 Custom 声明 ID 即使含 `/` 也可以出现在 `/v1/models` 上；它们不会折成 kebab 别名。
+`/v1/models` 可以通过与 OpenCode Go 相同的 canonical Alias 公布 Command Code 模型；只有至少一个供应商 mapping 仍有已启用协议时才公布该 Alias。合格 Custom 声明 ID 即使含 `/` 也可以出现；它们不会折成 kebab 别名。`application-models` 仍是更窄的 Go 与价格交集列表。
 
-原始上游 ID 在注册表中恰好对应一个 mapping 时，会钉在该 mapping 上——不跨 Plan 回退，也不做 Zen prefer 覆盖——然后才检查可路由性。因此不可路由 mapping 会被识别，但不能产出生产路由。名称里含 `/`、`_` 或空白时一律视为原始 ID，不会折叠成 kebab 别名（`glm/5.2` 不是 `glm-5.2`）。映射到多个 Plan 的原始 ID（含合格 Custom 能力与另一 Plan）返回 `400`，错误码 `ambiguous_model_id`，且不会调用上游。未知名称——既非已公布别名也非合格 Custom ID——在所有受支持的客户端格式上返回 `400`：Chat Completions、Responses、Messages，以及 Gemini `generateContent` / `streamGenerateContent`。已公布的 kebab 别名 `deepseek-v4-flash` 仍归 Go；唯一原始 ID `deepseek/deepseek-v4-flash` 钉在 Command Code GOAT，不可作为生产路由，除非与合格 Custom ID 冲突而变为 `ambiguous_model_id`。
+原始上游 ID 在注册表中恰好对应一个 mapping 时，会钉在该 mapping 上——不跨 Plan 回退，也不做 Zen prefer 覆盖——然后才检查可路由性。名称里含 `/`、`_` 或空白时一律视为原始 ID，不会折叠成 kebab 别名（`glm/5.2` 不是 `glm-5.2`）。映射到多个 Plan 的原始 ID（含合格 Custom 能力与另一 Plan）返回 `400`，错误码 `ambiguous_model_id`，且不会调用上游。未知名称——既非已公布别名也非合格 Custom ID——在所有受支持的客户端格式上返回 `400`：Chat Completions、Responses、Messages，以及 Gemini `generateContent` / `streamGenerateContent`。canonical kebab 别名 `deepseek-v4-flash` 可以在已启用的 Go、Zen 与 Command Code mapping 中选择；唯一原始 ID `deepseek/deepseek-v4-flash` 只钉在 Command Code。Zen 的 `foo-free` 同样保留为精确 raw pin，对外公布 Alias 则是 `foo`。
 
 转发日志把请求身份与上游身份分开记录，没有 `requested_alias` 字段：
 

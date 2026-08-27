@@ -44,18 +44,13 @@ const GROUP_LABEL: Record<PlanChooserGroupId, MessageKey> = {
 
 /**
  * Human-readable hint shown for selectable families whose post-create state
- * needs honest copy: GOAT follows the catalog (routable → verify-then-enable,
- * otherwise a disabled draft), Custom always verifies before enabling.
+ * needs honest copy. GOAT is live without a Key-verification gate; Custom may
+ * still be verified explicitly after creation.
  */
 function planCreationHint(
   plan: PlanDefinition,
-  catalog: readonly ProviderCatalogEntry[] | null | undefined,
+  _catalog: readonly ProviderCatalogEntry[] | null | undefined,
 ): MessageKey | "" {
-  if (plan.id === "command-code-goat") {
-    return planFamilyRoutable(plan, catalog)
-      ? "创建为禁用账号，验证连接成功后手动启用。"
-      : "创建为禁用草稿；验证与路由尚未就绪";
-  }
   if (plan.id === "custom-endpoint") return "创建为禁用账号，验证连接成功后手动启用。";
   return "";
 }

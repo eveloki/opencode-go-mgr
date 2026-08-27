@@ -4,7 +4,7 @@
 //! helpers here avoids a handler <-> executor import cycle.
 
 use crate::gateway::diagnostics::{
-    ErrorDiagnostic, RequestTrace, emit_failure, serialize_diagnostic,
+    ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
 };
 use crate::gateway::protocol::{ProtocolError, format_error, format_protocol_error};
 use crate::kernel::protocol::ApiFormat;
@@ -31,22 +31,13 @@ pub(crate) fn local_protocol_failure(
     if let Some(body) = summary_body {
         diagnostic = diagnostic.with_request_summary(body);
     }
-    let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
-    let encoded = serialize_diagnostic(diagnostic);
-    let _ = state.db.lock().log_gateway_diagnostic(
-        if error.status.is_server_error() {
-            "error"
-        } else {
-            "warn"
-        },
-        "gateway_request",
+    let encoded = serialize_diagnostic(diagnostic.clone());
+    log_request_failure(
+        &state.db.lock(),
+        trace,
+        &diagnostic,
+        &encoded,
         &error.message,
-        Some(&trace.request_id),
-        Some(1),
-        Some("client"),
-        Some(stage),
-        Some(duration_ms),
-        Some(&encoded),
     );
     emit_failure(&encoded);
     protocol_error_from(format, error)

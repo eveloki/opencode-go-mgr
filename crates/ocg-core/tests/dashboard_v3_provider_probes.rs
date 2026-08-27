@@ -15,9 +15,12 @@ use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::models::{ProxyListDirection, ProxyMode};
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, UpstreamProtocolKind,
 };
-use ocg_core::provider_contracts::{ContractScope, PersistedModelProtocol, ProbeResultKind};
+use ocg_core::provider_contracts::{
+    CATALOG_SOURCE_OPENCODE_MODELS, ContractScope, PersistedModelProtocol, ProbeResultKind,
+    ProtocolOverrideState,
+};
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, Mutex};
@@ -107,6 +110,58 @@ async fn start_probe_origin(status: StatusCode, body: &str, delay: Duration) -> 
     }
 }
 
+async fn start_fallback_probe_origin(failing_key: &str) -> ProbeOrigin {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls_for_handler = calls.clone();
+    let failing_bearer = format!("Bearer {failing_key}");
+    let app = Router::new().fallback(any(
+        move |method: HttpMethod, uri: OriginalUri, headers: HeaderMap, payload: Bytes| {
+            let calls = calls_for_handler.clone();
+            let failing_bearer = failing_bearer.clone();
+            async move {
+                let authorization = header_value(&headers, "authorization");
+                calls.lock().unwrap().push(CapturedProbe {
+                    method: method.to_string(),
+                    path: uri.0.path().to_string(),
+                    authorization: authorization.clone(),
+                    x_api_key: header_value(&headers, "x-api-key"),
+                    cookie: header_value(&headers, "cookie"),
+                    body: String::from_utf8_lossy(&payload).into_owned(),
+                });
+                if authorization.as_deref() == Some(failing_bearer.as_str()) {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        r#"{"error":{"message":"account unavailable"}}"#,
+                    )
+                } else {
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        SUCCESS_BODY,
+                    )
+                }
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, shutdown) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown.await;
+            })
+            .await
+            .ok();
+    });
+    ProbeOrigin {
+        url: format!("http://{addr}"),
+        calls,
+        _stop: stop,
+    }
+}
+
 fn cas(harness: &V3Harness, patch: Value) -> Value {
     let mut body = match patch {
         Value::Object(map) => map,
@@ -157,6 +212,14 @@ async fn send_raw(harness: &V3Harness, path: &str, body: &str) -> (StatusCode, V
 
 fn probe_path(provider_id: &str) -> String {
     format!("/providers/{provider_id}/protocol-probes")
+}
+
+fn static_reset_path() -> String {
+    static_reset_path_for(OPENCODE_PROVIDER_ID)
+}
+
+fn static_reset_path_for(provider_id: &str) -> String {
+    format!("/provider-contracts/provider/{provider_id}/model-protocols/reset-static")
 }
 
 fn assert_v3_error(body: &Value, code: &str) {
@@ -234,11 +297,15 @@ fn parse_probe(body: &Value) -> ProtocolProbeResponse {
 }
 
 async fn create_go_account(harness: &V3Harness) -> String {
+    create_go_account_with(harness, "Go probe", GO_KEY).await
+}
+
+async fn create_go_account_with(harness: &V3Harness, name: &str, key: &str) -> String {
     let (status, created) = send_json(
         harness,
         Method::POST,
         "/accounts",
-        &cas(harness, json!({ "name": "Go probe", "key": GO_KEY })),
+        &cas(harness, json!({ "name": name, "key": key })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
@@ -317,6 +384,271 @@ async fn protocol_probes_require_the_v3_session() {
     assert_eq!(body["currentRevision"], Value::Null);
     assert_eq!(body["processGeneration"], Value::Null);
     assert_eq!(origin.call_count(), 0);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn opencode_static_protocol_reset_requires_the_v3_session() {
+    let harness = start_public("static-protocol-reset-auth").await;
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path(),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_v3_error(&body, ERROR_UNAUTHORIZED);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn opencode_static_protocol_reset_is_cas_protected_and_restores_current_catalog_deterministically()
+ {
+    let harness = start_loopback("static-protocol-reset").await;
+    let scope = go_scope();
+    let models = vec!["grok-4.5".to_string(), "future-go-model".to_string()];
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &models,
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "https://example.test/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+
+    let stale = json!({
+        "expectedRevision": harness.state.settings_revision().saturating_sub(1),
+        "processGeneration": harness.state.process_generation(),
+    });
+    let (status, body) = send_json(&harness, Method::POST, &static_reset_path(), &stale).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_v3_error(&body, ERROR_REVISION_CONFLICT);
+
+    let (status, body) = send_json(
+        &harness,
+        Method::PUT,
+        "/provider-contracts/provider/opencode/model-protocol-overrides",
+        &cas(
+            &harness,
+            json!({"overrides": [
+                {"modelId": "grok-4.5", "protocol": "chat_completions", "state": "force_on"},
+                {"modelId": "future-go-model", "protocol": "chat_completions", "state": "force_on"}
+            ]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let before = harness.state.settings_revision();
+    let (status, reset) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path(),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reset}");
+    assert_eq!(harness.state.settings_revision(), before + 1);
+    let opencode = reset["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"] == OPENCODE_PROVIDER_ID)
+        .unwrap();
+    assert_eq!(opencode["staticProtocolSnapshotDate"], "2026-08-27");
+    assert_eq!(opencode["catalog"]["models"], json!(models));
+    let grok = opencode["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "grok-4.5")
+        .unwrap();
+    assert_eq!(grok["protocols"]["responses"]["override"], "auto");
+    assert_eq!(grok["protocols"]["responses"]["enabled"], true);
+    assert_eq!(
+        grok["protocols"]["chat_completions"]["override"],
+        "force_off"
+    );
+    assert_eq!(grok["protocols"]["messages"]["override"], "force_off");
+    let future = opencode["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "future-go-model")
+        .unwrap();
+    for protocol in ["chat_completions", "responses", "messages"] {
+        assert_eq!(future["protocols"][protocol]["override"], "force_off");
+        assert_eq!(future["protocols"][protocol]["enabled"], false);
+    }
+    let (status, repeat) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path(),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repeat}");
+    let repeated_opencode = repeat["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"] == OPENCODE_PROVIDER_ID)
+        .unwrap();
+    assert_eq!(repeated_opencode["catalog"], opencode["catalog"]);
+    assert_eq!(repeated_opencode["models"], opencode["models"]);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn zen_static_protocol_reset_restores_exact_snapshot_pairs_and_defaults_other_catalog_pairs_off()
+ {
+    let harness = start_loopback("zen-static-protocol-reset").await;
+    let scope = ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID);
+    let models = vec!["hy3-free".to_string(), "future-free".to_string()];
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &models,
+            Some(now),
+            "official_zen",
+            "https://example.test/zen",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    let stale = json!({"expectedRevision": harness.state.settings_revision().saturating_sub(1), "processGeneration": harness.state.process_generation()});
+    let (status, stale_body) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path_for(OPENCODE_ZEN_FREE_PROVIDER_ID),
+        &stale,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale_body}");
+    let (status, reset) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path_for(OPENCODE_ZEN_FREE_PROVIDER_ID),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reset}");
+    let zen = reset["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"] == OPENCODE_ZEN_FREE_PROVIDER_ID)
+        .unwrap();
+    assert_eq!(zen["staticProtocolSnapshotDate"], "2026-08-27");
+    let hy3 = zen["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "hy3-free")
+        .unwrap();
+    assert_eq!(hy3["protocols"]["chat_completions"]["override"], "auto");
+    assert_eq!(hy3["protocols"]["chat_completions"]["enabled"], true);
+    let future = zen["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "future-free")
+        .unwrap();
+    for protocol in ["chat_completions", "responses", "messages"] {
+        assert_eq!(future["protocols"][protocol]["override"], "force_off");
+    }
+    harness.stop();
+}
+
+#[tokio::test]
+async fn goat_static_protocol_reset_defaults_unusable_and_future_channels_off_but_allows_manual_override()
+ {
+    let harness = start_loopback("goat-static-protocol-reset").await;
+    let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let models = vec![
+        "claude-fable-5".to_string(),
+        "stealth/ox-alpha".to_string(),
+        "future-goat-model".to_string(),
+    ];
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &scope,
+            &models,
+            Some(now),
+            "command_code_get_models",
+            "https://example.test/goat",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    let (status, reset) = send_json(
+        &harness,
+        Method::POST,
+        &static_reset_path_for(COMMAND_CODE_PROVIDER_ID),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reset}");
+    let goat = reset["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"] == COMMAND_CODE_PROVIDER_ID)
+        .unwrap();
+    assert_eq!(goat["staticProtocolSnapshotDate"], "2026-08-27");
+    let fable = goat["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "claude-fable-5")
+        .unwrap();
+    assert_eq!(fable["protocols"]["messages"]["override"], "force_off");
+    assert_eq!(fable["protocols"]["messages"]["available"], false);
+    assert_eq!(fable["protocols"]["messages"]["enabled"], false);
+    for model_id in ["stealth/ox-alpha", "future-goat-model"] {
+        let model = goat["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["modelId"] == model_id)
+            .unwrap();
+        assert_eq!(
+            model["protocols"]["chat_completions"]["override"],
+            "force_off"
+        );
+        assert_eq!(model["protocols"]["chat_completions"]["enabled"], false);
+    }
+    let (status, overridden) = send_json(&harness, Method::PUT, "/provider-contracts/provider/command-code/model-protocol-overrides", &cas(&harness, json!({"overrides":[{"modelId":"future-goat-model","protocol":"chat_completions","state":"force_on"}]}))).await;
+    assert_eq!(status, StatusCode::OK, "{overridden}");
+    let goat = overridden["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["providerId"] == COMMAND_CODE_PROVIDER_ID)
+        .unwrap();
+    let future = goat["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["modelId"] == "future-goat-model")
+        .unwrap();
+    assert_eq!(future["protocols"]["chat_completions"]["enabled"], true);
     harness.stop();
 }
 
@@ -481,22 +813,6 @@ async fn protocol_probes_zero_call_gates_do_not_touch_upstream() {
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{goat}");
     assert_v3_error(&goat, ERROR_NOT_IMPLEMENTED);
 
-    let (status, missing_account) = send_json(
-        &harness,
-        Method::POST,
-        &probe_path(OPENCODE_PROVIDER_ID),
-        &cas(
-            &harness,
-            json!({
-                "modelId": "grok-4.5",
-                "protocols": ["responses"]
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing_account}");
-    assert_v3_error(&missing_account, ERROR_INVALID_REQUEST);
-
     let (status, unknown_provider) = send_json(
         &harness,
         Method::POST,
@@ -514,23 +830,6 @@ async fn protocol_probes_zero_call_gates_do_not_touch_upstream() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{unknown_provider}");
     assert_v3_error(&unknown_provider, ERROR_NOT_FOUND);
 
-    let (status, unknown_account) = send_json(
-        &harness,
-        Method::POST,
-        &probe_path(OPENCODE_PROVIDER_ID),
-        &cas(
-            &harness,
-            json!({
-                "accountId": "missing-account",
-                "modelId": "grok-4.5",
-                "protocols": ["responses"]
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{unknown_account}");
-    assert_v3_error(&unknown_account, ERROR_NOT_FOUND);
-
     assert_eq!(origin.call_count(), 0);
     assert_eq!(harness.state.settings_revision(), before);
     harness.stop();
@@ -541,7 +840,7 @@ async fn go_protocol_probes_send_one_admin_post_per_protocol_with_correct_path_a
     let harness = start_loopback("probes-go-n").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
-    let account_id = create_go_account(&harness).await;
+    create_go_account(&harness).await;
     let before = harness.state.settings_revision();
 
     let (status, body) = send_json(
@@ -551,7 +850,6 @@ async fn go_protocol_probes_send_one_admin_post_per_protocol_with_correct_path_a
         &cas(
             &harness,
             json!({
-                "accountId": account_id,
                 "modelId": "grok-4.5",
                 "protocols": ["chat_completions", "responses", "messages"]
             }),
@@ -560,7 +858,7 @@ async fn go_protocol_probes_send_one_admin_post_per_protocol_with_correct_path_a
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let parsed = parse_probe(&body);
-    assert_eq!(parsed.account_id, account_id);
+    assert_eq!(parsed.account_id, None);
     assert_eq!(parsed.provider_id, OPENCODE_PROVIDER_ID);
     assert_eq!(parsed.model_id, "grok-4.5");
     assert_eq!(parsed.results.len(), 3);
@@ -598,31 +896,135 @@ async fn go_protocol_probes_send_one_admin_post_per_protocol_with_correct_path_a
 }
 
 #[tokio::test]
-async fn zen_protocol_probe_omits_auth_and_rejects_the_wrong_singleton_id() {
-    let harness = start_loopback("probes-zen").await;
-    let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
-    point_upstream(&harness, &format!("{}/zen/go", origin.url));
-    let before = harness.state.settings_revision();
+async fn protocol_probe_falls_back_to_the_next_eligible_account() {
+    const BAD_KEY: &str = "sk-probe-first-unavailable";
+    let harness = start_loopback("probes-account-fallback").await;
+    let origin = start_fallback_probe_origin(BAD_KEY).await;
+    point_upstream(&harness, &origin.url);
+    let first_id = create_go_account_with(&harness, "First unavailable", BAD_KEY).await;
+    let second_id = create_go_account_with(&harness, "Second available", GO_KEY).await;
 
-    let (status, wrong) = send_json(
+    let (status, body) = send_json(
         &harness,
         Method::POST,
-        &probe_path(OPENCODE_ZEN_FREE_PROVIDER_ID),
+        &probe_path(OPENCODE_PROVIDER_ID),
         &cas(
             &harness,
             json!({
-                "accountId": "not-zen",
-                "modelId": "hy3-free",
-                "protocols": ["chat_completions"]
+                "modelId": "grok-4.5",
+                "protocols": ["responses"]
             }),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{wrong}");
-    assert_v3_error(&wrong, ERROR_INVALID_REQUEST);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed = parse_probe(&body);
+    assert_eq!(parsed.account_id, None);
+    assert!(parsed.results[0].success, "{body}");
+    assert_eq!(parsed.results[0].error, None);
+
+    let calls = origin.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(
+        calls[0].authorization.as_deref(),
+        Some("Bearer sk-probe-first-unavailable")
+    );
+    assert_eq!(
+        calls[1].authorization.as_deref(),
+        Some("Bearer sk-probe-secret-key")
+    );
+
+    let db = harness.state.db.lock();
+    let mut logs: Vec<_> = db
+        .list_forward_logs(100)
+        .unwrap()
+        .into_iter()
+        .filter(|row| {
+            row.diagnostic
+                .as_ref()
+                .and_then(|value| value["event"].as_str())
+                == Some("protocol_probe")
+        })
+        .collect();
+    let runtime_logs = db.list_gateway_logs(100).unwrap();
+    drop(db);
+    logs.sort_by_key(|row| row.attempt);
+    assert_eq!(logs.len(), 2, "{logs:?}");
+    assert_eq!(logs[0].account_id, first_id);
+    assert_eq!(logs[0].status, "error");
+    assert_eq!(logs[0].http_status, Some(401));
+    assert_eq!(logs[1].account_id, second_id);
+    assert_eq!(logs[1].status, "success");
+    assert_eq!(logs[1].http_status, Some(200));
+    assert_eq!(logs[0].request_id, logs[1].request_id);
+    assert_eq!(logs[0].attempt, Some(1));
+    assert_eq!(logs[1].attempt, Some(2));
+    assert!(
+        runtime_logs
+            .iter()
+            .all(|row| row.category != "protocol_probe")
+    );
+
+    let stored = harness
+        .state
+        .provider_contracts()
+        .scope(&go_scope())
+        .and_then(|scope| scope.model("grok-4.5").cloned())
+        .unwrap();
+    assert_eq!(
+        stored.protocols.get("responses").unwrap().r#override,
+        ProtocolOverrideState::ForceOn
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn protocol_probe_without_eligible_accounts_is_a_zero_call_rejection() {
+    let harness = start_loopback("probes-no-eligible-account").await;
+    let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
+    point_upstream(&harness, &origin.url);
+    let before = harness.state.settings_revision();
+
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "modelId": "grok-4.5",
+                "protocols": ["responses"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_v3_error(&body, ERROR_INVALID_REQUEST);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("no eligible provider accounts")
+    );
     assert_eq!(origin.call_count(), 0);
     assert_eq!(harness.state.settings_revision(), before);
+    assert!(
+        harness
+            .state
+            .db
+            .lock()
+            .list_forward_logs(100)
+            .unwrap()
+            .is_empty()
+    );
+    harness.stop();
+}
 
+#[tokio::test]
+async fn zen_protocol_probe_omits_auth_and_selects_the_singleton_internally() {
+    let harness = start_loopback("probes-zen").await;
+    let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
+    point_upstream(&harness, &format!("{}/zen/go", origin.url));
     let (status, body) = send_json(
         &harness,
         Method::POST,
@@ -638,7 +1040,7 @@ async fn zen_protocol_probe_omits_auth_and_rejects_the_wrong_singleton_id() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let parsed = parse_probe(&body);
-    assert_eq!(parsed.account_id, ZEN_FREE_ACCOUNT_ID);
+    assert_eq!(parsed.account_id, None);
     assert_eq!(parsed.provider_id, OPENCODE_ZEN_FREE_PROVIDER_ID);
     assert!(parsed.results[0].success);
     assert_eq!(origin.call_count(), 1);
@@ -651,7 +1053,7 @@ async fn zen_protocol_probe_omits_auth_and_rejects_the_wrong_singleton_id() {
 }
 
 #[tokio::test]
-async fn unknown_model_ceiling_skip_returns_200_without_bump_or_upstream() {
+async fn model_outside_provider_catalog_is_rejected_without_bump_or_upstream() {
     let harness = start_loopback("probes-ceiling").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     point_upstream(&harness, &origin.url);
@@ -672,19 +1074,223 @@ async fn unknown_model_ceiling_skip_returns_200_without_bump_or_upstream() {
         ),
     )
     .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], ERROR_INVALID_REQUEST);
+    assert!(body.to_string().contains("provider catalog"), "{body}");
+    assert_eq!(harness.state.settings_revision(), before);
+    assert_eq!(origin.call_count(), 0);
+    harness.stop();
+}
+
+#[tokio::test]
+async fn fetched_catalog_model_probes_all_protocols_and_writes_request_logs() {
+    let harness = start_loopback("probes-fetched-model").await;
+    let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
+    point_upstream(&harness, &origin.url);
+    let account_id = create_go_account(&harness).await;
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &go_scope(),
+            &["future-go-model".to_string()],
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "http://127.0.0.1/provider/v1/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "accountId": account_id,
+                "modelId": "future-go-model",
+                "protocols": ["chat_completions", "responses", "messages"]
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let parsed = parse_probe(&body);
-    assert_eq!(parsed.results.len(), 2);
+    assert_eq!(parsed.results.len(), 3);
     assert!(
         parsed
             .results
             .iter()
-            .all(|result| result.skipped && !result.success)
+            .all(|result| result.success && !result.skipped),
+        "{body}"
     );
-    assert!(parsed.contract.is_none());
-    assert_eq!(parsed.revision, before);
-    assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(origin.call_count(), 0);
+    assert_eq!(origin.call_count(), 3);
+
+    let db = harness.state.db.lock();
+    let logs: Vec<_> = db
+        .list_forward_logs(100)
+        .unwrap()
+        .into_iter()
+        .filter(|row| {
+            row.diagnostic
+                .as_ref()
+                .and_then(|value| value["event"].as_str())
+                == Some("protocol_probe")
+        })
+        .collect();
+    let runtime_logs = db.list_gateway_logs(100).unwrap();
+    drop(db);
+    assert_eq!(logs.len(), 3, "{logs:?}");
+    assert!(logs.iter().all(|row| {
+        row.model == "future-go-model"
+            && row.account_id == account_id
+            && row.provider_id.as_deref() == Some(OPENCODE_PROVIDER_ID)
+            && row.status == "success"
+            && row.http_status == Some(200)
+            && row.cost_state == "not_applicable"
+            && row.prompt_tokens == 0
+            && row.completion_tokens == 0
+            && row.client_key_id.is_none()
+    }));
+    let request_ids: std::collections::HashSet<_> =
+        logs.iter().map(|row| row.request_id.as_deref()).collect();
+    assert_eq!(
+        request_ids.len(),
+        1,
+        "one request id groups the probe batch"
+    );
+    assert!(request_ids.iter().next().unwrap().is_some());
+    let mut attempts: Vec<_> = logs.iter().filter_map(|row| row.attempt).collect();
+    attempts.sort_unstable();
+    assert_eq!(attempts, vec![1, 2, 3]);
+    assert!(
+        runtime_logs
+            .iter()
+            .all(|row| row.category != "protocol_probe"),
+        "request-related probes must not enter runtime logs: {runtime_logs:?}"
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn removed_and_zen_owned_go_catalog_models_cannot_be_probed() {
+    let harness = start_loopback("probes-current-catalog-only").await;
+    let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
+    point_upstream(&harness, &origin.url);
+    let account_id = create_go_account(&harness).await;
+    let now = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &go_scope(),
+            &["future-go-model".to_string()],
+            Some(now),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "http://127.0.0.1/provider/v1/models",
+            now,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "accountId": account_id,
+                "modelId": "future-go-model",
+                "protocols": ["chat_completions"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(origin.call_count(), 1);
+
+    let refreshed = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &go_scope(),
+            &["glm-5.3".to_string()],
+            Some(refreshed),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "http://127.0.0.1/provider/v1/models",
+            refreshed,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    assert!(
+        harness
+            .state
+            .db
+            .lock()
+            .load_model_protocol(
+                &go_scope(),
+                "future-go-model",
+                UpstreamProtocolKind::ChatCompletions,
+            )
+            .unwrap()
+            .is_some(),
+        "historical evidence remains persisted for this admission regression"
+    );
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "accountId": account_id,
+                "modelId": "future-go-model",
+                "protocols": ["chat_completions"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(origin.call_count(), 1);
+
+    let legacy = chrono::Utc::now();
+    harness
+        .state
+        .db
+        .lock()
+        .set_contract_catalog(
+            &go_scope(),
+            &["hy3-free".to_string()],
+            Some(legacy),
+            CATALOG_SOURCE_OPENCODE_MODELS,
+            "http://127.0.0.1/provider/v1/models",
+            legacy,
+        )
+        .unwrap();
+    harness.state.reload_provider_contracts().unwrap();
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "accountId": account_id,
+                "modelId": "hy3-free",
+                "protocols": ["chat_completions"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(origin.call_count(), 1);
     harness.stop();
 }
 
@@ -732,6 +1338,140 @@ async fn transport_failure_returns_200_persists_observation_and_redacts_secrets(
     assert!(!chat.available);
     assert_eq!(chat.last_probe_result, Some(ProbeResultKind::Failure));
     assert_eq!(origin.call_count(), 1);
+    let db = harness.state.db.lock();
+    let log = db
+        .list_forward_logs(100)
+        .unwrap()
+        .into_iter()
+        .find(|row| {
+            row.diagnostic
+                .as_ref()
+                .and_then(|value| value["event"].as_str())
+                == Some("protocol_probe")
+        })
+        .expect("failed probe writes a request log");
+    let runtime_logs = db.list_gateway_logs(100).unwrap();
+    drop(db);
+    assert_eq!(log.status, "error");
+    assert_eq!(log.http_status, Some(500));
+    assert_eq!(log.error_stage.as_deref(), Some("protocol_probe"));
+    assert!(
+        log.error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("upstream returned 500"))
+    );
+    assert_secret_free(&serde_json::to_value(&log).unwrap(), &[GO_KEY]);
+    assert!(
+        runtime_logs
+            .iter()
+            .all(|row| row.category != "protocol_probe"),
+        "failed request-related probes must not enter runtime logs: {runtime_logs:?}"
+    );
+    harness.stop();
+}
+
+#[tokio::test]
+async fn probe_success_pins_force_on_while_failure_never_pins_force_off() {
+    let harness = start_loopback("probes-write-overrides").await;
+    let ok_origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
+    point_upstream(&harness, &ok_origin.url);
+    let account_id = create_go_account(&harness).await;
+
+    // Every protocol the probe ran to success pins force_on.
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "accountId": account_id,
+                "modelId": "grok-4.5",
+                "protocols": ["chat_completions", "responses"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stored = harness
+        .state
+        .provider_contracts()
+        .scope(&go_scope())
+        .and_then(|scope| scope.model("grok-4.5").cloned())
+        .unwrap();
+    for protocol in ["chat_completions", "responses"] {
+        let row = stored.protocols.get(protocol).unwrap();
+        assert_eq!(row.r#override, ProtocolOverrideState::ForceOn, "{protocol}");
+        assert!(row.available, "{protocol}");
+        assert!(row.enabled, "{protocol}");
+    }
+
+    // A failed account-level attempt records evidence but never pins a shared
+    // provider protocol force_off.
+    let fail_origin = start_probe_origin(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        r#"{"error":"down"}"#,
+        Duration::ZERO,
+    )
+    .await;
+    point_upstream(&harness, &fail_origin.url);
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &probe_path(OPENCODE_PROVIDER_ID),
+        &cas(
+            &harness,
+            json!({
+                "accountId": account_id,
+                "modelId": "grok-4.5",
+                "protocols": ["messages"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed = parse_probe(&body);
+    assert!(!parsed.results[0].success);
+    assert!(!parsed.results[0].skipped);
+    let stored = harness
+        .state
+        .provider_contracts()
+        .scope(&go_scope())
+        .and_then(|scope| scope.model("grok-4.5").cloned())
+        .unwrap();
+    let messages = stored.protocols.get("messages").unwrap();
+    assert_eq!(messages.r#override, ProtocolOverrideState::Auto);
+    assert!(!messages.enabled);
+    assert_eq!(
+        stored.protocols.get("chat_completions").unwrap().r#override,
+        ProtocolOverrideState::ForceOn
+    );
+
+    // The overrides are persisted rows, not just runtime state.
+    let conn = open_sqlite(&harness);
+    let mut statement = conn
+        .prepare(
+            "SELECT protocol, state FROM provider_contract_model_protocol_overrides
+             WHERE scope_kind = 'provider' AND scope_id = ?1 AND model_id = 'grok-4.5'
+             ORDER BY protocol",
+        )
+        .unwrap();
+    let rows: Vec<(String, String)> = statement
+        .query_map([OPENCODE_PROVIDER_ID], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("chat_completions".to_string(), "force_on".to_string()),
+            ("responses".to_string(), "force_on".to_string()),
+        ]
+    );
+    drop(statement);
+    drop(conn);
     harness.stop();
 }
 
@@ -833,13 +1573,12 @@ async fn protocol_probes_use_the_default_proxy_leg_not_the_model_exception() {
 }
 
 #[tokio::test]
-async fn cas_change_during_outbound_still_persists_and_bumps_once() {
+async fn cas_change_during_outbound_rejects_probe_commit() {
     let harness = start_loopback("probes-cas-during").await;
     let origin = start_probe_origin(StatusCode::OK, SUCCESS_BODY, Duration::from_millis(400)).await;
     point_upstream(&harness, &origin.url);
     let account_id = create_go_account(&harness).await;
     let before = harness.state.settings_revision();
-    let generation = harness.state.process_generation();
     let payload = cas(
         &harness,
         json!({
@@ -860,13 +1599,30 @@ async fn cas_change_during_outbound_still_persists_and_bumps_once() {
     let mid = harness.state.bump_settings_revision();
     assert_eq!(mid, before + 1);
     let (status, body) = pending.await.unwrap();
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let parsed = parse_probe(&body);
-    assert!(parsed.results[0].success);
-    assert_eq!(parsed.revision, mid + 1);
-    assert_eq!(parsed.process_generation, generation);
-    assert_eq!(harness.state.settings_revision(), mid + 1);
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], ERROR_REVISION_CONFLICT);
+    assert_eq!(harness.state.settings_revision(), mid);
+    assert_eq!(go_scope_revision(&harness), None);
     assert_eq!(origin.call_count(), 1);
+    let db = harness.state.db.lock();
+    let request_logs = db.list_forward_logs(100).unwrap();
+    let runtime_logs = db.list_gateway_logs(100).unwrap();
+    drop(db);
+    assert!(
+        request_logs.iter().any(|row| {
+            row.diagnostic
+                .as_ref()
+                .and_then(|value| value["event"].as_str())
+                == Some("protocol_probe")
+        }),
+        "the real upstream attempt remains visible even when its stale result is not committed"
+    );
+    assert!(
+        runtime_logs
+            .iter()
+            .all(|row| row.category != "protocol_probe"),
+        "request-related probes must not enter runtime logs: {runtime_logs:?}"
+    );
     harness.stop();
 }
 
@@ -1090,8 +1846,8 @@ async fn v2_duplicate_custom_and_ceiling_probes_coexist() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{ceiling}");
-    assert_eq!(ceiling["results"][0]["skipped"], true);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{ceiling}");
+    assert_eq!(ceiling["code"], ERROR_INVALID_REQUEST);
     assert_eq!(origin.call_count(), 0);
 
     let (status, custom) = send_json(

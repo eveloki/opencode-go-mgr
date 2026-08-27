@@ -1,7 +1,7 @@
 //! HTTP-neutral admin protocol-probe transport and observation orchestration.
 //!
-//! Dashboard V2 and V3 share this module. Callers own HTTP envelopes, CAS,
-//! persistence, and revision bumps. This module never imports dashboard
+//! Dashboard V3 owns the live entrypoint. Callers own HTTP envelopes, CAS,
+//! catalog admission, persistence, and revision bumps. This module never imports dashboard
 //! surfaces, never calls `forward_once` / the executor, and never selects a
 //! model-exception proxy leg.
 
@@ -17,9 +17,7 @@ use crate::provider_contracts::{self, ContractScope, PersistedModelProtocol, pro
 use crate::state::CoreState;
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
-
-pub(crate) const CEILING_SKIP_MESSAGE: &str =
-    "probe combination is outside the adapter safety ceiling";
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProtocolProbeOutcome {
@@ -28,19 +26,29 @@ pub(crate) struct ProtocolProbeOutcome {
     pub skipped: bool,
     pub error: Option<String>,
     pub observation: Option<PersistedModelProtocol>,
+    pub attempts: Vec<ProtocolProbeAttempt>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProtocolProbeAttempt {
+    pub account_id: String,
+    pub protocol: UpstreamProtocolKind,
+    pub success: bool,
+    pub http_status: Option<i32>,
+    pub error: Option<String>,
+    pub duration_ms: i64,
 }
 
 #[derive(Debug)]
 pub(crate) enum ProtocolProbeRunError {
     Evidence(String),
     Apply(String),
-    Persist(String),
 }
 
 pub(crate) struct ProtocolProbeContext<'a> {
     pub state: &'a CoreState,
     pub config: &'a AppConfig,
-    pub account: &'a Account,
+    pub accounts: &'a [Account],
     pub adapter: ProviderAdapterKind,
     pub model_id: &'a str,
     pub custom_route: Option<CustomRouteSpec>,
@@ -59,35 +67,43 @@ pub(crate) fn require_unique_probe_protocols(
     Ok(())
 }
 
-pub(crate) async fn run_protocol_probes<L, P>(
+pub(crate) async fn run_protocol_probes<L>(
     ctx: &ProtocolProbeContext<'_>,
     scope: &ContractScope,
     protocols: &[UpstreamProtocolKind],
-    declared: &[(String, UpstreamProtocolKind)],
     mut load_existing: L,
-    mut persist: P,
 ) -> Result<Vec<ProtocolProbeOutcome>, ProtocolProbeRunError>
 where
     L: FnMut(UpstreamProtocolKind) -> Result<Option<PersistedModelProtocol>, String>,
-    P: FnMut(&PersistedModelProtocol) -> Result<(), String>,
 {
     let mut results = Vec::with_capacity(protocols.len());
     for protocol in protocols {
-        if !provider_contracts::probe_may_add(ctx.adapter, ctx.model_id, *protocol, declared) {
-            results.push(ProtocolProbeOutcome {
-                protocol: *protocol,
-                success: false,
-                skipped: true,
-                error: Some(CEILING_SKIP_MESSAGE.to_string()),
-                observation: None,
-            });
-            continue;
-        }
         let existing = load_existing(*protocol).map_err(ProtocolProbeRunError::Evidence)?;
-        let (success, error) = match execute_protocol_probe(ctx, *protocol).await {
-            Ok(()) => (true, None),
-            Err(message) => (false, Some(message)),
-        };
+        let mut attempts = Vec::with_capacity(ctx.accounts.len());
+        let mut success = false;
+        let mut error = None;
+        for account in ctx.accounts {
+            let attempt_started = Instant::now();
+            let (attempt_success, attempt_status, attempt_error) =
+                match execute_protocol_probe(ctx, account, *protocol).await {
+                    Ok(status) => (true, Some(i32::from(status)), None),
+                    Err((status, message)) => (false, status.map(i32::from), Some(message)),
+                };
+            attempts.push(ProtocolProbeAttempt {
+                account_id: account.id.clone(),
+                protocol: *protocol,
+                success: attempt_success,
+                http_status: attempt_status,
+                error: attempt_error.clone(),
+                duration_ms: attempt_started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            });
+            error = attempt_error;
+            if attempt_success {
+                success = true;
+                error = None;
+                break;
+            }
+        }
         let persisted = provider_contracts::apply_probe_observation(
             existing.as_ref(),
             scope.clone(),
@@ -99,13 +115,13 @@ where
             true,
         )
         .map_err(ProtocolProbeRunError::Apply)?;
-        persist(&persisted).map_err(ProtocolProbeRunError::Persist)?;
         results.push(ProtocolProbeOutcome {
             protocol: *protocol,
             success,
             skipped: false,
             error,
             observation: Some(persisted),
+            attempts,
         });
     }
     Ok(results)
@@ -113,11 +129,12 @@ where
 
 pub(crate) async fn execute_protocol_probe(
     ctx: &ProtocolProbeContext<'_>,
+    account: &Account,
     protocol: UpstreamProtocolKind,
-) -> Result<(), String> {
+) -> Result<u16, (Option<u16>, String)> {
     let format = protocol_to_api(protocol);
     let body = crate::custom::minimal_verification_body(protocol, ctx.model_id)
-        .map_err(|error| error.message)?;
+        .map_err(|error| (None, error.message))?;
     let plan = RequestPlan {
         client: format,
         upstream: format,
@@ -143,19 +160,20 @@ pub(crate) async fn execute_protocol_probe(
         response_tools: Vec::new(),
     };
     if ctx.adapter == ProviderAdapterKind::ConfigurableHttp && plan.custom_route.is_none() {
-        return Err(
+        return Err((
+            None,
             "Custom API accounts require a persisted base URL, protocol set, and auth scheme"
                 .to_string(),
-        );
+        ));
     }
-    let route = resolve_probe_route(ctx.account, ctx.config, &plan)?;
+    let route = resolve_probe_route(account, ctx.config, &plan).map_err(|error| (None, error))?;
     let secret = if matches!(route.auth, UpstreamAuth::None) {
         None
     } else {
         Some(
             ctx.state
-                .decrypt_key(&ctx.account.key_cipher)
-                .map_err(|error| error.to_string())?,
+                .decrypt_key(&account.key_cipher)
+                .map_err(|error| (None, error.to_string()))?,
         )
     };
     let spec = if route.follow_redirects {
@@ -163,12 +181,12 @@ pub(crate) async fn execute_protocol_probe(
     } else {
         HttpInferenceTransportSpec::no_redirects()
     };
-    let transport =
-        HttpInferenceTransport::build(ctx.config, spec).map_err(|error| error.to_string())?;
+    let transport = HttpInferenceTransport::build(ctx.config, spec)
+        .map_err(|error| (None, error.to_string()))?;
     let url = HttpInferenceTransport::join_endpoint(&route.base_url, &route.path)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| (None, error.to_string()))?;
     let extra = json_content_headers(protocol == UpstreamProtocolKind::Messages)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| (None, error.to_string()))?;
     let timeout = std::time::Duration::from_secs(ctx.config.non_stream_timeout_secs.clamp(5, 30));
     let auth = match (route.auth, secret.as_deref()) {
         (UpstreamAuth::None, _) => None,
@@ -183,7 +201,10 @@ pub(crate) async fn execute_protocol_probe(
             Some((UpstreamAuthScheme::Bearer, key))
         }
         (_, None) => {
-            return Err("account is missing a decrypted credential for this probe".to_string());
+            return Err((
+                None,
+                "account is missing a decrypted credential for this probe".to_string(),
+            ));
         }
     };
     let response = transport
@@ -197,30 +218,60 @@ pub(crate) async fn execute_protocol_probe(
         })
         .await
         .map_err(|error| {
-            provider_contracts::sanitize_probe_error(&error.to_string(), secret.as_deref())
+            (
+                None,
+                provider_contracts::sanitize_probe_error(&error.to_string(), secret.as_deref()),
+            )
         })?;
     let status = response.status();
+    let status_code = status.as_u16();
     let bytes = HttpInferenceTransport::read_body_limited(
         response,
         crate::custom::MAX_CUSTOM_VERIFICATION_BODY_BYTES,
     )
     .await
     .map_err(|error| {
-        provider_contracts::sanitize_probe_error(&error.to_string(), secret.as_deref())
+        (
+            Some(status_code),
+            provider_contracts::sanitize_probe_error(&error.to_string(), secret.as_deref()),
+        )
     })?;
     if !status.is_success() {
         let raw = String::from_utf8_lossy(&bytes);
-        return Err(provider_contracts::sanitize_probe_error(
-            &format!("upstream returned {} {raw}", status.as_u16()),
-            secret.as_deref(),
+        return Err((
+            Some(status_code),
+            provider_contracts::sanitize_probe_error(
+                &format!("upstream returned {status_code} {raw}"),
+                secret.as_deref(),
+            ),
         ));
     }
-    let parsed: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "protocol probe did not return a JSON object".to_string())?;
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        (
+            Some(status_code),
+            "protocol probe did not return a JSON object".to_string(),
+        )
+    })?;
     if !parsed.is_object() {
-        return Err("protocol probe did not return a JSON object".to_string());
+        return Err((
+            Some(status_code),
+            "protocol probe did not return a JSON object".to_string(),
+        ));
     }
-    Ok(())
+    if let Some(error) = non_null_probe_error(&parsed) {
+        return Err((
+            Some(status_code),
+            provider_contracts::sanitize_probe_error(
+                &format!("protocol probe returned an error object: {error}"),
+                secret.as_deref(),
+            ),
+        ));
+    }
+    Ok(status_code)
+}
+
+fn non_null_probe_error(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    value.get("error").filter(|error| !error.is_null())
 }
 
 #[cfg(test)]
@@ -241,5 +292,19 @@ mod tests {
         ])
         .expect_err("duplicates must fail locally");
         assert!(error.contains("duplicate"));
+    }
+
+    #[test]
+    fn null_error_field_is_not_a_probe_failure() {
+        let success = serde_json::json!({ "id": "response-1", "error": null });
+        assert!(non_null_probe_error(&success).is_none());
+
+        let failure = serde_json::json!({ "error": { "message": "model unavailable" } });
+        assert_eq!(
+            non_null_probe_error(&failure)
+                .and_then(|error| error.get("message"))
+                .and_then(serde_json::Value::as_str),
+            Some("model unavailable")
+        );
     }
 }

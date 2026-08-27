@@ -14,9 +14,10 @@ use crate::kernel::protocol::{ApiFormat, is_known_model, supported_model_protoco
 use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::Account;
 use crate::provider::{
-    BUILTIN_PLANS, COMMAND_CODE_GOAT_BASE_URL, OPENCODE_CONSTRUCTABLE_PROTOCOLS,
-    PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES, ProviderAdapterKind, ProviderRegistry,
-    StructuralProbeCeiling, UpstreamProtocolKind,
+    BUILTIN_PLANS, COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
+    OPENCODE_CONSTRUCTABLE_PROTOCOLS, PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
+    ProviderAdapterKind, ProviderRegistry, StructuralProbeCeiling, UpstreamProtocolKind,
+    command_code_goat_includes_model,
 };
 use crate::redaction::sanitize_upstream_error_value_with_known_secret;
 use chrono::{DateTime, Utc};
@@ -38,6 +39,21 @@ pub const NO_ENABLED_UPSTREAM_PROTOCOL: &str =
     "no enabled upstream protocol is available for this model";
 
 const MAX_PROBE_ERROR_CHARS: usize = 500;
+
+pub fn static_protocol_snapshot_date(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        OPENCODE_PROVIDER_ID => {
+            Some(crate::kernel::protocol::OPENCODE_GO_STATIC_PROTOCOL_SNAPSHOT_DATE)
+        }
+        OPENCODE_ZEN_FREE_PROVIDER_ID => {
+            Some(crate::kernel::protocol::ZEN_FREE_STATIC_PROTOCOL_SNAPSHOT_DATE)
+        }
+        COMMAND_CODE_PROVIDER_ID => {
+            Some(crate::kernel::protocol::COMMAND_CODE_GOAT_STATIC_PROTOCOL_SNAPSHOT_DATE)
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -252,8 +268,8 @@ pub enum ProtocolOverrideState {
     /// Follow persisted evidence and adapter safety ceiling.
     #[default]
     Auto,
-    /// Enable the protocol if the adapter safety ceiling allows it,
-    /// even when no probe evidence exists yet.
+    /// Enable the protocol unconditionally (declaration-is-truth), even
+    /// beyond static support, probe evidence, and the adapter safety ceiling.
     ForceOn,
     /// Disable the protocol regardless of evidence.
     ForceOff,
@@ -588,40 +604,28 @@ pub fn static_verified_protocols(
     model_id: &str,
     declared: &[(String, UpstreamProtocolKind)],
 ) -> Vec<UpstreamProtocolKind> {
-    match adapter {
-        ProviderAdapterKind::OpenCodeGo => opencode_supported(model_id).unwrap_or_default(),
-        ProviderAdapterKind::ZenFree => {
-            if let Some(supported) = opencode_supported(model_id) {
-                supported.to_vec()
-            } else if crate::kernel::ids::is_free_model(model_id) {
-                vec![UpstreamProtocolKind::ChatCompletions]
-            } else {
-                Vec::new()
-            }
-        }
-        ProviderAdapterKind::CommandCodeGoat => {
-            ocg_domain::protocol::command_code_supported_formats(model_id)
-                .iter()
-                .copied()
-                .filter_map(protocol_from_api)
-                .collect()
-        }
-        ProviderAdapterKind::ConfigurableHttp => declared
+    if adapter == ProviderAdapterKind::ConfigurableHttp {
+        return declared
             .iter()
             .filter(|(id, _)| custom_model_id_matches(id, model_id))
             .map(|(_, protocol)| *protocol)
-            .collect(),
+            .collect();
     }
-}
-
-fn opencode_supported(model_id: &str) -> Option<Vec<UpstreamProtocolKind>> {
-    opencode_profile(model_id).map(|(_, supported)| {
-        supported
-            .iter()
-            .copied()
-            .filter_map(protocol_from_api)
-            .collect()
-    })
+    match adapter {
+        ProviderAdapterKind::OpenCodeGo => {
+            crate::kernel::protocol::snapshot_protocols(OPENCODE_PROVIDER_ID, model_id)
+        }
+        ProviderAdapterKind::ZenFree => {
+            crate::kernel::protocol::snapshot_protocols(OPENCODE_ZEN_FREE_PROVIDER_ID, model_id)
+        }
+        ProviderAdapterKind::CommandCodeGoat => {
+            crate::kernel::protocol::snapshot_protocols(COMMAND_CODE_PROVIDER_ID, model_id)
+        }
+        ProviderAdapterKind::ConfigurableHttp => unreachable!("handled above"),
+    }
+    .into_iter()
+    .filter_map(protocol_from_api)
+    .collect()
 }
 
 fn opencode_profile(model_id: &str) -> Option<(ApiFormat, &'static [ApiFormat])> {
@@ -837,23 +841,36 @@ fn merge_provider_scope(
             )
         }
         ProviderAdapterKind::ZenFree => {
+            let has_persisted_catalog = persisted.is_some_and(|row| !row.catalog_models.is_empty());
             let models = persisted
                 .filter(|row| !row.catalog_models.is_empty())
                 .map(|row| row.catalog_models.clone())
                 .unwrap_or_else(|| zen_catalog.models.clone());
             (
                 EffectiveCatalog {
-                    source: persisted
-                        .map(|row| row.catalog_source.clone())
-                        .filter(|source| !source.is_empty())
-                        .unwrap_or_else(|| CATALOG_SOURCE_OFFICIAL_ZEN.to_string()),
-                    source_url: persisted
-                        .map(|row| row.catalog_source_url.clone())
-                        .filter(|url| !url.is_empty())
-                        .unwrap_or_else(|| zen_catalog.source_url.clone()),
-                    refreshed_at: persisted
-                        .and_then(|row| row.catalog_refreshed_at)
-                        .or(zen_catalog.refreshed_at),
+                    source: if has_persisted_catalog {
+                        persisted
+                            .map(|row| row.catalog_source.clone())
+                            .filter(|source| !source.is_empty())
+                            .unwrap_or_else(|| CATALOG_SOURCE_OFFICIAL_ZEN.to_string())
+                    } else {
+                        CATALOG_SOURCE_STATIC.to_string()
+                    },
+                    source_url: if has_persisted_catalog {
+                        persisted
+                            .map(|row| row.catalog_source_url.clone())
+                            .filter(|url| !url.is_empty())
+                            .unwrap_or_else(|| zen_catalog.source_url.clone())
+                    } else {
+                        String::new()
+                    },
+                    refreshed_at: if has_persisted_catalog {
+                        persisted
+                            .and_then(|row| row.catalog_refreshed_at)
+                            .or(zen_catalog.refreshed_at)
+                    } else {
+                        None
+                    },
                     models: models.clone(),
                     refresh_supported: true,
                 },
@@ -862,8 +879,14 @@ fn merge_provider_scope(
         }
         ProviderAdapterKind::CommandCodeGoat => {
             let models: Vec<String> = persisted
+                .filter(|row| !row.catalog_models.is_empty())
                 .map(|row| row.catalog_models.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS
+                        .iter()
+                        .map(|model| (*model).to_string())
+                        .collect()
+                });
             (
                 EffectiveCatalog {
                     source: persisted
@@ -886,28 +909,26 @@ fn merge_provider_scope(
 
     let mut models = BTreeMap::new();
     for model_id in &static_models {
+        let default_source = if adapter == ProviderAdapterKind::CommandCodeGoat
+            && command_code_goat_includes_model(model_id)
+        {
+            ContractEvidenceSource::Preset
+        } else {
+            ContractEvidenceSource::Static
+        };
         models.insert(
             model_id.clone(),
             merge_model_contract(
                 adapter,
                 model_id,
                 &[],
-                ContractEvidenceSource::Static,
+                default_source,
                 evidence,
                 overrides,
                 descriptor.inference.catalog_routable && descriptor.inference.production_inference,
             ),
         );
     }
-    overlay_probe_confirmed_models(
-        &mut models,
-        adapter,
-        &[],
-        evidence,
-        overrides,
-        descriptor.inference.catalog_routable && descriptor.inference.production_inference,
-    );
-
     let mut disabled_reasons = Vec::new();
     if !descriptor.inference.catalog_routable {
         disabled_reasons.push("catalog offering is not routable".to_string());
@@ -944,20 +965,19 @@ fn merge_custom_scope(
         .iter()
         .map(|capability| (capability.model_id.clone(), capability.protocol))
         .collect();
-    let catalog_models = persisted
-        .map(|row| row.catalog_models.clone())
-        .unwrap_or_default();
+    let mut catalog_models = Vec::new();
+    let mut catalog_seen = HashSet::new();
+    for (model_id, _) in &declared {
+        if catalog_seen.insert(model_id.to_ascii_lowercase()) {
+            catalog_models.push(model_id.clone());
+        }
+    }
     let catalog = EffectiveCatalog {
-        source: persisted
-            .map(|row| row.catalog_source.clone())
-            .filter(|source| !source.is_empty())
-            .unwrap_or_else(|| CATALOG_SOURCE_CUSTOM_DISCOVERY.to_string()),
-        source_url: persisted
-            .map(|row| row.catalog_source_url.clone())
-            .unwrap_or_default(),
-        refreshed_at: persisted.and_then(|row| row.catalog_refreshed_at),
+        source: CATALOG_SOURCE_DECLARED.to_string(),
+        source_url: String::new(),
+        refreshed_at: None,
         models: catalog_models,
-        refresh_supported: true,
+        refresh_supported: false,
     };
 
     let mut models = BTreeMap::new();
@@ -1044,8 +1064,20 @@ fn merge_model_contract(
     overrides: &[PersistedModelProtocolOverride],
     adapter_routable: bool,
 ) -> EffectiveModelContract {
+    let default_enabled = adapter != ProviderAdapterKind::CommandCodeGoat
+        || command_code_goat_includes_model(model_id);
     let preferred = preferred_protocol(adapter, model_id, declared);
-    let ceiling = safety_ceiling_protocols(adapter, model_id, declared);
+    let ceiling = if adapter == ProviderAdapterKind::CommandCodeGoat
+        && !model_id.eq_ignore_ascii_case("stealth/ox-alpha")
+    {
+        ocg_domain::protocol::command_code_supported_formats(model_id)
+            .iter()
+            .copied()
+            .filter_map(protocol_from_api)
+            .collect()
+    } else {
+        safety_ceiling_protocols(adapter, model_id, declared)
+    };
     let static_verified = static_verified_protocols(adapter, model_id, declared);
     let mut protocols = BTreeMap::new();
     for protocol in UpstreamProtocolKind::ALL {
@@ -1071,12 +1103,20 @@ fn merge_model_contract(
                 ContractEvidenceSource::ProbeObserved
             });
         let supported = statically_verified || in_ceiling;
+        // Static/preset support is declaration truth: a stale probe-failure
+        // observation must not demote it. Probe outcomes move enablement only
+        // through the explicit overrides the probe handler persists.
+        let evidence_available = (statically_verified || source.confers_support()) && supported;
         let (available, enabled) = match override_state {
-            ProtocolOverrideState::ForceOn => (supported, supported),
-            ProtocolOverrideState::ForceOff => (source.confers_support() && supported, false),
+            // Declaration-is-truth: an explicit force_on wins unconditionally,
+            // even beyond static support and the adapter safety ceiling.
+            ProtocolOverrideState::ForceOn if adapter == ProviderAdapterKind::CommandCodeGoat => {
+                (supported, supported)
+            }
+            ProtocolOverrideState::ForceOn => (true, true),
+            ProtocolOverrideState::ForceOff => (evidence_available, false),
             ProtocolOverrideState::Auto => {
-                let available = source.confers_support() && supported;
-                (available, available)
+                (evidence_available, evidence_available && default_enabled)
             }
         };
         protocols.insert(
@@ -1105,7 +1145,7 @@ fn merge_model_contract(
             EffectiveProtocolEvidence {
                 protocol: preferred,
                 available: true,
-                enabled: true,
+                enabled: default_enabled,
                 source: default_source,
                 verified_at: None,
                 observed_at: None,
@@ -1410,23 +1450,149 @@ mod tests {
     }
 
     #[test]
-    fn override_force_on_does_not_break_safety_ceiling() {
+    fn override_force_on_enables_protocol_beyond_static_and_ceiling() {
         let mut persisted = empty_persisted();
         let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        // "not-a-known-model" is outside the OpenCode safety ceiling for all protocols.
+        let now = Utc::now();
+        // A refreshed Go catalog can carry models the static table does not
+        // know; those sit outside the safety ceiling for every protocol.
+        persisted.scopes.insert(
+            scope.clone(),
+            PersistedScopeRow {
+                scope: scope.clone(),
+                catalog_models: vec!["future-go-model".into()],
+                catalog_refreshed_at: Some(now),
+                catalog_source: CATALOG_SOURCE_OPENCODE_MODELS.into(),
+                catalog_source_url: "https://opencode.ai/zen/go/v1/models".into(),
+                switches: ProtocolSwitches::default(),
+                revision: 1,
+                updated_at: now,
+            },
+        );
         persisted.overrides.insert(
             scope.clone(),
             vec![PersistedModelProtocolOverride {
-                scope: scope.clone(),
-                model_id: "not-a-known-model".into(),
+                scope,
+                model_id: "future-go-model".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 state: ProtocolOverrideState::ForceOn,
-                updated_at: Utc::now(),
+                updated_at: now,
             }],
         );
         let set = build_effective_contracts(&zen_seed(), &[], persisted);
         let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
-        assert!(go.model("not-a-known-model").is_none());
+        let model = go
+            .model("future-go-model")
+            .expect("catalog model is present");
+        let chat = model.protocols.get("chat_completions").unwrap();
+        assert!(chat.available, "force_on wins beyond static/ceiling");
+        assert!(chat.enabled);
+        assert_eq!(chat.r#override, ProtocolOverrideState::ForceOn);
+        assert!(model.routable);
+    }
+
+    #[test]
+    fn refreshed_catalog_is_authoritative_and_new_models_can_start_fully_off() {
+        let mut persisted = empty_persisted();
+        let now = Utc::now();
+        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+        persisted.scopes.insert(
+            scope.clone(),
+            PersistedScopeRow {
+                scope: scope.clone(),
+                catalog_models: vec!["future-go-model".into()],
+                catalog_refreshed_at: Some(now),
+                catalog_source: CATALOG_SOURCE_OPENCODE_MODELS.into(),
+                catalog_source_url: "https://opencode.ai/zen/go/v1/models".into(),
+                switches: ProtocolSwitches::default(),
+                revision: 2,
+                updated_at: now,
+            },
+        );
+        persisted.evidence.insert(
+            scope.clone(),
+            vec![PersistedModelProtocol {
+                scope: scope.clone(),
+                model_id: "grok-4.5".into(),
+                protocol: UpstreamProtocolKind::Responses,
+                source: ContractEvidenceSource::ProbeConfirmed,
+                verified_at: Some(now),
+                observed_at: Some(now),
+                last_probe_result: Some(ProbeResultKind::Success),
+                last_probe_at: Some(now),
+                last_probe_error: None,
+            }],
+        );
+        persisted.overrides.insert(
+            scope.clone(),
+            [
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+                UpstreamProtocolKind::Messages,
+            ]
+            .into_iter()
+            .map(|protocol| PersistedModelProtocolOverride {
+                scope: scope.clone(),
+                model_id: "future-go-model".into(),
+                protocol,
+                state: ProtocolOverrideState::ForceOff,
+                updated_at: now,
+            })
+            .collect(),
+        );
+
+        let set = build_effective_contracts(&zen_seed(), &[], persisted);
+        let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
+        assert_eq!(go.catalog.source, CATALOG_SOURCE_OPENCODE_MODELS);
+        assert_eq!(go.catalog.models, vec!["future-go-model"]);
+        assert!(
+            !go.models.contains_key("grok-4.5"),
+            "models removed by the official catalog must not be restored by stale probe evidence"
+        );
+        let future = go.model("future-go-model").unwrap();
+        assert!(!future.routable);
+        assert!(future.protocols.values().all(|protocol| {
+            !protocol.enabled && protocol.r#override == ProtocolOverrideState::ForceOff
+        }));
+    }
+
+    #[test]
+    fn stale_probe_failure_does_not_demote_static_support() {
+        let mut persisted = empty_persisted();
+        let now = Utc::now();
+        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+        persisted.evidence.insert(
+            scope.clone(),
+            vec![PersistedModelProtocol {
+                scope,
+                model_id: "glm-5.3".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: ContractEvidenceSource::ProbeObserved,
+                verified_at: None,
+                observed_at: Some(now),
+                last_probe_result: Some(ProbeResultKind::Failure),
+                last_probe_at: Some(now),
+                last_probe_error: Some("upstream 500".into()),
+            }],
+        );
+        let go = build_effective_contracts(&zen_seed(), &[], persisted)
+            .providers
+            .remove(OPENCODE_PROVIDER_ID)
+            .unwrap();
+        let glm = go.model("glm-5.3").unwrap();
+        let chat = glm.protocols.get("chat_completions").unwrap();
+        assert!(
+            chat.available,
+            "static support survives a stale probe-failure observation"
+        );
+        assert!(chat.enabled);
+        assert_eq!(chat.r#override, ProtocolOverrideState::Auto);
+        assert_eq!(chat.last_probe_result, Some(ProbeResultKind::Failure));
+        assert_eq!(
+            chat.last_probe_error.as_deref(),
+            Some("upstream 500"),
+            "failure detail stays visible as evidence"
+        );
     }
 
     #[test]
@@ -1544,12 +1710,8 @@ mod tests {
         );
         let set = build_effective_contracts(&zen_seed(), &[runtime], persisted);
         let custom = set.custom_endpoints.get("custom-1").unwrap();
-        assert!(
-            custom
-                .catalog
-                .models
-                .contains(&"discovered-only".to_string())
-        );
+        assert_eq!(custom.catalog.source, CATALOG_SOURCE_DECLARED);
+        assert_eq!(custom.catalog.models, vec!["declared-model"]);
         assert!(custom.model("declared-model").unwrap().routable);
         assert!(custom.model("discovered-only").is_none());
     }

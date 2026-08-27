@@ -25,15 +25,15 @@ pub const COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 /// Relative to [`COMMAND_CODE_GOAT_BASE_URL`]. Anthropic models use this path;
 /// OpenAI and open-source models use Chat Completions.
 pub const COMMAND_CODE_GOAT_MESSAGES_PATH: &str = "/messages";
-/// Official GET `/models` discovery path used for connection verification.
+/// Official public GET `/models` discovery path used for Provider catalog refresh.
 pub const COMMAND_CODE_GOAT_MODELS_PATH: &str = "/models";
 pub const COMMAND_CODE_GOAT_MODELS_SOURCE: &str = "command_code_get_models";
 pub const COMMAND_CODE_GOAT_MODEL_SOURCE: &str = "command_code_verified_models";
 pub const MAX_COMMAND_CODE_MODELS_CATALOG: usize = 1_000;
 
-/// Models whose monthly allowance is included by the GOAT subscription page.
-/// The Provider API can return additional Pro/Max/PAYG models; those remain
-/// available only when an account explicitly opts into `all` access.
+/// Models included by the GOAT subscription page. These are the default-on
+/// rows in the Provider model/protocol matrix. Models discovered beyond this
+/// preset remain visible but default off until an administrator enables them.
 pub const COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS: &[&str] = &[
     "gpt-5.6-sol",
     "gpt-5.6-luna",
@@ -403,8 +403,8 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 4] = [
         display_family: "Command Code",
         creation_availability: CreationAvailability::Available,
         creation_unavailable_reason: None,
-        verification_policy: VerificationPolicy::Required,
-        verification_runtime_availability: "available",
+        verification_policy: VerificationPolicy::NotRequired,
+        verification_runtime_availability: "not_applicable",
         routable: true,
         managed_registration: false,
         pricing_availability: "available",
@@ -523,9 +523,8 @@ impl ProviderAdapterKind {
 
     pub const fn catalog_refresh_supported(self) -> bool {
         match self {
-            Self::OpenCodeGo | Self::ZenFree | Self::CommandCodeGoat | Self::ConfigurableHttp => {
-                true
-            }
+            Self::OpenCodeGo | Self::ZenFree | Self::CommandCodeGoat => true,
+            Self::ConfigurableHttp => false,
         }
     }
 
@@ -1234,9 +1233,9 @@ impl VerificationAdapter for CommandCodeGoatAdapter {
         VerificationDescriptor {
             policy: plan.verification_policy,
             runtime_availability: plan.verification_runtime_availability,
-            never_auto_enable: true,
+            never_auto_enable: false,
             probe_first_declared_model: false,
-            uses_get_models: true,
+            uses_get_models: false,
         }
     }
 }
@@ -1280,13 +1279,13 @@ impl CardCapabilities for CommandCodeGoatAdapter {
     fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
         CardActionsDescriptor {
             persisted_enable_allowed: plan.routable,
-            enable_requires_verification: true,
+            enable_requires_verification: false,
             managed_registration: plan.managed_registration,
             fetch_zen_models: false,
             discover_models: false,
             usage_refresh: false,
             manual_usage_calibration: plan.manual_usage_calibration,
-            connection_verify: CardVerifyAction::AvailableThenExplicitEnable,
+            connection_verify: CardVerifyAction::NotApplicable,
             protocol_and_auth_immutable_after_create: false,
             protocol_probe: false,
             catalog_refresh: true,
@@ -1396,7 +1395,7 @@ impl CardCapabilities for ConfigurableHttpAdapter {
             connection_verify: CardVerifyAction::AvailableThenExplicitEnable,
             protocol_and_auth_immutable_after_create: false,
             protocol_probe: true,
-            catalog_refresh: true,
+            catalog_refresh: false,
         }
     }
 }
@@ -1739,8 +1738,8 @@ mod tests {
         assert_eq!(BUILTIN_PLANS.len(), 4);
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert!(goat.routable);
-        assert_eq!(goat.verification_policy, VerificationPolicy::Required);
-        assert_eq!(goat.verification_runtime_availability, "available");
+        assert_eq!(goat.verification_policy, VerificationPolicy::NotRequired);
+        assert_eq!(goat.verification_runtime_availability, "not_applicable");
         assert_eq!(goat.creation_availability, CreationAvailability::Available);
         assert_eq!(goat.pricing_availability, "available");
         assert_eq!(goat.usage_availability, "unavailable");
@@ -1950,10 +1949,7 @@ mod tests {
                 descriptor.card_actions.protocol_probe,
                 kind.protocol_probe_supported()
             );
-            assert_eq!(
-                descriptor.verification.uses_get_models,
-                kind == ProviderAdapterKind::CommandCodeGoat
-            );
+            assert!(!descriptor.verification.uses_get_models);
             match kind {
                 ProviderAdapterKind::OpenCodeGo
                 | ProviderAdapterKind::ZenFree
@@ -2063,10 +2059,10 @@ mod tests {
         assert!(goat.card_actions.catalog_refresh);
         assert_eq!(
             goat.card_actions.connection_verify,
-            CardVerifyAction::AvailableThenExplicitEnable
+            CardVerifyAction::NotApplicable
         );
-        assert!(goat.verification.uses_get_models);
-        assert!(goat.verification.never_auto_enable);
+        assert!(!goat.verification.uses_get_models);
+        assert!(!goat.verification.never_auto_enable);
 
         let custom = ProviderRegistry::get(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
         assert_eq!(custom.kind, ProviderAdapterKind::ConfigurableHttp);
@@ -2091,7 +2087,7 @@ mod tests {
         assert!(!custom.card_actions.enable_requires_verification);
         assert!(custom.card_actions.discover_models);
         assert!(custom.card_actions.protocol_probe);
-        assert!(custom.card_actions.catalog_refresh);
+        assert!(!custom.card_actions.catalog_refresh);
         assert_eq!(
             custom.protocol_probe.structural_ceiling,
             StructuralProbeCeiling::AccountDeclared
@@ -2162,7 +2158,7 @@ mod tests {
         assert!(!ConfigurableHttpAdapter::inference(custom_plan).follow_redirects);
         let goat_plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert!(CommandCodeGoatAdapter::inference(goat_plan).production_inference);
-        assert!(CommandCodeGoatAdapter::verification(goat_plan).uses_get_models);
+        assert!(!CommandCodeGoatAdapter::verification(goat_plan).uses_get_models);
         let zen_plan =
             builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();
         assert!(ZenFreeAdapter::protocol_probe(zen_plan).unknown_zen_free_defaults_to_chat);

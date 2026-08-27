@@ -27,6 +27,15 @@ export const PROVIDER_PROTOCOLS: readonly ProviderProtocol[] = [
   "messages",
 ];
 
+export function modelProtocolOverrideKey(
+  scopeKind: ContractScopeKind,
+  scopeId: string,
+  modelId: string,
+  protocol: ProviderProtocol,
+): string {
+  return JSON.stringify([scopeKind, scopeId, modelId, protocol]);
+}
+
 export const CATALOG_SOURCE_STATIC = "static";
 export const CATALOG_SOURCE_OFFICIAL_ZEN = "official_zen";
 export const CATALOG_SOURCE_CUSTOM_DISCOVERY = "custom_discovery";
@@ -44,10 +53,11 @@ export interface ProviderScopeView {
   scope_kind: ContractScopeKind;
   scope_id: string;
   provider_id: string;
+  static_protocol_snapshot_date: string | null;
   label: string;
   offerings: ProviderOfferingChoice[];
   catalog: EffectiveCatalog;
-  models: EffectiveModelContract[];
+  models: ProviderModelContract[];
   pricing: CapabilitySummary;
   usage: CapabilitySummary;
   card: CardCapabilitySummary;
@@ -56,6 +66,11 @@ export interface ProviderScopeView {
   disabled_reasons: string[];
   revision: number;
 }
+
+/** Provider rows may publish a stable client Alias alongside their raw upstream id. */
+export type ProviderModelContract = EffectiveModelContract & {
+  alias?: string;
+};
 
 export interface AccountContractSummary {
   scope_kind: ContractScopeKind;
@@ -188,7 +203,7 @@ function normalizeEvidence(
   };
 }
 
-function normalizeModel(model: EffectiveModelContract): EffectiveModelContract {
+function normalizeModel(model: ProviderModelContract): ProviderModelContract {
   const protocols: Record<string, EffectiveProtocolEvidence> = {};
   for (const protocol of PROVIDER_PROTOCOLS) {
     const evidence = model.protocols?.[protocol];
@@ -202,6 +217,7 @@ function normalizeModel(model: EffectiveModelContract): EffectiveModelContract {
     }
   }
   return {
+    alias: asString(model.alias),
     model_id: asString(model.model_id),
     preferred_protocol: model.preferred_protocol ?? "chat_completions",
     protocols,
@@ -241,6 +257,9 @@ function normalizeProviderGroup(group: ProviderContractGroup): ProviderContractG
     scope_kind: group.scope_kind === "custom_endpoint" ? "custom_endpoint" : "provider",
     scope_id: asString(group.scope_id),
     provider_id: asString(group.provider_id),
+    static_protocol_snapshot_date: typeof group.static_protocol_snapshot_date === "string"
+      ? group.static_protocol_snapshot_date
+      : null,
     offerings: Array.isArray(group.offerings) ? group.offerings.map(normalizeOffering) : [],
     catalog: normalizeCatalog(group.catalog),
     models: Array.isArray(group.models) ? group.models.map(normalizeModel) : [],
@@ -335,6 +354,7 @@ export function flattenProviderScopes(
     scope_kind: group.scope_kind,
     scope_id: group.scope_id,
     provider_id: group.provider_id,
+    static_protocol_snapshot_date: group.static_protocol_snapshot_date,
     label: providerLabel(group.provider_id, catalog),
     offerings: group.offerings,
     catalog: group.catalog,
@@ -352,6 +372,7 @@ export function flattenProviderScopes(
     scope_kind: endpoint.scope_kind,
     scope_id: endpoint.scope_id,
     provider_id: endpoint.provider_id,
+    static_protocol_snapshot_date: null,
     label: customEndpointLabel(endpoint, catalog),
     offerings: customOfferings(endpoint, catalog),
     catalog: endpoint.catalog,
@@ -432,9 +453,9 @@ export function protocolEvidenceStatus(
 }
 
 export function mergeModelContract(
-  models: readonly EffectiveModelContract[],
-  next: EffectiveModelContract,
-): EffectiveModelContract[] {
+  models: readonly ProviderModelContract[],
+  next: ProviderModelContract,
+): ProviderModelContract[] {
   const normalized = normalizeModel(next);
   const index = models.findIndex((model) => model.model_id === normalized.model_id);
   if (index < 0) return [...models, normalized];
@@ -517,6 +538,7 @@ export function emptyProviderScopeView(
     scope_kind: ref.scope_kind,
     scope_id: ref.scope_id,
     provider_id: providerId,
+    static_protocol_snapshot_date: null,
     label: providerId,
     offerings: [],
     catalog: EMPTY_CATALOG,

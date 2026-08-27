@@ -36,11 +36,10 @@
 - Claude Desktop only advertises three fixed Claude aliases, mapped to the
   supported actual models; it does not mean OCG Manager provides native
   Claude 4.6 models or the full Anthropic Models API.
-- Command Code GOAT is a schema/UI draft only. It creates disabled `pending`
-  accounts; verification is `501`; it is not selected for Alias routing. Do
-  not document or ship it as live support. Custom API is live under the
-  trusted-administrator boundary (`custom.rs` + `custom_http.rs`); keep it
-  out of GOAT anti-abuse wording.
+- Command Code GOAT has no machine-readable usage endpoint. Its public model
+  directory cannot validate a stored Key, so authentication failure is only
+  known from real inference 401/403. Custom API remains a distinct live route
+  under the trusted-administrator boundary (`custom.rs` + `custom_http.rs`).
 - Per-model/per-protocol overrides are on V3; Custom account-level
   per-protocol probing has no V3 counterpart, and the historical V2
   account-owned probe path is 410. Custom verify and model discovery are the
@@ -54,7 +53,8 @@
 - Tauri `invoke` as a dashboard data path; WebView commands stay removed.
 - Request-time upstream discovery on `GET /v1/models` or
   `GET /dashboard/api/v3/application-models`.
-- Live GOAT routing, usage, pricing, verification, or provider guides.
+- An authoritative GOAT usage API or treating its public directory as Key
+  verification.
 - `/embeddings`, Gemini `embedContent` (501), or Gemini `countTokens` as a
   real upstream count (501 so Gemini CLI can fall back locally).
 - Gemini as an upstream protocol.

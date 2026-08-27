@@ -17,53 +17,77 @@ The left rail lists those scopes. The main pane has two tabs: **Model catalog**
 and **Pricing**. The old catalog and model-contract views are merged into one
 matrix on the Model catalog tab.
 
-**Model catalog** is local. The matrix has one row per model and three columns —
-Chat Completions, Responses, and Messages. Each cell shows the effective state
-of that model/protocol pair and carries a three-state control: **Auto** (no
-override, follow the underlying evidence), **Force on** (enable the protocol for
-that model up to the adapter safety ceiling), or **Force off** (disable it). You
-can change cells individually, apply a state to the whole row, or apply a state
-to the whole column.
+**Model catalog** is local. The matrix has one row per current catalog model and
+three columns — Chat Completions, Responses, and Messages. Each cell is a binary
+switch for the effective model/protocol state: turning it on writes `force_on`,
+and turning it off writes `force_off`. Column menus can turn a whole protocol
+column on or off. The switch updates immediately while the CAS-protected save
+runs in the background; only affected cells show saving progress.
 
-The underlying evidence for a cell is one of: unavailable,
-unsupported, static, preset (Custom declared protocols), probe confirmed, or
-latest probe failed. The matrix cell shows the effective result after applying
-the override: `force_on` enables even when evidence is absent, but never breaks
-the adapter ceiling; `force_off` disables even when evidence says supported;
-`auto` follows evidence. A failed probe is recorded; it does not erase static
-capability.
+Underlying static, preset, and probe evidence remains in the contract, but is
+not shown as a separate badge in this compact matrix. `auto` remains the stored
+default until an explicit switch or a successful probe writes an override. A
+successful provider-level probe pins `force_on`. Failed account attempts are
+reported and retained as evidence, but never pin the shared protocol
+`force_off`; only an explicit switch can do that.
 
-Refresh is never automatic:
+For the built-in **OpenCode Go**, **Zen Free**, and **Command Code GOAT** scopes,
+the catalog header offers **Restore static
+protocol snapshot**. It makes no upstream request, keeps the current model
+catalog, clears manual switches and probe evidence, and restores the static
+protocol snapshot dated **2026-08-27**. Any current-catalog protocol pair that
+is absent from that static snapshot is explicitly left off, so a newly
+discovered model cannot become routable through fallback alone.
 
-- OpenCode Go **Refresh model catalog** uses the selected Go account Key to
-  call the official `GET /zen/go/v1/models` endpoint. The saved provider
-  catalog replaces the static fallback after success; a failed or empty
-  refresh keeps the previous snapshot.
-- Zen Free **Refresh model catalog** (choose the Zen Free account) calls the
-  official keyless directory `https://opencode.ai/zen/v1/models`. A failed or
-  empty refresh keeps the previous snapshot.
-- Custom **Refresh model catalog** (choose that Custom account) discovers
-  models from the configured base URL without changing declared capabilities.
-  Truncated discovery is reported; a failed refresh keeps the previous
-  snapshot. The account form **Fetch models** action remains a separate
-  explicit edit that only merges IDs into the unsaved capability list.
-- Command Code GOAT **Refresh model catalog** uses a selected verified GOAT
-  account to call the official `GET /provider/v1/models` endpoint. Success
-  updates both that account's allowed catalog and the shared Provider catalog;
-  failure keeps the last good snapshot.
+The compact source line, refresh action, and matrix share one content panel;
+there is no separate catalog-summary card and no refresh-account selector.
+Every refreshable scope uses the same action. OpenCode Go refreshes from the
+official authenticated model endpoint with a backend-selected eligible Go
+account, Zen Free uses the fixed keyless directory
+`https://opencode.ai/zen/v1/models`, and Command Code uses its fixed public
+official `/models` directory without selecting an account. Refresh is always
+explicit.
 
-Saved Go/GOAT catalogs feed local Alias resolution without another upstream
+Before the first successful refresh, the built-in static catalog is the initial
+preset. After success, the saved official snapshot is authoritative and
+replaces that preset. Models newly added by a refresh are visible in the matrix
+with Chat Completions, Responses, and Messages all disabled. They become
+enabled only after you turn on a cell or a successful Test confirms it. Existing
+overrides and probe results for surviving models are preserved. A failed or
+empty refresh keeps the previous snapshot.
+
+Custom API continues to use each account's declared model IDs; discovery never
+silently replaces that declaration. The account form **Fetch models** action is
+an unsaved-form helper that merges selected IDs into the declaration being
+edited. Command Code uses its public official `/models` directory: the GOAT
+preset starts enabled, while additional models discovered later start disabled
+until you enable their supported protocol in the matrix. It has no separate
+Max or account-level GOAT/All mode.
+
+Local catalogs feed Alias resolution without another request-time upstream
 call. A model is advertised only when its saved contract has an effective,
-known, enabled protocol; an unfamiliar Go ID therefore remains visible in the
-Provider catalog but fails closed for client routing. Zen Free still derives one
-extra alias by stripping `-free` from each saved ID, as described under
+known, enabled protocol. Alias names follow the OpenCode Go catalog. Zen Free
+publishes only the suffix-stripped Alias while the original `-free` ID remains
+available as an exact raw pin, as described under
 [Zen Free models](routing.md#zen-free-models).
 
-Each row has a **Test** button. It auto-selects the first account in the scope
-and probes every protocol for that model. A Popconfirm warns that the probe may
-consume quota. Custom endpoint scopes do not show the Test button because Custom
-account-level protocol probing has no V3 counterpart. Probe results confirm or
-add support only inside the adapter safety ceiling.
+If every model/protocol cell for a Provider is off, that Provider contributes
+no route. If an Alias has no enabled mapping from any Provider, it is removed
+from downstream `GET /v1/models` supply.
+
+Each row has a **Test** button. It probes every protocol for that model without
+asking for an account. For each protocol the provider automatically tries its
+eligible accounts in saved routing order and stops at the first success. A
+Popconfirm warns that these real minimal requests may consume quota. Custom
+endpoint scopes do not show the Test button because Custom account-level
+protocol probing has no V3 counterpart. Models must belong to the current
+provider catalog; all three requested protocol endpoints are then tested,
+including for newly fetched models not yet in the static table. Each protocol
+result is shown above the matrix with its success, failure, or skipped state,
+HTTP status, readable upstream message, and a safe upstream help/billing link
+when one is supplied. Every actual account attempt is recorded as a
+redacted request log; probe traffic never enters Runtime Logs. One account
+failure never disables a protocol that another eligible account can serve.
 
 **Pricing** is scoped to the selected provider. **Refresh price table** only
 hits the official source owned by that Provider. OpenCode and Command Code

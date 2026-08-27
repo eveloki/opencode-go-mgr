@@ -2,7 +2,7 @@
 //!
 //! These tests drive public Gateway and dashboard HTTP/JSON. They are the
 //! independent acceptance slice for the accepted unified-alias / multi-Plan
-//! contracts. GOAT verify uses GET `/models`. Custom is catalog-routable with
+//! contracts. Command Code refreshes its public catalog with GET `/models`. Custom is catalog-routable with
 //! an available verification runtime; live Custom network coverage lives in
 //! `custom_trusted_admin.rs`.
 //!
@@ -189,7 +189,8 @@ async fn providers_catalog_is_the_only_plan_source() {
             );
         }
         if provider_id == ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID {
-            assert!(published_list.iter().any(|alias| alias == FREE_MODEL));
+            assert!(!published_list.iter().any(|alias| alias == FREE_MODEL));
+            assert!(published_list.iter().any(|alias| alias == "mimo-v2.5"));
             assert!(
                 published_list.iter().any(|alias| alias == GO_ALIAS),
                 "Zen must publish the stripped Alias shared with Go: {published_list:?}"
@@ -251,22 +252,16 @@ async fn client_models_list_exposes_aliases_not_raw_upstream_ids() {
     );
     let ids = client_model_ids(&body);
     let expected = ocg_core::alias::published_routeable_aliases();
-    assert_eq!(
-        ids,
-        expected
+    for published in &expected {
+        let index = ids
             .iter()
-            .map(|item| item.alias.to_string())
-            .collect::<Vec<_>>(),
-        "client model list must be the deterministic routeable Alias registry"
-    );
-    for (item, published) in body["data"]
-        .as_array()
-        .expect("OpenAI list data")
-        .iter()
-        .zip(&expected)
-    {
+            .position(|alias| alias == &published.alias)
+            .unwrap_or_else(|| panic!("missing base Alias {} in {ids:?}", published.alias));
+        let item = &body["data"].as_array().expect("OpenAI list data")[index];
         assert_eq!(item["owned_by"].as_str(), Some(published.owned_by));
     }
+    assert!(ids.iter().all(|alias| !alias.contains('/')));
+    assert!(!ids.iter().any(|alias| alias == "mimo-v2.5-free"));
     assert!(
         ids.iter().any(|id| id == GO_ALIAS),
         "client model list must include preferred Go alias {GO_ALIAS}: {ids:?}"
@@ -294,12 +289,9 @@ async fn client_models_list_exposes_aliases_not_raw_upstream_ids() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|item| item["id"] == FREE_MODEL)
+        .find(|item| item["id"] == "mimo-v2.5")
         .unwrap();
-    assert_eq!(
-        zen_owned["owned_by"],
-        ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
-    );
+    assert_eq!(zen_owned["owned_by"], OPENCODE_PROVIDER_ID);
     let logs = harness.forward_logs().await;
     assert_eq!(
         logs["items"].as_array().map(Vec::len).unwrap_or(0),
@@ -579,9 +571,9 @@ async fn go_import_remains_immediately_routable_without_verification() {
     harness.shutdown();
 }
 
-/// GOAT and Custom create as disabled pending drafts.
+/// GOAT is live without directory verification; Custom remains an optional-verification draft.
 #[tokio::test]
-async fn goat_and_custom_create_disabled_pending_drafts() {
+async fn goat_creates_live_while_custom_creates_a_pending_draft() {
     let harness = V2Harness::start().await;
     let catalog = harness.catalog().await;
 
@@ -589,36 +581,36 @@ async fn goat_and_custom_create_disabled_pending_drafts() {
         .expect("catalog must include command-code/goat");
     assert_eq!(
         goat["verification_policy"].as_str(),
-        Some("required"),
-        "v2-contract: command-code/goat must require verification: {goat}"
+        Some("not_required"),
+        "Command Code's public catalog must not be presented as Key verification: {goat}"
     );
     assert_eq!(
         goat["creation_availability"].as_str(),
         Some("available"),
-        "GOAT drafts must still be creatable: {goat}"
+        "GOAT accounts must be creatable: {goat}"
     );
     let (status, body) = harness
         .create_account(json!({
             "provider_id": COMMAND_CODE_PROVIDER_ID,
             "offering_id": GOAT_OFFERING_ID,
-            "name": "goat-draft",
+            "name": "goat-live",
             "key": GOAT_ACCOUNT_KEY,
             "expected_revision": harness.settings_revision().await
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], false,
-        "GOAT must save as a disabled draft: {body}"
+        body["enabled"], true,
+        "GOAT must be immediately eligible when ready and keyed: {body}"
     );
     assert_eq!(
         body["verification_status"].as_str(),
-        Some("pending"),
-        "v2-contract: GOAT draft verification_status: {body}"
+        Some("not_required"),
+        "GOAT directory refresh is not account verification: {body}"
     );
     assert_eq!(
         body["key"], "",
-        "draft JSON must not return the Key: {body}"
+        "account JSON must not return the Key: {body}"
     );
 
     let (status, body) = harness
@@ -664,25 +656,30 @@ async fn goat_and_custom_create_disabled_pending_drafts() {
     harness.shutdown();
 }
 
-/// Disabled drafts must not be selected when an alias is requested.
+/// Explicitly disabled GOAT accounts must not be selected when a shared alias is requested.
 #[tokio::test]
-async fn disabled_draft_is_not_selected_for_alias_routing() {
+async fn disabled_goat_is_not_selected_for_alias_routing() {
     let harness = V2Harness::start_with_chat_success(&[GO_ACCOUNT_KEY, GOAT_ACCOUNT_KEY]).await;
     let go = harness.create_go_account("go-main", GO_ACCOUNT_KEY).await;
     let (status, goat) = harness
         .create_account(json!({
             "provider_id": COMMAND_CODE_PROVIDER_ID,
             "offering_id": GOAT_OFFERING_ID,
-            "name": "goat-draft",
+            "name": "goat-disabled",
             "key": GOAT_ACCOUNT_KEY,
             "expected_revision": harness.settings_revision().await
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{goat}");
-    assert_eq!(
-        goat["enabled"], false,
-        "v2-contract: GOAT must create as a disabled draft: {goat}"
-    );
+    assert_eq!(goat["enabled"], true, "{goat}");
+    let (status, goat) = harness
+        .patch_json(
+            &format!("/accounts/{}", goat["id"].as_str().unwrap()),
+            &json!({ "enabled": false }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{goat}");
+    assert_eq!(goat["enabled"], false, "{goat}");
     reorder_account_first(&harness, go["id"].as_str().unwrap()).await;
 
     let (status, body) = harness.chat(GO_ALIAS).await;
@@ -698,11 +695,11 @@ async fn disabled_draft_is_not_selected_for_alias_routing() {
     harness.shutdown();
 }
 
-/// GOAT draft stays unchanged when verify is unavailable.
+/// GOAT verification is not applicable because its public catalog is not a Key check.
 #[tokio::test]
-async fn verify_runtime_unavailable_leaves_goat_draft_unchanged() {
+async fn goat_account_reports_verification_not_applicable() {
     let harness = V2Harness::start().await;
-    let (status, draft) = harness
+    let (status, account) = harness
         .create_account(json!({
             "provider_id": COMMAND_CODE_PROVIDER_ID,
             "offering_id": GOAT_OFFERING_ID,
@@ -711,30 +708,30 @@ async fn verify_runtime_unavailable_leaves_goat_draft_unchanged() {
             "expected_revision": harness.settings_revision().await
         }))
         .await;
-    assert_eq!(status, StatusCode::OK, "{draft}");
-    assert_eq!(draft["enabled"], false, "{draft}");
+    assert_eq!(status, StatusCode::OK, "{account}");
+    assert_eq!(account["enabled"], true, "{account}");
     assert_eq!(
-        draft["verification_status"].as_str(),
-        Some("pending"),
-        "{draft}"
+        account["verification_status"].as_str(),
+        Some("not_required"),
+        "{account}"
     );
-    let goat_id = draft["id"].as_str().expect("draft id").to_string();
+    let goat_id = account["id"].as_str().expect("account id").to_string();
     let catalog = harness.catalog().await;
     let goat = catalog_entry(&catalog, COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
     assert_eq!(
         goat["verification_runtime_availability"].as_str(),
-        Some("available")
+        Some("not_applicable")
     );
 
     let stored = harness.account_by_id(&goat_id).await;
     assert_eq!(
-        stored["enabled"], false,
-        "draft must stay disabled after unavailable verify: {stored}"
+        stored["enabled"], true,
+        "GOAT account enabled state must not be gated by directory refresh: {stored}"
     );
     assert_eq!(
         stored["verification_status"].as_str(),
-        Some("pending"),
-        "draft must stay pending after unavailable verify: {stored}"
+        Some("not_required"),
+        "GOAT account must not expose a pending Key-verification state: {stored}"
     );
     assert!(
         stored["connection_verified_at"].is_null()

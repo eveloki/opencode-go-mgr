@@ -203,7 +203,7 @@ fn tauri_and_cli_shaped_creates_differ_from_dashboard_enablement() {
         .db
         .lock()
         .create_account(&goat)
-        .expect("disabled GOAT drafts persist through Database::create_account");
+        .expect("disabled GOAT accounts persist through Database::create_account");
 
     let mut custom = go_account(&state, "tauri-custom", true);
     custom.provider_id = CUSTOM_PROVIDER_ID.into();

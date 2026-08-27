@@ -10,8 +10,8 @@
 #[doc(inline)]
 pub use ocg_gateway::alias::{
     AMBIGUOUS_MODEL_ID, AliasEntry, CUSTOM_DYNAMIC_UPSTREAM, ProviderMapping, PublishedAlias,
-    ResolveError, ResolvedModel, is_published_alias, published_aliases,
-    published_routeable_aliases, published_routeable_aliases_with_all_catalogs,
+    ResolveError, ResolvedModel, canonical_alias_for_provider_model, is_published_alias,
+    published_aliases, published_routeable_aliases, published_routeable_aliases_with_all_catalogs,
     published_routeable_aliases_with_zen, resolve, resolve_with_all_catalogs,
     resolve_with_catalogs, resolve_with_custom, resolve_with_provider_models,
     routeable_aliases_for, routeable_aliases_for_with_zen,

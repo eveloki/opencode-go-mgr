@@ -258,7 +258,7 @@
           @update:page="changeForwardPage"
         >
           <template #empty>
-            <n-empty :description="t('仅记录经本机 API 转发的请求，账号 Ping 见运行日志')" />
+            <n-empty :description="t('记录推理转发和协议探测请求；运行日志只记录进程与控制面事件')" />
           </template>
         </n-data-table>
       </n-tab-pane>
@@ -328,7 +328,7 @@ const sortValues = new Set<SortBy>([
 const query = new URLSearchParams(window.location.search);
 const message = useMessage();
 const { copiedTarget, copy, cleanup } = useClipboard();
-const activeTab = ref<LogTab>(query.get("tab") === "forward" ? "forward" : "gateway");
+const activeTab = ref<LogTab>(query.get("tab") === "gateway" ? "gateway" : "forward");
 const gatewayLogs = ref<GatewayLog[]>([]);
 const forwardLogs = ref<ForwardLog[]>([]);
 const accounts = ref<Account[]>([]);

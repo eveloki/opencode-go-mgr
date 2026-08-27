@@ -17,8 +17,9 @@
    an `AttemptSpec` only. **Adapters cannot own DB, `CoreState`, or a raw
    reqwest client.** Decrypt and HTTP stay in the Host resolver /
    `forward_once`.
-5. Fail closed until routing, verify, usage, and pricing are actually
-   implemented. GOAT is the template for "catalog present, not live".
+5. Fail closed until the required routing and control-plane semantics are
+   actually implemented. Command Code is the template for a live fixed-origin
+   provider whose public catalog is not account-Key verification.
 6. Run `cargo test -p ocg-domain`, `cargo test -p ocg-gateway`, and
    `cargo test -p ocg-core`. Purity/dependency guards will fail a
    forbidden import.

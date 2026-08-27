@@ -33,10 +33,10 @@ on a single-key-era build, and a revoked value cannot come back to life by
 downgrading.
 
 v29 removes SCNet Token Plans from the catalog and deletes any existing
-SCNet account rows during migration. Every startup disables enabled leftovers
-for Command Code GOAT without changing `updated_at`. Custom API stays enabled,
-and an existing unverified GOAT row resets to `pending`. OpenCode Go, Zen Free,
-and unknown provider/offering pairs are left alone.
+SCNet account rows during migration. Every startup normalizes historical
+Command Code GOAT verification state to `not_required`, because the public
+catalog is not Key verification. Custom API enabled state is preserved.
+OpenCode Go, Zen Free, and unknown provider/offering pairs are left alone.
 
 v30 expands Custom API `account_custom_configs` from the single
 `upstream_protocol` column to a JSON `upstream_protocols` set, backfilling

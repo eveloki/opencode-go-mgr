@@ -78,16 +78,6 @@
         "expiresOn": {
           "type": "string"
         },
-        "goatModelAccess": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AccountGoatModelAccess"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "id": {
           "type": "string"
         },
@@ -203,7 +193,6 @@
         "connectionVerifiedAt",
         "verificationError",
         "planRoutable",
-        "goatModelAccess",
         "customConfig",
         "modelCapabilities"
       ],
@@ -405,38 +394,6 @@
         "baseUrl",
         "upstreamProtocols",
         "authScheme"
-      ],
-      "type": "object"
-    },
-    "AccountGoatModelAccess": {
-      "enum": [
-        "goat",
-        "all"
-      ],
-      "type": "string"
-    },
-    "AccountGoatModelAccessUpdate": {
-      "additionalProperties": false,
-      "description": "PUT `/accounts/{id}/goat-model-access` body.",
-      "properties": {
-        "expectedRevision": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "modelAccess": {
-          "$ref": "#/$defs/AccountGoatModelAccess"
-        },
-        "processGeneration": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "expectedRevision",
-        "processGeneration",
-        "modelAccess"
       ],
       "type": "object"
     },
@@ -1756,6 +1713,9 @@
       "additionalProperties": false,
       "description": "One model's preferred protocol and per-protocol evidence.",
       "properties": {
+        "alias": {
+          "type": "string"
+        },
         "disabledReasons": {
           "items": {
             "type": "string"
@@ -1776,6 +1736,7 @@
         }
       },
       "required": [
+        "alias",
         "modelId",
         "preferredProtocol",
         "protocols",
@@ -3149,7 +3110,7 @@
     },
     "ProtocolProbeRequest": {
       "additionalProperties": false,
-      "description": "POST protocol-probe body. `accountId` may be omitted; `protocols` is the\nrequired explicit probe set. Handlers validate membership and uniqueness.",
+      "description": "POST protocol-probe body. `accountId` is a deprecated compatibility field\nand is ignored; the provider chooses eligible accounts automatically.\n`protocols` is the required explicit probe set.",
       "properties": {
         "accountId": {
           "type": [
@@ -3190,7 +3151,11 @@
       "description": "Protocol-probe mutation result. Identity strings are always present;\n`contract` is required `T | null` on the wire.",
       "properties": {
         "accountId": {
-          "type": "string"
+          "description": "Deprecated compatibility field. Provider-level probes can use different\naccounts per protocol, so this is always `null`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "contract": {
           "anyOf": [
@@ -3521,6 +3486,13 @@
         "scopeKind": {
           "$ref": "#/$defs/ContractScopeKind"
         },
+        "staticProtocolSnapshotDate": {
+          "description": "The built-in provider's static protocol-evidence snapshot date. This is\n`null` when the scope has no restorable snapshot and is distinct from\ncatalog `refreshed_at`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "usage": {
           "$ref": "#/$defs/CapabilitySummary"
         }
@@ -3529,6 +3501,7 @@
         "scopeKind",
         "scopeId",
         "providerId",
+        "staticProtocolSnapshotDate",
         "offerings",
         "catalog",
         "models",
@@ -3617,7 +3590,10 @@
       "additionalProperties": false,
       "properties": {
         "accountId": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "models": {
           "items": {
@@ -3662,10 +3638,13 @@
     },
     "ProviderModelsRefreshUpdate": {
       "additionalProperties": false,
-      "description": "Provider-scoped model-directory refresh. The selected account supplies the\ncredential; the saved result belongs to the Provider scope.",
+      "description": "Provider-scoped model-directory refresh. OpenCode Go requires a selected\naccount credential; Command Code exposes a public Provider catalog.",
       "properties": {
         "accountId": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "expectedRevision": {
           "format": "uint64",
@@ -3680,8 +3659,7 @@
       },
       "required": [
         "expectedRevision",
-        "processGeneration",
-        "accountId"
+        "processGeneration"
       ],
       "type": "object"
     },
@@ -5068,9 +5046,6 @@
     },
     {
       "$ref": "#/$defs/AccountSetupUpdate"
-    },
-    {
-      "$ref": "#/$defs/AccountGoatModelAccessUpdate"
     },
     {
       "$ref": "#/$defs/AccountCustomConfigUpdate"

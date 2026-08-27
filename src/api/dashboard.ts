@@ -67,7 +67,6 @@ import {
   type ConnectionInfo,
   type CustomModelDiscoveryInput,
   type ForwardLogQuery,
-  type GoatModelAccess,
   type ManagedAccountInput,
   type PricingMultiplierUpdate,
   type ProviderPricingRefreshRequest,
@@ -189,14 +188,6 @@ export const dashboardApi = {
 
   verifyAccountConnection: (id: string, _ignoredRevision?: number): Promise<Account> =>
     mutatedAccount(withCas((expectation) => dashboardV3.verifyAccount(id, expectation))),
-
-  updateGoatModelAccess: (
-    id: string,
-    modelAccess: GoatModelAccess,
-    _ignoredRevision?: number,
-  ): Promise<Account> => mutatedAccount(withCas((expectation) => (
-    dashboardV3.putAccountGoatModelAccess(id, modelAccess, expectation)
-  ))),
 
   updateAccountCustomConfig: (
     id: string,

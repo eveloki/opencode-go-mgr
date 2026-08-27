@@ -11,7 +11,7 @@ test("Providers reads and mutates contracts through its store while explicit act
   assert.match(providers, /providersStore\.loadContracts\(\)/);
   assert.match(providers, /providersStore\.loadCatalog\(\)/);
   assert.match(providers, /providersStore\.putModelProtocolOverrides\(/);
-  assert.match(providers, /providerApi\.refreshProviderModels\(/);
+  assert.match(providers, /providersStore\.refreshContractCatalog\(/);
   assert.match(providers, /providerApi\.runProtocolProbes\(/);
   assert.match(providers, /error\.status === 409/);
   assert.match(providers, /<ProviderModelMatrix/);
@@ -31,45 +31,56 @@ test("Providers keeps last-good contracts while actions fail and distinguishes p
   assert.match(providers, /aria-live="polite"/);
 });
 
-test("Providers catalog refresh toasts success only after contracts GET replaces the snapshot", () => {
-  const load = providers.slice(
-    providers.indexOf("async function loadContracts"),
-    providers.indexOf("async function refreshCatalog"),
-  );
+test("catalog refresh is scope-based, account-free, and adopts the returned contract", () => {
   const refresh = providers.slice(
     providers.indexOf("async function refreshCatalog"),
-    providers.indexOf("async function updateOverrides"),
+    providers.indexOf("type OverridePayload"),
   );
-  assert.match(load, /Promise<\{ ok: boolean; error: string \}>/);
-  assert.match(load, /return \{ ok: true, error: "" \}/);
-  assert.match(load, /return \{ ok: false, error \}/);
-  assert.match(refresh, /const refreshed = await providerApi\.refreshProviderModels/);
-  assert.match(refresh, /const loaded = await loadContracts\(\{ retain: true \}\)/);
-  assert.match(refresh, /if \(!loaded\.ok \|\| loadError\.value\)/);
-  assert.match(refresh, /catalogRefreshError\.value = loaded\.error \|\| loadError\.value/);
+  assert.match(refresh, /refreshContractCatalog\(scope\.scope_kind, scope\.scope_id\)/);
+  assert.match(refresh, /contracts\.value = normalizeProviderContractsResponse\(refreshed\)/);
+  assert.match(refresh, /applyScopeFromQuery\(\)/);
+  assert.doesNotMatch(refresh, /refreshProviderModels|refreshAccount|loadContracts/);
   assert.match(refresh, /message\.error\(t\("刷新模型目录失败: \{error\}"/);
   assert.match(refresh, /message\.success\(t\("已刷新模型目录"\)\)/);
-  const loadIdx = refresh.indexOf("const loaded = await loadContracts");
-  const failIdx = refresh.indexOf("if (!loaded.ok || loadError.value)");
-  const errorIdx = refresh.indexOf("message.error");
+  const adoptIdx = refresh.indexOf("contracts.value = normalizeProviderContractsResponse");
   const successIdx = refresh.indexOf('message.success(t("已刷新模型目录")');
-  assert.ok(loadIdx >= 0 && failIdx > loadIdx && errorIdx > failIdx && successIdx > failIdx);
+  assert.ok(adoptIdx >= 0 && successIdx > adoptIdx);
   assert.doesNotMatch(refresh, /onMounted|onActivated|setInterval/);
 });
 
-test("override mutations are batched and conflict-aware", () => {
+test("Model catalog uses one content panel and one capability-driven refresh action", () => {
+  assert.match(providers, /class="providers-catalog-head"/);
+  assert.match(providers, /catalogRefreshSupported\(scope\)/);
+  assert.match(providers, /v-if="catalogRefreshVisible"/);
+  assert.match(providers, /t\("刷新模型目录"\)/);
+  assert.doesNotMatch(providers, /refreshAccountId|refreshAccountOptions/);
+  assert.doesNotMatch(providers, /选择用于刷新的账号|NFormItem|providers-overview/);
+  assert.doesNotMatch(providers, /该供应商不支持刷新模型目录/);
+});
+
+test("override mutations render optimistically, serialize CAS writes, and remain conflict-aware", () => {
   const update = providers.slice(
-    providers.indexOf("async function updateOverrides"),
+    providers.indexOf("type OverridePayload"),
     providers.indexOf("async function runModelProbe"),
   );
   assert.match(update, /putModelProtocolOverrides\(/);
   assert.match(update, /overrides: ModelProtocolOverrideUpdate\[\]/);
+  assert.match(update, /showOptimisticOverrides\(payload, sequence\)/);
+  assert.match(update, /overrideQueue = overrideQueue\.then\(\(\) => persistOverrides\(payload, sequence\)\)/);
+  assert.match(update, /settleOptimisticOverrides\(payload, sequence\)/);
+  assert.match(update, /latestOverrideSequence\.get\(key\) !== sequence/);
   assert.match(update, /contracts\.value = normalizeProviderContractsResponse\(response\)/);
   assert.match(update, /error instanceof DashboardRequestError && error\.status === 409/);
   assert.match(update, /await loadContracts\(\{ retain: true \}\)/);
   assert.match(update, /message\.warning\(t\("供应商设置已在其他位置更新，已重新加载，请重试"\)\)/);
   assert.match(update, /message\.error\(t\("保存协议覆盖失败: \{error\}"/);
   assert.doesNotMatch(update, /onMounted|onActivated|setInterval/);
+  assert.match(providers, /:action-locked="matrixActionLocked"/);
+  const matrixLock = providers.slice(
+    providers.indexOf("const matrixActionLocked"),
+    providers.indexOf("const scopeMenuOptions"),
+  );
+  assert.doesNotMatch(matrixLock, /pendingOverrideKeys/);
 });
 
 test("row-level probes send all three protocols and merge the returned contract", () => {
@@ -78,12 +89,43 @@ test("row-level probes send all three protocols and merge the returned contract"
     providers.indexOf("function onPopState"),
   );
   assert.match(probe, /protocols: \[\.\.\.PROVIDER_PROTOCOLS\]/);
+  assert.match(probe, /runProtocolProbes\(scope\.provider_id/);
+  assert.doesNotMatch(probe, /accountId/);
   assert.match(probe, /applyModelContractToResponse\(/);
   assert.match(probe, /await loadContracts\(\{ retain: true \}\)/);
   assert.match(probe, /probingModels\.value = new Set/);
   assert.match(probe, /probingModels\.value\.has\(payload\.modelId\)/);
+  assert.match(probe, /response\.results\.filter\(\(result\) => !result\.success\)/);
+  assert.match(probe, /message\.warning\(actionLive\.value\)/);
   assert.match(probe, /message\.success\(t\("探测完成"\)\)/);
   assert.match(probe, /message\.error\(t\("探测失败: \{error\}"/);
+});
+
+test("Providers presents per-protocol probe results above the matrix without a raw failure aggregate", () => {
+  const summary = providers.slice(
+    providers.indexOf('v-if="probeSummary"'),
+    providers.indexOf("<ProviderModelMatrix"),
+  );
+  assert.match(summary, /probeResultStatus\(result\)/);
+  assert.match(summary, /probeResultHttpStatus\(result\.error\)/);
+  assert.match(summary, /probeResultMessage\(result\.error\)/);
+  assert.match(summary, /probeResultUrl\(result\.error\)/);
+  assert.match(providers, /\(\?:HTTP\\s\+\|returned\\s\+\)\(\\d\{3\}\)/);
+  assert.match(providers, /raw\.indexOf\("\{"\)/);
+  const failure = providers.slice(
+    providers.indexOf("const failures = response.results.filter"),
+    providers.indexOf('actionLive.value = t("探测完成")'),
+  );
+  assert.doesNotMatch(failure, /probeError\.value = failures/);
+});
+
+test("every provider with a dated static snapshot can expose the restore action", () => {
+  assert.match(providers, /staticProtocolResetVisible/);
+  assert.doesNotMatch(providers, /provider_id === "opencode"/);
+  assert.match(providers, /static_protocol_snapshot_date/);
+  assert.match(providers, /resetStaticModelProtocols/);
+  assert.match(providers, /不会请求上游；将清除手动和探测判断/);
+  assert.match(providers, /未出现的协议默认关闭/);
 });
 
 test("Providers pricing is filtered to the active provider and 390px layout does not require horizontal scrolling", () => {
@@ -106,20 +148,30 @@ test("Providers shows model catalog and model prices in two tabs", () => {
   assert.doesNotMatch(providers, /id="provider-protocol-title"/);
 });
 
-test("ProviderModelMatrix renders a model-by-protocol grid with override controls and row probes", () => {
+test("ProviderModelMatrix renders a model-by-protocol grid with override switches and row probes", () => {
   assert.match(matrix, /matrixModels/);
   assert.match(matrix, /PROVIDER_PROTOCOLS/);
-  assert.match(matrix, /n-radio-group/);
-  assert.match(matrix, /value="auto"/);
-  assert.match(matrix, /value="force_on"/);
-  assert.match(matrix, /value="force_off"/);
-  assert.match(matrix, /canForceOn\(modelId, protocol\)/);
-  assert.match(matrix, /cellForced\(modelId, protocol\)/);
-  assert.match(matrix, /applyRowBatch/);
+  assert.match(matrix, /n-switch/);
+  assert.match(matrix, /cellEnabled\(modelId, protocol\)/);
+  assert.match(matrix, /on \? 'force_on' : 'force_off'/);
+  assert.doesNotMatch(matrix, /canForceOn/);
+  assert.doesNotMatch(matrix, /n-radio-group/);
+  assert.doesNotMatch(matrix, /expandedModel/);
+  assert.doesNotMatch(matrix, /status-dot/);
+  assert.doesNotMatch(matrix, /overrideOptions/);
   assert.match(matrix, /applyColumnBatch/);
+  assert.match(matrix, /columnBatchOptions/);
   assert.match(matrix, /n-popconfirm/);
+  assert.match(matrix, /ReloadOutlined/);
   assert.match(matrix, /runRowProbe/);
   assert.match(matrix, /scope\.scope_kind !== 'custom_endpoint'/);
-  assert.match(matrix, /protocolEvidenceStatus/);
-  assert.match(matrix, /statusKeys/);
+  assert.match(matrix, /scope\.provider_id !== "command-code"/);
+});
+
+test("Provider model rows use aliases and expose all-disabled state from matrix cells", () => {
+  assert.match(matrix, /modelAlias\(modelId\) \|\| modelId/);
+  assert.match(matrix, /modelAlias\(modelId\) !== modelId/);
+  assert.match(matrix, /const providerDisabled = computed/);
+  assert.match(matrix, /cellEnabled\(modelId, protocol\)/);
+  assert.match(matrix, /全部供应商协议已关闭/);
 });

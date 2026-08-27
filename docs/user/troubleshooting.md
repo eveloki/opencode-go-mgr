@@ -42,9 +42,10 @@ get billed for a bad guess.
   eligible Custom ID from authenticated `GET /v1/models`. Names with `/`,
   `_`, or whitespace are raw IDs, not kebab aliases. Unknown names and
   overlapping raw IDs fail closed and never call upstream.
-- **Saving Command Code GOAT does not start routing.** It stays a disabled
-  `pending` draft; verification returns `501`. Use an OpenCode Go key, Zen
-  Free, or an enabled Custom API card (verification is optional) for live traffic.
+- **Command Code GOAT does not produce a route.** Confirm the account is
+  enabled, ready, and has a non-empty Key, then check that the model's supported
+  protocol is enabled in the **Providers** matrix. Public `/models` refresh does
+  not validate the Key; an invalid Key surfaces as inference 401/403.
 - **Saving Custom API does not start routing.** The card is created disabled
   `pending`, but you can enable it immediately; an unverified badge is shown
   while verification is `pending`. Verify probes every selected protocol with a

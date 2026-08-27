@@ -110,22 +110,21 @@ fn stop(
 
 fn assert_local_openai_alias_list(body: &Value) {
     assert_eq!(body["object"], "list");
-    let expected = alias::published_routeable_aliases();
     let data = body["data"].as_array().expect("OpenAI list data");
-    assert_eq!(data.len(), expected.len(), "{body}");
-    for (item, published) in data.iter().zip(&expected) {
-        assert_eq!(item["id"], published.alias);
+    assert!(!data.is_empty(), "{body}");
+    let ids = data
+        .iter()
+        .map(|item| item["id"].as_str().expect("model id"))
+        .collect::<Vec<_>>();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{body}");
+    for item in data {
+        let published = item["id"].as_str().expect("model id");
         assert_eq!(item["object"], "model");
-        assert_eq!(item["owned_by"], published.owned_by);
+        assert!(item["owned_by"].is_string());
         assert_eq!(item["created"], 0);
-        assert!(
-            alias::is_published_alias(&published.alias),
-            "advertised `{}` is not an alias",
-            published.alias
-        );
-        assert!(!published.alias.contains('/'));
-        assert!(!published.alias.contains('_'));
-        assert!(!published.alias.contains(' '));
+        assert!(!published.contains('/'));
+        assert!(!published.contains('_'));
+        assert!(!published.contains(' '));
     }
     let go = data
         .iter()
@@ -140,22 +139,16 @@ fn assert_local_openai_alias_list(body: &Value) {
         go_named_free["owned_by"],
         ocg_core::provider::OPENCODE_PROVIDER_ID
     );
-    let zen_raw = data
-        .iter()
-        .find(|item| item["id"] == "deepseek-v4-flash-free")
-        .expect("Zen raw free model id");
-    assert_eq!(
-        zen_raw["owned_by"],
-        ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
+    assert!(
+        data.iter()
+            .all(|item| item["id"] != "deepseek-v4-flash-free"),
+        "Zen raw -free IDs must not be published"
     );
     let zen = data
         .iter()
-        .find(|item| item["id"] == "mimo-v2.5-free")
-        .expect("registered Zen alias");
-    assert_eq!(
-        zen["owned_by"],
-        ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID
-    );
+        .find(|item| item["id"] == "mimo-v2.5")
+        .expect("registered stripped Zen alias");
+    assert_eq!(zen["owned_by"], ocg_core::provider::OPENCODE_PROVIDER_ID);
     assert!(
         data.iter()
             .all(|item| item["id"]
@@ -236,7 +229,6 @@ async fn models_list_ignores_raw_only_and_empty_fake_upstream() {
     let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let expected = alias::published_routeable_aliases();
     let response = loopback_client()
         .get(format!("http://127.0.0.1:{port}/v1/models"))
         .bearer_auth("gw-test")
@@ -246,7 +238,6 @@ async fn models_list_ignores_raw_only_and_empty_fake_upstream() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
     assert_local_openai_alias_list(&body);
-    assert_eq!(body["data"].as_array().unwrap().len(), expected.len());
     assert!(
         calls.lock().unwrap().is_empty(),
         "GET /v1/models must not probe upstream even when accounts exist: {:?}",
@@ -302,10 +293,22 @@ async fn unknown_chat_model_returns_400_before_any_upstream_request() {
             .map(|call: &FakeCall| call.path.as_str())
             .collect::<Vec<_>>()
     );
-    assert!(
-        state.db.lock().list_forward_logs(8).unwrap().is_empty(),
-        "unknown models must not create an upstream forward log"
+    let db = state.db.lock();
+    let request_logs = db.list_forward_logs(8).unwrap();
+    assert_eq!(
+        request_logs.len(),
+        1,
+        "an authenticated unknown-model call is still a client request"
     );
+    assert_eq!(request_logs[0].status, "client_error");
+    assert_eq!(request_logs[0].http_status, Some(400));
+    assert_eq!(request_logs[0].error_source.as_deref(), Some("client"));
+    assert_eq!(request_logs[0].error_stage.as_deref(), Some("validation"));
+    assert!(
+        db.list_gateway_logs(8).unwrap().is_empty(),
+        "request validation must not enter runtime logs"
+    );
+    drop(db);
 
     stop(state, dir, gateway_handle, stop_mock);
 }

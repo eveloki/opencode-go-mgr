@@ -1,817 +1,570 @@
-//! Live protocol + stability probe against a local OCG data dir.
+//! One-time maintainer protocol-matrix runner. It never writes OCG state.
 //!
-//! Usage:
-//!   cargo run -p ocg-core --example probe_protocols --release -- [data-dir]
-//!
-//! Decrypts the first enabled account key, lists upstream models, then for each
-//! paid Go model (plus official IDs missing from /v1/models):
-//!   1. Chat / Responses / Messages × non-stream / stream one-shot
-//!   2. Official preferred endpoint: 5-turn conversation, non-stream then stream
-//!
-//! Free / pickle models get the one-shot matrix only.
+//! Default invocation is an offline inventory:
+//! `cargo run -p ocg-core --example probe_protocols -- --data-dir <dir>`.
+//! Add `--run` to send the bounded real requests. Results go to a timestamped
+//! JSONL and Markdown pair in the system temp directory.
 
-use std::collections::BTreeMap;
-use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use futures_util::StreamExt;
 use ocg_core::crypto::{KeyCipher, MachineBoundCipher};
-use ocg_core::db::Database;
-use ocg_core::gateway::free_models::is_free_model;
-use ocg_core::state::CoreStateInner;
+use ocg_core::gateway::free_models::resolve_upstream_base;
+use ocg_core::kernel::protocol::supported_model_protocol_profiles;
+use ocg_core::models::{AppConfig, UpstreamChannel};
+use ocg_core::provider::{
+    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
+    COMMAND_CODE_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID,
+};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use serde::Serialize;
 use serde_json::{Value, json};
 
-const REQUEST_GAP: Duration = Duration::from_millis(400);
-const PING_TIMEOUT: Duration = Duration::from_secs(120);
-const TURN_TIMEOUT: Duration = Duration::from_secs(180);
-const PING_MAX_TOKENS: u32 = 8;
-const TURN_MAX_TOKENS: u32 = 80;
+const MAX_TOKENS: u8 = 16;
+const REQUEST_TIMEOUT_SECS: u64 = 90;
 
-const OFFICIAL_PREFERRED: &[(&str, Endpoint)] = &[
-    ("grok-4.5", Endpoint::Responses),
-    ("gpt-5.6-luna", Endpoint::Responses),
-    ("muse-spark-1.2", Endpoint::Responses),
-    ("muse-spark-1.2-contributor", Endpoint::Responses),
-    ("glm-5.3", Endpoint::Chat),
-    ("glm-5.2", Endpoint::Chat),
-    ("glm-5.1", Endpoint::Chat),
-    ("kimi-k3", Endpoint::Chat),
-    ("kimi-k2.7-code", Endpoint::Chat),
-    ("kimi-k2.6", Endpoint::Chat),
-    ("deepseek-v4-pro", Endpoint::Chat),
-    ("deepseek-v4-flash", Endpoint::Chat),
-    ("mimo-v2.5", Endpoint::Chat),
-    ("mimo-v2.5-pro", Endpoint::Chat),
-    ("minimax-m3", Endpoint::Messages),
-    ("minimax-m2.7", Endpoint::Messages),
-    ("minimax-m2.5", Endpoint::Messages),
-    ("qwen3.8-max", Endpoint::Messages),
-    ("qwen3.7-max", Endpoint::Messages),
-    ("qwen3.7-plus", Endpoint::Messages),
-    ("qwen3.6-plus", Endpoint::Messages),
-    ("hy3", Endpoint::Chat),
-    ("ox-alpha-free", Endpoint::Chat),
-];
-
-const CONVERSATION: &[&str] = &[
-    "Reply with exactly: ALPHA",
-    "Repeat your previous reply and append -1",
-    "Repeat your previous reply and append -2",
-    "Repeat your previous reply and append -3",
-    "Repeat your previous reply and append -4",
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Endpoint {
-    Chat,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Protocol {
+    ChatCompletions,
     Responses,
     Messages,
 }
 
-impl Endpoint {
-    fn label(self) -> &'static str {
+impl Protocol {
+    const ALL: [Self; 3] = [Self::ChatCompletions, Self::Responses, Self::Messages];
+
+    fn path(self) -> &'static str {
         match self {
-            Self::Chat => "chat",
-            Self::Responses => "resp",
-            Self::Messages => "msg",
+            Self::ChatCompletions => "/v1/chat/completions",
+            Self::Responses => "/v1/responses",
+            Self::Messages => "/v1/messages",
         }
     }
 
-    fn all() -> [Self; 3] {
-        [Self::Chat, Self::Responses, Self::Messages]
+    fn goat_path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "/chat/completions",
+            Self::Responses => "/responses",
+            Self::Messages => "/messages",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "chat" | "chat_completions" => Some(Self::ChatCompletions),
+            "responses" => Some(Self::Responses),
+            "messages" => Some(Self::Messages),
+            _ => None,
+        }
     }
 }
 
-#[derive(Clone, Debug)]
-struct ProbeResult {
+#[derive(Clone)]
+struct Target {
+    provider_id: &'static str,
+    base_url: String,
+    bearer_key: Option<String>,
+    models: Vec<String>,
+}
+
+struct StoredAccount {
+    id: String,
+    name: String,
+    provider_id: String,
+    offering_id: String,
+    key_cipher: String,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Record {
+    timestamp: String,
+    provider_id: String,
+    model_id: String,
+    protocol: Protocol,
+    stream: bool,
     status: u16,
-    ms: u128,
     ok: bool,
-    text: String,
-    note: String,
+    duration_ms: u128,
+    evidence: String,
 }
 
-impl ProbeResult {
-    fn cell(&self) -> String {
-        if self.status == 0 {
-            "ERR".into()
-        } else if self.ok {
-            "OK".into()
-        } else {
-            self.status.to_string()
+struct Options {
+    data_dir: PathBuf,
+    account_filter: Option<String>,
+    model_filter: Option<String>,
+    protocol_filter: Option<Protocol>,
+    providers: Vec<String>,
+    output_dir: Option<PathBuf>,
+    concurrency: usize,
+    run: bool,
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "Usage: probe_protocols [--data-dir DIR] [--providers go,zen,goat] [--account NAME_OR_ID] [--model EXACT_ID] [--protocol chat|responses|messages] [--output-dir DIR] [--concurrency 1..8] [--run]\n\
+         Default is offline inventory only. --run sends real one-shot requests; it never writes SQLite."
+    );
+    std::process::exit(2);
+}
+
+fn options() -> Options {
+    let mut args = std::env::args().skip(1);
+    let mut data_dir = None;
+    let mut account_filter = None;
+    let mut model_filter = None;
+    let mut protocol_filter = None;
+    let mut providers = vec!["go".into(), "zen".into(), "goat".into()];
+    let mut output_dir = None;
+    let mut concurrency = 4;
+    let mut run = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--data-dir" => data_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| usage()))),
+            "--account" => account_filter = Some(args.next().unwrap_or_else(|| usage())),
+            "--model" => model_filter = Some(args.next().unwrap_or_else(|| usage())),
+            "--protocol" => {
+                protocol_filter = Some(
+                    Protocol::parse(&args.next().unwrap_or_else(|| usage()))
+                        .unwrap_or_else(|| usage()),
+                )
+            }
+            "--providers" => {
+                providers = args
+                    .next()
+                    .unwrap_or_else(|| usage())
+                    .split(',')
+                    .map(str::to_string)
+                    .collect();
+                if providers.is_empty()
+                    || providers
+                        .iter()
+                        .any(|provider| !matches!(provider.as_str(), "go" | "zen" | "goat"))
+                {
+                    usage();
+                }
+            }
+            "--output-dir" => {
+                output_dir = Some(PathBuf::from(args.next().unwrap_or_else(|| usage())))
+            }
+            "--concurrency" => {
+                concurrency = args
+                    .next()
+                    .unwrap_or_else(|| usage())
+                    .parse()
+                    .unwrap_or_else(|_| usage());
+                if !(1..=8).contains(&concurrency) {
+                    usage();
+                }
+            }
+            "--run" => run = true,
+            "--help" | "-h" => usage(),
+            _ => usage(),
         }
     }
+    let data_dir = data_dir.unwrap_or_else(|| {
+        PathBuf::from(
+            std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_else(|_| ".".into()),
+        )
+        .join(".ocg-mgr")
+    });
+    Options {
+        data_dir,
+        account_filter,
+        model_filter,
+        protocol_filter,
+        providers,
+        output_dir,
+        concurrency,
+        run,
+    }
+}
+
+fn enabled_provider(options: &Options, provider: &str) -> bool {
+    options.providers.iter().any(|item| item == provider)
+}
+
+fn matches(account: &StoredAccount, provider: &str, offering: &str, filter: Option<&str>) -> bool {
+    account.enabled
+        && account.provider_id == provider
+        && account.offering_id == offering
+        && filter.is_none_or(|value| account.name.contains(value) || account.id.starts_with(value))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let data_dir = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("USERPROFILE")
-                .or_else(|_| std::env::var("HOME"))
-                .expect("home");
-            PathBuf::from(home).join(".ocg-mgr")
-        });
-
+    let options = options();
     let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(MachineBoundCipher::new());
-    let db = Database::open_with_cipher(data_dir.clone(), cipher.clone())?;
-    let state = CoreStateInner::new(db, data_dir, cipher)?;
-    let (config, client) = state.upstream_context();
-    let base = config.upstream_base_url.trim_end_matches('/').to_string();
+    let db_path = options.data_dir.join("data.sqlite");
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let config_json: String = conn.query_row(
+        "SELECT value FROM settings WHERE key = 'config'",
+        [],
+        |row| row.get(0),
+    )?;
+    let config: AppConfig = serde_json::from_str(&config_json)?;
+    let accounts = conn
+        .prepare("SELECT id, name, provider_id, offering_id, key_cipher, enabled FROM accounts")?
+        .query_map([], |row| {
+            Ok(StoredAccount {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                provider_id: row.get(2)?,
+                offering_id: row.get(3)?,
+                key_cipher: row.get(4)?,
+                enabled: row.get::<_, i64>(5)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let catalog = |id: &str| -> anyhow::Result<Vec<String>> {
+        let persisted: Option<String> = conn.query_row("SELECT catalog_models_json FROM provider_contract_scopes WHERE scope_kind = 'provider' AND scope_id = ?1", [id], |row| row.get(0)).optional()?;
+        let models = persisted
+            .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+            .filter(|models| !models.is_empty());
+        Ok(models.unwrap_or_else(|| match id {
+            OPENCODE_PROVIDER_ID => supported_model_protocol_profiles()
+                .map(|(model, _, _)| model.to_string())
+                .collect(),
+            COMMAND_CODE_PROVIDER_ID => COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS
+                .iter()
+                .map(|model| (*model).to_string())
+                .collect(),
+            _ => Vec::new(),
+        }))
+    };
+    let go_accounts: Vec<_> = accounts
+        .iter()
+        .filter(|account| {
+            matches(
+                account,
+                OPENCODE_PROVIDER_ID,
+                GO_OFFERING_ID,
+                options.account_filter.as_deref(),
+            )
+        })
+        .collect();
+    let goat_accounts: Vec<_> = accounts
+        .iter()
+        .filter(|account| {
+            matches(
+                account,
+                COMMAND_CODE_PROVIDER_ID,
+                GOAT_OFFERING_ID,
+                options.account_filter.as_deref(),
+            )
+        })
+        .collect();
+    let free_accounts = accounts
+        .iter()
+        .filter(|account| {
+            matches(
+                account,
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+                options.account_filter.as_deref(),
+            )
+        })
+        .count();
+    let go_base = config.upstream_base_url.trim_end_matches('/').to_string();
+    let free_base = resolve_upstream_base(UpstreamChannel::Free, &go_base).ok();
 
-    let wanted = std::env::args().nth(2);
-    let mut keys = Vec::new();
-    for account in state
-        .db
-        .lock()
-        .list_accounts()?
-        .into_iter()
-        .filter(|a| a.enabled)
-    {
-        if wanted
-            .as_deref()
-            .is_some_and(|want| !account.name.contains(want) && !account.id.starts_with(want))
-        {
-            continue;
-        }
-        match state.decrypt_key(&account.key_cipher) {
-            Ok(key) => keys.push((account.name.clone(), key)),
-            Err(error) => eprintln!("skip account {}: {error}", account.name),
-        }
-    }
-    if keys.is_empty() {
-        anyhow::bail!("no enabled accounts available");
-    }
-    keys.sort_by_key(|(name, _)| match name.as_str() {
-        "115" => 0,
-        "klarkxy01" => 1,
-        _ => 2,
-    });
-    println!(
-        "probe accounts={} upstream={base}",
-        keys.iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let mut key_index = 0usize;
-
-    let models_url = format!("{base}/v1/models");
-    let models_resp = client
-        .get(&models_url)
-        .header("Authorization", format!("Bearer {}", keys[0].1))
-        .timeout(Duration::from_secs(60))
-        .send()
-        .await?;
-    let models_status = models_resp.status();
-    let models_body = models_resp.text().await?;
-    if !models_status.is_success() {
-        anyhow::bail!("GET /v1/models failed: {models_status} {models_body}");
-    }
-    let models_json: Value = serde_json::from_str(&models_body)?;
-    let mut listed = models_json
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect::<Vec<_>>();
-    listed.sort();
-    listed.dedup();
-    println!("upstream models ({}): {}", listed.len(), listed.join(", "));
-
-    let mut models = listed.clone();
-    for (id, _) in OFFICIAL_PREFERRED {
-        if !models.iter().any(|m| m == id) {
-            models.push((*id).to_string());
-        }
-    }
-    models.sort();
-    models.dedup();
-
-    println!();
-    println!(
-        "{:<22} {:<9} {:<9} {:<9} {:<9} {:<9} {:<9}",
-        "model", "c", "c~", "r", "r~", "m", "m~"
-    );
-    println!("{}", "-".repeat(88));
-
-    let mut report = String::new();
-    let mut supported: BTreeMap<String, Vec<Endpoint>> = BTreeMap::new();
-
-    for model in &models {
-        let mut row = BTreeMap::new();
-        for endpoint in Endpoint::all() {
-            for stream in [false, true] {
-                let result = probe_with_failover(
-                    &client,
-                    &base,
-                    &keys,
-                    &mut key_index,
-                    model,
-                    endpoint,
-                    stream,
-                    None,
-                    PING_TIMEOUT,
-                )
-                .await;
-                print_progress(model, endpoint, stream, &result);
-                row.insert((endpoint, stream), result);
-                tokio::time::sleep(REQUEST_GAP).await;
-            }
-        }
-
-        let oneshots = [
-            row.get(&(Endpoint::Chat, false)).cloned().unwrap(),
-            row.get(&(Endpoint::Chat, true)).cloned().unwrap(),
-            row.get(&(Endpoint::Responses, false)).cloned().unwrap(),
-            row.get(&(Endpoint::Responses, true)).cloned().unwrap(),
-            row.get(&(Endpoint::Messages, false)).cloned().unwrap(),
-            row.get(&(Endpoint::Messages, true)).cloned().unwrap(),
-        ];
+    println!("offline inventory (no network unless --run):");
+    let go_catalog = catalog(OPENCODE_PROVIDER_ID)?;
+    let free_catalog = catalog(OPENCODE_ZEN_FREE_PROVIDER_ID)?;
+    let goat_catalog = catalog(COMMAND_CODE_PROVIDER_ID)?;
+    if enabled_provider(&options, "go") {
         println!(
-            "{:<22} {:<9} {:<9} {:<9} {:<9} {:<9} {:<9}",
-            model,
-            oneshots[0].cell(),
-            oneshots[1].cell(),
-            oneshots[2].cell(),
-            oneshots[3].cell(),
-            oneshots[4].cell(),
-            oneshots[5].cell(),
+            "  {OPENCODE_PROVIDER_ID}: models={} enabled matching accounts={}",
+            go_catalog.len(),
+            go_accounts.len()
         );
+    }
+    if enabled_provider(&options, "zen") {
+        println!(
+            "  {OPENCODE_ZEN_FREE_PROVIDER_ID}: models={} enabled matching accounts={} base={}",
+            free_catalog.len(),
+            free_accounts,
+            free_base.as_deref().unwrap_or("unavailable")
+        );
+    }
+    if enabled_provider(&options, "goat") {
+        println!(
+            "  {COMMAND_CODE_PROVIDER_ID}: models={} enabled matching accounts={}",
+            goat_catalog.len(),
+            goat_accounts.len()
+        );
+    }
+    if !options.run {
+        return Ok(());
+    }
 
-        let mut ok_endpoints = Vec::new();
-        for endpoint in Endpoint::all() {
-            let ns = row.get(&(endpoint, false)).unwrap();
-            let st = row.get(&(endpoint, true)).unwrap();
-            if ns.ok && st.ok {
-                ok_endpoints.push(endpoint);
+    let first_key = |accounts: &[&StoredAccount]| -> anyhow::Result<Option<String>> {
+        accounts
+            .first()
+            .map(|account| cipher.decrypt(&account.key_cipher).map_err(Into::into))
+            .transpose()
+    };
+    let go_key = first_key(&go_accounts)?;
+    let goat_key = first_key(&goat_accounts)?;
+    let mut targets = Vec::new();
+    if enabled_provider(&options, "go") {
+        if let Some(key) = go_key {
+            targets.push(Target {
+                provider_id: OPENCODE_PROVIDER_ID,
+                base_url: go_base,
+                bearer_key: Some(key),
+                models: go_catalog,
+            });
+        }
+    }
+    if enabled_provider(&options, "zen") {
+        if let Some(base_url) = free_base {
+            targets.push(Target {
+                provider_id: OPENCODE_ZEN_FREE_PROVIDER_ID,
+                base_url,
+                bearer_key: None,
+                models: free_catalog,
+            });
+        }
+    }
+    if enabled_provider(&options, "goat") {
+        if let Some(key) = goat_key {
+            targets.push(Target {
+                provider_id: COMMAND_CODE_PROVIDER_ID,
+                base_url: COMMAND_CODE_GOAT_BASE_URL.trim_end_matches('/').to_string(),
+                bearer_key: Some(key),
+                models: goat_catalog,
+            });
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let root = options
+        .output_dir
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("ocg-protocol-matrix-{timestamp}"));
+    let jsonl_path = root.with_extension("jsonl");
+    let markdown_path = root.with_extension("md");
+    let mut jobs = Vec::new();
+    for target in &targets {
+        for model in &target.models {
+            if options
+                .model_filter
+                .as_deref()
+                .is_some_and(|filter| model != filter)
+            {
+                continue;
+            }
+            for protocol in Protocol::ALL {
+                if options
+                    .protocol_filter
+                    .is_some_and(|filter| protocol != filter)
+                {
+                    continue;
+                }
+                for stream in [false, true] {
+                    jobs.push((target.clone(), model.clone(), protocol, stream));
+                }
             }
         }
-        supported.insert(model.clone(), ok_endpoints);
-
-        writeln!(
-            report,
-            "## {model}\noneshot chat={} chat_stream={} resp={} resp_stream={} msg={} msg_stream={}",
-            detail(&oneshots[0]),
-            detail(&oneshots[1]),
-            detail(&oneshots[2]),
-            detail(&oneshots[3]),
-            detail(&oneshots[4]),
-            detail(&oneshots[5]),
-        )
-        .unwrap();
-
-        if is_free_or_pickle(model) {
-            writeln!(report, "skip 5-turn (free/pickle)\n").unwrap();
-            continue;
-        }
-
-        let preferred = official_preferred(model).unwrap_or_else(|| {
-            row.iter()
-                .find(|((_, stream), result)| !*stream && result.ok)
-                .map(|((endpoint, _), _)| *endpoint)
-                .unwrap_or(Endpoint::Chat)
-        });
-        let preferred_ready = row.get(&(preferred, false)).is_some_and(|result| result.ok)
-            || row.get(&(preferred, true)).is_some_and(|result| result.ok);
-        if !preferred_ready {
-            writeln!(
-                report,
-                "skip 5-turn (preferred {} not usable)\n",
-                preferred.label()
-            )
-            .unwrap();
-            println!("  skip 5-turn (preferred {} not usable)", preferred.label());
-            continue;
-        }
-
-        for stream in [false, true] {
-            let conversation = probe_conversation_with_failover(
-                &client,
-                &base,
-                &keys,
-                &mut key_index,
-                model,
-                preferred,
-                stream,
-            )
-            .await;
-            let ok_turns = conversation.iter().filter(|turn| turn.ok).count();
-            let stable = conversation.len() == CONVERSATION.len()
-                && conversation.iter().all(|turn| turn.ok)
-                && conversation_looks_stable(&conversation);
-            writeln!(
-                report,
-                "5-turn {} preferred={} ok={}/{} stable={} {}",
-                if stream { "stream" } else { "sync" },
-                preferred.label(),
-                ok_turns,
-                CONVERSATION.len(),
-                stable,
-                conversation
-                    .iter()
-                    .enumerate()
-                    .map(|(i, turn)| format!("t{}:{}", i + 1, detail(turn)))
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            )
-            .unwrap();
-            println!(
-                "  5-turn {}/{} {}/{} stable={}",
-                preferred.label(),
-                if stream { "stream" } else { "sync" },
-                ok_turns,
-                CONVERSATION.len(),
-                stable
-            );
-        }
-        writeln!(report).unwrap();
     }
-
-    println!();
-    println!("supported = both stream and non-stream 2xx with a usable body");
-    for (model, endpoints) in &supported {
-        let cells = endpoints
-            .iter()
-            .map(|endpoint| endpoint.label())
-            .collect::<Vec<_>>()
-            .join(",");
-        println!("  {model}: {}", if cells.is_empty() { "-" } else { &cells });
+    let records: Vec<Record> = futures_util::stream::iter(jobs)
+        .map(|(target, model, protocol, stream)| probe(&client, target, model, protocol, stream))
+        .buffer_unordered(options.concurrency)
+        .collect()
+        .await;
+    let jsonl = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n")
+        + "\n";
+    std::fs::write(&jsonl_path, jsonl)?;
+    let mut markdown = format!(
+        "# OCG protocol matrix {timestamp}\n\n| Provider | Model | Protocol | Stream | Status | OK | ms | Evidence |\n|---|---|---|---:|---:|---:|---:|---|\n"
+    );
+    for row in &records {
+        markdown.push_str(&format!(
+            "| {} | `{}` | {:?} | {} | {} | {} | {} | {} |\n",
+            row.provider_id,
+            row.model_id,
+            row.protocol,
+            row.stream,
+            row.status,
+            row.ok,
+            row.duration_ms,
+            row.evidence.replace('|', "\\|")
+        ));
     }
-
-    let out = std::env::temp_dir().join("ocg-protocol-probe.md");
-    std::fs::write(&out, report)?;
-    println!("\nfull notes: {}", out.display());
+    std::fs::write(&markdown_path, markdown)?;
+    println!(
+        "wrote {} records (Go accounts={}, Zen accounts={}, GOAT accounts={})",
+        records.len(),
+        go_accounts.len(),
+        free_accounts,
+        goat_accounts.len()
+    );
+    println!(
+        "jsonl: {}\nmarkdown: {}",
+        jsonl_path.display(),
+        markdown_path.display()
+    );
     Ok(())
 }
 
-fn official_preferred(model: &str) -> Option<Endpoint> {
-    OFFICIAL_PREFERRED
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, endpoint)| *endpoint)
-}
-
-fn is_free_or_pickle(model: &str) -> bool {
-    is_free_model(model)
-}
-
-fn detail(result: &ProbeResult) -> String {
-    if result.ok {
-        format!("OK {}ms", result.ms)
-    } else if result.status == 0 {
-        format!("ERR {}", clip(&result.note, 80))
-    } else {
-        format!("{} {}", result.status, clip(&result.note, 80))
-    }
-}
-
-fn clip(value: &str, n: usize) -> String {
-    let flat = value.replace('\n', " ");
-    flat.chars().take(n).collect()
-}
-
-fn print_progress(model: &str, endpoint: Endpoint, stream: bool, result: &ProbeResult) {
-    eprintln!(
-        "  … {model} {}{} => {}",
-        endpoint.label(),
-        if stream { "~" } else { "" },
-        detail(result)
-    );
-}
-
-fn conversation_looks_stable(turns: &[ProbeResult]) -> bool {
-    let Some(first) = turns.first().and_then(|turn| extract_marker(&turn.text)) else {
-        return false;
-    };
-    turns.iter().all(|turn| {
-        extract_marker(&turn.text)
-            .map(|text| text.starts_with(&first))
-            .unwrap_or(false)
-    })
-}
-
-fn extract_marker(text: &str) -> Option<String> {
-    let upper = text.to_ascii_uppercase();
-    let start = upper.find("ALPHA")?;
-    Some(
-        text[start..]
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
-            .take(24)
-            .collect(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn probe_with_failover(
+async fn probe(
     client: &reqwest::Client,
-    base: &str,
-    keys: &[(String, String)],
-    key_index: &mut usize,
-    model: &str,
-    endpoint: Endpoint,
+    target: Target,
+    model: String,
+    protocol: Protocol,
     stream: bool,
-    history: Option<&[(String, String)]>,
-    timeout: Duration,
-) -> ProbeResult {
-    for attempt in 0..keys.len() {
-        let index = (*key_index + attempt) % keys.len();
-        let body = if let Some(history) = history {
-            conversation_body(
-                model,
-                endpoint,
-                stream,
-                history,
-                CONVERSATION
-                    .get(history.len())
-                    .copied()
-                    .unwrap_or(CONVERSATION[CONVERSATION.len() - 1]),
-            )
+) -> Record {
+    let url = format!(
+        "{}{}",
+        target.base_url,
+        if target.provider_id == COMMAND_CODE_PROVIDER_ID {
+            protocol.goat_path()
         } else {
-            oneshot_body(model, endpoint, stream)
-        };
-        let result = send(
-            client,
-            base,
-            &keys[index].1,
-            endpoint,
-            body,
-            stream,
-            timeout,
-        )
-        .await;
-        if is_usage_limit(&result) {
-            eprintln!("  account {} hit Go usage limit, rotating", keys[index].0);
-            *key_index = (index + 1) % keys.len();
-            continue;
+            protocol.path()
         }
-        *key_index = index;
-        return result;
-    }
-    ProbeResult {
-        status: 429,
-        ms: 0,
-        ok: false,
-        text: String::new(),
-        note: "all accounts hit Go usage limit".into(),
-    }
-}
-
-fn is_usage_limit(result: &ProbeResult) -> bool {
-    result.status == 429 && result.note.contains("GoUsageLimitError")
-}
-
-async fn probe_conversation_with_failover(
-    client: &reqwest::Client,
-    base: &str,
-    keys: &[(String, String)],
-    key_index: &mut usize,
-    model: &str,
-    endpoint: Endpoint,
-    stream: bool,
-) -> Vec<ProbeResult> {
-    let mut history: Vec<(String, String)> = Vec::new();
-    let mut results = Vec::new();
-    for _user in CONVERSATION {
-        let result = probe_with_failover(
-            client,
-            base,
-            keys,
-            key_index,
-            model,
-            endpoint,
-            stream,
-            Some(&history),
-            TURN_TIMEOUT,
-        )
-        .await;
-        if result.ok && !result.text.trim().is_empty() {
-            history.push((CONVERSATION[history.len()].to_string(), result.text.clone()));
-        }
-        results.push(result);
-        tokio::time::sleep(REQUEST_GAP).await;
-    }
-    results
-}
-
-fn oneshot_body(model: &str, endpoint: Endpoint, stream: bool) -> Value {
-    match endpoint {
-        Endpoint::Chat => json!({
-            "model": model,
-            "messages": [{"role": "user", "content": "Reply with exactly: PING"}],
-            "max_tokens": PING_MAX_TOKENS,
-            "stream": stream
-        }),
-        Endpoint::Responses => json!({
-            "model": model,
-            "input": "Reply with exactly: PING",
-            "store": false,
-            "max_output_tokens": PING_MAX_TOKENS,
-            "stream": stream
-        }),
-        Endpoint::Messages => json!({
-            "model": model,
-            "messages": [{"role": "user", "content": "Reply with exactly: PING"}],
-            "max_tokens": PING_MAX_TOKENS,
-            "stream": stream
-        }),
-    }
-}
-
-fn conversation_body(
-    model: &str,
-    endpoint: Endpoint,
-    stream: bool,
-    history: &[(String, String)],
-    user: &str,
-) -> Value {
-    match endpoint {
-        Endpoint::Chat => {
-            let mut messages = Vec::new();
-            for (prev_user, prev_assistant) in history {
-                messages.push(json!({"role": "user", "content": prev_user}));
-                messages.push(json!({"role": "assistant", "content": prev_assistant}));
-            }
-            messages.push(json!({"role": "user", "content": user}));
-            json!({
-                "model": model,
-                "messages": messages,
-                "max_tokens": TURN_MAX_TOKENS,
-                "stream": stream
-            })
-        }
-        Endpoint::Responses => {
-            let mut input = Vec::new();
-            for (prev_user, prev_assistant) in history {
-                input.push(json!({
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": prev_user}]
-                }));
-                input.push(json!({
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": prev_assistant}]
-                }));
-            }
-            input.push(json!({
-                "role": "user",
-                "content": [{"type": "input_text", "text": user}]
-            }));
-            json!({
-                "model": model,
-                "input": input,
-                "store": false,
-                "max_output_tokens": TURN_MAX_TOKENS,
-                "stream": stream
-            })
-        }
-        Endpoint::Messages => {
-            let mut messages = Vec::new();
-            for (prev_user, prev_assistant) in history {
-                messages.push(json!({"role": "user", "content": prev_user}));
-                messages.push(json!({"role": "assistant", "content": prev_assistant}));
-            }
-            messages.push(json!({"role": "user", "content": user}));
-            json!({
-                "model": model,
-                "messages": messages,
-                "max_tokens": TURN_MAX_TOKENS,
-                "stream": stream
-            })
-        }
-    }
-}
-
-async fn send(
-    client: &reqwest::Client,
-    base: &str,
-    key: &str,
-    endpoint: Endpoint,
-    body: Value,
-    stream: bool,
-    timeout: Duration,
-) -> ProbeResult {
-    let url = match endpoint {
-        Endpoint::Chat => format!("{base}/v1/chat/completions"),
-        Endpoint::Responses => format!("{base}/v1/responses"),
-        Endpoint::Messages => format!("{base}/v1/messages"),
-    };
+    );
     let started = Instant::now();
-    let mut req = client
-        .post(&url)
-        .timeout(timeout)
-        .header("Content-Type", "application/json")
-        .json(&body);
-    req = match endpoint {
-        Endpoint::Messages => req
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01"),
-        _ => req.header("Authorization", format!("Bearer {key}")),
-    };
-
-    match req.send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            if stream {
-                finish_stream(resp, status, started, endpoint).await
+    let mut request = client
+        .post(url)
+        .header("content-type", "application/json")
+        .json(&body(&model, protocol, stream));
+    if let Some(key) = target.bearer_key.as_deref() {
+        request = if target.provider_id == OPENCODE_PROVIDER_ID
+            && matches!(protocol, Protocol::Messages)
+        {
+            request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        } else {
+            request.bearer_auth(key)
+        };
+    }
+    let response = request
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .send()
+        .await;
+    let duration_ms = started.elapsed().as_millis();
+    match response {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let (ok, evidence) = if stream {
+                stream_evidence(response, protocol).await
             } else {
-                finish_json(resp, status, started, endpoint).await
+                json_evidence(response, protocol).await
+            };
+            Record {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                provider_id: target.provider_id.into(),
+                model_id: model,
+                protocol,
+                stream,
+                status,
+                ok: status < 300 && ok,
+                duration_ms,
+                evidence: redact(&evidence, target.bearer_key.as_deref()),
             }
         }
-        Err(error) => ProbeResult {
+        Err(error) => Record {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            provider_id: target.provider_id.into(),
+            model_id: model,
+            protocol,
+            stream,
             status: 0,
-            ms: started.elapsed().as_millis(),
             ok: false,
-            text: String::new(),
-            note: error.to_string(),
+            duration_ms,
+            evidence: redact(&sanitize(&error.to_string()), target.bearer_key.as_deref()),
         },
     }
 }
 
-async fn finish_json(
-    resp: reqwest::Response,
-    status: u16,
-    started: Instant,
-    endpoint: Endpoint,
-) -> ProbeResult {
-    let text = resp.text().await.unwrap_or_default();
-    let parsed: Result<Value, _> = serde_json::from_str(&text);
-    let extracted = parsed
-        .as_ref()
-        .ok()
-        .map(|value| extract_text(endpoint, value))
-        .unwrap_or_default();
-    let ok = status < 300 && parsed.as_ref().is_ok_and(|value| json_ok(endpoint, value));
-    ProbeResult {
-        status,
-        ms: started.elapsed().as_millis(),
-        ok,
-        text: extracted,
-        note: if ok { "ok".into() } else { clip(&text, 160) },
+fn body(model: &str, protocol: Protocol, stream: bool) -> Value {
+    match protocol {
+        Protocol::ChatCompletions => {
+            json!({"model": model, "messages": [{"role":"user","content":"Reply: PING"}], "max_tokens": MAX_TOKENS, "stream": stream})
+        }
+        Protocol::Responses => {
+            json!({"model": model, "input":"Reply: PING", "max_output_tokens": MAX_TOKENS, "store":false, "stream":stream})
+        }
+        Protocol::Messages => {
+            json!({"model":model, "messages":[{"role":"user","content":"Reply: PING"}], "max_tokens":MAX_TOKENS, "stream":stream})
+        }
     }
 }
 
-async fn finish_stream(
-    resp: reqwest::Response,
-    status: u16,
-    started: Instant,
-    endpoint: Endpoint,
-) -> ProbeResult {
-    if status >= 300 {
-        let text = resp.text().await.unwrap_or_default();
-        return ProbeResult {
-            status,
-            ms: started.elapsed().as_millis(),
-            ok: false,
-            text: String::new(),
-            note: clip(&text, 160),
-        };
-    }
+async fn json_evidence(response: reqwest::Response, protocol: Protocol) -> (bool, String) {
+    let status = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let shaped = match protocol {
+        Protocol::ChatCompletions => value.pointer("/choices/0").is_some(),
+        Protocol::Responses => value.get("output").is_some() || value.get("output_text").is_some(),
+        Protocol::Messages => value.get("content").and_then(Value::as_array).is_some(),
+    };
+    (
+        status.is_success() && shaped,
+        if shaped {
+            "protocol-shaped JSON".into()
+        } else {
+            sanitize(&raw)
+        },
+    )
+}
 
+async fn stream_evidence(response: reqwest::Response, protocol: Protocol) -> (bool, String) {
+    let status = response.status();
+    if !status.is_success() {
+        return (false, sanitize(&response.text().await.unwrap_or_default()));
+    }
     let mut raw = String::new();
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    let mut bytes = response.bytes_stream();
+    while let Some(chunk) = bytes.next().await {
         match chunk {
-            Ok(bytes) => raw.push_str(&String::from_utf8_lossy(&bytes)),
-            Err(error) => {
-                return ProbeResult {
-                    status: 0,
-                    ms: started.elapsed().as_millis(),
-                    ok: false,
-                    text: String::new(),
-                    note: error.to_string(),
-                };
-            }
+            Ok(chunk) => raw.push_str(&String::from_utf8_lossy(&chunk)),
+            Err(error) => return (false, sanitize(&error.to_string())),
         }
     }
-
-    let (text, saw_terminal) = parse_sse(endpoint, &raw);
-    let ok = !text.trim().is_empty() || saw_terminal;
-    ProbeResult {
-        status,
-        ms: started.elapsed().as_millis(),
-        ok,
-        text,
-        note: if ok { "ok".into() } else { clip(&raw, 160) },
-    }
+    let token = match protocol {
+        Protocol::ChatCompletions => "chat.completion.chunk",
+        Protocol::Responses => "response.",
+        Protocol::Messages => "message_",
+    };
+    let shaped = raw.contains("data:") && raw.contains(token);
+    (
+        shaped,
+        if shaped {
+            "protocol-shaped SSE".into()
+        } else {
+            sanitize(&raw)
+        },
+    )
 }
 
-fn json_ok(endpoint: Endpoint, value: &Value) -> bool {
-    match endpoint {
-        Endpoint::Chat => {
-            value.get("object").and_then(Value::as_str) == Some("chat.completion")
-                || value.pointer("/choices/0/message").is_some()
-        }
-        Endpoint::Responses => {
-            value.get("object").and_then(Value::as_str) == Some("response")
-                || value.get("output").is_some()
-        }
-        Endpoint::Messages => {
-            value.get("type").and_then(Value::as_str) == Some("message")
-                || value.get("content").and_then(Value::as_array).is_some()
-        }
-    }
+fn sanitize(value: &str) -> String {
+    value
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .chars()
+        .take(300)
+        .collect()
 }
 
-fn extract_text(endpoint: Endpoint, value: &Value) -> String {
-    match endpoint {
-        Endpoint::Chat => value
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        Endpoint::Responses => {
-            if let Some(text) = value.get("output_text").and_then(Value::as_str) {
-                return text.to_string();
-            }
-            value
-                .get("output")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .flat_map(|item| item.get("content").and_then(Value::as_array))
-                .flatten()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("")
-        }
-        Endpoint::Messages => value
-            .get("content")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join(""),
-    }
-}
-
-fn parse_sse(endpoint: Endpoint, raw: &str) -> (String, bool) {
-    let mut text = String::new();
-    let mut terminal = false;
-    for block in raw.split("\n\n") {
-        let data = block
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join("");
-        if data.is_empty() || data == "[DONE]" {
-            if data == "[DONE]" {
-                terminal = true;
-            }
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
-            continue;
-        };
-        match endpoint {
-            Endpoint::Chat => {
-                if let Some(delta) = value
-                    .pointer("/choices/0/delta/content")
-                    .and_then(Value::as_str)
-                {
-                    text.push_str(delta);
-                }
-                if value
-                    .pointer("/choices/0/finish_reason")
-                    .and_then(Value::as_str)
-                    .is_some()
-                {
-                    terminal = true;
-                }
-            }
-            Endpoint::Responses => {
-                let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
-                if kind.ends_with("output_text.delta") {
-                    if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                        text.push_str(delta);
-                    }
-                }
-                if kind == "response.completed" || kind == "response.output_text.done" {
-                    terminal = true;
-                    if text.is_empty() {
-                        text.push_str(&extract_text(Endpoint::Responses, &value));
-                    }
-                }
-            }
-            Endpoint::Messages => {
-                let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
-                if kind == "content_block_delta" {
-                    if let Some(delta) = value.pointer("/delta/text").and_then(Value::as_str) {
-                        text.push_str(delta);
-                    }
-                }
-                if kind == "message_stop" {
-                    terminal = true;
-                }
-            }
-        }
-    }
-    (text, terminal)
+fn redact(value: &str, key: Option<&str>) -> String {
+    key.filter(|key| !key.is_empty())
+        .map_or_else(|| value.to_string(), |key| value.replace(key, "[redacted]"))
 }

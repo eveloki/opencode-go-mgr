@@ -17,13 +17,12 @@ Free 按出口 IP 共享额度与冷却，Custom API 不做供应商额度核算
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` / `go` | 是 | 每张卡一份官方分发的 API Key；托管注册仍是 Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 一张不带鉴权头、无需凭据的匿名单例卡；可排序、可启停，不可删除；额度按出口 IP 共享 |
-| Command Code GOAT | `command-code` / `goat` | 是 | 创建后禁用并为 `pending`；通过官方 `GET /models` 验证 Key，再显式启用；模型级别默认包含套餐 `goat`，可切换为 `all` |
+| Command Code GOAT | `command-code` / `goat` | 是 | 使用公开的供应商目录；GOAT 预设模型默认开启，额外模型在供应商矩阵中默认关闭；没有账号级 GOAT/全部或 Max 模式 |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地；通过复选框声明 1–3 个上游协议，对该账号所有模型统一生效；协议与鉴权方案创建后可编辑；验证为可选，未验证时显示提示；合格声明 ID 会出现在 `/v1/models`；费用 unpriced/unknown，不扣额度 |
 
 所有持久化变更路径（数据库闸口，以及 dashboard / CLI 共用服务）都会在改动行、revision
-或时间戳之前，拒绝为目录内 `routable=false` offering（Command Code GOAT）设置
-`enabled=true`。GOAT 在目录中可路由，但创建/更新后仍为禁用 `pending`；验证状态不是
-`verified` 时拒绝启用。Custom API 在目录中可路由，且即使 verification 为 `pending`
+或时间戳之前，拒绝为目录内真正 `routable=false` 的 offering 设置 `enabled=true`。
+Command Code GOAT 不把目录获取当作 Key 验证；enabled、ready 且 Key 非空的账号可路由供应商矩阵中已启用的模型。Custom API 在目录中可路由，且即使 verification 为 `pending`
 也可启用；编辑配置、能力、Key、协议或鉴权方案会把验证状态重置为 `pending`，但保持启用状态。禁用草稿仍可保存。桌面 UI 只经 Dashboard V3 HTTP 变更，没有独立的
 Tauri invoke 变更路径。
 
@@ -32,8 +31,7 @@ Key。GOAT 是独立的供应商映射，其 Key 只会发送到固定的 Comman
 API，绝不发往 OpenCode。Custom API
 是独立的受信管理员目的地，不能把 Key 发往 OpenCode endpoint。
 
-GOAT 验证执行一次带鉴权且不计费的 `GET /models`，保存返回的账号目录，但不会自动启用卡片；验证后需显式启用。GOAT 只通过已验证且显式启用的账号路由。账号模型级别可选套餐内
-`goat`（默认）或完整 `all` 目录。更换 Key 会使验证失效并禁用账号；切换 `goat`/`all` 不会。
+Command Code 官方 `GET /models` 是公开的供应商级目录刷新，不能证明已保存 Key 有效。供应商矩阵是唯一模型供应控制面：GOAT 预设默认开启，新发现模型默认关闭，推理返回的 401/403 才是真实 Key 鉴权信号。
 
 Custom API 是已上线的受信管理员目的地。账号卡保存 base URL、一组上游协议（Chat
 Completions、Responses、Messages，通过复选框至少选一种）、一种鉴权方案（Bearer 或 `x-api-key`），以及至少一条模型能力。对该账号而言，选定的所有协议对所有模型统一生效。**获取模型**

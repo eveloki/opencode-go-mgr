@@ -41,7 +41,7 @@ sync 元数据在 `provider_usage_sync_state`；v27 删除遗留的五列 `accou
 
 用量同步仅由 `usage_sync.rs` 处理；不存在 Profile Cookie 或 HTML 控制台用量路径。
 
-Zen Free 由数据库持有：可启用、停用、排序，但不能通过通用账号 API 创建或删除。GOAT 草稿保持禁用且不可路由。Custom 声明协议后即可路由；验证为可选。
+Zen Free 由数据库持有：可启用、停用、排序，但不能通过通用账号 API 创建或删除。Command Code 账号在 enabled、ready 且 Key 非空时可路由；供应商矩阵控制模型供应，GOAT 预设行默认开启，额外行默认关闭。Custom 声明协议后即可路由；验证为可选。
 
 浏览器：`GET /dashboard/api/v3/browser/capabilities`、 `POST /accounts/{id}/browser`、`DELETE /accounts/{id}/browser-profile` 与 `/browser/sessions/{token}/ws`。浏览目标允许 Google 注册/登录、GitHub 注册/ 登录、配置的邀请 URL 与 OpenCode 控制台（`https://opencode.ai/auth`）。 worker 主机白名单含 `accounts.google.com`、`github.com`、`opencode.ai`、 `console.opencode.ai`、`auth.opencode.ai`。远程会话令牌只在内存中保存，绑定管理员会话并检查 Origin，空闲 30 分钟或总计 4 小时失效。
 

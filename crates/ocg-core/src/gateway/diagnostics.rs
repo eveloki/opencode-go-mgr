@@ -1,7 +1,10 @@
+use crate::db::Database;
 use crate::gateway::protocol::{decode_anthropic_thinking_block, decode_chat_reasoning};
 use crate::kernel::protocol::ApiFormat;
+use crate::models::ForwardLog;
 use crate::redaction::{redact_exact_occurrences, redact_text, sha256_hex, truncate_text};
 use axum::http::HeaderMap;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -23,6 +26,8 @@ pub(crate) use crate::redaction::{
 pub struct RequestTrace {
     pub request_id: String,
     started_at: Instant,
+    client_key_id: Option<String>,
+    client_key_name: Option<String>,
 }
 
 impl RequestTrace {
@@ -30,7 +35,15 @@ impl RequestTrace {
         Self {
             request_id: format!("ocg-{}", Uuid::new_v4()),
             started_at: Instant::now(),
+            client_key_id: None,
+            client_key_name: None,
         }
+    }
+
+    pub fn with_client_key(mut self, id: String, name: String) -> Self {
+        self.client_key_id = Some(id);
+        self.client_key_name = Some(name);
+        self
     }
 
     pub fn elapsed_ms(&self) -> u64 {
@@ -202,6 +215,66 @@ pub fn serialize_diagnostic(mut diagnostic: ErrorDiagnostic) -> String {
 
 pub fn emit_failure(diagnostic_json: &str) {
     eprintln!("OCG_REQUEST_ERROR {diagnostic_json}");
+}
+
+/// Persist a local request failure in the request log without leaking request
+/// content into the operational runtime log. Failures that happen before model
+/// or account selection use honest unresolved/Gateway placeholders.
+pub(crate) fn log_request_failure(
+    db: &Database,
+    trace: &RequestTrace,
+    diagnostic: &ErrorDiagnostic,
+    diagnostic_json: &str,
+    message: &str,
+) {
+    let diagnostic_value = serde_json::from_str(diagnostic_json).ok();
+    let log = ForwardLog {
+        id: 0,
+        timestamp: Utc::now(),
+        model: diagnostic
+            .model
+            .clone()
+            .unwrap_or_else(|| "(unresolved)".to_string()),
+        account_id: String::new(),
+        account_name: "Gateway".to_string(),
+        route_account_id: None,
+        provider_id: None,
+        offering_id: None,
+        credential_account_id: None,
+        client_key_id: trace.client_key_id.clone(),
+        client_key_name: trace.client_key_name.clone(),
+        status: if diagnostic.error_source == "client" {
+            "client_error"
+        } else {
+            "error"
+        }
+        .to_string(),
+        http_status: diagnostic.downstream_status.map(i32::from),
+        route: String::new(),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cached_tokens: 0,
+        cache_creation_tokens: 0,
+        cost: None,
+        raw_cost_usd: None,
+        quota_debit: None,
+        effective_paid_cost_usd: None,
+        pricing_revision_id: None,
+        quota_multiplier: None,
+        local_adjustment_multiplier: None,
+        service_tier: None,
+        cost_state: "not_applicable".to_string(),
+        error_message: Some(redact_text(message)),
+        request_id: Some(diagnostic.request_id.clone()),
+        attempt: Some(i64::from(diagnostic.attempt)),
+        error_source: Some(diagnostic.error_source.clone()),
+        error_stage: Some(diagnostic.error_stage.clone()),
+        duration_ms: Some(diagnostic.duration_ms.min(i64::MAX as u64) as i64),
+        diagnostic: diagnostic_value,
+    };
+    if let Err(error) = db.log_forward(&log) {
+        eprintln!("failed to persist local request failure: {error}");
+    }
 }
 
 fn summarize_request(body: &[u8]) -> (Value, String) {

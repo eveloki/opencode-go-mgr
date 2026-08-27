@@ -11,8 +11,9 @@
 //! Command Code GOAT has one official mapping:
 //! Alias `deepseek-v4-flash` → raw `deepseek/deepseek-v4-flash`. The kebab
 //! alias stays Go-owned and published; the unique slash raw ID pins to GOAT.
-//! Eligible verified GOAT catalogs overlay unique IDs without stealing
-//! Go/Zen aliases. Eligible Custom capabilities
+//! Eligible verified Command Code catalogs join the Go canonical Alias by
+//! leaf name where possible. Zen `*-free` IDs likewise stay exact raw pins
+//! while publishing only their stripped Alias. Eligible Custom capabilities
 //! overlay published aliases and resolve otherwise unknown IDs without
 //! stealing Go/Zen mappings.
 //! Later host adapters consume [`ProviderMapping`]: parse the client protocol
@@ -193,8 +194,9 @@ fn build_registry(zen_free_models: &[String]) -> Registry {
             continue;
         }
         if let Some(alias) = stripped_free_alias(model) {
-            insert_mapping(&mut registry, model, zen_mapping(model));
-            insert_mapping(&mut registry, alias, zen_mapping(model));
+            let mapping = zen_mapping(model);
+            insert_raw_mapping(&mut registry, mapping.clone());
+            insert_mapping(&mut registry, alias, mapping);
         }
     }
     registry
@@ -232,17 +234,42 @@ fn goat_catalog_hit(goat_model_ids: &[String], requested: &str) -> Option<String
 fn goat_catalog_hit_for_resolved(
     goat_model_ids: &[String],
     resolved: &ResolvedModel,
+    registry: &Registry,
+    go_model_ids: &[String],
 ) -> Option<String> {
     goat_catalog_hit(goat_model_ids, resolved.requested()).or_else(|| match resolved {
-        ResolvedModel::Alias { mappings, .. } => mappings
+        ResolvedModel::Alias {
+            alias, mappings, ..
+        } => mappings
             .iter()
             .filter(|mapping| mapping.is_command_code_goat())
-            .find_map(|mapping| goat_catalog_hit(goat_model_ids, &mapping.upstream_model)),
+            .find_map(|mapping| goat_catalog_hit(goat_model_ids, &mapping.upstream_model))
+            .or_else(|| {
+                command_catalog_hit_for_alias(goat_model_ids, alias, registry, go_model_ids)
+            }),
         ResolvedModel::PinnedRaw { mapping, .. } if mapping.is_command_code_goat() => {
             goat_catalog_hit(goat_model_ids, &mapping.upstream_model)
         }
         _ => None,
     })
+}
+
+const COMMAND_ALIAS_SUFFIX_EXCEPTIONS: &[&str] = &["-paid"];
+const COMMAND_ALIAS_EXACT_EXCEPTIONS: &[(&str, &str)] = &[("ox-alpha", "ox-alpha-free")];
+
+fn command_catalog_hit_for_alias(
+    goat_model_ids: &[String],
+    alias: &str,
+    registry: &Registry,
+    go_model_ids: &[String],
+) -> Option<String> {
+    let matches = goat_model_ids
+        .iter()
+        .filter(|id| {
+            command_alias_with_go_catalog(id, registry, go_model_ids).eq_ignore_ascii_case(alias)
+        })
+        .collect::<Vec<_>>();
+    (matches.len() == 1).then(|| matches[0].clone())
 }
 
 fn go_alias_mappings(upstream_model: &'static str) -> Vec<ProviderMapping> {
@@ -321,6 +348,10 @@ fn insert_mapping(registry: &mut Registry, alias: &str, mapping: ProviderMapping
     if !entry.mappings.contains(&mapping) {
         entry.mappings.push(mapping.clone());
     }
+    insert_raw_mapping(registry, mapping);
+}
+
+fn insert_raw_mapping(registry: &mut Registry, mapping: ProviderMapping) {
     for (index, raw_key) in [
         (&mut registry.raw_exact, mapping.upstream_model.clone()),
         (
@@ -463,8 +494,10 @@ pub fn resolve_with_all_catalogs(
         other => other,
     };
     match custom_resolved {
-        Ok(resolved) => overlay_goat_catalog(resolved, goat_model_ids),
-        Err(ResolveError::Unknown { requested }) => overlay_unknown_goat(requested, goat_model_ids),
+        Ok(resolved) => overlay_goat_catalog(resolved, goat_model_ids, &registry, go_model_ids),
+        Err(ResolveError::Unknown { requested }) => {
+            overlay_unknown_goat(requested, goat_model_ids, &registry, go_model_ids)
+        }
         other => other,
     }
 }
@@ -619,8 +652,12 @@ fn overlay_known_provider(
 fn overlay_goat_catalog(
     resolved: ResolvedModel,
     goat_model_ids: &[String],
+    registry: &Registry,
+    go_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
-    let Some(canonical) = goat_catalog_hit_for_resolved(goat_model_ids, &resolved) else {
+    let Some(canonical) =
+        goat_catalog_hit_for_resolved(goat_model_ids, &resolved, registry, go_model_ids)
+    else {
         return Ok(match resolved {
             ResolvedModel::PinnedRaw { requested, mapping }
                 if mapping.is_command_code_goat() && mapping.routeable =>
@@ -639,19 +676,43 @@ fn overlay_goat_catalog(
 fn overlay_unknown_goat(
     requested: String,
     goat_model_ids: &[String],
+    registry: &Registry,
+    go_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
-    let Some(canonical) = goat_catalog_hit(goat_model_ids, &requested) else {
+    let Some(canonical) = goat_catalog_hit(goat_model_ids, &requested).or_else(|| {
+        command_catalog_hit_for_alias(
+            goat_model_ids,
+            &requested.to_ascii_lowercase(),
+            registry,
+            go_model_ids,
+        )
+    }) else {
         return Err(ResolveError::Unknown { requested });
     };
-    if looks_raw_shaped(&requested) || looks_raw_shaped(&canonical) {
+    let alias = command_alias_with_go_catalog(&canonical, registry, go_model_ids);
+    if looks_raw_shaped(&requested)
+        || (custom_model_id_matches(&canonical, &requested)
+            && !alias.eq_ignore_ascii_case(&requested))
+    {
         return Ok(ResolvedModel::PinnedRaw {
             requested,
             mapping: goat_mapping(&canonical, true),
         });
     }
+    if let Some(entry) = registry.aliases.get(&alias) {
+        let mut mappings = entry.mappings.clone();
+        if !mappings.iter().any(ProviderMapping::is_command_code_goat) {
+            mappings.push(goat_mapping(&canonical, true));
+        }
+        return Ok(ResolvedModel::Alias {
+            requested,
+            alias: entry.alias.clone(),
+            mappings,
+        });
+    }
     Ok(ResolvedModel::Alias {
         requested,
-        alias: canonical.clone(),
+        alias,
         mappings: vec![goat_mapping(&canonical, true)],
     })
 }
@@ -786,7 +847,8 @@ pub fn published_routeable_aliases_with_all_catalogs(
 ) -> Vec<PublishedAlias> {
     let mut published = published_routeable_aliases_with_zen(zen_free_models);
     append_catalog_aliases(&mut published, go_model_ids, OPENCODE_PROVIDER_ID);
-    append_catalog_aliases(&mut published, goat_model_ids, COMMAND_CODE_PROVIDER_ID);
+    let registry = build_registry(zen_free_models);
+    append_command_catalog_aliases(&mut published, goat_model_ids, &registry, go_model_ids);
     published.sort_by(|left, right| left.alias.cmp(&right.alias));
     published
 }
@@ -811,6 +873,95 @@ fn append_catalog_aliases(
             owned_by,
         });
     }
+}
+
+fn append_command_catalog_aliases(
+    published: &mut Vec<PublishedAlias>,
+    model_ids: &[String],
+    registry: &Registry,
+    go_model_ids: &[String],
+) {
+    for id in model_ids {
+        let alias = command_alias_with_go_catalog(id, registry, go_model_ids);
+        if alias.is_empty()
+            || published
+                .iter()
+                .any(|item| item.alias.eq_ignore_ascii_case(&alias))
+        {
+            continue;
+        }
+        published.push(PublishedAlias {
+            alias,
+            owned_by: COMMAND_CODE_PROVIDER_ID,
+        });
+    }
+}
+
+fn command_alias_with_go_catalog(
+    upstream_model: &str,
+    registry: &Registry,
+    go_model_ids: &[String],
+) -> String {
+    let leaf = upstream_model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace(['_', ' '], "-");
+    let is_go_alias = |candidate: &str| {
+        registry
+            .aliases
+            .get(candidate)
+            .is_some_and(|entry| entry.mappings.iter().any(ProviderMapping::is_opencode_go))
+            || go_model_ids
+                .iter()
+                .any(|id| !looks_raw_shaped(id) && id.trim().eq_ignore_ascii_case(candidate))
+    };
+    if is_go_alias(&leaf) {
+        return leaf;
+    }
+    for (command_leaf, go_alias) in COMMAND_ALIAS_EXACT_EXCEPTIONS {
+        if leaf.eq_ignore_ascii_case(command_leaf) && is_go_alias(go_alias) {
+            return (*go_alias).to_string();
+        }
+    }
+    for suffix in COMMAND_ALIAS_SUFFIX_EXCEPTIONS {
+        if let Some(candidate) = leaf.strip_suffix(suffix) {
+            if is_go_alias(candidate) {
+                return candidate.to_string();
+            }
+        }
+    }
+    leaf
+}
+
+/// Canonical client Alias for one Provider catalog row. OpenCode Go names are
+/// the baseline; Zen strips its transport-only `-free` suffix, and Command
+/// Code joins a matching Go Alias before falling back to a deterministic leaf.
+pub fn canonical_alias_for_provider_model(
+    provider_id: &str,
+    upstream_model: &str,
+    go_model_ids: &[String],
+    zen_free_models: &[String],
+) -> String {
+    if provider_id == OPENCODE_PROVIDER_ID {
+        return upstream_model.trim().to_ascii_lowercase();
+    }
+    if provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID {
+        return stripped_free_alias(upstream_model)
+            .unwrap_or(upstream_model)
+            .trim()
+            .to_ascii_lowercase();
+    }
+    if provider_id == COMMAND_CODE_PROVIDER_ID {
+        return command_alias_with_go_catalog(
+            upstream_model,
+            &build_registry(zen_free_models),
+            go_model_ids,
+        );
+    }
+    upstream_model.trim().to_string()
 }
 
 fn published_routeable_in(registry: &Registry) -> Vec<PublishedAlias> {
@@ -1032,19 +1183,24 @@ mod tests {
     }
 
     #[test]
-    fn discovered_free_ids_and_stripped_aliases_share_the_zen_mapping() {
+    fn free_ids_are_exact_pins_and_only_stripped_aliases_are_published() {
         let resolved = resolve("deepseek-v4-flash-free").expect("Zen model id");
         match resolved {
-            ResolvedModel::Alias {
-                alias, mappings, ..
-            } => {
-                assert_eq!(alias, "deepseek-v4-flash-free");
-                assert_eq!(mappings.len(), 1);
-                assert!(mappings[0].is_zen_free());
-                assert_eq!(mappings[0].upstream_model, "deepseek-v4-flash-free");
+            ResolvedModel::PinnedRaw { mapping, .. } => {
+                assert!(mapping.is_zen_free());
+                assert_eq!(mapping.upstream_model, "deepseek-v4-flash-free");
             }
-            other => panic!("expected alias, got {other:?}"),
+            other => panic!("expected raw pin, got {other:?}"),
         }
+        assert!(matches!(
+            resolve("deepseek-v4-flash"),
+            Ok(ResolvedModel::Alias { mappings, .. }) if mappings.iter().any(ProviderMapping::is_zen_free)
+        ));
+        assert!(
+            !published_aliases()
+                .iter()
+                .any(|alias| alias == "deepseek-v4-flash-free")
+        );
     }
 
     #[test]
@@ -1065,20 +1221,121 @@ mod tests {
     }
 
     #[test]
-    fn refreshed_zen_models_publish_raw_and_stripped_aliases() {
-        let models = vec!["brand-new-coder-free".to_string()];
-        for requested in ["brand-new-coder-free", "brand-new-coder"] {
-            match resolve_with_provider_models(requested, &models, &[]).unwrap() {
-                ResolvedModel::Alias {
-                    alias, mappings, ..
-                } => {
-                    assert_eq!(alias, requested);
-                    assert_eq!(mappings.len(), 1);
-                    assert!(mappings[0].is_zen_free());
-                    assert_eq!(mappings[0].upstream_model, "brand-new-coder-free");
-                }
-                other => panic!("expected dynamic Zen alias, got {other:?}"),
+    fn command_catalog_uses_go_canonical_aliases_and_keeps_raw_ids_pinned() {
+        let go = vec!["hy3".to_string(), "future-go".to_string()];
+        let zen = vec!["hy3-free".to_string()];
+        let command = vec![
+            "vendor/hy3".to_string(),
+            "vendor/future-go".to_string(),
+            "acme/Model_Name".to_string(),
+            "stealth/ox-alpha".to_string(),
+        ];
+
+        match resolve_with_all_catalogs("hy3", &go, &zen, &[], &command).unwrap() {
+            ResolvedModel::Alias {
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, "hy3");
+                assert!(mappings.iter().any(ProviderMapping::is_opencode_go));
+                assert!(mappings.iter().any(ProviderMapping::is_zen_free));
+                assert!(mappings.iter().any(|mapping| {
+                    mapping.is_command_code_goat() && mapping.upstream_model == "vendor/hy3"
+                }));
             }
+            other => panic!("expected three-supplier Alias, got {other:?}"),
+        }
+        assert!(matches!(
+            resolve_with_all_catalogs("vendor/hy3", &go, &zen, &[], &command),
+            Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                if mapping.is_command_code_goat() && mapping.upstream_model == "vendor/hy3"
+        ));
+        assert!(matches!(
+            resolve_with_all_catalogs("future-go", &go, &zen, &[], &command),
+            Ok(ResolvedModel::Alias { mappings, .. })
+                if mappings.iter().any(ProviderMapping::is_opencode_go)
+                    && mappings.iter().any(|mapping| mapping.is_command_code_goat()
+                        && mapping.upstream_model == "vendor/future-go")
+        ));
+        let suffix_command = vec!["hy3-paid".to_string()];
+        assert!(matches!(
+            resolve_with_all_catalogs("hy3", &go, &zen, &[], &suffix_command),
+            Ok(ResolvedModel::Alias { mappings, .. })
+                if mappings.iter().any(|mapping| mapping.is_command_code_goat()
+                    && mapping.upstream_model == "hy3-paid")
+        ));
+        assert!(matches!(
+            resolve_with_all_catalogs("hy3-paid", &go, &zen, &[], &suffix_command),
+            Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                if mapping.is_command_code_goat() && mapping.upstream_model == "hy3-paid"
+        ));
+        match resolve_with_all_catalogs("ox-alpha-free", &go, &zen, &[], &command).unwrap() {
+            ResolvedModel::Alias { mappings, .. } => {
+                assert!(mappings.iter().any(ProviderMapping::is_opencode_go));
+                assert!(mappings.iter().any(|mapping| {
+                    mapping.is_command_code_goat() && mapping.upstream_model == "stealth/ox-alpha"
+                }));
+            }
+            other => panic!("expected Ox Alpha to share the Go baseline Alias, got {other:?}"),
+        }
+        assert!(matches!(
+            resolve_with_all_catalogs("stealth/ox-alpha", &go, &zen, &[], &command),
+            Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                if mapping.is_command_code_goat()
+                    && mapping.upstream_model == "stealth/ox-alpha"
+        ));
+
+        match resolve_with_all_catalogs("model-name", &go, &zen, &[], &command).unwrap() {
+            ResolvedModel::Alias {
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, "model-name");
+                assert_eq!(mappings.len(), 1);
+                assert!(mappings[0].is_command_code_goat());
+                assert_eq!(mappings[0].upstream_model, "acme/Model_Name");
+            }
+            other => panic!("expected deterministic Command leaf alias, got {other:?}"),
+        }
+        assert!(matches!(
+            resolve_with_all_catalogs("acme/Model_Name", &go, &zen, &[], &command),
+            Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                if mapping.is_command_code_goat() && mapping.upstream_model == "acme/Model_Name"
+        ));
+
+        let shared_raw = vec!["vendor/shared".to_string()];
+        let error = resolve_with_all_catalogs("vendor/shared", &shared_raw, &[], &[], &shared_raw)
+            .expect_err("provider raw collision must remain ambiguous");
+        assert_eq!(error.code(), Some(AMBIGUOUS_MODEL_ID));
+
+        let published = published_routeable_aliases_with_all_catalogs(&go, &zen, &command);
+        assert_eq!(
+            published.iter().filter(|item| item.alias == "hy3").count(),
+            1
+        );
+        assert!(published.iter().any(|item| item.alias == "model-name"));
+        assert!(
+            !published
+                .iter()
+                .any(|item| { item.alias.contains('/') || is_free_model(&item.alias) })
+        );
+    }
+
+    #[test]
+    fn refreshed_zen_models_publish_only_stripped_aliases() {
+        let models = vec!["brand-new-coder-free".to_string()];
+        match resolve_with_provider_models("brand-new-coder-free", &models, &[]).unwrap() {
+            ResolvedModel::PinnedRaw { mapping, .. } => {
+                assert!(mapping.is_zen_free());
+                assert_eq!(mapping.upstream_model, "brand-new-coder-free");
+            }
+            other => panic!("expected dynamic Zen raw pin, got {other:?}"),
+        }
+        match resolve_with_provider_models("brand-new-coder", &models, &[]).unwrap() {
+            ResolvedModel::Alias { mappings, .. } => {
+                assert_eq!(mappings.len(), 1);
+                assert!(mappings[0].is_zen_free());
+                assert_eq!(mappings[0].upstream_model, "brand-new-coder-free");
+            }
+            other => panic!("expected dynamic Zen alias, got {other:?}"),
         }
         let published = published_routeable_aliases_with_zen(&models);
         assert!(
@@ -1087,7 +1344,7 @@ mod tests {
                 .any(|entry| entry.alias == "brand-new-coder")
         );
         assert!(
-            published
+            !published
                 .iter()
                 .any(|entry| entry.alias == "brand-new-coder-free")
         );
@@ -1115,15 +1372,21 @@ mod tests {
             {
                 continue;
             }
+            let expected_alias = if is_free_model(id) {
+                stripped_free_alias(id).expect("free protocol id has a stripped alias")
+            } else {
+                id
+            };
             assert!(
-                aliases.iter().any(|alias| alias == id),
+                aliases.iter().any(|alias| alias == expected_alias),
                 "MODEL_PROTOCOLS id `{id}` must have an alias"
             );
         }
         for id in &free_models {
             assert!(
-                aliases.iter().any(|alias| alias == id),
-                "free model `{id}` must have an alias"
+                stripped_free_alias(id)
+                    .is_some_and(|alias| aliases.iter().any(|item| item == alias)),
+                "free model `{id}` must have a stripped alias"
             );
             assert!(resolve(id).unwrap().routeable_mappings()[0].is_zen_free());
         }
@@ -1171,17 +1434,21 @@ mod tests {
             .find(|item| item.alias == "glm-5.2")
             .expect("Go alias");
         assert_eq!(go.owned_by, OPENCODE_PROVIDER_ID);
-        let zen_free = published
-            .iter()
-            .find(|item| item.alias == "deepseek-v4-flash-free")
-            .expect("discovered Zen model id");
-        assert_eq!(zen_free.owned_by, OPENCODE_ZEN_FREE_PROVIDER_ID);
+        assert!(
+            !published
+                .iter()
+                .any(|item| item.alias == "deepseek-v4-flash-free")
+        );
         let goat_alias = published
             .iter()
             .find(|item| item.alias == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS)
             .expect("Go still owns the kebab alias");
         assert_eq!(goat_alias.owned_by, OPENCODE_PROVIDER_ID);
-        assert!(!published.iter().any(|item| item.alias.contains('/')));
+        assert!(
+            !published
+                .iter()
+                .any(|item| item.alias.contains('/') || is_free_model(&item.alias))
+        );
     }
 
     #[test]
@@ -1502,14 +1769,16 @@ mod tests {
         assert!(go.iter().any(|alias| alias == "minimax-m2.7-highspeed"));
         assert!(!go.iter().any(|alias| alias == "deepseek-v4-flash-free"));
         assert!(!zen.iter().any(|alias| alias == "glm-5.2"));
-        assert!(zen.iter().any(|alias| alias == "deepseek-v4-flash-free"));
+        assert!(zen.iter().any(|alias| alias == "deepseek-v4-flash"));
+        assert!(!zen.iter().any(|alias| alias.ends_with("-free")));
         for id in &free_models {
+            let alias = stripped_free_alias(id).expect("seeded Zen ids end in -free");
             assert!(
-                zen.iter().any(|alias| alias == id),
-                "Zen catalog must include `{id}`"
+                zen.iter().any(|item| item == alias),
+                "Zen catalog must include stripped `{id}` alias"
             );
             assert!(
-                !go.iter().any(|alias| alias == id),
+                !go.iter().any(|item| item == id),
                 "Go catalog must not include free `{id}`"
             );
         }

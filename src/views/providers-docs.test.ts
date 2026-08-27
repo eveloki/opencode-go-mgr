@@ -43,7 +43,7 @@ test("DESIGN.md names Providers as the fourth of seven views", () => {
   );
   assert.doesNotMatch(design, /Accounts, Pricing, Applications/);
   assert.match(design, /Providers is the supplier control plane/);
-  assert.match(design, /three-state control per cell/);
+  assert.match(design, /binary switch bound to the effective enabled state/);
   assert.match(design, /multi-select checkboxes \(Chat Completions, Responses, Messages\)/);
   assert.match(design, /may consume quota/);
   assert.match(design, /never automatic on page load/);
@@ -101,13 +101,21 @@ test("USER guides describe the Providers control plane and drop stale locations"
   assert.doesNotMatch(userZh, /通过卡片的 \*\*获取模型\*\* 动作刷新/);
 });
 
-test("USER guides keep GOAT verified and refresh/probe manual-only", () => {
-  assert.match(userEn, /GOAT routes\s+only through verified, explicitly enabled accounts/);
-  assert.match(userZh, /GOAT 只通过已验证且显式启用的账号路由/);
+test("USER guides keep unified catalog refresh and probes manual-only", () => {
+  assert.match(userEn, /Command Code uses its public official `\/models` directory/);
+  assert.match(userZh, /Command Code 使用官方公开的 `\/models` 目录/);
+  assert.match(userEn, /no separate\s+Max or account-level GOAT\/All mode/);
+  assert.match(userZh, /不再存在独立的 Max 或账号级 GOAT\/全部模式/);
   assert.doesNotMatch(userEn, /SCNet remains archived/);
   assert.doesNotMatch(userZh, /SCNet 已归档/);
-  assert.match(userEn, /Refresh is never automatic/);
-  assert.match(userZh, /刷新绝不会自动发生/);
+  assert.match(userEn, /Every refreshable scope uses the same action/);
+  assert.match(userZh, /所有可刷新的范围使用同一个动作/);
+  assert.match(userEn, /static catalog is the initial\s+preset/);
+  assert.match(userZh, /内置静态目录只是初始预设/);
+  assert.match(userEn, /newly added by a refresh[\s\S]*all disabled/);
+  assert.match(userZh, /刷新新增的模型[\s\S]*三个协议默认全部关闭/);
+  assert.match(userEn, /no refresh-account selector/);
+  assert.match(userZh, /没有刷新账号选择器/);
   assert.match(userEn, /Client requests never probe/);
   assert.match(userZh, /客户端请求不会探测/);
   assert.match(userEn, /effective enabled protocol/);

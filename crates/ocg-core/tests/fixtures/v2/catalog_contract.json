@@ -42,13 +42,13 @@
       "creation_availability": "unavailable",
       "routable": true,
       "singleton": true,
-      "required_aliases": ["mimo-v2.5-free", "mimo-v2.5"]
+      "required_aliases": ["mimo-v2.5"]
     },
     {
       "provider_id": "command-code",
       "offering_id": "goat",
-      "verification_policy": "required",
-      "verification_runtime_availability": "available",
+      "verification_policy": "not_required",
+      "verification_runtime_availability": "not_applicable",
       "creation_availability": "available",
       "routable": true
     },

@@ -104,9 +104,10 @@ Only `usage_sync.rs` handles usage sync. There is no Profile Cookie or HTML
 console usage path.
 
 Zen Free is database-owned: it can be enabled, disabled, and reordered,
-but cannot be created or deleted through generic account APIs. GOAT
-drafts stay disabled and unroutable. Custom is catalog-routable after
-declaration; verification is optional.
+but cannot be created or deleted through generic account APIs. Command Code
+accounts are routable when enabled, ready, and keyed; the Provider matrix owns
+their model supply, with GOAT preset rows on and additional rows off by default.
+Custom is catalog-routable after declaration; verification is optional.
 
 Browser: `GET /dashboard/api/v3/browser/capabilities`,
 `POST /accounts/{id}/browser`, `DELETE /accounts/{id}/browser-profile`,

@@ -17,7 +17,7 @@ test("forward log failures surface a persistent retry alert distinct from the em
 
   // The legitimate empty state stays separate from the error state.
   assert.match(forwardPane, /<template #empty>/);
-  assert.match(forwardPane, /仅记录经本机 API 转发的请求/);
+  assert.match(forwardPane, /记录推理转发和协议探测请求/);
 });
 
 test("forward log loader clears the alert on retry and reports dashboardErrorDetail", () => {

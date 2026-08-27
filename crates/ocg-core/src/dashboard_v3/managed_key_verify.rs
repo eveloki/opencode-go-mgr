@@ -655,7 +655,6 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
             .map(|value| value.to_rfc3339()),
         verification_error: sanitize_persisted_error(contract.verification.verification_error),
         plan_routable: plan.is_some_and(|plan| plan.routable),
-        goat_model_access: None,
         custom_config: contract.custom_config.map(custom_config_from_model),
         model_capabilities: contract
             .model_capabilities

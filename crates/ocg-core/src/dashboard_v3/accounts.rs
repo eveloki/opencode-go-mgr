@@ -22,16 +22,15 @@ use crate::models::{
 };
 use crate::provider::{
     CreationAvailability, VerificationPolicy, default_offering_id, default_provider_id,
-    is_command_code_goat,
 };
 use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
 
 use super::types::{
     Account, AccountCreate, AccountCustomConfig, AccountCustomConfigUpdate,
-    AccountCustomConfigWrite, AccountGoatModelAccessUpdate, AccountList, AccountManagedCreate,
-    AccountModelCapabilitiesUpdate, AccountModelCapability, AccountModelCapabilityWrite,
-    AccountMutation, AccountOrder, AccountSetupUpdate, AccountUpdate, MutationExpectation,
+    AccountCustomConfigWrite, AccountList, AccountManagedCreate, AccountModelCapabilitiesUpdate,
+    AccountModelCapability, AccountModelCapabilityWrite, AccountMutation, AccountOrder,
+    AccountSetupUpdate, AccountUpdate, MutationExpectation,
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
@@ -134,15 +133,6 @@ pub(super) async fn put_account_custom_config(
 ) -> Result<Json<AccountMutation>, V3ApiError> {
     let input = parse_mutation_json::<AccountCustomConfigUpdate>(&body)?;
     put_custom_config_locked(&state, &id, input).map(Json)
-}
-
-pub(super) async fn put_account_goat_model_access(
-    State(state): State<CoreState>,
-    Path(id): Path<String>,
-    body: Bytes,
-) -> Result<Json<AccountMutation>, V3ApiError> {
-    let input = parse_mutation_json::<AccountGoatModelAccessUpdate>(&body)?;
-    put_goat_model_access_locked(&state, &id, input).map(Json)
 }
 
 pub(super) async fn put_account_model_capabilities(
@@ -621,28 +611,6 @@ fn put_custom_config_locked(
     mutation_after_commit(state, id, true)
 }
 
-fn put_goat_model_access_locked(
-    state: &CoreState,
-    id: &str,
-    input: AccountGoatModelAccessUpdate,
-) -> Result<AccountMutation, V3ApiError> {
-    let _settings_update = state.settings_update.lock();
-    check_expectation(state, &input.expectation)?;
-    let account = load_model_account(state, id)?;
-    if !is_command_code_goat(&account.provider_id, &account.offering_id) {
-        return Err(V3ApiError::invalid_request_at(
-            state,
-            "model access is only available for Command Code GOAT accounts",
-        ));
-    }
-    state
-        .db
-        .lock()
-        .set_goat_model_access(id, input.model_access.into())
-        .map_err(V3ApiError::internal)?;
-    mutation_after_commit(state, id, false)
-}
-
 fn put_capabilities_locked(
     state: &CoreState,
     id: &str,
@@ -790,7 +758,7 @@ pub(super) fn mutation_at(
 }
 
 fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Account, V3ApiError> {
-    let ((usage_sync_last_success_at, usage_sync_next_allowed_at), contract, goat_model_access) = {
+    let ((usage_sync_last_success_at, usage_sync_next_allowed_at), contract) = {
         let db = state.db.lock();
         let sync = db
             .account_usage_sync_state(&account.id)
@@ -798,13 +766,9 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
         let contract = db
             .load_account_contract(&account.id)
             .map_err(V3ApiError::internal)?;
-        let goat_model_access = db
-            .goat_model_access(&account.id)
-            .map_err(V3ApiError::internal)?;
         (
             crate::usage_sync::dashboard_sync_fields(sync.as_ref(), state.usage_sync.now()),
             contract,
-            goat_model_access,
         )
     };
     let known_secret = if account.last_error.is_some()
@@ -862,7 +826,6 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
             .map(|value| value.to_rfc3339()),
         verification_error: sanitize_persisted_error(contract.verification.verification_error),
         plan_routable: plan.is_some_and(|plan| plan.routable),
-        goat_model_access: goat_model_access.map(Into::into),
         custom_config: contract.custom_config.map(custom_config_from_model),
         model_capabilities: contract
             .model_capabilities

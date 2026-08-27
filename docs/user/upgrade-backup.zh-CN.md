@@ -10,7 +10,7 @@
 
 已有（非空）库会先规范迁移到 v26，再由 v27 重写把主 Key 与全部 `sub_gateway_keys` 行复制进 `access_keys` 表，删除 `sub_gateway_keys`，并删除 `accounts` 上遗留的五列 `usage_sync_*`。任何 v27 写入前，库会得到同级快照 `data.sqlite.pre-v3.<timestamp>.bak` 及 SHA-256 sidecar。全新空数据目录直接创建 schema v31，不写该副本。快照只是 v26 回滚点，不能替代完整备份：恢复前先校验 sidecar，只能恢复到仍支持 v26 的程序，或用于重试尚未提交的 v27 打开。旧版程序无法打开已迁移的数据库——单 Key 时代不识额外 Key，已撤销的值也不会因降级复活。
 
-v29 从目录中移除 SCNet Token Plans，并在迁移期间删除所有现有 SCNet 账号行。每次启动时，遗留的已启用 Command Code GOAT 会被禁用，且不改动 `updated_at`；Custom API 的 enabled 状态保留，未验证的 GOAT 行重置为 `pending`。OpenCode Go、Zen Free 与未知 provider/offering pair 不受影响。
+v29 从目录中移除 SCNet Token Plans，并在迁移期间删除所有现有 SCNet 账号行。每次启动时，历史 Command Code GOAT 验证状态都会统一为 `not_required`，因为公开目录不是 Key 验证；Custom API 的 enabled 状态保留。OpenCode Go、Zen Free 与未知 provider/offering pair 不受影响。
 
 v30 将 Custom API 的 `account_custom_configs` 从单一 `upstream_protocol` 列扩展为 JSON `upstream_protocols` 集合，按旧值回填每个现有 Custom 账号。Custom 配置/能力编辑保持账号启用，但将 `verification_status` 重置为 `pending`。
 

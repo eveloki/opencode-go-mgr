@@ -8,7 +8,7 @@
 2. 若该家族需要协议行，加在 `ocg-domain::protocol`。请求路径不会用来试探协议。
 3. 若该家族需要别名，加在 `ocg-gateway::alias`。不可路由 mapping 可以被识别但不产出生产路由。
 4. 在 `ocg-core` 为新 kind 实现 `resolve_route`，只返回 `AttemptSpec`。 **适配器不能持有 DB、`CoreState` 或原始 reqwest 客户端。** 解密与 HTTP 留在宿主 resolver / `forward_once`。
-5. 在路由、验证、用量、计价真正实现之前 fail closed。GOAT 是「目录在、未上线」的模板。
+5. 在所需路由与控制面语义真正实现之前 fail closed。Command Code 是「固定官方源已上线，公开目录不等于账号 Key 验证」的模板。
 6. 跑 `cargo test -p ocg-domain`、`cargo test -p ocg-gateway` 与 `cargo test -p ocg-core`。纯度/依赖守卫会拦截越界导入。
 
 Provider 注册表是静态密封的。不提供插件加载器、动态库或用户提供的适配器脚本。

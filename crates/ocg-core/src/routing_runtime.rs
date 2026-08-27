@@ -285,6 +285,17 @@ pub(crate) fn account_is_available_for_at(
         && !account.is_cooling_for(channel, now)
 }
 
+pub(crate) fn free_channel_is_exhausted_at(accounts: &[Account], now: DateTime<Utc>) -> bool {
+    accounts
+        .iter()
+        .filter(|account| {
+            account.id == crate::kernel::ids::ZEN_FREE_ACCOUNT_ID
+                && account.provider_id == crate::kernel::ids::OPENCODE_ZEN_FREE_PROVIDER_ID
+                && account.offering_id == crate::kernel::ids::ANONYMOUS_FREE_OFFERING_ID
+        })
+        .any(|account| account.cooldown_free_until.is_some_and(|until| until > now))
+}
+
 fn account_matches_channel(account: &Account, channel: UpstreamChannel) -> bool {
     if account.validate_provider_binding().is_err() {
         return false;

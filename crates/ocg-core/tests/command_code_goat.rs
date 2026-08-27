@@ -1,7 +1,7 @@
 //! Focused Command Code GOAT official-contract tests.
 //!
-//! Production catalog/runtime stay fail-closed. These tests prove the official
-//! transport/model seam without live `api.commandcode.ai` calls.
+//! These tests prove the fixed-origin transport/model seam without live
+//! `api.commandcode.ai` calls.
 
 use ocg_core::alias::{ResolvedModel, resolve};
 use ocg_core::gateway::protocol::{
@@ -18,7 +18,7 @@ use ocg_core::provider::{
 };
 
 #[test]
-fn official_base_path_auth_and_gate_stay_closed() {
+fn official_base_path_auth_and_public_catalog_contract_stay_fixed() {
     let spec = command_code_goat_transport_spec();
     assert_eq!(spec.base_url, COMMAND_CODE_GOAT_BASE_URL);
     assert_eq!(spec.host, "api.commandcode.ai");
@@ -26,7 +26,7 @@ fn official_base_path_auth_and_gate_stay_closed() {
     assert_eq!(spec.auth_scheme.as_str(), "bearer");
     assert!(!spec.follow_redirects);
     assert_eq!(spec.zdr_header_name, None);
-    assert!(spec.uses_get_models_for_verification);
+    assert!(spec.public_catalog_refresh);
     assert_eq!(
         command_code_goat_official_url(ApiFormat::ChatCompletions).unwrap(),
         "https://api.commandcode.ai/provider/v1/chat/completions"
@@ -35,7 +35,7 @@ fn official_base_path_auth_and_gate_stay_closed() {
 
     let plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
     assert!(plan.routable);
-    assert_eq!(plan.verification_runtime_availability, "available");
+    assert_eq!(plan.verification_runtime_availability, "not_applicable");
 }
 
 #[test]

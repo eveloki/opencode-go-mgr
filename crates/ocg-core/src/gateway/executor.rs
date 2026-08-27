@@ -8,7 +8,7 @@
 
 use crate::alias;
 use crate::gateway::diagnostics::{
-    ErrorDiagnostic, RequestTrace, emit_failure, serialize_diagnostic,
+    ErrorDiagnostic, RequestTrace, emit_failure, log_request_failure, serialize_diagnostic,
 };
 use crate::gateway::forwarder::{ForwardAction, forward_request, rate_limited_response};
 use crate::gateway::materialize::{
@@ -420,59 +420,17 @@ impl GatewayExecutor {
                         ForwardAction::Return => return result.response,
                         ForwardAction::RetrySameAccount if !retried_same_account => {
                             retried_same_account = true;
-                            let _ = state.db.lock().log_gateway_diagnostic(
-                                "warn",
-                                "gateway",
-                                &format!(
-                                    "account {} attempt ended before any downstream response data was emitted; retrying once: {:?}",
-                                    account.name, result.error_message
-                                ),
-                                Some(&trace.request_id),
-                                Some(loop_state.attempt as i64),
-                                Some("gateway"),
-                                Some("retry"),
-                                Some(trace.elapsed_ms() as i64),
-                                None,
-                            );
                             continue;
                         }
                         ForwardAction::RetrySameAccount => return result.response,
                         ForwardAction::ExhaustFreeChannel => {
                             loop_state.last_error = result.error_message.clone();
                             loop_state.failed_ids.push(account.id.clone());
-                            let _ = state.db.lock().log_gateway_diagnostic(
-                                "warn",
-                                "gateway",
-                                &format!(
-                                    "Zen Free route {} was exhausted before output; continuing through the global account order: {:?}",
-                                    account.name, result.error_message
-                                ),
-                                Some(&trace.request_id),
-                                Some(loop_state.attempt as i64),
-                                Some("upstream"),
-                                Some("free_fallback"),
-                                Some(trace.elapsed_ms() as i64),
-                                None,
-                            );
                             break;
                         }
                         ForwardAction::TryNextAccount => {
                             loop_state.last_error = result.error_message.clone();
                             loop_state.failed_ids.push(account.id.clone());
-                            let _ = state.db.lock().log_gateway_diagnostic(
-                                "warn",
-                                "gateway",
-                                &format!(
-                                    "account {} was rejected, switching to next: {:?}",
-                                    account.name, result.error_message
-                                ),
-                                Some(&trace.request_id),
-                                Some(loop_state.attempt as i64),
-                                Some("upstream"),
-                                Some("upstream_http"),
-                                Some(trace.elapsed_ms() as i64),
-                                None,
-                            );
                             break;
                         }
                     },
@@ -526,23 +484,8 @@ fn record_plan_failure(
     diagnostic.model = Some(plan.model.clone());
     diagnostic.stream = Some(plan.stream);
     diagnostic.downstream_status = Some(status.as_u16());
-    let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
-    let encoded = serialize_diagnostic(diagnostic);
-    let _ = state.db.lock().log_gateway_diagnostic(
-        if status.is_server_error() {
-            "error"
-        } else {
-            "warn"
-        },
-        "gateway_request",
-        message,
-        Some(&trace.request_id),
-        Some(attempt as i64),
-        Some(error_source),
-        Some(error_stage),
-        Some(duration_ms),
-        Some(&encoded),
-    );
+    let encoded = serialize_diagnostic(diagnostic.clone());
+    log_request_failure(&state.db.lock(), trace, &diagnostic, &encoded, message);
     emit_failure(&encoded);
 }
 

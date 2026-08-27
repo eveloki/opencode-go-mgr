@@ -3,7 +3,6 @@ import type {
   Account,
   AccountCreate,
   AccountCustomConfigUpdate,
-  AccountGoatModelAccessUpdate,
   AccountList,
   AccountManagedCreate,
   AccountManagedKeyVerify,
@@ -23,6 +22,7 @@ import type {
   ClaudeDesktopModels,
   ClaudeDesktopModelsUpdate,
   ConnectionInfo,
+  ContractScopeKind,
   ControlRevision,
   CustomModelDiscoveryRequest,
   CustomModelDiscoveryResponse,
@@ -476,14 +476,6 @@ export const dashboardV3 = {
       method: "PUT",
       body: withExpectation(config, expectation),
     }),
-  putAccountGoatModelAccess: (
-    id: string,
-    modelAccess: WithoutExpectation<AccountGoatModelAccessUpdate>["modelAccess"],
-    expectation: MutationExpectation,
-  ) => requestV3<AccountMutation>(`/accounts/${encode(id)}/goat-model-access`, {
-    method: "PUT",
-    body: withExpectation({ modelAccess } satisfies WithoutExpectation<AccountGoatModelAccessUpdate>, expectation),
-  }),
   putAccountModelCapabilities: (id: string, update: WithoutExpectation<AccountModelCapabilitiesUpdate>, expectation: MutationExpectation) =>
     requestV3<AccountMutation>(`/accounts/${encode(id)}/model-capabilities`, {
       method: "PUT",
@@ -547,6 +539,21 @@ export const dashboardV3 = {
       body: mutation(expectation),
     }),
   getProviderContracts: () => requestV3<ProviderContracts>("/provider-contracts"),
+  refreshContractCatalog: (
+    scopeKind: ContractScopeKind,
+    scopeId: string,
+    expectation: MutationExpectation,
+  ) => requestV3<ProviderContracts>(
+    `/provider-contracts/${encode(scopeKind)}/${encode(scopeId)}/catalog/refresh`,
+    { method: "POST", body: mutation(expectation) },
+  ),
+  resetStaticModelProtocols: (
+    scopeId: string,
+    expectation: MutationExpectation,
+  ) => requestV3<ProviderContracts>(
+    `/provider-contracts/provider/${encode(scopeId)}/model-protocols/reset-static`,
+    { method: "POST", body: mutation(expectation) },
+  ),
   putModelProtocolOverrides: (
     scopeKind: "provider" | "custom_endpoint",
     scopeId: string,

@@ -416,23 +416,39 @@ fn create_goat_account(
     );
 }
 
-fn persist_goat_verified_catalog(state: &Arc<CoreStateInner>, account_id: &str, models: &[&str]) {
+fn persist_goat_verified_catalog(state: &Arc<CoreStateInner>, _account_id: &str, models: &[&str]) {
     let models: Vec<String> = models.iter().map(|model| (*model).to_string()).collect();
+    let scope = ocg_core::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let now = Utc::now();
     let db = state.db.lock();
-    let contract = db
-        .capture_goat_verification_contract(account_id)
-        .unwrap()
-        .expect("GOAT verification contract");
-    assert!(
-        db.commit_goat_verification_if_contract_matches(
-            &contract,
-            ocg_core::provider::ConnectionVerificationStatus::Verified,
-            Some(Utc::now()),
-            None,
-            Some(models.as_slice()),
-        )
-        .unwrap()
-    );
+    db.set_contract_catalog(
+        &scope,
+        &models,
+        Some(now),
+        "test_command_code_catalog",
+        "http://127.0.0.1/provider/v1/models",
+        now,
+    )
+    .unwrap();
+    let overrides = models
+        .iter()
+        .flat_map(|model| {
+            [
+                ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+                ocg_core::provider::UpstreamProtocolKind::Messages,
+            ]
+            .into_iter()
+            .map(move |protocol| {
+                (
+                    model.clone(),
+                    protocol,
+                    ocg_core::provider_contracts::ProtocolOverrideState::ForceOn,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    db.set_model_protocol_overrides(&scope, &overrides, now)
+        .unwrap();
     drop(db);
     state.reload_provider_contracts().unwrap();
 }
@@ -595,12 +611,17 @@ fn assert_local_openai_alias_list(body: &str) {
     assert_eq!(payload["object"], "list", "{body}");
     let expected = ocg_core::alias::published_routeable_aliases();
     let data = payload["data"].as_array().expect("OpenAI list data");
-    assert_eq!(data.len(), expected.len(), "{body}");
-    for (item, published) in data.iter().zip(&expected) {
-        assert_eq!(item["id"], published.alias);
+    for published in &expected {
+        let item = data
+            .iter()
+            .find(|item| item["id"] == published.alias)
+            .unwrap_or_else(|| panic!("missing base Alias {} in {body}", published.alias));
         assert_eq!(item["object"], "model");
         assert_eq!(item["owned_by"], published.owned_by);
-        assert!(!published.alias.contains('/'));
+    }
+    for item in data {
+        let alias = item["id"].as_str().expect("model id");
+        assert!(!alias.contains('/'));
     }
     assert!(!body.contains(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM));
 }
@@ -658,8 +679,8 @@ async fn model_discovery_does_not_create_inference_logs() {
     assert_eq!(status, StatusCode::OK);
     assert_local_openai_alias_list(&body);
     assert!(
-        body.contains("mimo-v2.5-free") && body.contains("nemotron-3-ultra"),
-        "saved Zen Free models and stripped aliases must appear in the local Alias list: {body}"
+        !body.contains("mimo-v2.5-free") && body.contains("mimo-v2.5"),
+        "Zen Free must publish only the suffix-stripped Alias: {body}"
     );
     assert!(
         calls.lock().unwrap().is_empty(),
@@ -2500,10 +2521,22 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("unknown model"), "{body}");
     assert!(calls.lock().unwrap().is_empty());
-    assert!(
-        state.db.lock().list_forward_logs(10).unwrap().is_empty(),
-        "unknown model must not insert a forward row"
+    let db = state.db.lock();
+    let request_logs = db.list_forward_logs(10).unwrap();
+    assert_eq!(
+        request_logs.len(),
+        1,
+        "unknown model is still a client request"
     );
+    assert_eq!(request_logs[0].status, "client_error");
+    assert_eq!(request_logs[0].http_status, Some(400));
+    assert_eq!(request_logs[0].error_source.as_deref(), Some("client"));
+    assert_eq!(request_logs[0].error_stage.as_deref(), Some("validation"));
+    assert!(
+        db.list_gateway_logs(10).unwrap().is_empty(),
+        "request validation must not enter runtime logs"
+    );
+    drop(db);
     assert!(
         state
             .db
@@ -3273,9 +3306,9 @@ async fn disabled_goat_protocol_fails_locally_without_upstream() {
 }
 
 #[tokio::test]
-async fn unsupported_goat_model_is_skipped_before_any_upstream_attempt() {
+async fn goat_preset_alias_routes_before_go_when_account_order_prefers_goat() {
     let replies = HashMap::from([(
-        "open-key".to_string(),
+        "goat-key".to_string(),
         VecDeque::from([MockReply {
             status: 200,
             body: SUCCESS_BODY,
@@ -3302,7 +3335,7 @@ async fn unsupported_goat_model_is_skipped_before_any_upstream_attempt() {
             .iter()
             .map(|call| call.key.as_str())
             .collect::<Vec<_>>(),
-        ["open-key"]
+        ["goat-key"]
     );
 
     gateway::stop_gateway(gateway_handle);
@@ -3398,7 +3431,7 @@ async fn mixed_goat_cooldown_and_sticky_state_are_independent() {
 }
 
 #[tokio::test]
-async fn goat_loopback_does_not_steal_go_alias_requests() {
+async fn shared_alias_respects_account_order_and_can_prefer_go() {
     let replies = HashMap::from([(
         "open-key".to_string(),
         VecDeque::from([MockReply {
@@ -3413,7 +3446,7 @@ async fn goat_loopback_does_not_steal_go_alias_requests() {
     state
         .db
         .lock()
-        .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
+        .reorder_accounts(&["acct-1".into(), goat_id.clone(), ZEN_FREE_ACCOUNT_ID.into()])
         .unwrap();
     let _goat_route = install_goat_loopback_route_for_test(goat_id, base_url).unwrap();
     let (port, gateway_handle) = start_gateway(state).await;
@@ -3508,11 +3541,6 @@ async fn eligible_goat_anthropic_catalog_uses_messages_and_converts_client_respo
     let (state, dir) = build_state(base_url.clone(), &["open-key"]);
     let goat_id = format!("goat-{}", uuid::Uuid::new_v4());
     create_goat_account(&state, "acct-1", &goat_id, "goat-key");
-    state
-        .db
-        .lock()
-        .set_goat_model_access(&goat_id, ocg_core::provider::GoatModelAccess::All)
-        .unwrap();
     persist_goat_verified_catalog(&state, &goat_id, &["claude-sonnet-4-6"]);
     state
         .db
@@ -4595,6 +4623,30 @@ fn disable_go_protocols(
     state.reload_provider_contracts().unwrap();
 }
 
+fn disable_command_protocols(state: &Arc<CoreStateInner>, model_id: &str) {
+    let scope = ocg_core::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+    let rows = [
+        ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
+        ocg_core::provider::UpstreamProtocolKind::Responses,
+        ocg_core::provider::UpstreamProtocolKind::Messages,
+    ]
+    .into_iter()
+    .map(|protocol| {
+        (
+            model_id.to_string(),
+            protocol,
+            ocg_core::provider_contracts::ProtocolOverrideState::ForceOff,
+        )
+    })
+    .collect::<Vec<_>>();
+    state
+        .db
+        .lock()
+        .set_model_protocol_overrides(&scope, &rows, Utc::now())
+        .unwrap();
+    state.reload_provider_contracts().unwrap();
+}
+
 #[tokio::test]
 async fn disabled_protocols_fail_locally_without_upstream() {
     let replies = HashMap::from([(
@@ -4607,6 +4659,7 @@ async fn disabled_protocols_fail_locally_without_upstream() {
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1"]);
     disable_go_protocols(&state, "glm-5.3", false, false, false);
+    disable_command_protocols(&state, "zai-org/GLM-5.3");
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     let (status, body) = protocol_call(port, "/v1/chat/completions", "glm-5.3").await;
@@ -4645,8 +4698,8 @@ async fn protocol_switch_filters_v1_models_and_application_models() {
     let (status, body) = models(port).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
-        !body.contains("\"glm-5.3\""),
-        "chat-only glm-5.3 must leave /v1/models when Chat is disabled: {body}"
+        body.contains("\"glm-5.3\""),
+        "glm-5.3 must stay while Command Code still supplies the shared Alias: {body}"
     );
     assert!(
         body.contains("\"grok-4.5\""),
@@ -4663,6 +4716,14 @@ async fn protocol_switch_filters_v1_models_and_application_models() {
         .collect::<Vec<_>>();
     assert!(!ids.contains(&"glm-5.3"));
     assert!(ids.contains(&"grok-4.5"));
+
+    disable_command_protocols(&state, "zai-org/GLM-5.3");
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains("\"glm-5.3\""),
+        "the Alias must leave /v1/models after every Provider mapping is off: {body}"
+    );
     assert!(
         calls.lock().unwrap().is_empty(),
         "listing endpoints must stay local: {:?}",

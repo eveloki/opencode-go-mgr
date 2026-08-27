@@ -162,7 +162,6 @@ test("v2 plan, form, draft, pricing, and Alias copy has no English fallback in a
     "高级版",
     "仅限 AI 工具内交互式使用；禁止共享账号、自动化脚本、自定义应用后端及非交互批量调用。",
     "查看使用限制",
-    "当前仍是禁用草稿；这里仅展示官方参考，不代表 OCG Manager 已支持路由、验证或实时用量。",
     "该方案暂不可路由",
     "该方案暂不可路由。",
     "待验证",

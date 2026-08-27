@@ -1,17 +1,16 @@
-//! Command Code GOAT runtime: verified GET `/models` catalogs and eligibility.
+//! Command Code account runtime and public Provider catalog refresh.
 //!
-//! Production inference uses saved catalog facts plus hard-coded family rules.
-//! Verification is the only outbound catalog call.
+//! Model supply is governed by the Provider model/protocol contract. Accounts
+//! contribute credentials and ordering only; the public `/models` response is
+//! not treated as proof that a stored Key is valid.
 
 use crate::http_client;
 use crate::models::AppConfig;
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_MODELS_PATH, COMMAND_CODE_PROVIDER_ID,
-    ConnectionVerificationStatus, GOAT_OFFERING_ID, GoatModelAccess, is_command_code_goat,
+    ConnectionVerificationStatus, GOAT_OFFERING_ID, is_command_code_goat,
     parse_command_code_models_catalog,
 };
-use ocg_domain::ids::custom_model_id_matches;
-use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::fmt;
 #[cfg(debug_assertions)]
@@ -34,8 +33,6 @@ pub struct GoatAccountRuntime {
     pub verification_status: ConnectionVerificationStatus,
     pub setup_ready: bool,
     pub has_key: bool,
-    pub model_access: GoatModelAccess,
-    pub models: Vec<String>,
 }
 
 pub const MAX_GOAT_VERIFICATION_BODY_BYTES: usize = 256 * 1024;
@@ -116,21 +113,13 @@ fn ensure_loopback_origin(origin: &str) -> Result<(), String> {
 impl GoatAccountRuntime {
     pub fn eligible(&self) -> bool {
         self.enabled
-            && self.verification_status == ConnectionVerificationStatus::Verified
             && self.setup_ready
             && self.has_key
-            && self
-                .models
-                .iter()
-                .any(|model| self.model_access.allows(model))
             && is_command_code_goat(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID)
     }
 
-    pub fn serves(&self, requested: &str) -> bool {
+    pub fn serves(&self, _requested: &str) -> bool {
         self.eligible()
-            && self.models.iter().any(|model| {
-                self.model_access.allows(model) && custom_model_id_matches(model, requested)
-            })
     }
 }
 
@@ -142,25 +131,6 @@ pub fn goat_runtimes_by_account(
         .cloned()
         .map(|runtime| (runtime.account_id.clone(), runtime))
         .collect()
-}
-
-pub fn eligible_goat_model_ids(runtimes: &[GoatAccountRuntime]) -> Vec<String> {
-    let mut ids = Vec::new();
-    for runtime in runtimes.iter().filter(|runtime| runtime.eligible()) {
-        for model in &runtime.models {
-            if !runtime.model_access.allows(model) {
-                continue;
-            }
-            if ids
-                .iter()
-                .any(|existing: &String| custom_model_id_matches(existing, model))
-            {
-                continue;
-            }
-            ids.push(model.clone());
-        }
-    }
-    ids
 }
 
 #[derive(Debug, Clone)]
@@ -192,12 +162,81 @@ pub fn goat_models_url_for_base(base: &str) -> String {
     )
 }
 
+pub fn opencode_go_models_url_for_base(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    }
+}
+
 pub async fn probe_goat_models(
+    config: &AppConfig,
+    _api_key: &str,
+    base_url: &str,
+) -> Result<Vec<String>, GoatVerifyFailure> {
+    let url = goat_models_url_for_base(base_url);
+    probe_public_provider_models_at_url(config, &url, "Command Code").await
+}
+
+pub async fn refresh_command_code_models(
+    config: &AppConfig,
+    base_url: &str,
+) -> Result<Vec<String>, GoatVerifyFailure> {
+    let url = goat_models_url_for_base(base_url);
+    probe_public_provider_models_at_url(config, &url, "Command Code").await
+}
+
+async fn probe_public_provider_models_at_url(
+    config: &AppConfig,
+    url: &str,
+    provider_label: &str,
+) -> Result<Vec<String>, GoatVerifyFailure> {
+    let client = http_client::configured_builder(config)
+        .and_then(|builder| {
+            builder
+                .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
+                .redirect(http_client::no_redirect_policy())
+                .build()
+                .map_err(Into::into)
+        })
+        .map_err(|error| GoatVerifyFailure {
+            message: format!("failed to build {provider_label} model refresh client: {error}"),
+        })?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .timeout(Duration::from_secs(config.non_stream_timeout_secs))
+        .send()
+        .await
+        .map_err(|error| GoatVerifyFailure {
+            message: format!("{provider_label} GET /models failed: {error}"),
+        })?;
+    parse_provider_models_response(response, provider_label).await
+}
+
+async fn parse_provider_models_response(
+    response: reqwest::Response,
+    provider_label: &str,
+) -> Result<Vec<String>, GoatVerifyFailure> {
+    let status = response.status();
+    let bytes = read_limited_body(response).await?;
+    if !status.is_success() {
+        return Err(GoatVerifyFailure {
+            message: format!("{provider_label} GET /models returned {}", status.as_u16()),
+        });
+    }
+    parse_command_code_models_catalog(&bytes).map_err(|message| GoatVerifyFailure { message })
+}
+
+pub async fn probe_opencode_go_models(
     config: &AppConfig,
     api_key: &str,
     base_url: &str,
 ) -> Result<Vec<String>, GoatVerifyFailure> {
-    probe_provider_models(config, api_key, base_url, "Command Code GOAT").await
+    let url = opencode_go_models_url_for_base(base_url);
+    probe_provider_models_at_url(config, api_key, &url, "OpenCode Go").await
 }
 
 pub async fn probe_provider_models(
@@ -206,13 +245,22 @@ pub async fn probe_provider_models(
     base_url: &str,
     provider_label: &str,
 ) -> Result<Vec<String>, GoatVerifyFailure> {
+    let url = goat_models_url_for_base(base_url);
+    probe_provider_models_at_url(config, api_key, &url, provider_label).await
+}
+
+async fn probe_provider_models_at_url(
+    config: &AppConfig,
+    api_key: &str,
+    url: &str,
+    provider_label: &str,
+) -> Result<Vec<String>, GoatVerifyFailure> {
     let key = api_key.trim();
     if key.is_empty() {
         return Err(GoatVerifyFailure {
             message: format!("{provider_label} model refresh requires a stored Key"),
         });
     }
-    let url = goat_models_url_for_base(base_url);
     let client = http_client::configured_builder(config)
         .and_then(|builder| {
             builder
@@ -225,7 +273,7 @@ pub async fn probe_provider_models(
             message: format!("failed to build {provider_label} model client: {error}"),
         })?;
     let response = client
-        .get(&url)
+        .get(url)
         .bearer_auth(key)
         .header(reqwest::header::ACCEPT, "application/json")
         .timeout(Duration::from_secs(config.non_stream_timeout_secs))
@@ -234,19 +282,7 @@ pub async fn probe_provider_models(
         .map_err(|error| GoatVerifyFailure {
             message: format!("{provider_label} GET /models failed: {error}"),
         })?;
-    let status = response.status();
-    let bytes = read_limited_body(response).await?;
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        return Err(GoatVerifyFailure {
-            message: format!("{provider_label} GET /models returned {}", status.as_u16()),
-        });
-    }
-    if !status.is_success() {
-        return Err(GoatVerifyFailure {
-            message: format!("{provider_label} GET /models returned {}", status.as_u16()),
-        });
-    }
-    parse_command_code_models_catalog(&bytes).map_err(|message| GoatVerifyFailure { message })
+    parse_provider_models_response(response, provider_label).await
 }
 
 async fn read_limited_body(response: reqwest::Response) -> Result<Vec<u8>, GoatVerifyFailure> {
@@ -272,29 +308,36 @@ async fn read_limited_body(response: reqwest::Response) -> Result<Vec<u8>, GoatV
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::GoatModelAccess;
 
-    fn runtime(model_access: GoatModelAccess) -> GoatAccountRuntime {
+    fn runtime(
+        enabled: bool,
+        verification_status: ConnectionVerificationStatus,
+    ) -> GoatAccountRuntime {
         GoatAccountRuntime {
             account_id: "goat-1".into(),
-            enabled: true,
-            verification_status: ConnectionVerificationStatus::Verified,
+            enabled,
+            verification_status,
             setup_ready: true,
             has_key: true,
-            model_access,
-            models: vec!["gpt-5.6-sol".into(), "anthropic/claude-opus-4.1".into()],
         }
     }
 
     #[test]
-    fn goat_mode_filters_saved_catalog_while_all_mode_keeps_it() {
-        let goat = runtime(GoatModelAccess::Goat);
-        assert!(goat.serves("gpt-5.6-sol"));
-        assert!(!goat.serves("anthropic/claude-opus-4.1"));
-        assert_eq!(eligible_goat_model_ids(&[goat]), vec!["gpt-5.6-sol"]);
+    fn account_eligibility_does_not_reinterpret_the_provider_model_preset() {
+        let pending = runtime(true, ConnectionVerificationStatus::Pending);
+        assert!(pending.serves("any-model-in-the-provider-contract"));
+        assert!(!runtime(false, ConnectionVerificationStatus::Verified).eligible());
+    }
 
-        let all = runtime(GoatModelAccess::All);
-        assert!(all.serves("anthropic/claude-opus-4.1"));
-        assert_eq!(eligible_goat_model_ids(&[all]).len(), 2);
+    #[test]
+    fn opencode_go_models_url_keeps_the_official_v1_segment() {
+        assert_eq!(
+            opencode_go_models_url_for_base("https://opencode.ai/zen/go"),
+            "https://opencode.ai/zen/go/v1/models"
+        );
+        assert_eq!(
+            opencode_go_models_url_for_base("http://127.0.0.1:9/provider/v1/"),
+            "http://127.0.0.1:9/provider/v1/models"
+        );
     }
 }

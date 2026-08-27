@@ -4,12 +4,17 @@
 
 ## Logs
 
-The **Logs** view is the rolling receipt tape for every request the gateway
-forwards: timestamp, selected provider/offering, route account, credential
-account, model, status code, the upstream error if any, and the streamed usage
-when the upstream emits a usage chunk. Filters cover provider, offering, route
+The **Logs** view opens on **Request Logs** and is the rolling receipt tape for
+requests the gateway forwards plus explicit provider protocol probes: timestamp,
+selected provider/offering, route account, credential account, model, status
+code, the upstream error if any, and the streamed usage when the upstream emits
+a usage chunk. Probe rows carry zero token values and no applicable cost, have no client Key
+attribution, and never appear in Runtime Logs. Filters cover provider, offering, route
 account, credential account, model, status, time range, and client Key. It will
 not fix your prompt, but it will tell you exactly which account took the fall.
+Authenticated parse, validation, or routing failures that happen before account
+selection also appear here with unresolved/Gateway attribution. Runtime Logs are
+reserved for process and control-plane events.
 Each stored row keeps the request identity separate from the upstream
 identity. There is no `requested_alias` field:
 

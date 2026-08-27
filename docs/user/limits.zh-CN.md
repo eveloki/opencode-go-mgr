@@ -19,7 +19,7 @@
 - 已安装的 Windows 桌面版可以在用户登录时把 OCG Manager 拉起到托盘；开发构建、 macOS、Linux、CLI、Docker 不暴露面板里的 `auto_start` 开关。Docker Compose 另由 `restart: unless-stopped` 在 Docker daemon 重启后恢复服务。
 - macOS 桌面版可以在设置中隐藏 Dock 图标而只保留菜单栏图标；Windows、Linux、 CLI 与 Docker 不暴露 `show_dock_icon` 开关。
 - 不发布 Windows / Linux ARM64、32 位 x86 构建；不支持 RPM、Snap、应用商店包、 Windows Authenticode 正式签名、Apple 公证。该口径仅覆盖桌面安装包；容器镜像（`ghcr.io/klarkxy/opencode-go-mgr` 及其 `-browser` 侧车）发布 `linux/amd64` 与 `linux/arm64`。支持升级的已安装桌面版可在设置页安装签名 Release；开发构建、CLI、Docker 使用直接/手动升级路径。
-- Command Code GOAT 可以保存为禁用的 `pending` 草稿（`routable=false`）。连接验证返回 `501`；它没有已上线的推理、用量、计价、验证运行时或生产路由，探测也不能把它提升为生产路由。它在 **供应商** 页显示为不可路由范围。Custom API 已在 [账号](accounts.zh-CN.md#账号) 的受信管理员边界下上线路由；不计价，也没有官方用量路径，其目录、协议与价格控制作为隔离的 `CustomEndpoint` 范围呈现在 **供应商** 页。
+- Command Code GOAT 是已上线的固定官方源路由。其公开 `/models` 目录只在 **供应商** 页显式刷新；GOAT 预设默认开启，额外模型默认关闭。它没有官方用量 API，也不把目录刷新当作 Key 验证。Custom API 已在 [账号](accounts.zh-CN.md#账号) 的受信管理员边界下上线路由；不计价，也没有官方用量路径，其目录、协议与价格控制作为隔离的 `CustomEndpoint` 范围呈现在 **供应商** 页。
 - 未知模型名在所有受支持的客户端格式上返回 `400`。客户端应发送带鉴权的 `GET /v1/models` 公布的、当前有有效启用协议的别名或合格 Custom ID。受保护的 `GET /dashboard/api/v3/application-models` 是 Go 别名 ∩ 当前价格快照，不是那份完整客户端列表。
 
 ---

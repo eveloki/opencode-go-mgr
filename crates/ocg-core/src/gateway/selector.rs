@@ -1,7 +1,4 @@
 use crate::db::Database;
-use crate::kernel::ids::{
-    ANONYMOUS_FREE_OFFERING_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
-};
 use crate::models::{Account, UpstreamChannel};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -112,14 +109,7 @@ impl AccountSelector {
     }
 
     pub fn free_channel_exhausted_at(accounts: &[Account], now: DateTime<Utc>) -> bool {
-        accounts
-            .iter()
-            .filter(|account| {
-                account.id == ZEN_FREE_ACCOUNT_ID
-                    && account.provider_id == OPENCODE_ZEN_FREE_PROVIDER_ID
-                    && account.offering_id == ANONYMOUS_FREE_OFFERING_ID
-            })
-            .any(|account| account.cooldown_free_until.is_some_and(|until| until > now))
+        crate::routing_runtime::free_channel_is_exhausted_at(accounts, now)
     }
 
     pub fn first_available_for(

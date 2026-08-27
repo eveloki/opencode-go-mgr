@@ -56,11 +56,10 @@ Every gateway draws a line somewhere. This page is that line — a running list 
   publish `linux/amd64` and `linux/arm64`. Updater-enabled installed desktop
   builds can install signed releases from Settings; 1.4.1, development
   builds, the CLI, and Docker use the direct/manual upgrade path.
-- Command Code GOAT can be saved as a disabled `pending` draft
-  (`routable=false`). Connection verification returns `501`; it has no live
-  inference, usage, pricing, verification runtime, or production routing and
-  cannot be promoted by probes. It appears on **Providers** as a non-routable
-  scope. Custom API is live under the trusted-administrator boundary in
+- Command Code GOAT is a live fixed-origin route. Its public `/models` catalog
+  is refreshed explicitly on **Providers**; GOAT preset rows default on and
+  additional rows default off. It has no official usage API and does not use
+  catalog refresh as Key verification. Custom API is live under the trusted-administrator boundary in
   [Accounts](accounts.md); it is unpriced, has no official usage path, and its
   catalog, protocol, and pricing controls live on **Providers** as isolated
   `CustomEndpoint` scopes.

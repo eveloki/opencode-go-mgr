@@ -53,14 +53,8 @@ test("the generic account patch no longer carries the zen free alias", () => {
   assert.doesNotMatch(api, /setAccountFreeAlias|free_alias_enabled/);
 });
 
-test("GOAT account card switches between included and full saved model catalogs", () => {
+test("GOAT account cards no longer own model catalog access controls", () => {
   const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
-  const transport = readFileSync(new URL("../api/dashboard-v3.ts", import.meta.url), "utf8");
-  assert.match(card, /account\.goat_model_access \?\? 'goat'/);
-  assert.match(card, /n-radio-button value="goat"/);
-  assert.match(card, /n-radio-button value="all"/);
-  assert.match(card, /goatModelAccessSaving/);
-  assert.match(accounts, /dashboardApi\.updateGoatModelAccess\(id, modelAccess, revision\)/);
-  assert.match(accounts, /recoverAccountMutationConflict\(error\)/);
-  assert.match(transport, /\/accounts\/\$\{encode\(id\)\}\/goat-model-access/);
+  assert.doesNotMatch(card, /goat_model_access|goat-model-access|NRadioButton|NRadioGroup/);
+  assert.doesNotMatch(accounts, /goatModelAccessSaving|updateGoatModelAccess|goat-model-access/);
 });

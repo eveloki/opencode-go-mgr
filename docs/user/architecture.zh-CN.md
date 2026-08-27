@@ -2,7 +2,7 @@
 
 # 架构图
 
-这是一组单个本地节点的文字版图。按当前 HEAD：已上线路由是 OpenCode Go、Zen Free 与 Custom API。Command Code GOAT 仍是禁用草稿，往那边路由只会收到 `501`。每张图下面链接到负责详情的章节；图与章节冲突时，以章节和代码为准。
+这是一组单个本地节点的文字版图。按当前 HEAD：已上线路由是 OpenCode Go、Zen Free、Command Code GOAT 与 Custom API。每张图下面链接到负责详情的章节；图与章节冲突时，以章节和代码为准。
 
 ## 目录
 

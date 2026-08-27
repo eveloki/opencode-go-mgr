@@ -74,7 +74,7 @@ desktop-specific steps need a real machine.
 - [ ] Cover schema v16 migration, schema v27 (`access_keys`, pre-v3 backup +
       SHA-256 sidecar, dropped `sub_gateway_keys` and `accounts.usage_sync_*`,
       ciphertext validated not rewritten), Alias / upstream log identity, optional native
-      cost, unverified GOAT rows stay disabled `pending`, Zen Free catalog
+      cost, historical GOAT verification states normalize to `not_required`, Zen Free catalog
       persistence, provider contract scopes / model-protocol tables, legacy
       `key + ready`, managed transitions (forward one step / rewind earlier
       steps / no skip-forward), pending-route isolation, the invite URL
@@ -89,10 +89,10 @@ desktop-specific steps need a real machine.
       the active pricing snapshot (highspeed inherits the base row) and must
       not include Custom. Unknown models return `400` on Chat / Responses /
       Messages / Gemini unless they match that `/v1/models` list. Command
-      Command Code GOAT drafts stay disabled, unroutable
-      (`routable=false`), and `501` on verify. Do not smoke GOAT as live
-      routing, usage, pricing, or provider guides. These local-list and
-      fail-closed checks do not require live provider keys.
+      Code catalog refresh is public and keyless; GOAT preset rows start on,
+      extra discovered rows start off, and all-off scopes disappear from
+      `/v1/models`. These local-list checks do not require live provider keys;
+      do not perform billable inference as part of the release smoke.
 - [ ] Bounded fake-upstream Custom API smoke (no live provider key): URL
       credentials are rejected; a `2xx` JSON object verifies; the card stays
       disabled; explicit enable is required; declared model/protocol

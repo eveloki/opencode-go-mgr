@@ -3,7 +3,7 @@
 use chrono::Utc;
 use ocg_core::browser::browser_profile_paths;
 use ocg_core::dashboard_v3::{
-    Account, AccountGoatModelAccess, AccountList, AccountMutation, AccountSetupStep, AccountType,
+    Account, AccountList, AccountMutation, AccountSetupStep, AccountType,
     AccountVerificationStatus, ERROR_CONFLICT, ERROR_INTERNAL, ERROR_INVALID_JSON,
     ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
     ERROR_PRECONDITION_FAILED, ERROR_REVISION_CONFLICT, ERROR_SERVICE_UNAVAILABLE,
@@ -241,11 +241,6 @@ fn mutation_routes(id: &str) -> Vec<(Method, String, Value)> {
             Method::PUT,
             format!("/accounts/{id}/custom-config"),
             custom_write(),
-        ),
-        (
-            Method::PUT,
-            format!("/accounts/{id}/goat-model-access"),
-            json!({ "modelAccess": "all" }),
         ),
         (
             Method::PUT,
@@ -643,10 +638,12 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     .await;
     assert_eq!(status, StatusCode::OK, "{goat}");
     let goat = mutation_account(&goat);
-    assert!(!goat.enabled);
-    assert_eq!(goat.verification_status, AccountVerificationStatus::Pending);
+    assert!(goat.enabled);
+    assert_eq!(
+        goat.verification_status,
+        AccountVerificationStatus::NotRequired
+    );
     assert!(goat.plan_routable);
-    assert_eq!(goat.goat_model_access, Some(AccountGoatModelAccess::Goat));
 
     let (status, custom_err) = send_json(
         &harness,
@@ -714,99 +711,6 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{zen}");
     assert_v3_error(&zen, ERROR_INVALID_REQUEST);
     assert!(zen["message"].as_str().unwrap().contains("singleton"));
-
-    harness.stop();
-}
-
-#[tokio::test]
-async fn goat_model_access_defaults_to_goat_and_switches_with_cas() {
-    let harness = start_loopback("goat-model-access").await;
-    let (status, created) = send_json(
-        &harness,
-        Method::POST,
-        "/accounts",
-        &cas(
-            &harness,
-            json!({
-                "name": "GOAT",
-                "key": "goat-key",
-                "providerId": COMMAND_CODE_PROVIDER_ID,
-                "offeringId": GOAT_OFFERING_ID
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{created}");
-    let created = mutation_account(&created);
-    assert_eq!(
-        created.goat_model_access,
-        Some(AccountGoatModelAccess::Goat)
-    );
-
-    let revision = harness.state.settings_revision();
-    let (status, stale) = send_json(
-        &harness,
-        Method::PUT,
-        &format!("/accounts/{}/goat-model-access", created.id),
-        &json!({
-            "expectedRevision": revision.saturating_sub(1),
-            "processGeneration": harness.state.process_generation(),
-            "modelAccess": "all"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
-    assert_v3_error(&stale, ERROR_REVISION_CONFLICT);
-    assert_eq!(
-        harness
-            .state
-            .db
-            .lock()
-            .goat_model_access(&created.id)
-            .unwrap(),
-        Some(ocg_core::provider::GoatModelAccess::Goat)
-    );
-
-    let (status, updated) = send_json(
-        &harness,
-        Method::PUT,
-        &format!("/accounts/{}/goat-model-access", created.id),
-        &cas(&harness, json!({ "modelAccess": "all" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{updated}");
-    let updated = mutation_account(&updated);
-    assert_eq!(updated.goat_model_access, Some(AccountGoatModelAccess::All));
-    assert_eq!(
-        harness
-            .state
-            .db
-            .lock()
-            .goat_model_access(&created.id)
-            .unwrap(),
-        Some(ocg_core::provider::GoatModelAccess::All)
-    );
-
-    let (status, go) = send_json(
-        &harness,
-        Method::POST,
-        "/accounts",
-        &cas(&harness, json!({ "name": "Go", "key": "sk-go" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{go}");
-    let go = mutation_account(&go);
-    let before = harness.state.settings_revision();
-    let (status, rejected) = send_json(
-        &harness,
-        Method::PUT,
-        &format!("/accounts/{}/goat-model-access", go.id),
-        &cas(&harness, json!({ "modelAccess": "all" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
-    assert_v3_error(&rejected, ERROR_INVALID_REQUEST);
-    assert_eq!(harness.state.settings_revision(), before);
 
     harness.stop();
 }
@@ -1168,21 +1072,21 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
     assert_eq!(status, StatusCode::OK, "{goat}");
     let goat_id = mutation_account(&goat).id;
     let before_goat = harness.state.settings_revision();
-    let (status, goat_enable) = send_json(
+    let (status, goat_disable) = send_json(
         &harness,
         Method::POST,
         &format!("/accounts/{goat_id}/toggle"),
         &cas(&harness, json!({})),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{goat_enable}");
-    assert!(
-        goat_enable["message"]
-            .as_str()
-            .unwrap()
-            .contains("verify the account connection")
+    assert_eq!(status, StatusCode::OK, "{goat_disable}");
+    let goat_disable = mutation_account(&goat_disable);
+    assert!(!goat_disable.enabled);
+    assert_eq!(
+        goat_disable.verification_status,
+        AccountVerificationStatus::NotRequired
     );
-    assert_eq!(harness.state.settings_revision(), before_goat);
+    assert_eq!(harness.state.settings_revision(), before_goat + 1);
 
     harness.stop();
 }

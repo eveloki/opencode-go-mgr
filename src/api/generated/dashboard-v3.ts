@@ -27,7 +27,6 @@ export type DashboardApiV3 =
   | AccountUpdate
   | AccountOrder
   | AccountSetupUpdate
-  | AccountGoatModelAccessUpdate
   | AccountCustomConfigUpdate
   | AccountCustomConfigWrite
   | AccountModelCapabilitiesUpdate
@@ -152,7 +151,6 @@ export type AccountAuthScheme = "bearer" | "x-api-key";
  * Custom/upstream protocol. Wire values match V2 snake_case.
  */
 export type AccountUpstreamProtocol = "chat_completions" | "responses" | "messages";
-export type AccountGoatModelAccess = "goat" | "all";
 /**
  * Wire identity matching V2 `key` / `egress-ip`.
  */
@@ -378,7 +376,6 @@ export interface Account {
   customConfig: AccountCustomConfig | null;
   enabled: boolean;
   expiresOn: string;
-  goatModelAccess: AccountGoatModelAccess | null;
   id: string;
   lastError: string | null;
   modelCapabilities: AccountModelCapability[];
@@ -513,14 +510,6 @@ export interface AccountSetupUpdate {
   expectedRevision: number;
   processGeneration: number;
   setupStep: AccountSetupStep;
-}
-/**
- * PUT `/accounts/{id}/goat-model-access` body.
- */
-export interface AccountGoatModelAccessUpdate {
-  expectedRevision: number;
-  modelAccess: AccountGoatModelAccess;
-  processGeneration: number;
 }
 /**
  * PUT `/accounts/{id}/custom-config` body. Protocol set and auth scheme are
@@ -704,6 +693,7 @@ export interface EffectiveCatalog {
  * One model's preferred protocol and per-protocol evidence.
  */
 export interface EffectiveModelContract {
+  alias: string;
   disabledReasons: string[];
   modelId: string;
   preferredProtocol: AccountUpstreamProtocol;
@@ -759,6 +749,12 @@ export interface ProviderContractGroup {
   revision: number;
   scopeId: string;
   scopeKind: ContractScopeKind;
+  /**
+   * The built-in provider's static protocol-evidence snapshot date. This is
+   * `null` when the scope has no restorable snapshot and is distinct from
+   * catalog `refreshed_at`.
+   */
+  staticProtocolSnapshotDate: string | null;
   usage: CapabilitySummary;
 }
 /**
@@ -788,8 +784,9 @@ export interface ModelProtocolOverride {
   state: ProtocolOverrideState;
 }
 /**
- * POST protocol-probe body. `accountId` may be omitted; `protocols` is the
- * required explicit probe set. Handlers validate membership and uniqueness.
+ * POST protocol-probe body. `accountId` is a deprecated compatibility field
+ * and is ignored; the provider chooses eligible accounts automatically.
+ * `protocols` is the required explicit probe set.
  */
 export interface ProtocolProbeRequest {
   accountId?: string | null;
@@ -812,7 +809,11 @@ export interface ProtocolProbeResult {
  * `contract` is required `T | null` on the wire.
  */
 export interface ProtocolProbeResponse {
-  accountId: string;
+  /**
+   * Deprecated compatibility field. Provider-level probes can use different
+   * accounts per protocol, so this is always `null`.
+   */
+  accountId: string | null;
   contract: EffectiveModelContract | null;
   modelId: string;
   pricingRevision: string;
@@ -1501,16 +1502,16 @@ export interface UsageRefreshThrottleError {
   processGeneration: number | null;
 }
 /**
- * Provider-scoped model-directory refresh. The selected account supplies the
- * credential; the saved result belongs to the Provider scope.
+ * Provider-scoped model-directory refresh. OpenCode Go requires a selected
+ * account credential; Command Code exposes a public Provider catalog.
  */
 export interface ProviderModelsRefreshUpdate {
-  accountId: string;
+  accountId?: string | null;
   expectedRevision: number;
   processGeneration: number;
 }
 export interface ProviderModels {
-  accountId: string;
+  accountId: string | null;
   models: string[];
   pricingRevision: string;
   processGeneration: number;

@@ -1,6 +1,7 @@
 use crate::alias;
 use crate::gateway::diagnostics::{
-    ErrorDiagnostic, REQUEST_ID_HEADER, RequestTrace, emit_failure, serialize_diagnostic,
+    ErrorDiagnostic, REQUEST_ID_HEADER, RequestTrace, emit_failure, log_request_failure,
+    serialize_diagnostic,
 };
 use crate::gateway::executor::GatewayExecutor;
 use crate::gateway::forwarder::UpstreamPayloadTooLargeResponse;
@@ -25,14 +26,18 @@ pub async fn request_trace_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let trace = RequestTrace::new();
+    let credential = extract_client_key(request.headers(), &state);
+    let trace = credential
+        .as_ref()
+        .map(|entry| RequestTrace::new().with_client_key(entry.id.clone(), entry.name.clone()))
+        .unwrap_or_default();
     let path = request.uri().path().to_string();
     let client_body_bytes = request
         .headers()
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok());
-    let authenticated = check_auth(request.headers(), &state);
+    let authenticated = credential.is_some();
     request.extensions_mut().insert(trace.clone());
     let mut response = next.run(request).await;
 
@@ -52,18 +57,13 @@ pub async fn request_trace_middleware(
         );
         diagnostic.client_body_bytes = client_body_bytes;
         diagnostic.downstream_status = Some(StatusCode::PAYLOAD_TOO_LARGE.as_u16());
-        let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
-        let encoded = serialize_diagnostic(diagnostic);
-        let _ = state.db.lock().log_gateway_diagnostic(
-            "warn",
-            "gateway_request",
+        let encoded = serialize_diagnostic(diagnostic.clone());
+        log_request_failure(
+            &state.db.lock(),
+            &trace,
+            &diagnostic,
+            &encoded,
             "gateway request body exceeded the configured limit",
-            Some(&trace.request_id),
-            Some(1),
-            Some("client"),
-            Some("body_limit"),
-            Some(duration_ms),
-            Some(&encoded),
         );
         emit_failure(&encoded);
     }
@@ -230,10 +230,9 @@ pub async fn gemini_model_action(
 /// GET /v1/models — authenticated local Alias registry list.
 ///
 /// Returns OpenAI list JSON for routeable published client aliases union
-/// eligible enabled+verified Custom capability IDs and eligible Command Code
-/// GOAT catalog IDs, de-duplicated, in deterministic order. Does not call
-/// upstream `/v1/models`. Zero eligible Custom/GOAT accounts returns the
-/// published alias list unchanged. GOAT IDs never steal already-published
+/// eligible enabled+verified Custom capability IDs and Provider-enabled
+/// Command Code GOAT catalog IDs, de-duplicated, in deterministic order. It
+/// does not call upstream `/v1/models`. GOAT IDs never steal already-published
 /// Go/Zen aliases.
 pub async fn models(
     State(state): State<CoreState>,
@@ -254,7 +253,8 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
     let zen_catalog = state.zen_free_model_catalog();
     let contracts = state.provider_contracts();
     let go_ids = provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
-    let goat_ids = eligible_goat_model_ids(state);
+    let goat_ids =
+        provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
     let published = crate::alias::published_routeable_aliases_with_all_catalogs(
         &go_ids,
         &zen_catalog.models,
@@ -281,23 +281,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
         })
         .collect();
     let custom_ids = eligible_custom_model_ids(state, &contracts);
-    for id in custom_ids.into_iter().chain(
-        goat_ids
-            .iter()
-            .filter(|id| !ocg_domain::ids::looks_raw_shaped(id))
-            .filter(|id| {
-                model_has_enabled_protocol(id, &go_ids, &zen_catalog.models, &goat_ids, &contracts)
-            })
-            .cloned(),
-    ) {
-        let owned_by = if goat_ids
-            .iter()
-            .any(|goat| crate::custom::custom_model_id_matches(goat, &id))
-        {
-            crate::provider::COMMAND_CODE_PROVIDER_ID
-        } else {
-            crate::provider::CUSTOM_PROVIDER_ID
-        };
+    for id in custom_ids {
         if data.iter().any(|item| {
             item.get("id")
                 .and_then(|value| value.as_str())
@@ -309,7 +293,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
             "id": id,
             "object": "model",
             "created": 0,
-            "owned_by": owned_by
+            "owned_by": crate::provider::CUSTOM_PROVIDER_ID
         }));
     }
     axum::Json(serde_json::json!({
@@ -360,13 +344,6 @@ fn provider_catalog_model_ids(
         })
         .map(|scope| scope.catalog.models.clone())
         .unwrap_or_default()
-}
-
-fn eligible_goat_model_ids(state: &CoreState) -> Vec<String> {
-    let Ok(runtimes) = state.db.lock().list_goat_account_runtimes() else {
-        return Vec::new();
-    };
-    crate::goat::eligible_goat_model_ids(&runtimes)
 }
 
 fn eligible_custom_model_ids(
@@ -464,7 +441,8 @@ async fn proxy_handler_inner(
     let go_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
     let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
-    let goat_model_ids = eligible_goat_model_ids(&state);
+    let goat_model_ids =
+        provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
     let zen_catalog = state.zen_free_model_catalog();
     let resolved = match crate::alias::resolve_with_all_catalogs(
         &routing_model,
@@ -567,7 +545,8 @@ async fn gemini_proxy_handler(
     let go_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
     let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
-    let goat_model_ids = eligible_goat_model_ids(&state);
+    let goat_model_ids =
+        provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
     let zen_catalog = state.zen_free_model_catalog();
     let resolved = match crate::alias::resolve_with_all_catalogs(
         &routing_model,
@@ -640,10 +619,16 @@ fn candidate_key_values(headers: &HeaderMap) -> Vec<&str> {
 /// in header order, attributes the request (the primary key resolves to the
 /// fixed `PRIMARY_KEY_ID`).
 pub(crate) fn extract_client_key_id(headers: &HeaderMap, state: &CoreState) -> Option<String> {
+    extract_client_key(headers, state).map(|entry| entry.id)
+}
+
+fn extract_client_key(
+    headers: &HeaderMap,
+    state: &CoreState,
+) -> Option<crate::gateway_keys::CredentialEntry> {
     candidate_key_values(headers)
         .into_iter()
         .find_map(|value| state.credential_entry_for_value(value))
-        .map(|entry| entry.id)
 }
 
 fn check_auth(headers: &HeaderMap, state: &CoreState) -> bool {
@@ -714,23 +699,8 @@ fn local_failure_response(
     if let Some(body) = summary_body {
         diagnostic = diagnostic.with_request_summary(body);
     }
-    let duration_ms = diagnostic.duration_ms.min(i64::MAX as u64) as i64;
-    let encoded = serialize_diagnostic(diagnostic);
-    let _ = state.db.lock().log_gateway_diagnostic(
-        if status.is_server_error() {
-            "error"
-        } else {
-            "warn"
-        },
-        "gateway_request",
-        message,
-        Some(&trace.request_id),
-        Some(1),
-        Some(error_source),
-        Some(error_stage),
-        Some(duration_ms),
-        Some(&encoded),
-    );
+    let encoded = serialize_diagnostic(diagnostic.clone());
+    log_request_failure(&state.db.lock(), trace, &diagnostic, &encoded, message);
     emit_failure(&encoded);
     protocol_error_from(
         format,

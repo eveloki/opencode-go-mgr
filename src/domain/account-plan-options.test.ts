@@ -70,14 +70,14 @@ test("add-account chooser omits singleton Zen Free and groups remaining families
   );
 });
 
-test("GOAT follows the catalog: routable means addable with verify-then-enable copy", () => {
+test("GOAT follows the catalog without inventing a Key-verification gate", () => {
   const routable = buildPlanChooserGroups([
     catalogEntry("command-code", "goat", { routable: true, creation_availability: "available" }),
   ]);
   const available = routable.find((group) => group.id === "available")!;
   const goat = available.options.find(({ plan }) => plan.id === "command-code-goat")!;
   assert.equal(goat.disabled, false);
-  assert.equal(goat.creationHint, "创建为禁用账号，验证连接成功后手动启用。");
+  assert.equal(goat.creationHint, "");
 
   const draft = buildPlanChooserGroups([
     catalogEntry("command-code", "goat", { routable: false, creation_availability: "available" }),
@@ -86,7 +86,7 @@ test("GOAT follows the catalog: routable means addable with verify-then-enable c
     .find((group) => group.id === "draft")!
     .options.find(({ plan }) => plan.id === "command-code-goat")!;
   assert.equal(draftGoat.disabled, false);
-  assert.equal(draftGoat.creationHint, "创建为禁用草稿；验证与路由尚未就绪");
+  assert.equal(draftGoat.creationHint, "");
 });
 
 test("plan hints and disabled reasons are translation keys", () => {

@@ -1051,7 +1051,7 @@ async fn free_gates_close_only_free_candidates_on_shared_alias() {
 }
 
 #[tokio::test]
-async fn goat_draft_is_absent_and_goat_raw_has_no_route() {
+async fn disabled_goat_is_skipped_and_unavailable_raw_has_no_route() {
     let (base_url, calls, stop) = start_scripted_upstream(
         vec![ScriptedReply {
             status: 200,
@@ -1064,7 +1064,7 @@ async fn goat_draft_is_absent_and_goat_raw_has_no_route() {
     insert_disabled_offering(
         &state,
         "acct-1",
-        "goat-draft",
+        "goat-disabled",
         COMMAND_CODE_PROVIDER_ID,
         GOAT_OFFERING_ID,
         "goat-key",
@@ -1073,7 +1073,7 @@ async fn goat_draft_is_absent_and_goat_raw_has_no_route() {
         .db
         .lock()
         .reorder_accounts(&[
-            "goat-draft".into(),
+            "goat-disabled".into(),
             "acct-1".into(),
             ZEN_FREE_ACCOUNT_ID.into(),
         ])
@@ -1087,8 +1087,8 @@ async fn goat_draft_is_absent_and_goat_raw_has_no_route() {
     assert_eq!(logs.len(), 1, "{logs:?}");
     assert_eq!(logs[0].account_id, "acct-1");
     assert!(
-        logs.iter().all(|log| log.account_id != "goat-draft"),
-        "GOAT draft must stay off the production route set: {logs:?}"
+        logs.iter().all(|log| log.account_id != "goat-disabled"),
+        "disabled GOAT must stay off the production route set: {logs:?}"
     );
 
     let (status, body) = chat(port, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM).await;

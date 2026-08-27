@@ -524,6 +524,95 @@ fn upsert_contract_catalog_on(
     Ok(())
 }
 
+fn set_model_protocol_override_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    model_id: &str,
+    protocol: UpstreamProtocolKind,
+    state: ProtocolOverrideState,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    match state {
+        ProtocolOverrideState::Auto => {
+            conn.execute(
+                "DELETE FROM provider_contract_model_protocol_overrides
+                 WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3 AND protocol = ?4",
+                params![scope.kind_str(), scope.id(), model_id, protocol.as_str()],
+            )?;
+        }
+        ProtocolOverrideState::ForceOn | ProtocolOverrideState::ForceOff => {
+            conn.execute(
+                "INSERT OR REPLACE INTO provider_contract_model_protocol_overrides
+                 (scope_kind, scope_id, model_id, protocol, state, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    scope.kind_str(),
+                    scope.id(),
+                    model_id,
+                    protocol.as_str(),
+                    state.as_str(),
+                    now.to_rfc3339(),
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_default_off_override_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    model_id: &str,
+    protocol: UpstreamProtocolKind,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO provider_contract_model_protocol_overrides
+         (scope_kind, scope_id, model_id, protocol, state, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'force_off', ?5)",
+        params![
+            scope.kind_str(),
+            scope.id(),
+            model_id,
+            protocol.as_str(),
+            now.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn mark_new_catalog_models_default_off_on(
+    conn: &Connection,
+    scope: &ContractScope,
+    previous_models: &[String],
+    refreshed_models: &[String],
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let previous: HashSet<String> = previous_models
+        .iter()
+        .map(|model_id| model_id.to_ascii_lowercase())
+        .collect();
+    for model_id in refreshed_models {
+        if previous.contains(&model_id.to_ascii_lowercase()) {
+            continue;
+        }
+        if scope.kind_str() == crate::provider_contracts::SCOPE_KIND_PROVIDER
+            && scope.id() == COMMAND_CODE_PROVIDER_ID
+            && command_code_goat_includes_model(model_id)
+        {
+            continue;
+        }
+        for protocol in [
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Responses,
+            UpstreamProtocolKind::Messages,
+        ] {
+            insert_default_off_override_on(conn, scope, model_id, protocol, now)?;
+        }
+    }
+    Ok(())
+}
+
 fn upsert_model_protocol_row_on(conn: &Connection, row: &PersistedModelProtocol) -> Result<()> {
     conn.execute(
         "INSERT INTO provider_contract_model_protocols (
@@ -3187,16 +3276,19 @@ impl Database {
         // lack `enabled` even after additive column backstops, so skip rather
         // than fail the open. Go/Zen and unknown pairs are not in this set.
         disable_unroutable_catalog_accounts(&tx)?;
-        // Historical v23 leftovers that never received a verification status
-        // stay pending. Failed and verified GOAT rows keep their snapshots.
+        // Command Code's public model directory is not Key verification.
+        // Normalize historical GOAT verification states to the single current
+        // account semantic; inference remains the actual Key-auth boundary.
         if table_has_column(&tx, "accounts", "provider_id")?
             && table_has_column(&tx, "accounts", "offering_id")?
             && table_has_column(&tx, "accounts", "verification_status")?
         {
             tx.execute(
-                "UPDATE accounts SET verification_status = 'pending', verification_error = NULL
-                 WHERE provider_id = ?1 AND offering_id = ?2
-                   AND verification_status = 'not_required'",
+                "UPDATE accounts
+                 SET verification_status = 'not_required',
+                     connection_verified_at = NULL,
+                     verification_error = NULL
+                 WHERE provider_id = ?1 AND offering_id = ?2",
                 params![COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
             )?;
         }
@@ -3327,6 +3419,15 @@ impl Database {
         &self,
         catalog: &crate::kernel::zen::ZenFreeModelCatalog,
     ) -> Result<()> {
+        self.set_zen_free_model_catalog_with_default_off(catalog, &catalog.models)
+    }
+
+    pub fn set_zen_free_model_catalog_with_default_off(
+        &self,
+        catalog: &crate::kernel::zen::ZenFreeModelCatalog,
+        previous_models: &[String],
+    ) -> Result<()> {
+        let now = Utc::now();
         let models_json = serde_json::to_string(&catalog.models)?;
         let refreshed_at = catalog.refreshed_at.map(|value| value.to_rfc3339());
         let tx = self.conn.unchecked_transaction()?;
@@ -3353,7 +3454,14 @@ impl Database {
             catalog.refreshed_at,
             CATALOG_SOURCE_OFFICIAL_ZEN,
             &catalog.source_url,
-            Utc::now(),
+            now,
+        )?;
+        mark_new_catalog_models_default_off_on(
+            &tx,
+            &ContractScope::provider(OPENCODE_ZEN_FREE_PROVIDER_ID),
+            previous_models,
+            &catalog.models,
+            now,
         )?;
         tx.commit()?;
         Ok(())
@@ -3442,6 +3550,33 @@ impl Database {
         Ok(row)
     }
 
+    pub fn refresh_contract_catalog_with_default_off(
+        &self,
+        scope: &ContractScope,
+        previous_models: &[String],
+        models: &[String],
+        refreshed_at: DateTime<Utc>,
+        source: &str,
+        source_url: &str,
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
+        let tx = self.conn.unchecked_transaction()?;
+        upsert_contract_catalog_on(
+            &tx,
+            scope,
+            models,
+            Some(refreshed_at),
+            source,
+            source_url,
+            now,
+        )?;
+        mark_new_catalog_models_default_off_on(&tx, scope, previous_models, models, now)?;
+        let row = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        tx.commit()?;
+        Ok(row)
+    }
+
     pub fn set_model_protocol_overrides(
         &self,
         scope: &ContractScope,
@@ -3455,30 +3590,95 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         ensure_contract_scope_row(&tx, scope, now)?;
         for (model_id, protocol, state) in rows {
-            match state {
-                ProtocolOverrideState::Auto => {
-                    tx.execute(
-                        "DELETE FROM provider_contract_model_protocol_overrides
-                         WHERE scope_kind = ?1 AND scope_id = ?2 AND model_id = ?3 AND protocol = ?4",
-                        params![scope.kind_str(), scope.id(), model_id, protocol.as_str()],
-                    )?;
-                }
-                ProtocolOverrideState::ForceOn | ProtocolOverrideState::ForceOff => {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO provider_contract_model_protocol_overrides
-                         (scope_kind, scope_id, model_id, protocol, state, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![
-                            scope.kind_str(),
-                            scope.id(),
-                            model_id,
-                            protocol.as_str(),
-                            state.as_str(),
-                            now.to_rfc3339(),
-                        ],
+            set_model_protocol_override_on(&tx, scope, model_id, *protocol, *state, now)?;
+        }
+        bump_scope_revision_on(&tx, scope, now)?;
+        let scope = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        tx.commit()?;
+        Ok(scope)
+    }
+
+    /// Clear mutable protocol judgments for a built-in snapshot provider while
+    /// preserving its current catalog. Static-supported pairs intentionally have no
+    /// override (Auto); every absent static pair receives ForceOff so a future
+    /// preferred-protocol fallback cannot make an unknown catalog model live.
+    pub fn reset_provider_static_model_protocols(
+        &self,
+        scope: &ContractScope,
+        current_models: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
+        anyhow::ensure!(
+            scope.kind_str() == crate::provider_contracts::SCOPE_KIND_PROVIDER
+                && crate::provider_contracts::static_protocol_snapshot_date(scope.id()).is_some(),
+            "static protocol reset is only valid for a built-in snapshot provider"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_contract_scope_row(&tx, scope, now)?;
+        tx.execute(
+            "DELETE FROM provider_contract_model_protocols
+             WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![scope.kind_str(), scope.id()],
+        )?;
+        tx.execute(
+            "DELETE FROM provider_contract_model_protocol_overrides
+             WHERE scope_kind = ?1 AND scope_id = ?2",
+            params![scope.kind_str(), scope.id()],
+        )?;
+        for model_id in current_models {
+            let adapter = crate::provider_contracts::adapter_kind_for_provider_scope(scope.id())
+                .expect("validated built-in snapshot provider");
+            let static_protocols =
+                crate::provider_contracts::static_verified_protocols(adapter, model_id, &[]);
+            for protocol in [
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+                UpstreamProtocolKind::Messages,
+            ] {
+                if !static_protocols.contains(&protocol) {
+                    set_model_protocol_override_on(
+                        &tx,
+                        scope,
+                        model_id,
+                        protocol,
+                        ProtocolOverrideState::ForceOff,
+                        now,
                     )?;
                 }
             }
+        }
+        bump_scope_revision_on(&tx, scope, now)?;
+        let row = load_scope_on(&tx, scope)?
+            .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Commit one probe batch — evidence observations plus the binary
+    /// overrides each probed protocol implies — in a single transaction with
+    /// a single scope-revision bump.
+    pub fn commit_model_protocol_probe_results(
+        &self,
+        scope: &ContractScope,
+        observations: &[PersistedModelProtocol],
+        overrides: &[(String, UpstreamProtocolKind, ProtocolOverrideState)],
+        now: DateTime<Utc>,
+    ) -> Result<PersistedScopeRow> {
+        anyhow::ensure!(
+            !observations.is_empty() || !overrides.is_empty(),
+            "probe result batch must be nonempty"
+        );
+        anyhow::ensure!(
+            observations.iter().all(|row| row.scope == *scope),
+            "probe observations must belong to the committed contract scope"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        for row in observations {
+            upsert_model_protocol_row_on(&tx, row)?;
+        }
+        for (model_id, protocol, state) in overrides {
+            set_model_protocol_override_on(&tx, scope, model_id, *protocol, *state, now)?;
         }
         bump_scope_revision_on(&tx, scope, now)?;
         let scope = load_scope_on(&tx, scope)?
@@ -3749,9 +3949,9 @@ impl Database {
         let key_replaced = key_cipher.is_some();
         let requires_verification = builtin_plan(&existing.provider_id, &existing.offering_id)
             .is_some_and(|plan| plan.verification_policy == VerificationPolicy::Required);
-        // Key replacement invalidates verification for every Required plan,
-        // but only Plans whose card descriptor gates enablement on verification
-        // (GOAT) are also forced off. Custom stays enabled as a pending draft.
+        // Key replacement invalidates verification for every Required plan.
+        // Only a descriptor that explicitly gates enablement on verification
+        // would also force the account off; current built-ins do not do so.
         let verification_gates_enablement = requires_verification
             && ProviderRegistry::get(&existing.provider_id, &existing.offering_id)
                 .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
@@ -4210,7 +4410,7 @@ impl Database {
 
     pub fn list_goat_account_runtimes(&self) -> Result<Vec<crate::goat::GoatAccountRuntime>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, enabled, verification_status, setup_step, key_cipher, goat_model_access
+            "SELECT id, enabled, verification_status, setup_step, key_cipher
              FROM accounts
              WHERE provider_id = ?1 AND offering_id = ?2
              ORDER BY sort_order ASC, created_at ASC, id ASC",
@@ -4232,37 +4432,23 @@ impl Database {
                 )
             })?;
             let key_cipher: String = row.get(4)?;
-            let access_value: String = row.get(5)?;
-            let model_access =
-                GoatModelAccess::try_from(access_value.as_str()).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        5,
-                        Type::Text,
-                        Box::new(std::io::Error::other(error)),
-                    )
-                })?;
             Ok((
                 account_id,
                 enabled,
                 verification_status,
                 setup_step.is_ready(),
                 !key_cipher.is_empty(),
-                model_access,
             ))
         })?;
         let mut runtimes = Vec::new();
         for row in rows {
-            let (account_id, enabled, verification_status, setup_ready, has_key, model_access) =
-                row?;
-            let models = self.list_goat_catalog_models(&account_id)?;
+            let (account_id, enabled, verification_status, setup_ready, has_key) = row?;
             runtimes.push(crate::goat::GoatAccountRuntime {
                 account_id,
                 enabled,
                 verification_status,
                 setup_ready,
                 has_key,
-                model_access,
-                models,
             });
         }
         Ok(runtimes)
@@ -11506,7 +11692,7 @@ mod tests {
         let goat = db.get_account("v22-goat").unwrap().unwrap();
         assert!(!goat.enabled, "migrated GOAT rows must be fail-closed");
         let goat_state = db.account_verification_state("v22-goat").unwrap().unwrap();
-        assert_eq!(goat_state.status, ConnectionVerificationStatus::Pending);
+        assert_eq!(goat_state.status, ConnectionVerificationStatus::NotRequired);
         let log_id: i64 = db
             .conn
             .query_row("SELECT id FROM forward_logs LIMIT 1", [], |row| row.get(0))
@@ -11934,7 +12120,7 @@ mod tests {
             .account_verification_state("goat-draft")
             .unwrap()
             .unwrap();
-        assert_eq!(goat_state.status, ConnectionVerificationStatus::Pending);
+        assert_eq!(goat_state.status, ConnectionVerificationStatus::NotRequired);
 
         let mut custom = account("custom-1");
         custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
@@ -12960,7 +13146,7 @@ mod tests {
         assert!(goat_failed_before.enabled);
         assert_eq!(
             goat_pending_before.verification,
-            ConnectionVerificationStatus::Pending
+            ConnectionVerificationStatus::NotRequired
         );
         assert_eq!(
             goat_verified_before.verification,
@@ -12986,28 +13172,32 @@ mod tests {
         assert!(goat_pending_after.enabled);
         assert_eq!(
             goat_pending_after.verification,
-            ConnectionVerificationStatus::Pending
+            ConnectionVerificationStatus::NotRequired
         );
 
         let goat_verified_after = sanitation_snapshot(&db, "goat-verified");
-        assert_eq!(goat_verified_after, goat_verified_before);
+        assert_eq!(goat_verified_after.name, goat_verified_before.name);
+        assert_eq!(goat_verified_after.notes, goat_verified_before.notes);
+        assert_eq!(
+            goat_verified_after.updated_at,
+            goat_verified_before.updated_at
+        );
         assert!(goat_verified_after.enabled);
         assert_eq!(
             goat_verified_after.verification,
-            ConnectionVerificationStatus::Verified
+            ConnectionVerificationStatus::NotRequired
         );
 
         let goat_failed_after = sanitation_snapshot(&db, "goat-failed");
-        assert_eq!(goat_failed_after, goat_failed_before);
+        assert_eq!(goat_failed_after.name, goat_failed_before.name);
+        assert_eq!(goat_failed_after.notes, goat_failed_before.notes);
+        assert_eq!(goat_failed_after.updated_at, goat_failed_before.updated_at);
         assert!(goat_failed_after.enabled);
         assert_eq!(
             goat_failed_after.verification,
-            ConnectionVerificationStatus::Failed
+            ConnectionVerificationStatus::NotRequired
         );
-        assert_eq!(
-            goat_failed_after.verification_error.as_deref(),
-            Some("boom")
-        );
+        assert!(goat_failed_after.verification_error.is_none());
 
         let custom_after = sanitation_snapshot(&db, "draft-api");
         assert_eq!(custom_after, custom_before);
@@ -13990,6 +14180,155 @@ mod tests {
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].protocol, UpstreamProtocolKind::Messages);
         assert_eq!(overrides[0].state, ProtocolOverrideState::ForceOff);
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn catalog_refresh_defaults_only_new_models_off_and_preserves_existing_choices() {
+        let dir = temp_data_dir("catalog-refresh-default-off");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
+
+        db.set_contract_catalog(
+            &scope,
+            &["grok-4.5".into()],
+            None,
+            crate::provider_contracts::CATALOG_SOURCE_STATIC,
+            "",
+            now,
+        )
+        .unwrap();
+        db.set_model_protocol_overrides(
+            &scope,
+            &[
+                (
+                    "grok-4.5".into(),
+                    UpstreamProtocolKind::Responses,
+                    ProtocolOverrideState::ForceOn,
+                ),
+                (
+                    "future-go-model".into(),
+                    UpstreamProtocolKind::Messages,
+                    ProtocolOverrideState::ForceOn,
+                ),
+            ],
+            now,
+        )
+        .unwrap();
+        let revision_before = db.load_persisted_scope(&scope).unwrap().unwrap().revision;
+
+        let refreshed = db
+            .refresh_contract_catalog_with_default_off(
+                &scope,
+                &["grok-4.5".into()],
+                &[
+                    "grok-4.5".into(),
+                    "glm-5.2".into(),
+                    "future-go-model".into(),
+                ],
+                now,
+                crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
+                "https://opencode.ai/zen/go/v1/models",
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(refreshed.revision, revision_before + 1);
+        assert_eq!(
+            refreshed.catalog_models,
+            vec!["grok-4.5", "glm-5.2", "future-go-model"]
+        );
+        let persisted = db.load_persisted_contracts().unwrap();
+        let overrides = persisted.overrides.get(&scope).unwrap();
+        assert!(overrides.iter().any(|row| row.model_id == "grok-4.5"
+            && row.protocol == UpstreamProtocolKind::Responses
+            && row.state == ProtocolOverrideState::ForceOn));
+        assert_eq!(
+            overrides
+                .iter()
+                .filter(|row| row.model_id == "grok-4.5")
+                .count(),
+            1,
+            "retained models keep their existing protocol choices"
+        );
+        for protocol in [
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Responses,
+            UpstreamProtocolKind::Messages,
+        ] {
+            assert!(overrides.iter().any(|row| row.model_id == "glm-5.2"
+                && row.protocol == protocol
+                && row.state == ProtocolOverrideState::ForceOff));
+        }
+        for protocol in [
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Responses,
+        ] {
+            assert!(overrides.iter().any(|row| row.model_id == "future-go-model"
+                && row.protocol == protocol
+                && row.state == ProtocolOverrideState::ForceOff));
+        }
+        assert!(overrides.iter().any(|row| row.model_id == "future-go-model"
+            && row.protocol == UpstreamProtocolKind::Messages
+            && row.state == ProtocolOverrideState::ForceOn));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn command_catalog_reappearing_preset_returns_to_auto_enabled() {
+        let dir = temp_data_dir("command-catalog-reappearing-preset");
+        let db = Database::open(dir.clone()).unwrap();
+        let now = Utc::now();
+        let scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
+        let preset = COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS[0].to_string();
+        let extra = "vendor/future-command-model".to_string();
+
+        db.set_contract_catalog(
+            &scope,
+            std::slice::from_ref(&preset),
+            Some(now),
+            CATALOG_SOURCE_COMMAND_CODE_MODELS,
+            COMMAND_CODE_GOAT_BASE_URL,
+            now,
+        )
+        .unwrap();
+        db.refresh_contract_catalog_with_default_off(
+            &scope,
+            std::slice::from_ref(&preset),
+            std::slice::from_ref(&extra),
+            now,
+            CATALOG_SOURCE_COMMAND_CODE_MODELS,
+            COMMAND_CODE_GOAT_BASE_URL,
+            now,
+        )
+        .unwrap();
+        db.refresh_contract_catalog_with_default_off(
+            &scope,
+            std::slice::from_ref(&extra),
+            &[extra.clone(), preset.clone()],
+            now,
+            CATALOG_SOURCE_COMMAND_CODE_MODELS,
+            COMMAND_CODE_GOAT_BASE_URL,
+            now,
+        )
+        .unwrap();
+
+        let persisted = db.load_persisted_contracts().unwrap();
+        let overrides = persisted.overrides.get(&scope).unwrap();
+        assert!(
+            overrides.iter().all(|row| row.model_id != preset),
+            "a GOAT preset must remain Auto when it reappears: {overrides:?}"
+        );
+        assert!(
+            overrides.iter().any(|row| {
+                row.model_id == extra && row.state == ProtocolOverrideState::ForceOff
+            })
+        );
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();

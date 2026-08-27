@@ -200,6 +200,7 @@ pub(crate) fn materialize_account_routes(
 ) -> Result<MaterializedRouteSet, ProtocolError> {
     match resolved {
         ResolvedModel::PinnedRaw { mapping, .. } => {
+            let zen_only = mapping_is_zen_free(mapping);
             let plan = materialize_mapping_plan(
                 config,
                 parsed,
@@ -222,7 +223,7 @@ pub(crate) fn materialize_account_routes(
                     mapping: mapping.clone(),
                     plan,
                 }],
-                false,
+                zen_only,
                 Vec::new(),
                 custom_runtimes,
                 goat_runtimes,
@@ -661,15 +662,13 @@ mod tests {
         item
     }
 
-    fn goat_runtime(id: &str, models: &[&str]) -> GoatAccountRuntime {
+    fn goat_runtime(id: &str, _models: &[&str]) -> GoatAccountRuntime {
         GoatAccountRuntime {
             account_id: id.into(),
             enabled: true,
             verification_status: ConnectionVerificationStatus::Verified,
             setup_ready: true,
             has_key: true,
-            model_access: crate::provider::GoatModelAccess::All,
-            models: models.iter().map(|model| (*model).to_string()).collect(),
         }
     }
 
@@ -713,6 +712,27 @@ mod tests {
                 revision: 1,
                 updated_at: now,
             },
+        );
+        persisted.overrides.insert(
+            crate::provider_contracts::ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+            models
+                .iter()
+                .map(
+                    |model| crate::provider_contracts::PersistedModelProtocolOverride {
+                        scope: crate::provider_contracts::ContractScope::provider(
+                            COMMAND_CODE_PROVIDER_ID,
+                        ),
+                        model_id: (*model).to_string(),
+                        protocol: if ocg_domain::protocol::command_code_is_anthropic_model(model) {
+                            crate::provider::UpstreamProtocolKind::Messages
+                        } else {
+                            crate::provider::UpstreamProtocolKind::ChatCompletions
+                        },
+                        state: crate::provider_contracts::ProtocolOverrideState::ForceOn,
+                        updated_at: now,
+                    },
+                )
+                .collect(),
         );
         crate::provider_contracts::build_effective_contracts(
             &crate::zen_models::ZenFreeModelCatalog::default(),

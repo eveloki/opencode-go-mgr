@@ -55,7 +55,7 @@ pub struct CommandCodeGoatTransportSpec {
     pub auth_scheme: UpstreamAuthScheme,
     pub follow_redirects: bool,
     pub zdr_header_name: Option<&'static str>,
-    pub uses_get_models_for_verification: bool,
+    pub public_catalog_refresh: bool,
 }
 
 pub fn command_code_goat_transport_spec() -> CommandCodeGoatTransportSpec {
@@ -68,7 +68,7 @@ pub fn command_code_goat_transport_spec() -> CommandCodeGoatTransportSpec {
         auth_scheme: UpstreamAuthScheme::Bearer,
         follow_redirects: false,
         zdr_header_name: None,
-        uses_get_models_for_verification: true,
+        public_catalog_refresh: true,
     }
 }
 
@@ -486,12 +486,12 @@ fn require_opencode_protocol_policy(
         crate::provider_contracts::static_verified_protocols(adapter, &plan.model, &[]);
     match policy {
         RoutePolicy::Probe => {
-            if !ceiling.contains(&protocol) {
-                return Err(format!(
-                    "probe combination is outside the {label} adapter safety ceiling for model `{}` over {:?}",
-                    plan.model, plan.upstream
-                ));
-            }
+            // Dashboard V3 admits probe requests only for models present in
+            // the selected provider's effective catalog. Once admitted, an
+            // explicit admin probe must reach every constructible protocol
+            // endpoint; the static model table is evidence, not an admission
+            // gate for freshly fetched catalog models.
+            let _ = (protocol, ceiling, label);
             Ok(())
         }
         RoutePolicy::Production {
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(spec.auth_scheme, UpstreamAuthScheme::Bearer);
         assert!(!spec.follow_redirects);
         assert_eq!(spec.zdr_header_name, None);
-        assert!(spec.uses_get_models_for_verification);
+        assert!(spec.public_catalog_refresh);
         assert_eq!(
             command_code_goat_official_url(ApiFormat::ChatCompletions).unwrap(),
             "https://api.commandcode.ai/provider/v1/chat/completions"
@@ -999,6 +999,18 @@ mod tests {
         let probe = resolve_probe_route(&go, &config, &chat_grok).unwrap();
         assert_eq!(probe.path, "/v1/chat/completions");
         assert_eq!(probe.upstream, ApiFormat::ChatCompletions);
+        let fetched_model_probe = resolve_probe_route(
+            &go,
+            &config,
+            &chat_plan(
+                "future-go-model",
+                UpstreamChannel::Go,
+                ApiFormat::Messages,
+                None,
+            ),
+        )
+        .expect("the Dashboard catalog gate admits fetched models before route construction");
+        assert_eq!(fetched_model_probe.path, "/v1/messages");
 
         let static_contracts = crate::provider_contracts::build_effective_contracts(
             &crate::zen_models::ZenFreeModelCatalog::default(),

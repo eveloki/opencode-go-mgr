@@ -97,6 +97,28 @@ export const useProvidersStore = defineStore("providers", () => {
     }
   }
 
+  async function refreshContractCatalog(
+    scopeKind: ContractScopeKind,
+    scopeId: string,
+  ): Promise<ProviderContractsResponse> {
+    const result = await providerApi.refreshContractCatalog(scopeKind, scopeId);
+    contracts.value = result;
+    return result;
+  }
+
+  async function resetStaticModelProtocols(
+    scopeId: string,
+  ): Promise<ProviderContractsResponse> {
+    try {
+      const result = await providerApi.resetStaticModelProtocols(scopeId);
+      contracts.value = result;
+      return result;
+    } catch (cause) {
+      if (isRevisionConflict(cause)) await loadContracts();
+      throw cause;
+    }
+  }
+
   async function putModelProtocolOverrides(
     scopeKind: ContractScopeKind,
     scopeId: string,
@@ -139,6 +161,8 @@ export const useProvidersStore = defineStore("providers", () => {
     loadPricing,
     setZenFreeEnabled,
     refreshZenModels,
+    refreshContractCatalog,
+    resetStaticModelProtocols,
     putModelProtocolOverrides,
     reset,
   };

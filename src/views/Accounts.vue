@@ -109,14 +109,12 @@
           :usage-load-error="usageLoadErrors[account.id] ?? null"
           :usage-refresh-loading="!!usageRefreshLoading[account.id]"
           :verifying="!!verifying[account.id]"
-          :goat-model-access-saving="!!goatModelAccessSaving[account.id]"
           :quota-limits-failed="!!quotaLimitsError"
           :menu-options="accountMenuOptions(account, now)"
           @order-keydown="handleOrderKeydown($event, account.id)"
           @order-drag-start="startAccountDrag($event, account.id)"
           @toggle="toggleAccount(account.id)"
           @verify="verifyCustomAccount(account.id)"
-          @goat-model-access="updateGoatModelAccess(account.id, $event)"
           @refresh-usage="refreshAccountUsage(account.id)"
           @reload-usage="loadAccountUsage(account.id)"
           @open-provider="openProvider(account)"
@@ -270,10 +268,7 @@ import type {
 } from "../api/dashboard";
 import { isCooling } from "../domain/accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "../domain/account-display.ts";
-import {
-  isCommandCodeGoatAccount,
-  isZenFreeAccount,
-} from "../domain/account-providers.ts";
+import { isZenFreeAccount } from "../domain/account-providers.ts";
 import {
   executeCustomAccountEdit,
   isCustomApiAccount,
@@ -322,7 +317,6 @@ const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
 const verifying = ref<Record<string, boolean>>({});
-const goatModelAccessSaving = ref<Record<string, boolean>>({});
 const providerSettingsSaving = ref<Record<string, boolean>>({});
 /** Settings revision from `GET /settings`, used for conditional Zen writes. */
 const settingsRevision = ref<number | null>(null);
@@ -717,7 +711,6 @@ function removeAccountState(id: string): void {
   delete usageLoading.value[id];
   delete usageLoadErrors.value[id];
   delete verifying.value[id];
-  delete goatModelAccessSaving.value[id];
   delete providerSettingsSaving.value[id];
 }
 
@@ -909,14 +902,14 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
 }
 
 /**
- * Billable protocol-correct connection check for Custom API and GOAT accounts.
+ * Billable protocol-correct connection check for Custom API accounts.
  * The backend returns the account with a refreshed verification state and never
  * enables it — enabling stays an explicit toggle action after verification.
  */
 async function verifyCustomAccount(id: string) {
   const account = accounts.value.find((item) => item.id === id);
   if (!account || verifying.value[id]) return;
-  if (!isCustomApiAccount(account) && !isCommandCodeGoatAccount(account)) return;
+  if (!isCustomApiAccount(account)) return;
   verifying.value[id] = true;
   try {
     const updated = await runWithFreshSettingsRevision((revision) => (
@@ -941,26 +934,6 @@ async function verifyCustomAccount(id: string) {
     }
   } finally {
     verifying.value[id] = false;
-  }
-}
-
-async function updateGoatModelAccess(id: string, modelAccess: "goat" | "all"): Promise<void> {
-  const account = accounts.value.find((item) => item.id === id);
-  if (!account || !isCommandCodeGoatAccount(account) || goatModelAccessSaving.value[id]) return;
-  if ((account.goat_model_access ?? "goat") === modelAccess) return;
-  goatModelAccessSaving.value[id] = true;
-  try {
-    const updated = await runWithFreshSettingsRevision((revision) => (
-      dashboardApi.updateGoatModelAccess(id, modelAccess, revision)
-    ));
-    replaceAccount(updated);
-    message.success(t("设置已保存"));
-  } catch (error) {
-    if (!(await recoverAccountMutationConflict(error))) {
-      message.error(t("保存失败: {error}", { error: dashboardErrorDetail(error) }));
-    }
-  } finally {
-    goatModelAccessSaving.value[id] = false;
   }
 }
 

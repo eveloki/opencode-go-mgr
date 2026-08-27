@@ -209,6 +209,7 @@ export interface EffectiveProtocolEvidence {
 }
 
 export interface EffectiveModelContract {
+  alias: string;
   model_id: string;
   preferred_protocol: ProviderProtocol;
   protocols: Record<string, EffectiveProtocolEvidence>;
@@ -245,6 +246,7 @@ export interface ProviderContractGroup {
   scope_kind: ContractScopeKind;
   scope_id: string;
   provider_id: string;
+  static_protocol_snapshot_date: string | null;
   offerings: ProviderOfferingChoice[];
   catalog: EffectiveCatalog;
   models: EffectiveModelContract[];
@@ -299,7 +301,6 @@ export interface ProtocolProbeResult {
 }
 
 export interface ProtocolProbeResponse {
-  account_id: string;
   model_id: string;
   results: ProtocolProbeResult[];
   contract: EffectiveModelContract | null;
@@ -410,6 +411,7 @@ function presentModel(value: V3ProviderContracts["providers"][number]["models"][
   if (responses) protocols.responses = responses;
   if (messages) protocols.messages = messages;
   return {
+    alias: value.alias,
     model_id: value.modelId,
     preferred_protocol: value.preferredProtocol,
     protocols,
@@ -453,6 +455,7 @@ export function presentContracts(value: V3ProviderContracts): ProviderContractsR
       scope_kind: scope.scopeKind,
       scope_id: scope.scopeId,
       provider_id: scope.providerId,
+      static_protocol_snapshot_date: scope.staticProtocolSnapshotDate,
       offerings: scope.offerings.map((offering) => ({
         offering_id: offering.offeringId,
         display_name: offering.displayName,
@@ -579,7 +582,6 @@ function presentZenModels(value: V3ZenFreeModels): ZenFreeModelsResponse {
 
 function presentProbe(value: V3ProtocolProbeResponse): ProtocolProbeResponse {
   return {
-    account_id: value.accountId,
     model_id: value.modelId,
     results: value.results.map((result) => ({
       protocol: result.protocol,
@@ -684,6 +686,20 @@ export const providerApi = {
       expectation,
     ));
   },
+  refreshContractCatalog: async (scopeKind: ContractScopeKind, scopeId: string) => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    return presentContracts(await control.runMutation((expectation) =>
+      dashboardV3.refreshContractCatalog(scopeKind, scopeId, expectation)
+    ));
+  },
+  resetStaticModelProtocols: async (scopeId: string) => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    return presentContracts(await control.runMutation((expectation) =>
+      dashboardV3.resetStaticModelProtocols(scopeId, expectation)
+    ));
+  },
   getProviderContracts: async () => presentContracts(await dashboardV3.getProviderContracts()),
   updateModelProtocolOverrides: async (
     scopeKind: ContractScopeKind,
@@ -709,16 +725,14 @@ export const providerApi = {
       throw cause;
     }
   },
-  runProtocolProbes: async (accountId: string, input: ProtocolProbeRequest) => {
+  runProtocolProbes: async (providerId: string, input: ProtocolProbeRequest) => {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();
-    const account = await dashboardV3.getAccount(accountId);
-    if (account.providerId === "custom") {
+    if (providerId === "custom") {
       throw new Error("Custom API 协议探测尚未纳入 Dashboard V3 合同");
     }
     return presentProbe(await control.runMutation((expectation) =>
-      dashboardV3.runProviderProtocolProbes(account.providerId, {
-        accountId,
+      dashboardV3.runProviderProtocolProbes(providerId, {
         modelId: input.model_id,
         protocols: input.protocols,
       }, expectation)));

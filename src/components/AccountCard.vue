@@ -241,33 +241,6 @@
         </p>
       </div>
     </div>
-    <div v-else-if="isGoat" class="goat-connection">
-      <div class="goat-connection__model-access">
-        <span>{{ t("模型") }}</span>
-        <n-radio-group
-          :value="account.goat_model_access ?? 'goat'"
-          size="small"
-          :disabled="goatModelAccessSaving"
-          :aria-label="t('模型')"
-          @update:value="emit('goat-model-access', $event as 'goat' | 'all')"
-        >
-          <n-radio-button value="goat">GOAT</n-radio-button>
-          <n-radio-button value="all">{{ t("全部") }}</n-radio-button>
-        </n-radio-group>
-      </div>
-      <p v-if="verificationCaption" class="goat-connection__status">{{ verificationCaption }}</p>
-      <n-button
-        v-if="goatVerificationOffered"
-        size="small"
-        type="primary"
-        secondary
-        :loading="verifying"
-        :aria-label="t('验证连接')"
-        @click="emit('verify')"
-      >
-        {{ t("验证连接") }}
-      </n-button>
-    </div>
     <div v-else-if="isCustom" class="custom-endpoint">
       <div class="custom-endpoint__meta">
         <span v-if="account.custom_config?.base_url" class="custom-endpoint__url">
@@ -357,8 +330,6 @@ import {
   NDropdown,
   NIcon,
   NPopover,
-  NRadioButton,
-  NRadioGroup,
   NSwitch,
   NTag,
   NTooltip,
@@ -391,10 +362,7 @@ import {
   usageSyncCaption,
 } from "../domain/account-display.ts";
 import type { AccountMenuOption } from "../domain/account-display.ts";
-import {
-  isCommandCodeGoatAccount,
-  isZenFreeAccount,
-} from "../domain/account-providers.ts";
+import { isZenFreeAccount } from "../domain/account-providers.ts";
 import {
   customAccountNeedsVerification,
   isCustomApiAccount,
@@ -420,7 +388,6 @@ const props = defineProps<{
   usageRefreshLoading: boolean;
   /** Connection verification in flight for a pending/failed Custom account. */
   verifying: boolean;
-  goatModelAccessSaving: boolean;
   quotaLimitsFailed: boolean;
   menuOptions: AccountMenuOption[];
 }>();
@@ -430,7 +397,6 @@ const emit = defineEmits<{
   "order-drag-start": [event: PointerEvent];
   toggle: [];
   verify: [];
-  "goat-model-access": [value: "goat" | "all"];
   "refresh-usage": [];
   "open-provider": [];
   "reload-usage": [];
@@ -444,7 +410,6 @@ const emit = defineEmits<{
 }>();
 
 const isZen = computed(() => isZenFreeAccount(props.account));
-const isGoat = computed(() => isCommandCodeGoatAccount(props.account));
 const isGo = computed(() => (
   props.account.provider_id === "opencode" && props.account.offering_id === "go"
 ));
@@ -458,23 +423,8 @@ const manualUsageCalibration = computed(() => (
   plan.value?.manual_usage_calibration ?? false
 ));
 const customNeedsVerification = computed(() => customAccountNeedsVerification(props.account));
-// GOAT verify is explicit and catalog-gated: the button only appears when the
-// plan requires verification and the backend says the runtime can run it.
-const goatVerificationOffered = computed(() => {
-  if (!isGoat.value) return false;
-  const status = props.account.verification_status;
-  if (status !== "pending" && status !== "failed") return false;
-  const runtime = plan.value?.verification_runtime_availability;
-  return runtime === "available" || runtime === "optional";
-});
-const goatToggleBlocked = computed(() => (
-  isGoat.value
-  && props.account.verification_status !== "verified"
-  && props.account.verification_status !== "not_required"
-));
 const toggleBlockedReason = computed(() => {
   if (!props.account.plan_routable) return t("该方案暂不可路由");
-  if (goatToggleBlocked.value) return t("验证连接成功后才能启用");
   return "";
 });
 const verificationCaption = computed(() => {
@@ -507,6 +457,7 @@ const draftDescription = computed(() => {
 });
 
 const verificationError = computed(() => {
+  if (!isCustom.value) return null;
   if (props.account.verification_status !== "failed") return null;
   return props.account.verification_error?.trim() || t("验证失败");
 });
@@ -628,15 +579,6 @@ const usageEditorAvailable = computed(() => {
 
 .goat-connection__status {
   margin: 0;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-sm);
-}
-
-.goat-connection__model-access {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
 }

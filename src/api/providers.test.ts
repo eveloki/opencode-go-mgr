@@ -33,16 +33,13 @@ function installFetch(responder: (request: RequestRecord) => object): RequestRec
   return requests;
 }
 
-test("Go protocol probe sends the selected accountId in the frozen V3 body", async () => {
+test("Go protocol probe sends only provider, model, and protocol intent", async () => {
   setActivePinia(createPinia());
   useControlPlaneStore().sync({ revision: 12, processGeneration: 42, pricingRevision: "p1" });
   const requests = installFetch(({ url }) => {
-    if (url.endsWith("/accounts/go-account-2")) {
-      return { id: "go-account-2", providerId: "opencode", revision: 12, processGeneration: 42 };
-    }
     if (url.endsWith("/providers/opencode/protocol-probes")) {
       return {
-        accountId: "go-account-2",
+        accountId: null,
         providerId: "opencode",
         modelId: "gpt-5.6-luna",
         results: [{ protocol: "responses", success: true, skipped: false, error: null }],
@@ -55,17 +52,16 @@ test("Go protocol probe sends the selected accountId in the frozen V3 body", asy
     throw new Error(`unexpected request ${url}`);
   });
 
-  const result = await providerApi.runProtocolProbes("go-account-2", {
+  const result = await providerApi.runProtocolProbes("opencode", {
     model_id: "gpt-5.6-luna",
     protocols: ["responses"],
   });
 
-  assert.equal(result.account_id, "go-account-2");
-  assert.deepEqual(requests[1], {
+  assert.equal(result.model_id, "gpt-5.6-luna");
+  assert.deepEqual(requests[0], {
     url: "/dashboard/api/v3/providers/opencode/protocol-probes",
     method: "POST",
     body: {
-      accountId: "go-account-2",
       modelId: "gpt-5.6-luna",
       protocols: ["responses"],
       expectedRevision: 12,
@@ -125,6 +121,31 @@ test("Go and GOAT model refresh use the selected account on the provider route",
   ]);
 });
 
+test("unified catalog refresh sends only the selected contract scope and CAS tokens", async () => {
+  setActivePinia(createPinia());
+  useControlPlaneStore().sync({ revision: 12, processGeneration: 42, pricingRevision: "p1" });
+  const requests = installFetch(({ url, method }) => {
+    if (url.endsWith("/provider-contracts/provider/opencode/catalog/refresh") && method === "POST") {
+      return {
+        revision: 13,
+        processGeneration: 42,
+        pricingRevision: "p1",
+        providers: [],
+        customEndpoints: [],
+      };
+    }
+    throw new Error(`unexpected request ${url}`);
+  });
+
+  await providerApi.refreshContractCatalog("provider", "opencode");
+
+  assert.deepEqual(requests, [{
+    url: "/dashboard/api/v3/provider-contracts/provider/opencode/catalog/refresh",
+    method: "POST",
+    body: { expectedRevision: 12, processGeneration: 42 },
+  }]);
+});
+
 test("Custom endpoint protocol probe stays blocked while overrides use the model-protocol-overrides route", async () => {
   setActivePinia(createPinia());
   useControlPlaneStore().sync({ revision: 8, processGeneration: 42, pricingRevision: "p1" });
@@ -145,7 +166,7 @@ test("Custom endpoint protocol probe stays blocked while overrides use the model
   });
 
   await assert.rejects(
-    () => providerApi.runProtocolProbes("custom-1", {
+    () => providerApi.runProtocolProbes("custom", {
       model_id: "Org/Model",
       protocols: ["chat_completions"],
     }),
@@ -157,13 +178,12 @@ test("Custom endpoint protocol probe stays blocked while overrides use the model
     [{ model_id: "Org/Model", protocol: "chat_completions", state: "force_off" }],
   );
   assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
-    { method: "GET", url: "/dashboard/api/v3/accounts/custom-1" },
     {
       method: "PUT",
       url: "/dashboard/api/v3/provider-contracts/custom-endpoint/custom-1/model-protocol-overrides",
     },
   ]);
-  assert.deepEqual(requests[1]?.body, {
+  assert.deepEqual(requests[0]?.body, {
     overrides: [{ modelId: "Org/Model", protocol: "chat_completions", state: "force_off" }],
     expectedRevision: 8,
     processGeneration: 42,

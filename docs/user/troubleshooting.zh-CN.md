@@ -12,7 +12,7 @@ OCG Manager 出问题，通常先怀疑有别的进程占了 `127.0.0.1:9042`—
 - **本地进度条满格，Gateway 返回 `429`。**这是 **真熔断**。等 `cooldown_until` 到期，或在 **账号** 视图手动解除冷却。
 - **Gateway 返回 `429` 并提示 "all accounts cooling down"。**所有已启用账号都在冷却。等最近的恢复时间，或新增/启用其他账号。
 - **Gateway 因模型名返回 `400`。**请发送带鉴权的 `GET /v1/models` 公布的别名或合格 Custom ID。含 `/`、`_` 或空白的名称是原始 ID，不是 kebab 别名。未知名称和重叠的原始 ID 会 fail-closed，且不会调用上游。
-- **保存 Command Code GOAT 不会开始路由。**该 Plan 保持禁用的 `pending` 草稿；验证返回 `501`。实时流量请使用 OpenCode Go Key、Zen Free，或启用的 Custom API 账号（验证为可选）。
+- **Command Code GOAT 没有产生路由。**确认账号已启用、ready 且 Key 非空，并检查 **供应商** 矩阵中该模型的受支持协议是否开启。公开 `/models` 刷新不验证 Key；真实无效 Key 会在推理时返回 401/403。
 - **保存 Custom API 不会开始路由。**创建/更新后账号默认禁用，但可立即启用（未验证时会显示提示）。验证动作用 `2xx` JSON 探测每个已选协议；更改 URL、Key、声明模型、协议集或鉴权方案会使验证状态变为 `pending`，但保持该卡启用。
 - **Gemini 请求因 `safetySettings` 返回 `400`。**Gateway 无法把 Google 的安全阈值等价映射到 Chat/Messages 上游，因此拒绝非空数组。删除该字段后重试；不要假设同一套 Google 内容安全策略仍在生效。
 - **Docker 首次注册的 `OCG_ADMIN_PASSWORD` 没生效。**这两个变量只在数据库还没有管理员时生效，请使用数据库里已有的管理员账号。只有在确认备份有效且确实要完全重置时才重建 `ocg-data` 与 `ocg-browser-profiles`——这会删除全部账号、凭据、设置、Cookie 和浏览器 Profile。

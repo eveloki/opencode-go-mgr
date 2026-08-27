@@ -344,13 +344,20 @@ impl CoreStateInner {
         &self,
         catalog: crate::kernel::zen::ZenFreeModelCatalog,
     ) -> crate::Result<()> {
+        let previous_models = self
+            .provider_contracts()
+            .scope(&crate::provider_contracts::ContractScope::provider(
+                crate::kernel::ids::OPENCODE_ZEN_FREE_PROVIDER_ID,
+            ))
+            .map(|contract| contract.catalog.models.clone())
+            .unwrap_or_default();
         let route_set = crate::http_client::build_route_set(&self.config(), &catalog)?;
         {
             let db = self.db.lock();
             let mut http_client = self.http_client.lock();
             let mut active = self.zen_free_models.write();
             let mut contracts = self.provider_contracts.write();
-            db.set_zen_free_model_catalog(&catalog)?;
+            db.set_zen_free_model_catalog_with_default_off(&catalog, &previous_models)?;
             *active = Arc::new(catalog);
             *contracts = Arc::new(crate::provider_contracts::build_effective_contracts(
                 &active,

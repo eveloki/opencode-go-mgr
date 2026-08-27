@@ -145,11 +145,11 @@ src-tauri   -> ocg-core
        （没有 requested_alias 字段）
 ```
 
-鉴权接受 Bearer、`x-api-key`、`x-goog-api-key`。候选头中首个命中 `CoreStateInner.credential_snapshot`（主 Key 或启用子 Key）者即通过，并作为转发日志名称归因。客户端凭据在出站前剥离，只注入所选账号配置的鉴权方案。Gemini 或 Anthropic 客户端凭据不会透传到上游 offering；Command Code / GOAT 不会被别名到 OpenCode，其 Key 也不会发往 OpenCode endpoint。
+鉴权接受 Bearer、`x-api-key`、`x-goog-api-key`。候选头中首个命中 `CoreStateInner.credential_snapshot`（主 Key 或启用子 Key）者即通过，并作为转发日志名称归因。客户端凭据在出站前剥离，只注入所选账号配置的鉴权方案。Gemini 或 Anthropic 客户端凭据不会透传到上游 offering；Command Code 模型可以与 OpenCode Go 模型共享客户端 Alias，但 mapping 仍保留独立供应商身份，其 Key 也不会发往 OpenCode endpoint。
 
 标准入口为 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`。Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`。Gemini 接受 `/v1beta/models/{model}:*` 与 `/v1/models/{model}:*`；`generateContent` 与 `streamGenerateContent` 进入转换链，`countTokens` 与 `embedContent` 返回 `501`，未知 action 返回 `404`。带鉴权的 `GET /v1/models` 仅本地读取当前可路由别名：OpenCode Go、最后一次成功的 Zen Free 快照，以及合格的 Custom 声明 ID。受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：Go 可路由别名 ∩ 当前 Go 价格快照（highspeed 变体继承基价行），不含 Custom ID。Claude Desktop `/claude-desktop/v1/models` 只公布三个角色别名。
 
-Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选别名是小写 kebab-case。kebab 拼写大小写折叠；含 `/`、`_` 或空白的名称视为原始 ID，不会折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个 mapping 时钉在该 mapping，之后再检查可路由性；不可路由的 mapping 会被识别，但不能产出生产路由。重叠的原始 ID 返回 `400` `ambiguous_model_id`，不调用上游。未知名称在 Chat Completions、Responses、Messages 以及 Gemini generate / streamGenerate 上返回 `400`。合格 Custom ID 会 overlay 进解析与 `/v1/models`，但不替换已公布的 Go/Zen 别名。已公布 kebab 别名 `deepseek-v4-flash` 归 Go；原始 ID `deepseek/deepseek-v4-flash` 钉在不可路由的 GOAT。转发日志持久化 `requested_model`、`resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`；没有 `requested_alias` 字段。
+Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选别名是小写 kebab-case，并以 OpenCode Go 名称为基准。kebab 拼写大小写折叠；含 `/`、`_` 或空白的名称视为原始 ID，不会折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个 mapping 时钉在该 mapping，之后再检查可路由性；不可路由的 mapping 会被识别，但不能产出生产路由。重叠的原始 ID 返回 `400` `ambiguous_model_id`，不调用上游。未知名称在 Chat Completions、Responses、Messages 以及 Gemini generate / streamGenerate 上返回 `400`。合格 Custom ID 会 overlay 进解析与 `/v1/models`，但不替换已公布的 Go/Zen/Command 别名。已公布 kebab 别名 `deepseek-v4-flash` 可以同时含 Go、Zen 与 Command Code mapping；原始 ID `deepseek/deepseek-v4-flash` 精确钉在 Command Code。转发日志持久化 `requested_model`、`resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`；没有 `requested_alias` 字段。
 
 JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解析、usage、流式与路由身份类型。Gemini 只是客户端格式。已知模型使用 `ocg-domain` 中硬编码的 `MODEL_PROTOCOLS`：客户端协议在 `supported` 内则透传，否则转到 `preferred`。未知模型在所有受支持的客户端格式上返回 `400`；请求路径不试探协议。非空 `safetySettings` 返回 `400`；空数组可以接受。`topK` 与 `thinkingConfig` 只是兼容提示，不保证与 Gemini 等价。
 
@@ -173,7 +173,7 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 `AttemptSpec` 上的 `ProxyRoutingModel`：
 
 - `RequestEntrySnapshot` — 冻结的双段 `ForwardRouteSet`（Go / Zen）。跟随重定向。受限 URL（https 或回环 http）。
-- `ProcessWideNoRedirect` — 仅 GOAT 回环测试。生产 GOAT 在没有回环守卫时 fail-closed。
+- `ProcessWideNoRedirect` — Command Code 固定官方源的公开目录与推理传输；禁止重定向。
 - `IsolatedTrustedAdmin` — Custom：进程级代理、禁重定向、不转发客户端头、管理员受信 URL。
 
 全局出站代理是进程级（`AppConfig`）：自动、手动 HTTP、强制直连或 List。List 模式使用 `proxy_list_direction` 与 `proxy_list_models`。名单内模型走例外段（白名单→代理，黑名单→直连）；名单外模型与非模型出站（验证、Zen 刷新、用量、价格、升级）走默认段。名单成员校验只在 dashboard `update_settings` 写闸口执行（非空、精确已知 id、去重）；加载路径容忍旧值。构造在 `ocg-infra::http`；`ocg-core::http_client` 在精确匹配前折叠目录别名。请求从入口持有一份 `ForwardRouteSet`；并发设置切换只影响之后启动的请求。
@@ -200,7 +200,7 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
   AttemptSpec.proxy_routing
     RequestEntrySnapshot     Go / Zen ；跟随重定向
     IsolatedTrustedAdmin     Custom ；不跟随重定向 ；不转发客户端头
-    ProcessWideNoRedirect    仅 GOAT 回环测试
+    ProcessWideNoRedirect    Command Code 固定官方源；禁止重定向
 ```
 
 ## Plan 目录
@@ -211,10 +211,10 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` / `go` | 是 | 只接受官方分发 Key |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 无凭据单例，数据库持有 |
-| Command Code GOAT | `command-code` / `goat` | 否 | 禁用 `pending` 草稿；验证 `501` |
+| Command Code GOAT | `command-code` / `goat` | 是 | 固定官方源；公开供应商目录；模型供应由供应商矩阵控制 |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地 |
 
-所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会禁用遗留的已启用 GOAT，且不改 `updated_at`；未验证 GOAT 重置为 `pending`。Custom 的 enabled 状态保留。Go、Zen Free 与未知 pair 不受影响。
+所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会把历史 Command Code 验证状态统一为 `not_required`，因为公开目录不是 Key 验证；enabled 状态保持不变。Go、Zen Free、Custom 与未知 pair 的其他状态不受影响。
 
 Custom API（`custom.rs` + `custom_http.rs`）接受任意语法合法的 HTTP 或 HTTPS 源；拒绝 URL 内嵌凭据、query 与 fragment。不跟随重定向，不转发 dashboard 或客户端鉴权，只构造已配置的 Bearer 或 `x-api-key`。拼接 endpoint 必须保持 scheme、host、port 与 base-path 前缀。`connect_timeout_secs` 夹到 5–60 秒。账号通过表单复选框声明 1–3 个协议（chat_completions / responses / messages），对该账号所有模型统一生效；声明的协议立即作为预设证据参与路由。Custom 验证为可选：`verification_status` 为 `pending` 时仍可启用。verify 动作用第一个声明模型探测每个已选协议，只有全部返回 `2xx` JSON object 才算成功，不会发现/改写能力，也不会自动启用。修改 Key、base URL、声明能力、协议集或鉴权方案会把 `verification_status` 重置为 `pending`，但账号保持启用。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
 

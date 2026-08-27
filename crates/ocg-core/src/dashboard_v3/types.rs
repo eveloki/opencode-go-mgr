@@ -27,9 +27,8 @@ use serde_json::{Map, Value, json};
 
 use crate::models::{AccountSetupStep as ModelAccountSetupStep, AccountType as ModelAccountType};
 use crate::provider::{
-    ConnectionVerificationStatus as ProviderVerificationStatus, CredentialKind,
-    GoatModelAccess as ProviderGoatModelAccess, QuotaScope, UpstreamAuthScheme,
-    UpstreamProtocolKind,
+    ConnectionVerificationStatus as ProviderVerificationStatus, CredentialKind, QuotaScope,
+    UpstreamAuthScheme, UpstreamProtocolKind,
 };
 use crate::provider_contracts::{
     ContractEvidenceSource as DomainContractEvidenceSource,
@@ -64,7 +63,6 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AccountUpdate",
     "AccountOrder",
     "AccountSetupUpdate",
-    "AccountGoatModelAccessUpdate",
     "AccountCustomConfigUpdate",
     "AccountCustomConfigWrite",
     "AccountModelCapabilitiesUpdate",
@@ -720,7 +718,6 @@ pub struct Account {
     pub connection_verified_at: Option<String>,
     pub verification_error: Option<String>,
     pub plan_routable: bool,
-    pub goat_model_access: Option<AccountGoatModelAccess>,
     pub custom_config: Option<AccountCustomConfig>,
     pub model_capabilities: Vec<AccountModelCapability>,
 }
@@ -859,16 +856,6 @@ pub struct AccountSetupUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
     pub setup_step: AccountSetupStep,
-}
-
-/// PUT `/accounts/{id}/goat-model-access` body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AccountGoatModelAccessUpdate {
-    #[serde(flatten)]
-    pub expectation: MutationExpectation,
-    pub model_access: AccountGoatModelAccess,
 }
 
 /// POST `/accounts/{id}/setup/verify-key` body. CAS tokens and the write-only
@@ -1044,32 +1031,6 @@ pub enum AccountVerificationStatus {
     Pending,
     Verified,
     Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(rename_all = "snake_case")]
-pub enum AccountGoatModelAccess {
-    Goat,
-    All,
-}
-
-impl From<ProviderGoatModelAccess> for AccountGoatModelAccess {
-    fn from(value: ProviderGoatModelAccess) -> Self {
-        match value {
-            ProviderGoatModelAccess::Goat => Self::Goat,
-            ProviderGoatModelAccess::All => Self::All,
-        }
-    }
-}
-
-impl From<AccountGoatModelAccess> for ProviderGoatModelAccess {
-    fn from(value: AccountGoatModelAccess) -> Self {
-        match value {
-            AccountGoatModelAccess::Goat => Self::Goat,
-            AccountGoatModelAccess::All => Self::All,
-        }
-    }
 }
 
 impl From<ProviderVerificationStatus> for AccountVerificationStatus {
@@ -1289,6 +1250,10 @@ pub struct ProviderContractGroup {
     pub scope_kind: ContractScopeKind,
     pub scope_id: String,
     pub provider_id: String,
+    /// The built-in provider's static protocol-evidence snapshot date. This is
+    /// `null` when the scope has no restorable snapshot and is distinct from
+    /// catalog `refreshed_at`.
+    pub static_protocol_snapshot_date: Option<String>,
     pub offerings: Vec<ProviderOfferingChoice>,
     pub catalog: EffectiveCatalog,
     pub models: Vec<EffectiveModelContract>,
@@ -1372,6 +1337,7 @@ pub struct EffectiveCatalog {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EffectiveModelContract {
+    pub alias: String,
     pub model_id: String,
     pub preferred_protocol: AccountUpstreamProtocol,
     pub protocols: EffectiveModelProtocols,
@@ -1428,15 +1394,16 @@ pub struct CardCapabilitySummary {
     pub catalog_refresh: bool,
 }
 
-/// Provider-scoped model-directory refresh. The selected account supplies the
-/// credential; the saved result belongs to the Provider scope.
+/// Provider-scoped model-directory refresh. OpenCode Go requires a selected
+/// account credential; Command Code exposes a public Provider catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ProviderModelsRefreshUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
-    pub account_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1444,7 +1411,7 @@ pub(crate) struct ProviderModelsRefreshUpdate {
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ProviderModels {
     pub provider_id: String,
-    pub account_id: String,
+    pub account_id: Option<String>,
     pub models: Vec<String>,
     pub refreshed_at: String,
     pub source_url: String,
@@ -1474,8 +1441,9 @@ pub struct ModelProtocolOverridesUpdate {
     pub overrides: Vec<ModelProtocolOverride>,
 }
 
-/// POST protocol-probe body. `accountId` may be omitted; `protocols` is the
-/// required explicit probe set. Handlers validate membership and uniqueness.
+/// POST protocol-probe body. `accountId` is a deprecated compatibility field
+/// and is ignored; the provider chooses eligible accounts automatically.
+/// `protocols` is the required explicit probe set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -1505,7 +1473,9 @@ pub struct ProtocolProbeResult {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtocolProbeResponse {
-    pub account_id: String,
+    /// Deprecated compatibility field. Provider-level probes can use different
+    /// accounts per protocol, so this is always `null`.
+    pub account_id: Option<String>,
     pub provider_id: String,
     pub model_id: String,
     pub results: Vec<ProtocolProbeResult>,
@@ -2489,7 +2459,6 @@ pub fn contract_schema() -> Value {
     include_type::<AccountUpdate>(&mut deserialize);
     include_type::<AccountOrder>(&mut deserialize);
     include_type::<AccountSetupUpdate>(&mut deserialize);
-    include_type::<AccountGoatModelAccessUpdate>(&mut deserialize);
     include_type::<AccountManagedKeyVerify>(&mut deserialize);
     include_type::<AccountCustomConfigUpdate>(&mut deserialize);
     include_type::<AccountCustomConfigWrite>(&mut deserialize);
@@ -2948,7 +2917,6 @@ mod tests {
             connection_verified_at: None,
             verification_error: None,
             plan_routable: true,
-            goat_model_access: None,
             custom_config: None,
             model_capabilities: Vec::new(),
         };
@@ -3228,7 +3196,6 @@ mod tests {
         "AccountUpdate",
         "AccountOrder",
         "AccountSetupUpdate",
-        "AccountGoatModelAccessUpdate",
         "AccountCustomConfigUpdate",
         "AccountCustomConfigWrite",
         "AccountModelCapabilitiesUpdate",
@@ -3385,6 +3352,7 @@ mod tests {
             scope_kind: ContractScopeKind::Provider,
             scope_id: "command-code".into(),
             provider_id: "command-code".into(),
+            static_protocol_snapshot_date: None,
             offerings: vec![ProviderOfferingChoice {
                 offering_id: "goat".into(),
                 display_name: "Command Code GOAT".into(),
@@ -3404,6 +3372,7 @@ mod tests {
                 refresh_supported: false,
             },
             models: vec![EffectiveModelContract {
+                alias: "deepseek-v4-flash".into(),
                 model_id: "deepseek-v4-flash".into(),
                 preferred_protocol: AccountUpstreamProtocol::ChatCompletions,
                 protocols: EffectiveModelProtocols {
@@ -3571,7 +3540,6 @@ mod tests {
                 "connectionVerifiedAt",
                 "verificationError",
                 "planRoutable",
-                "goatModelAccess",
                 "customConfig",
                 "modelCapabilities"
             ])
@@ -3815,7 +3783,7 @@ mod tests {
         );
 
         let probe = ProtocolProbeResponse {
-            account_id: "acct-1".into(),
+            account_id: None,
             provider_id: "custom".into(),
             model_id: "gpt-5.6-luna".into(),
             results: vec![ProtocolProbeResult {
@@ -3830,7 +3798,7 @@ mod tests {
             pricing_revision: "seed".into(),
         };
         let probe_value = serde_json::to_value(&probe).unwrap();
-        assert_eq!(probe_value["accountId"], "acct-1");
+        assert_eq!(probe_value["accountId"], Value::Null);
         assert_eq!(probe_value["providerId"], "custom");
         assert_eq!(probe_value["contract"], Value::Null);
         assert_eq!(probe_value["pricingRevision"], "seed");

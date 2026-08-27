@@ -194,7 +194,7 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.doesNotMatch(chooser, /GiftOutlined|"zen-free"/);
 });
 
-test("GOAT verification is explicit and catalog-gated; usage meters stay DTO-driven", () => {
+test("GOAT has no account Key-verification gate; usage meters stay DTO-driven", () => {
   const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
   const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
 
@@ -206,19 +206,13 @@ test("GOAT verification is explicit and catalog-gated; usage meters stay DTO-dri
   assert.doesNotMatch(providers, /COMMAND_CODE_GOAT_USAGE_LIMITS|window_5h: 14|window_week: 35|window_month: 70/);
   assert.doesNotMatch(accounts, /loaded\.some\(isCommandCodeGoatAccount\)|GOAT keeps a manual display/);
 
-  // Verify-before-enable: an explicit verify action gated on the catalog's
-  // verification runtime, and an enable switch that stays blocked until the
-  // account DTO reports verified.
-  assert.match(card, /goatVerificationOffered/);
-  assert.match(card, /verification_runtime_availability/);
-  assert.match(card, /status !== "pending" && status !== "failed"/);
-  assert.match(card, /runtime === "available" \|\| runtime === "optional"/);
-  assert.match(card, /goatToggleBlocked/);
-  assert.match(card, /验证连接成功后才能启用/);
-  assert.match(accounts, /!isCustomApiAccount\(account\) && !isCommandCodeGoatAccount\(account\)/);
+  assert.doesNotMatch(card, /goatVerificationOffered|goatToggleBlocked/);
+  assert.doesNotMatch(card, /验证连接成功后才能启用/);
+  assert.doesNotMatch(accounts, /isCommandCodeGoatAccount/);
+  assert.match(accounts, /if \(!isCustomApiAccount\(account\)\) return/);
 });
 
-test("GOAT account states surface pending, verified, disabled, and enabled honestly", () => {
+test("GOAT account states are live without a verification phase", () => {
   const goat = (overrides: Partial<Account> = {}): Account => ({
     id: "goat-1",
     name: "GOAT",
@@ -247,7 +241,7 @@ test("GOAT account states surface pending, verified, disabled, and enabled hones
     usage_sync_next_allowed_at: null,
     created_at: "2026-08-21T00:00:00Z",
     updated_at: "2026-08-21T00:00:00Z",
-    verification_status: "pending",
+    verification_status: "not_required",
     connection_verified_at: null,
     verification_error: null,
     plan_routable: true,
@@ -255,14 +249,10 @@ test("GOAT account states surface pending, verified, disabled, and enabled hones
     ...overrides,
   });
 
-  // Created disabled/pending, explicit verify, stays disabled after verify,
-  // then enables explicitly.
-  assert.equal(accountStatusLabel(goat()), "待验证");
-  assert.equal(accountStatusLabel(goat({ verification_status: "failed" })), "验证失败");
-  assert.equal(accountStatusLabel(goat({ verification_status: "verified" })), "已禁用");
-  assert.equal(accountStatusLabel(goat({ verification_status: "verified", enabled: true })), "可用");
+  assert.equal(accountStatusLabel(goat()), "已禁用");
+  assert.equal(accountStatusLabel(goat({ enabled: true })), "可用");
   // An unroutable catalog still renders the backend-owned draft state.
-  assert.equal(accountStatusLabel(goat({ plan_routable: false })), "待验证");
+  assert.equal(accountStatusLabel(goat({ plan_routable: false })), "等待支持");
 });
 
 test("Applications labels all model selectors as Alias-first", () => {

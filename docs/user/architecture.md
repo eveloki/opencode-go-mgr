@@ -2,7 +2,7 @@
 
 # Architecture Diagrams
 
-These are text maps of a single local node, current as of HEAD. Live routes: OpenCode Go, Zen Free, and Custom API. Command Code GOAT is still a disabled draft — routing traffic there will only earn you a `501`. Each diagram points to the chapter that owns the details; when a picture and a chapter disagree, trust the chapter and the code.
+These are text maps of a single local node, current as of HEAD. Live routes: OpenCode Go, Zen Free, Command Code GOAT, and Custom API. Each diagram points to the chapter that owns the details; when a picture and a chapter disagree, trust the chapter and the code.
 
 ## Contents
 

@@ -191,8 +191,9 @@ that hits `CoreStateInner.credential_snapshot` (primary or enabled sub
 key) determines attribution and supplies the forward-log name. Client
 credentials are stripped before upstream; only the selected account's
 scheme is injected. Gemini or Anthropic client credentials never pass
-through. Command Code / GOAT is never aliased to OpenCode, and GOAT keys
-never reach OpenCode endpoints.
+through. Command Code models may share a client Alias with an OpenCode Go
+model, but every mapping retains its own Provider identity and GOAT keys never
+reach OpenCode endpoints.
 
 Standard entries are `/v1/chat/completions`, `/v1/responses`,
 `/v1/messages`, and `/v1/models`. Claude Desktop uses
@@ -217,8 +218,8 @@ but cannot produce a production route. Overlapping raw IDs return `400`
 on Chat Completions, Responses, Messages, and Gemini generate /
 streamGenerate. Eligible Custom IDs overlay resolution and `/v1/models`
 but do not steal published Go/Zen aliases. The published kebab
-`deepseek-v4-flash` stays Go-owned; raw `deepseek/deepseek-v4-flash` pins
-to unroutable GOAT. Forward logs persist `requested_model`,
+`deepseek-v4-flash` can contain Go, Zen, and Command Code mappings; raw
+`deepseek/deepseek-v4-flash` pins to Command Code. Forward logs persist `requested_model`,
 `resolved_alias`, `upstream_model`, `provider_id`, and `offering_id`;
 there is no `requested_alias` field.
 
@@ -294,8 +295,8 @@ Fallback / retry (executor + classify, **not** `forward_once`):
 
 - `RequestEntrySnapshot` — frozen dual-leg `ForwardRouteSet` (Go / Zen).
   Follows redirects. Restricted URL (https or loopback http).
-- `ProcessWideNoRedirect` — GOAT loopback tests only. Production GOAT
-  fail-closes without a loopback guard.
+- `ProcessWideNoRedirect` — Command Code's fixed-origin public catalog and
+  inference transport; redirects are disabled.
 - `IsolatedTrustedAdmin` — Custom: process-wide proxy, no redirects, no
   client-header forwarding, administrator-trusted URL.
 
@@ -332,7 +333,7 @@ concurrent settings changes affect only later requests.
   AttemptSpec.proxy_routing
     RequestEntrySnapshot     Go / Zen ; follows redirects
     IsolatedTrustedAdmin     Custom ; no redirects ; no client-header forward
-    ProcessWideNoRedirect    GOAT loopback tests only
+    ProcessWideNoRedirect    Command Code fixed origin ; no redirects
 ```
 
 ## Plan catalog
@@ -344,14 +345,15 @@ concurrent settings changes affect only later requests.
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` / `go` | yes | Official keys only |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | yes | Credentialless singleton, DB-owned |
-| Command Code GOAT | `command-code` / `goat` | no | Disabled `pending` draft; verify `501` |
+| Command Code GOAT | `command-code` / `goat` | yes | Fixed official origin; public Provider catalog; model supply controlled by the Provider matrix |
 | Custom API | `custom` / `api` | yes | Trusted-admin destination |
 
 Every persistent mutation path rejects `enabled=true` for a
-`routable=false` offering before touching the row, revision, or
-timestamps. On every `Database::open`, leftover enabled GOAT is disabled
-without changing `updated_at`; unverified GOAT is reset to `pending`. Custom
-enabled state is preserved. Go, Zen Free, and unknown pairs are untouched.
+`routable=false` offering before touching the row, revision, or timestamps.
+On every `Database::open`, historical Command Code verification states are
+normalized to `not_required`, because its public catalog is not Key
+verification. Enabled state is preserved. Go, Zen Free, Custom, and unknown
+pairs are otherwise untouched.
 
 Custom API (`custom.rs` + `custom_http.rs`) accepts any syntactically
 valid HTTP or HTTPS origin; URL-embedded credentials, query, and fragment

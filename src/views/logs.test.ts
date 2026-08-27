@@ -383,7 +383,7 @@ test("logs view wires filters, race cancellation, debounce, and empty or error s
   assert.match(template, /v-model:value="sortBy"/);
   assert.match(template, /:aria-label="t\('刷新运行日志'\)"/);
   assert.match(template, /:aria-label="t\('刷新请求日志'\)"/);
-  assert.match(template, /t\('仅记录经本机 API 转发的请求，账号 Ping 见运行日志'\)/);
+  assert.match(template, /t\('记录推理转发和协议探测请求；运行日志只记录进程与控制面事件'\)/);
   assert.match(template, /:loading="gatewayLoading"/);
   assert.match(template, /:loading="forwardLoading"/);
   assert.doesNotMatch(template, /:summary="forwardSummary"/);
@@ -392,6 +392,7 @@ test("logs view wires filters, race cancellation, debounce, and empty or error s
   assert.match(source, /request !== forwardRequest/);
   assert.match(source, /const request = \+\+gatewayRequest/);
   assert.match(source, /request !== gatewayRequest/);
+  assert.match(source, /query\.get\("tab"\) === "gateway" \? "gateway" : "forward"/);
   const gatewayLoad = source.slice(
     source.indexOf("async function loadGatewayLogs"),
     source.indexOf("let forwardRequest"),

@@ -41,7 +41,7 @@
       Key，并实际启动 Claude Desktop 与 Gemini CLI 各完成一次文本和工具调用。
 - [ ] 覆盖 schema v16 迁移、schema v27（`access_keys`、pre-v3 备份 + SHA-256
       sidecar、删除 `sub_gateway_keys` 与 `accounts.usage_sync_*`、密文只校验
-      不重加密）、别名 / 上游日志身份、可选原生成本、未 `verified` 的 GOAT 行保持禁用 `pending`、Zen Free 模型
+      不重加密）、别名 / 上游日志身份、可选原生成本、历史 GOAT 验证状态统一为 `not_required`、Zen Free 模型
       快照持久化、供应商合约范围 / 模型协议表、旧账号 `key + ready`、托管状态
       机（前进一格 / 回退更早步骤、不支持跳步）、Pending 路由隔离、邀请 URL 白
       名单与演示默认写回，以及 Key 验证的 `2xx`/`429`/`401`/`403`/网络/`5xx`
@@ -52,10 +52,9 @@
       上游。`/v1/models` 是当前可路由已公布别名加上合格 Custom ID；
       `application-models` 是 Go 可路由别名 ∩ 当前价格快照（highspeed 继承基价
       行），不返回 Custom ID。未知模型在 Chat / Responses / Messages / Gemini
-      上返回 `400`，除非命中该 `/v1/models` 列表。Command Code GOAT
-      草稿保持禁用、不可路由（`routable=false`）、验证 `501`。冒烟测试
-      不覆盖 GOAT 的路由、用量、计价或供应商教程。这些本地
-      列表与 fail-closed 检查不需要真实供应商 Key。
+      上返回 `400`，除非命中该 `/v1/models` 列表。Command Code 目录刷新公开且不需要 Key；GOAT
+      预设行默认开启，额外发现行默认关闭，供应商全关后会从 `/v1/models` 撤下。
+      这些本地列表检查不需要真实供应商 Key；发版冒烟不得执行可能计费的推理。
 - [ ] 有界假上游 Custom API 冒烟（不需要真实供应商 Key）：拒绝 URL 内嵌凭据；
       `2xx` JSON object 验证成功；账号仍保持禁用；必须显式启用；声明的模型/协议
       可转发；拒绝重定向；不转发 dashboard/client 鉴权，只发送已配置的 Bearer 或

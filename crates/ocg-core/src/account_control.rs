@@ -571,9 +571,9 @@ mod tests {
 
     #[test]
     fn verification_enablement_gate_reads_the_composed_card_descriptor() {
-        // Both Plans keep VerificationPolicy::Required for status tracking;
-        // only the composed card descriptor decides whether verification
-        // blocks enablement. Custom flips off, GOAT stays on.
+        // Custom keeps required verification for status tracking while its
+        // card does not gate enablement. Command Code's public model catalog
+        // is not Key verification, so its Plan and card are both ungated.
         let custom_plan =
             crate::provider::builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
         let goat_plan = crate::provider::builtin_plan(
@@ -587,7 +587,7 @@ mod tests {
         );
         assert_eq!(
             goat_plan.verification_policy,
-            crate::provider::VerificationPolicy::Required
+            crate::provider::VerificationPolicy::NotRequired
         );
         let custom_card =
             crate::provider::ProviderRegistry::get(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
@@ -598,7 +598,7 @@ mod tests {
             crate::provider::GOAT_OFFERING_ID,
         )
         .unwrap();
-        assert!(goat_card.card_actions.enable_requires_verification);
+        assert!(!goat_card.card_actions.enable_requires_verification);
     }
 
     #[tokio::test]

@@ -3,7 +3,6 @@ import test from "node:test";
 import type { Account } from "../api/dashboard.ts";
 import type {
   CustomEndpointContract,
-  EffectiveModelContract,
   ProviderCatalogEntry,
   ProviderContractGroup,
   ProviderContractsResponse,
@@ -25,6 +24,7 @@ import {
   providerScopeKey,
   selectProviderScope,
   uniqueProtocols,
+  type ProviderModelContract,
 } from "./provider-contracts.ts";
 
 const catalogEntry = (
@@ -58,7 +58,8 @@ const catalogEntry = (
 function modelContract(
   modelId: string,
   enabled: Partial<Record<ProviderProtocol, boolean>> = {},
-): EffectiveModelContract {
+  alias = "",
+): ProviderModelContract {
   const protocols = {
     chat_completions: {
       protocol: "chat_completions" as const,
@@ -98,6 +99,7 @@ function modelContract(
     },
   };
   return {
+    alias,
     model_id: modelId,
     preferred_protocol: "responses",
     protocols,
@@ -111,6 +113,7 @@ function providerGroup(overrides: Partial<ProviderContractGroup> = {}): Provider
     scope_kind: "provider",
     scope_id: "opencode",
     provider_id: "opencode",
+    static_protocol_snapshot_date: "2026-08-14",
     offerings: [{
       offering_id: "go",
       display_name: "OpenCode Go",
@@ -122,7 +125,7 @@ function providerGroup(overrides: Partial<ProviderContractGroup> = {}): Provider
       source_url: "https://opencode.ai/docs/go/",
       refreshed_at: null,
       models: ["gpt-5.6-luna"],
-      refresh_supported: false,
+      refresh_supported: true,
     },
     models: [modelContract("gpt-5.6-luna", { chat_completions: true, responses: true })],
     pricing: { availability: "available" },
@@ -131,7 +134,7 @@ function providerGroup(overrides: Partial<ProviderContractGroup> = {}): Provider
       fetch_zen_models: false,
       discover_models: false,
       protocol_probe: true,
-      catalog_refresh: false,
+      catalog_refresh: true,
     },
     catalog_routable: true,
     production_inference: true,
@@ -148,11 +151,11 @@ function customEndpoint(overrides: Partial<CustomEndpointContract> = {}): Custom
     provider_id: "custom",
     account: { id: "custom-1", name: "Home Lab", enabled: true, verification_status: "verified" },
     catalog: {
-      source: "custom_discovery",
+      source: "account_declared",
       source_url: "",
-      refreshed_at: "2026-08-22T00:00:00Z",
+      refreshed_at: null,
       models: ["local-model"],
-      refresh_supported: true,
+      refresh_supported: false,
     },
     models: [modelContract("local-model", { chat_completions: true })],
     pricing: { availability: "unpriced" },
@@ -161,7 +164,7 @@ function customEndpoint(overrides: Partial<CustomEndpointContract> = {}): Custom
       fetch_zen_models: false,
       discover_models: true,
       protocol_probe: true,
-      catalog_refresh: true,
+      catalog_refresh: false,
     },
     catalog_routable: true,
     production_inference: true,
@@ -276,6 +279,17 @@ test("stale or missing scope selection falls back to the first scope", () => {
   assert.equal(selectProviderScope([], "provider", "opencode").scope, null);
 });
 
+test("normalization preserves a provider model alias alongside its raw id", () => {
+  const response = normalizeProviderContractsResponse(contracts({
+    providers: [providerGroup({
+      models: [modelContract("upstream-model-2026", { responses: true }, "gpt-5.6-luna")],
+    })],
+  }));
+  const model = flattenProviderScopes(response)[0]?.models[0];
+  assert.equal(model?.alias, "gpt-5.6-luna");
+  assert.equal(model?.model_id, "upstream-model-2026");
+});
+
 test("account summaries use contract facts for protocol availability and unroutable reasons", () => {
   const closed = contracts({
     providers: [providerGroup({
@@ -373,9 +387,9 @@ test("protocol evidence maps probe and preset states without color-only meaning"
 test("refresh and probe capability follow card/catalog facts, not raw provider ids", () => {
   const go = flattenProviderScopes(normalizeProviderContractsResponse(contracts()))[0]!;
   const custom = flattenProviderScopes(normalizeProviderContractsResponse(contracts()))[1]!;
-  assert.equal(catalogRefreshSupported(go), false);
+  assert.equal(catalogRefreshSupported(go), true);
   assert.equal(protocolProbeSupported(go), true);
-  assert.equal(catalogRefreshSupported(custom), true);
+  assert.equal(catalogRefreshSupported(custom), false);
   assert.equal(protocolProbeSupported(custom), true);
   assert.deepEqual(enabledProtocols(custom), ["chat_completions"]);
 });

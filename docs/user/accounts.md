@@ -24,14 +24,14 @@ The registry is sealed. Built-in Plan families are:
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` / `go` | Yes | One officially distributable API key per card; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
-| Command Code GOAT | `command-code` / `goat` | Yes | Create disabled `pending`; verify the Key through official `GET /models`, then explicitly enable; model access defaults to the included `goat` catalog and can switch to `all` |
+| Command Code GOAT | `command-code` / `goat` | Yes | Public Provider catalog; GOAT preset models default on, additional models default off in the Providers matrix; no account-level GOAT/All or Max mode |
 | Custom API | `custom` / `api` | Yes | Trusted-administrator destination; declare 1–3 upstream protocols via checkboxes, uniform across all models; protocol and auth scheme editable after create; verification is optional but shows an unverified hint; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
-Every persistent mutation path rejects `enabled=true` for the catalogued
-`routable=false` offering (Command Code GOAT) before it mutates the row,
-revision, or timestamps. GOAT is catalog-routable but create/update still leave
-the card disabled and `pending`; enable is rejected until verification status is
-`verified`. Custom API is catalog-routable and can be enabled even while
+Every persistent mutation path rejects `enabled=true` for a catalogued
+`routable=false` offering before it mutates the row, revision, or timestamps.
+Command Code GOAT does not use directory fetch as Key verification; an enabled,
+ready account with a non-empty Key can route models enabled in the Provider
+matrix. Custom API is catalog-routable and can be enabled even while
 verification is `pending`; editing config/capabilities/key/protocol/auth resets
 verification status to `pending` but keeps the enabled state. Disabled drafts
 remain saveable. The desktop UI uses Dashboard V3 HTTP and has no separate
@@ -43,13 +43,10 @@ is a separate provider mapping and its Key is sent only to the fixed Command
 Code Provider API, never to OpenCode. Custom API is a separate trusted-administrator
 destination and must not send its key to an OpenCode endpoint.
 
-GOAT verification performs one authenticated, non-billable `GET /models` and
-saves the returned account catalog without enabling the card. After verify,
-explicitly enable the account.
-GOAT routes only through verified, explicitly enabled accounts.
-The account can use the included `goat` model
-set (default) or the full `all` catalog. Changing the Key invalidates
-verification and disables the account; switching `goat`/`all` does not.
+Command Code's official `GET /models` is public and refreshes one Provider-level
+catalog. It does not prove that a stored Key is valid. The Providers matrix is
+the only model-supply control: GOAT preset rows default on, newly discovered
+rows default off, and inference 401/403 is the real Key-auth signal.
 
 Custom API is a live trusted-administrator destination. The card stores a base
 URL, a protocol set (Chat Completions, Responses, Messages — choose at least one

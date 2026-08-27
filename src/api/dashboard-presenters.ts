@@ -31,7 +31,6 @@ export type AccountSetupStep =
   | "key_verification"
   | "ready";
 export type AccountProtocol = "chat_completions" | "responses" | "messages";
-export type GoatModelAccess = "goat" | "all";
 
 export interface AccountCustomConfig {
   account_id: string;
@@ -84,7 +83,6 @@ export interface Account {
   connection_verified_at: string | null;
   verification_error: string | null;
   plan_routable: boolean;
-  goat_model_access?: GoatModelAccess | null;
   custom_config?: AccountCustomConfig | null;
   model_capabilities: AccountModelCapability[];
 }
@@ -481,7 +479,6 @@ export function presentAccount(value: V3Account): Account {
     connection_verified_at: value.connectionVerifiedAt,
     verification_error: value.verificationError,
     plan_routable: value.planRoutable,
-    goat_model_access: value.goatModelAccess,
     custom_config: value.customConfig === null ? null : {
       account_id: value.customConfig.accountId,
       base_url: value.customConfig.baseUrl,
