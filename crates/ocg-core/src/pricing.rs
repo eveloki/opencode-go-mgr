@@ -438,19 +438,31 @@ pub fn parse_goat_html(html: &str) -> Result<ProviderScopedPricingSnapshot> {
         if row.len() != 9 {
             bail!("Command Code GOAT model pricing table contains an incomplete row");
         }
-        let display_name = clean_goat_model_name(&row[0]);
+        let base_name = clean_goat_model_name(&row[0]);
+        let free_variant = goat_model_has_free_badge(&row[0]);
+        let display_name = if free_variant {
+            format!("{base_name} Free")
+        } else {
+            base_name.clone()
+        };
         let identity = canonical_display_name(&display_name);
-        if identity.is_empty() || !seen.insert(identity.clone()) {
+        if identity.is_empty() || !seen.insert(identity) {
             bail!("Command Code GOAT model pricing table contains an invalid or duplicate model");
         }
         let input = parse_goat_money(&row[4])?;
         let output = parse_goat_money(&row[5])?;
         let cache_read = parse_goat_money(&row[6])?;
         let cache_write = parse_goat_money(&row[7])?;
-        let allowance = allowances
-            .get(&identity)
-            .copied()
-            .or_else(|| older.contains(&identity).then_some(window_month.min(20.0)));
+        let allowance_identity = canonical_display_name(&base_name);
+        let allowance = (!free_variant)
+            .then(|| {
+                allowances.get(&allowance_identity).copied().or_else(|| {
+                    older
+                        .contains(&allowance_identity)
+                        .then_some(window_month.min(20.0))
+                })
+            })
+            .flatten();
         let model_id = goat_reference_model_id(&display_name);
         values.push(ProviderPricingValue::new(
             model_id,
@@ -474,12 +486,16 @@ pub fn parse_goat_html(html: &str) -> Result<ProviderScopedPricingSnapshot> {
             values.len()
         );
     }
+    let priced_models = values
+        .iter()
+        .filter(|value| value.input_per_million().is_some())
+        .count();
     let priced_allowances = values
         .iter()
         .filter(|value| value.input_per_million().is_some())
         .filter(|value| value.model_allowance().is_some())
         .count();
-    if priced_allowances + 2 != included_count {
+    if priced_allowances != priced_models {
         bail!("Command Code GOAT monthly allowances are incomplete");
     }
     values.sort_by(|left, right| left.display_name().cmp(right.display_name()));
@@ -523,12 +539,17 @@ fn parse_first_dollar_after(plain: &str, marker: &str) -> Result<f64> {
 
 fn clean_goat_model_name(value: &str) -> String {
     let mut value = value.trim().to_string();
-    for marker in [" Off-peak shown", " -98%", " -99%", " -50%", " Free"] {
+    for marker in ["Off-peak shown", "-98%", "-99%", "-50%", "Free"] {
         if let Some(index) = value.find(marker) {
             value.truncate(index);
         }
     }
     value.trim().to_string()
+}
+
+fn goat_model_has_free_badge(value: &str) -> bool {
+    let value = value.trim();
+    value.contains(" Free") || value.contains("FreeEnds") || value.ends_with("Free")
 }
 
 fn parse_goat_money(value: &str) -> Result<Option<f64>> {
@@ -1585,8 +1606,8 @@ mod tests {
         ProviderPricingSnapshot, ProviderPricingValue, ProviderScopedPricingSnapshot,
         embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage,
         fetch_official_snapshot, latest_provider_pricing_snapshot,
-        legacy_policy_needs_multiplier_repair, parse_official_html, provider_pricing_capability,
-        quota_multiplier, store_provider_pricing_snapshot,
+        legacy_policy_needs_multiplier_repair, parse_goat_html, parse_official_html,
+        provider_pricing_capability, quota_multiplier, store_provider_pricing_snapshot,
     };
     use chrono::{DateTime, Utc};
 
@@ -1808,6 +1829,51 @@ mod tests {
         assert!(!capability.experimental);
         assert_eq!(capability.source_url, Some(GOAT_SOURCE_URL));
         assert!(capability.manual_refresh_available);
+    }
+
+    #[test]
+    fn goat_parser_accepts_concatenated_discount_and_free_badges() {
+        let html = r#"
+            <p>GOAT plan 3 All plans 61</p>
+            <p>unlimited coding for $10/month</p>
+            <p>5-hour limit - $14 of usage</p>
+            <p>Weekly limit - $35 of usage</p>
+            <p>Monthly limit - $70 of usage</p>
+            <table>
+              <tr><th>Model&#8597;</th><th>Context&#8597;</th><th>Intelligence&#8597;</th><th>Tok/s&#8597;</th><th>Input&#8597;</th><th>Output&#8597;</th><th>Cache read&#8597;</th><th>Cache write&#8597;</th><th>Caps</th></tr>
+              <tr><td>MiniMax M3-50%Ends December 31, 2026</td><td>1M</td><td>45</td><td>100</td><td>$0.30</td><td>$1.20</td><td>$0.06</td><td>-</td><td>+1</td></tr>
+              <tr><td>MiniMax M3FreeEnds September 5, 2026</td><td>1M</td><td>45</td><td>100</td><td>Free</td><td>Free</td><td>Free</td><td>-</td><td>+1</td></tr>
+              <tr><td>Laguna S 2.1 Free</td><td>256K</td><td>40</td><td>60</td><td>Free</td><td>Free</td><td>Free</td><td>-</td><td>+1</td></tr>
+            </table>
+            <table>
+              <tr><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Monthly credits</th></tr>
+              <tr><td>MiniMax M3</td><td>$0.30</td><td>$1.20</td><td>$0.06</td><td>-</td><td>$47</td></tr>
+            </table>
+        "#;
+
+        let snapshot = parse_goat_html(html).unwrap();
+        assert_eq!(snapshot.values().len(), 3);
+        let paid = snapshot
+            .values()
+            .iter()
+            .find(|value| value.model_id() == "minimax-m3")
+            .unwrap();
+        assert_eq!(paid.display_name(), "MiniMax M3");
+        assert_eq!(paid.model_allowance(), Some(47.0));
+        let free = snapshot
+            .values()
+            .iter()
+            .find(|value| value.model_id() == "minimax-m3-free")
+            .unwrap();
+        assert_eq!(free.display_name(), "MiniMax M3 Free");
+        assert_eq!(free.input_per_million(), None);
+        assert_eq!(free.model_allowance(), None);
+        assert!(
+            snapshot
+                .values()
+                .iter()
+                .any(|value| value.model_id() == "laguna-s-2-1-free")
+        );
     }
 
     #[test]
