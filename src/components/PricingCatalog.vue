@@ -79,7 +79,7 @@
 
             <n-spin :show="loading">
               <template v-if="snapshot && pricingDisplay(group).state === 'available-table'">
-                <dl class="pricing-ledger">
+                <dl class="pricing-ledger pricing-ledger--compact">
                   <div class="pricing-ledger__revision">
                     <dt>{{ t("修订版本") }}</dt>
                     <dd><code>{{ snapshot.revision }}</code></dd>
@@ -91,18 +91,6 @@
                   <div>
                     <dt>{{ t("文档更新时间") }}</dt>
                     <dd>{{ snapshot.document_updated_at ? formatTimestamp(snapshot.document_updated_at) : "—" }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t("5 小时额度") }}</dt>
-                    <dd>{{ formatRate(snapshot.limits.window_5h).label }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t("周额度") }}</dt>
-                    <dd>{{ formatRate(snapshot.limits.window_week).label }}</dd>
-                  </div>
-                  <div>
-                    <dt>{{ t("月额度") }}</dt>
-                    <dd>{{ formatRate(snapshot.limits.window_month).label }}</dd>
                   </div>
                 </dl>
 
@@ -786,7 +774,7 @@ onMounted(() => void loadProviderCatalog());
   background: var(--ocg-border);
 }
 .pricing-ledger--compact {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .pricing-ledger > div {
   min-width: 0;

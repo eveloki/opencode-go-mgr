@@ -131,6 +131,7 @@ test("pricing catalog fetches the provider catalog explicitly and keeps the Go t
   assert.notEqual(goBlockStart, -1);
   const goBlock = catalog.slice(goBlockStart, catalog.indexOf("</template>", goBlockStart));
   assert.match(goBlock, /n-data-table/);
+  assert.doesNotMatch(goBlock, /5 小时额度|周额度|月额度/);
   // The exhaustive state copy is behavior-tested in pricing-plans.test.ts;
   // the parent catalog owns the Go table while GOAT encapsulates its matching table.
   assert.equal(catalog.match(/<n-data-table/g)?.length, 1);
