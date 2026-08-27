@@ -649,7 +649,6 @@ export const ptBRMessages = {
   "缓存读": "Leitura de cache",
   "缓存写": "Gravação de cache",
   "本地调整": "Ajustes locais",
-  "额度有效价格": "Tarifas efetivas de cota",
   "无": "Nenhum",
   "适用于：{scope}": "Aplica-se a: {scope}",
   "精确值：{value} / 百万 tokens": "Exato: {value} / milhão de tokens",

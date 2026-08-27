@@ -65,13 +65,6 @@ export function formatPricingRate(
   };
 }
 
-export function effectivePricingRate(
-  rate: number | null,
-  quotaMultiplier: number,
-): number | null {
-  return rate === null ? null : rate * quotaMultiplier;
-}
-
 export function formatPricingMultiplier(value: number): string {
   return `×${new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 }).format(value)}`;
 }

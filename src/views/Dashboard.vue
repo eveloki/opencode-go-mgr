@@ -190,25 +190,6 @@
       </n-button>
     </n-alert>
 
-    <section class="kpi-row" :aria-label="t('用量摘要')" :aria-busy="!summaryLoaded">
-      <article class="kpi-card">
-        <span class="kpi-badge success"><n-icon aria-hidden="true"><KeyOutlined /></n-icon></span>
-        <div><strong>{{ summaryLoaded ? formatNumber(routableAccounts) : "—" }}</strong><span>{{ t("可路由账号") }}</span></div>
-      </article>
-      <article class="kpi-card">
-        <span class="kpi-badge info"><n-icon aria-hidden="true"><CalendarOutlined /></n-icon></span>
-        <div><strong>{{ summaryLoaded ? formatCost(summary.today_cost) : "—" }}</strong><span>{{ t("今日") }}</span></div>
-      </article>
-      <article class="kpi-card">
-        <span class="kpi-badge warning"><n-icon aria-hidden="true"><ClockCircleOutlined /></n-icon></span>
-        <div><strong>{{ summaryLoaded ? formatCost(summary.week_cost) : "—" }}</strong><span>{{ t("本周") }}</span></div>
-      </article>
-      <article class="kpi-card">
-        <span class="kpi-badge primary"><n-icon aria-hidden="true"><WalletOutlined /></n-icon></span>
-        <div><strong>{{ summaryLoaded ? formatCost(summary.month_cost) : "—" }}</strong><span>{{ t("本月") }}</span></div>
-      </article>
-    </section>
-
     <section class="card attention-card" :aria-label="t('需要关注')" :aria-busy="!accountsLoaded">
       <div class="card-head">
         <div>
@@ -278,16 +259,13 @@ import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watc
 import { NAlert, NButton, NEmpty, NIcon, NPopconfirm, NPopover, NSpin, NTag, NTooltip, useMessage } from "naive-ui";
 import {
   ApiOutlined,
-  CalendarOutlined,
   CheckOutlined,
-  ClockCircleOutlined,
   CloudServerOutlined,
   CopyOutlined,
   DownOutlined,
   KeyOutlined,
   ReloadOutlined,
   UnorderedListOutlined,
-  WalletOutlined,
 } from "@vicons/antd";
 import StackedBarChart from "../components/StackedBarChart.vue";
 import { PRIMARY_KEY_ID, dashboardApi } from "../api/dashboard";
@@ -301,7 +279,7 @@ import type {
 } from "../api/dashboard";
 import { CHART_PALETTE } from "../theme";
 import { t } from "../i18n/index.ts";
-import { formatCost, formatNumber, formatTokens, useClipboard } from "../utils/format.ts";
+import { formatNumber, formatTokens, useClipboard } from "../utils/format.ts";
 import { userFacingError } from "../utils/errors.ts";
 import { daysUntilDate } from "../domain/account-lifecycle.ts";
 import { maskConnectionKey, resolveConnectionUrls } from "./dashboard-connection";
@@ -409,14 +387,6 @@ const connectionUrls = computed(() => {
   }
 });
 const serviceApiUrl = computed(() => connectionUrls.value.apiBaseUrl);
-
-const routableAccounts = computed(() => (
-  accounts.value.filter((account) => (
-    account.setup_step === "ready"
-    && account.enabled
-    && account.plan_routable
-  )).length
-));
 
 const attentionItems = computed<AttentionItem[]>(() => {
   if (!accountsLoaded.value) return [];
@@ -848,56 +818,6 @@ onUnmounted(() => {
   user-select: none;
 }
 
-.kpi-row {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-}
-.kpi-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-  padding: 14px 16px;
-  border: 1px solid var(--ocg-border);
-  border-radius: 10px;
-  background: var(--ocg-surface);
-  box-shadow: var(--ocg-shadow-sm);
-}
-.kpi-badge {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-}
-.kpi-badge.success { color: var(--ocg-success); background: var(--ocg-success-soft); }
-.kpi-badge.info { color: var(--ocg-info); background: color-mix(in srgb, var(--ocg-info) 12%, transparent); }
-.kpi-badge.warning { color: var(--ocg-warning); background: var(--ocg-warning-soft); }
-.kpi-badge.primary { color: var(--ocg-primary); background: var(--ocg-primary-soft); }
-.kpi-card > div {
-  display: grid;
-  min-width: 0;
-}
-.kpi-card strong {
-  color: var(--ocg-ink);
-  font: 700 var(--ocg-font-xl)/1.1 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
-  font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.kpi-card small {
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-sm);
-}
-.kpi-card span:last-child {
-  margin-top: 3px;
-  color: var(--ocg-subtle);
-  font-size: var(--ocg-font-xs);
-}
-
 .card {
   border: 1px solid var(--ocg-border);
   border-radius: 14px;
@@ -976,9 +896,6 @@ onUnmounted(() => {
     right: 6px;
     max-width: 36%;
   }
-  .kpi-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 640px) {
@@ -1013,12 +930,6 @@ onUnmounted(() => {
   }
   .connection-row {
     background: color-mix(in srgb, var(--ocg-surface) 88%, transparent);
-  }
-  .kpi-card {
-    padding: 12px;
-  }
-  .kpi-card strong {
-    font-size: var(--ocg-font-lg);
   }
   .chart-head {
     align-items: flex-start;

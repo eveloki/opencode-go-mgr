@@ -55,5 +55,9 @@ test("GOAT pricing is a display-only official reference", () => {
   const quota = readFileSync(new URL("../components/GoatQuotaReference.vue", import.meta.url), "utf8");
   assert.match(quota, /GOAT_PRICING_REFERENCE\.models/);
   assert.match(quota, /未知价格不会参与费用估算/);
+  assert.match(quota, /class="pricing-ledger"/);
+  assert.match(quota, /<n-data-table/);
+  assert.match(quota, /formatPricingRate/);
+  assert.doesNotMatch(quota, /<table|goat-pricing-summary|goat-pricing-table-wrap/);
   assert.doesNotMatch(quota, /provider-usage|used|remaining|percentage/);
 });

@@ -892,7 +892,8 @@ test("dashboard keeps the connection center first and protects key regeneration"
   const source = await readFile(new URL("./Dashboard.vue", import.meta.url), "utf8");
   const template = source.slice(source.indexOf("<template>"), source.indexOf("<script setup"));
 
-  assert.ok(template.indexOf("接入中心") < template.indexOf("kpi-row"));
+  assert.ok(template.indexOf("接入中心") < template.indexOf("attention-card"));
+  assert.doesNotMatch(template, /kpi-row|kpi-card|用量摘要|可路由账号/);
   // Regeneration is per selected key: only that key's old value dies.
   assert.match(template, /仅当前 Key 的旧值立即失效/);
   assert.match(template, /:aria-label="t\('复制 API Base URL'\)"/);

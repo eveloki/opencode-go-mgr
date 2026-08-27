@@ -490,7 +490,6 @@ export const esESMessages = {
   "缓存读": "Lectura de caché",
   "缓存写": "Escritura de caché",
   "本地调整": "Ajustes locales",
-  "额度有效价格": "Tarifas efectivas de cuota",
   "无": "Ninguno",
   "适用于：{scope}": "Se aplica a: {scope}",
   "精确值：{value} / 百万 tokens": "Exacto: {value} / millón de tokens",

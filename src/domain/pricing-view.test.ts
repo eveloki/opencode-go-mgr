@@ -5,7 +5,6 @@ import type { PricingModel } from "../api/dashboard.ts";
 import {
   buildPricingOfferingSections,
   buildPricingTableRows,
-  effectivePricingRate,
   formatPricingMultiplier,
   formatPricingRate,
 } from "./pricing-view.ts";
@@ -51,9 +50,7 @@ test("pricing rates use two decimals and expose tiny exact values", () => {
   });
 });
 
-test("effective pricing retains nulls and applies the Go quota multiplier", () => {
-  assert.equal(effectivePricingRate(null, 4), null);
-  assert.equal(effectivePricingRate(0.5, 4), 2);
+test("pricing multipliers use a compact display", () => {
   assert.equal(formatPricingMultiplier(1.5), "×1.5");
 });
 
@@ -205,6 +202,7 @@ test("pricing catalog keeps refresh explicit and exposes accessible grouped mult
   assert.match(catalog, /performPricingRefresh\("keep_current"|apply\("keep_current"\)/);
   assert.match(catalog, /performPricingRefresh\("use_official"|apply\("use_official"\)/);
   assert.match(catalog, /模型价格为 OpenCode Go 表中的美元\/百万 tokens；官方倍率用于换算额度消耗，可按活动手动调整。/);
+  assert.doesNotMatch(catalog, /额度有效价格|effectivePricingRate|effective-rates/);
   assert.doesNotMatch(catalog, /本地条件价格最后叠加/);
   assert.doesNotMatch(catalog, /official_price_multiplier|表价已含|Go 倍率/);
   assert.match(catalog, /kind="goat"/);

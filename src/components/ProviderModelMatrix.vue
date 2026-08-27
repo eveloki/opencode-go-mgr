@@ -143,7 +143,7 @@ const matrixModels = computed(() => {
 });
 
 const matrixProtocols = computed<ProviderProtocol[]>(() => {
-  if (props.scope.scope_kind !== "custom_endpoint" && props.scope.provider_id !== "command-code") {
+  if (props.scope.scope_kind !== "custom_endpoint") {
     return [...PROVIDER_PROTOCOLS];
   }
   return PROVIDER_PROTOCOLS.filter((protocol) => (

@@ -648,7 +648,6 @@ export const deDEMessages = {
   "缓存读": "Cache-Lesevorgänge",
   "缓存写": "Cache-Schreibvorgänge",
   "本地调整": "Lokale Anpassungen",
-  "额度有效价格": "Effektive Kontingentpreise",
   "无": "Keine",
   "适用于：{scope}": "Gilt für: {scope}",
   "精确值：{value} / 百万 tokens": "Exakt: {value} / Million Tokens",

@@ -47,11 +47,11 @@ test("ProviderModelMatrix presents canonical aliases and derives an all-disabled
   assert.match(source, /t\("全部供应商协议已关闭"\)/);
 });
 
-test("ProviderModelMatrix limits Custom and Command Code to protocols present in their model evidence", async () => {
+test("ProviderModelMatrix shows all provider protocols while limiting Custom to declared evidence", async () => {
   const source = await readFile(new URL("./ProviderModelMatrix.vue", import.meta.url), "utf8");
   assert.match(source, /v-for="protocol in matrixProtocols"/);
   assert.match(source, /scope\.scope_kind !== "custom_endpoint"/);
-  assert.match(source, /scope\.provider_id !== "command-code"/);
+  assert.doesNotMatch(source, /scope\.provider_id !== "command-code"/);
   assert.match(source, /model\.protocols\[protocol\]\?\.available === true/);
   assert.doesNotMatch(source, /v-for="protocol in PROVIDER_PROTOCOLS"/);
 });

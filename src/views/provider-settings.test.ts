@@ -111,6 +111,7 @@ test("pricing catalog fetches the provider catalog explicitly and keeps the Go t
   assert.match(catalog, /onMounted\(\(\) => void loadProviderCatalog\(\)\)/);
   assert.match(catalog, /buildScopedPlanPricingGroups/);
   assert.match(catalog, /props\.providerId/);
+  assert.match(catalog, /group\.content\.snapshot\?\.source_url \?\? GOAT_PRICING_REFERENCE\.sourceUrl/);
   // No auto-refresh of the catalog or prices.
   assert.doesNotMatch(catalog, /setInterval|setTimeout/);
   // Loading and error states with retry; every catalog plan has an explicit
@@ -131,7 +132,7 @@ test("pricing catalog fetches the provider catalog explicitly and keeps the Go t
   const goBlock = catalog.slice(goBlockStart, catalog.indexOf("</template>", goBlockStart));
   assert.match(goBlock, /n-data-table/);
   // The exhaustive state copy is behavior-tested in pricing-plans.test.ts;
-  // the only rendered data table still belongs to OpenCode Go.
+  // the parent catalog owns the Go table while GOAT encapsulates its matching table.
   assert.equal(catalog.match(/<n-data-table/g)?.length, 1);
 });
 
@@ -153,9 +154,13 @@ test("pricing catalog uses one keyboard-accessible plan-family tab switcher with
   // GOAT delegates to the provider pricing snapshot, never a live meter.
   assert.match(reference, /<GoatQuotaReference :snapshot="snapshot" \/>/);
   assert.doesNotMatch(reference, /另加处理费/);
+  assert.doesNotMatch(reference, /订阅制|官方来源|NButton|NTag/);
   const quota = readFileSync(new URL("../components/GoatQuotaReference.vue", import.meta.url), "utf8");
   assert.match(quota, /未知价格不会参与费用估算/);
   assert.match(quota, /GOAT_PRICING_REFERENCE\.models/);
+  assert.match(quota, /class="pricing-ledger"/);
+  assert.match(quota, /<n-data-table/);
+  assert.doesNotMatch(quota, /<table|goat-pricing-summary|goat-pricing-table-wrap/);
   assert.doesNotMatch(quota, /provider-usage|used|remaining|percentage/);
 });
 

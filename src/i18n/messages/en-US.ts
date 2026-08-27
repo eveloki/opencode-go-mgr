@@ -494,7 +494,6 @@ export const enUSMessages = {
   "缓存读": "Cache read",
   "缓存写": "Cache write",
   "本地调整": "Local adjustments",
-  "额度有效价格": "Effective quota rates",
   "无": "None",
   "适用于：{scope}": "Applies to: {scope}",
   "精确值：{value} / 百万 tokens": "Exact: {value} / million tokens",

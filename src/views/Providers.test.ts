@@ -165,7 +165,7 @@ test("ProviderModelMatrix renders a model-by-protocol grid with override switche
   assert.match(matrix, /ReloadOutlined/);
   assert.match(matrix, /runRowProbe/);
   assert.match(matrix, /scope\.scope_kind !== 'custom_endpoint'/);
-  assert.match(matrix, /scope\.provider_id !== "command-code"/);
+  assert.doesNotMatch(matrix, /scope\.provider_id !== "command-code"/);
 });
 
 test("Provider model rows use aliases and expose all-disabled state from matrix cells", () => {

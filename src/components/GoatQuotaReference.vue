@@ -1,75 +1,72 @@
 <template>
-  <div
-    class="goat-pricing-reference"
-    role="note"
-    :aria-label="t('未知价格不会参与费用估算')"
-  >
-    <dl class="goat-pricing-summary">
+  <div class="goat-pricing-reference">
+    <dl class="pricing-ledger">
+      <div class="pricing-ledger__revision">
+        <dt>{{ t("修订版本") }}</dt>
+        <dd><code>{{ snapshot?.revision ?? `static-${PRICING_REFERENCE_CHECKED_AT}` }}</code></dd>
+      </div>
+      <div>
+        <dt>{{ t("启用时间") }}</dt>
+        <dd>{{ snapshot ? formatTimestamp(snapshot.activated_at) : "—" }}</dd>
+      </div>
+      <div>
+        <dt>{{ t("文档更新时间") }}</dt>
+        <dd>{{ documentUpdatedAt }}</dd>
+      </div>
       <div>
         <dt>{{ t("月费") }}</dt>
-        <dd>${{ monthlyPriceUsd }}</dd>
+        <dd>{{ formatUsd(monthlyPriceUsd) }}</dd>
       </div>
       <div>
         <dt>{{ t("5 小时额度") }}</dt>
-        <dd>${{ GOAT_PRICING_REFERENCE.rollingLimitsUsd.window5h }}</dd>
+        <dd>{{ formatUsd(GOAT_PRICING_REFERENCE.rollingLimitsUsd.window5h) }}</dd>
       </div>
       <div>
         <dt>{{ t("周额度") }}</dt>
-        <dd>${{ GOAT_PRICING_REFERENCE.rollingLimitsUsd.windowWeek }}</dd>
-      </div>
-      <div>
-        <dt>{{ t("月额度") }}</dt>
-        <dd>$20–$70 / {{ t("模型") }}</dd>
-      </div>
-      <div>
-        <dt>{{ t("模型") }}</dt>
-        <dd>{{ rows.length }}</dd>
+        <dd>{{ formatUsd(GOAT_PRICING_REFERENCE.rollingLimitsUsd.windowWeek) }}</dd>
       </div>
     </dl>
 
-    <p class="goat-pricing-note">
+    <p class="pricing-note">
       USD / 1M tokens · {{ t("未知价格不会参与费用估算") }}
     </p>
 
-    <div class="goat-pricing-table-wrap" tabindex="0">
-      <table aria-label="Command Code GOAT">
-        <thead>
-          <tr>
-            <th scope="col">{{ t("模型") }}</th>
-            <th scope="col">{{ t("输入") }}</th>
-            <th scope="col">{{ t("输出") }}</th>
-            <th scope="col">{{ t("缓存读") }}</th>
-            <th scope="col">{{ t("缓存写") }}</th>
-            <th scope="col">{{ t("月额度") }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in rows" :key="row.model">
-            <th scope="row">{{ row.model }}</th>
-            <td>{{ formatOfficialRate(row.input) }}</td>
-            <td>{{ formatOfficialRate(row.output) }}</td>
-            <td>{{ formatOfficialRate(row.cacheRead) }}</td>
-            <td>{{ formatOfficialRate(row.cacheWrite) }}</td>
-            <td>{{ formatMonthlyCredits(row.monthlyCreditsUsd) }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <n-data-table
+      :columns="columns"
+      :data="rows"
+      :pagination="false"
+      :row-key="rowKey"
+      :scroll-x="870"
+      size="small"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
-import { t } from "../i18n/index.ts";
+import { computed, h } from "vue";
+import { NDataTable, NTooltip } from "naive-ui";
+import type { DataTableColumns } from "naive-ui";
+import { locale, t } from "../i18n/index.ts";
 import type { ProviderNeutralPricingSnapshot } from "../api/providers.ts";
+import { formatPricingRate } from "../domain/pricing-view.ts";
 import {
   GOAT_PRICING_REFERENCE,
+  PRICING_REFERENCE_CHECKED_AT,
   type GoatOfficialRate,
 } from "../domain/pricing-references.ts";
 
+interface GoatPricingRow {
+  model: string;
+  input: GoatOfficialRate;
+  output: GoatOfficialRate;
+  cacheRead: GoatOfficialRate;
+  cacheWrite: GoatOfficialRate;
+  monthlyCreditsUsd: number | "free";
+}
+
 const props = defineProps<{ snapshot?: ProviderNeutralPricingSnapshot | null }>();
 
-const rows = computed(() => {
+const rows = computed<GoatPricingRow[]>(() => {
   if (!props.snapshot) return [...GOAT_PRICING_REFERENCE.models];
   return props.snapshot.values.map((row) => {
     const free = row.input_per_million === null
@@ -82,13 +79,6 @@ const rows = computed(() => {
       cacheRead: free ? "free" : row.cache_read_per_million,
       cacheWrite: row.cache_write_per_million,
       monthlyCreditsUsd: free ? "free" : (row.model_allowance ?? 0),
-    } satisfies {
-      model: string;
-      input: GoatOfficialRate;
-      output: GoatOfficialRate;
-      cacheRead: GoatOfficialRate;
-      cacheWrite: GoatOfficialRate;
-      monthlyCreditsUsd: number | "free";
     };
   });
 });
@@ -98,116 +88,139 @@ const monthlyPriceUsd = computed(() => (
   ?? GOAT_PRICING_REFERENCE.monthlyPriceUsd
 ));
 
-function formatOfficialRate(value: GoatOfficialRate): string {
-  if (value === "free") return t("免费");
-  if (value === null) return "—";
-  return `$${value}`;
+const documentUpdatedAt = computed(() => {
+  const value = props.snapshot?.document_updated_at;
+  return value ? formatTimestamp(value) : PRICING_REFERENCE_CHECKED_AT;
+});
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(locale.value, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
-function formatMonthlyCredits(value: number | "free"): string {
-  return value === "free" ? t("免费") : `$${value}`;
+function formatUsd(value: number): string {
+  return new Intl.NumberFormat(locale.value, {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "narrowSymbol",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function renderOfficialRate(value: GoatOfficialRate) {
+  if (value === "free") return t("免费");
+  const formatted = formatPricingRate(value, locale.value);
+  if (!formatted.exact) return formatted.label;
+  const exactLabel = t("精确值：{value} / 百万 tokens", { value: formatted.exact });
+  return h(NTooltip, { trigger: "focus" }, {
+    trigger: () => h("span", {
+      class: "tiny-rate",
+      tabindex: 0,
+      title: exactLabel,
+      "aria-label": `${formatted.label}, ${exactLabel}`,
+    }, formatted.label),
+    default: () => exactLabel,
+  });
+}
+
+function renderMonthlyCredits(value: number | "free") {
+  return value === "free" ? t("免费") : formatUsd(value);
+}
+
+const columns = computed<DataTableColumns<GoatPricingRow>>(() => [
+  {
+    title: t("模型"),
+    key: "model",
+    width: 190,
+    fixed: "left",
+    ellipsis: { tooltip: true },
+  },
+  { title: t("输入"), key: "input", width: 112, align: "right", render: (row) => renderOfficialRate(row.input) },
+  { title: t("输出"), key: "output", width: 112, align: "right", render: (row) => renderOfficialRate(row.output) },
+  { title: t("缓存读"), key: "cacheRead", width: 112, align: "right", render: (row) => renderOfficialRate(row.cacheRead) },
+  { title: t("缓存写"), key: "cacheWrite", width: 112, align: "right", render: (row) => renderOfficialRate(row.cacheWrite) },
+  { title: t("月额度"), key: "monthlyCreditsUsd", width: 130, align: "right", render: (row) => renderMonthlyCredits(row.monthlyCreditsUsd) },
+]);
+
+function rowKey(row: GoatPricingRow): string {
+  return row.model;
 }
 </script>
 
 <style scoped>
 .goat-pricing-reference {
-  display: grid;
-  gap: 12px;
   min-width: 0;
+  width: 100%;
 }
 
-.goat-pricing-summary {
+.pricing-ledger {
   display: grid;
-  grid-template-columns: repeat(5, minmax(112px, 1fr));
+  grid-template-columns: minmax(180px, 1.4fr) repeat(5, minmax(112px, 1fr));
   gap: 1px;
-  margin: 0;
+  margin: 0 0 14px;
   overflow: hidden;
   border: 1px solid var(--ocg-border);
   border-radius: 10px;
   background: var(--ocg-border);
+  font-variant-numeric: tabular-nums;
 }
 
-.goat-pricing-summary > div {
+.pricing-ledger > div {
   min-width: 0;
   padding: 10px 12px;
   background: var(--ocg-canvas);
 }
 
-.goat-pricing-summary dt {
+.pricing-ledger dt {
   margin-bottom: 4px;
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-xs);
 }
 
-.goat-pricing-summary dd {
+.pricing-ledger dd {
+  overflow: hidden;
   margin: 0;
   color: var(--ocg-ink);
   font-weight: 600;
-}
-
-.goat-pricing-note {
-  margin: 0;
-  color: var(--ocg-text-3);
-  font-size: var(--ocg-font-size-12);
-}
-
-.goat-pricing-table-wrap {
-  max-height: 520px;
-  overflow: auto;
-  border: 1px solid var(--ocg-border);
-  border-radius: 10px;
-}
-
-.goat-pricing-table-wrap:focus-visible {
-  outline: 2px solid var(--ocg-primary);
-  outline-offset: 2px;
-}
-
-table {
-  width: 100%;
-  min-width: 760px;
-  border-collapse: collapse;
-  font-size: var(--ocg-font-size-12);
-}
-
-th,
-td {
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--ocg-border);
-  text-align: right;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-th:first-child {
-  text-align: left;
+.pricing-ledger code {
+  font-family: "Cascadia Mono", Consolas, monospace;
 }
 
-thead th {
-  position: sticky;
-  z-index: 1;
-  top: 0;
+.pricing-note {
+  margin: 0 0 10px;
   color: var(--ocg-subtle);
-  background: var(--ocg-canvas);
+  font-size: var(--ocg-font-sm);
 }
 
-tbody th {
-  color: var(--ocg-ink);
-  font-weight: 600;
+:deep(.n-data-table-td) {
+  font-variant-numeric: tabular-nums;
 }
 
-tbody tr:last-child th,
-tbody tr:last-child td {
-  border-bottom: 0;
+:deep(.tiny-rate) {
+  border-bottom: 1px dotted currentColor;
+  cursor: help;
 }
 
 @media (max-width: 900px) {
-  .goat-pricing-summary {
+  .pricing-ledger {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 640px) {
-  .goat-pricing-summary {
+  .pricing-ledger {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

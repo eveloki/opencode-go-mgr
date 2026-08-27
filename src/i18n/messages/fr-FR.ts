@@ -649,7 +649,6 @@ export const frFRMessages = {
   "缓存读": "Lecture cache",
   "缓存写": "Écriture cache",
   "本地调整": "Ajustements locaux",
-  "额度有效价格": "Tarifs de quota effectifs",
   "无": "Aucun",
   "适用于：{scope}": "S'applique à : {scope}",
   "精确值：{value} / 百万 tokens": "Exact : {value} / million de tokens",

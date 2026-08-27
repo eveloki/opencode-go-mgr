@@ -197,10 +197,10 @@ import ProviderPricingReference from "./ProviderPricingReference.vue";
 import { locale, t } from "../i18n/index.ts";
 import {
   buildPricingTableRows,
-  effectivePricingRate,
   formatPricingMultiplier,
   formatPricingRate,
 } from "../domain/pricing-view.ts";
+import { GOAT_PRICING_REFERENCE } from "../domain/pricing-references.ts";
 import type { PricingTableRow } from "../domain/pricing-view.ts";
 import type { PlanId } from "../domain/plans.ts";
 import {
@@ -261,7 +261,9 @@ function pricingDisplay(group: PlanPricingGroup) {
 
 function pricingSourceUrl(group: PlanPricingGroup): string {
   if (group.content.kind === "opencode-go") return snapshot.value?.source_url ?? "";
-  if (group.content.kind === "goat-reference") return group.content.snapshot?.source_url ?? "";
+  if (group.content.kind === "goat-reference") {
+    return group.content.snapshot?.source_url ?? GOAT_PRICING_REFERENCE.sourceUrl;
+  }
   return "";
 }
 
@@ -425,11 +427,6 @@ function validMultiplier(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-function previewMultiplier(modelId: string): number {
-  const value = multiplierValue(modelId);
-  return validMultiplier(value) ? value : snapshotMultiplier(modelId);
-}
-
 function updateMultiplierDraft(modelId: string, value: number | null) {
   const current = snapshotMultiplier(modelId);
   if (validMultiplier(value) && Math.abs(value - current) < Number.EPSILON) {
@@ -553,22 +550,6 @@ function renderMultiplierEditor(row: PricingTableRow) {
   ]);
 }
 
-function renderEffectiveRates(row: PricingTableRow) {
-  const rates = [
-    ["I", row.input],
-    ["O", row.output],
-    ["CR", row.cache_read],
-    ["CW", row.cache_write],
-  ] as const;
-  return h("div", { class: "effective-rates" }, rates.map(([label, rate]) => (
-    h("span", { key: label }, [
-      h("b", label),
-      " ",
-      renderRate(effectivePricingRate(rate ?? null, previewMultiplier(row.model_id))),
-    ])
-  )));
-}
-
 const columns = computed<DataTableColumns<PricingTableRow>>(() => [
   {
     title: t("模型"),
@@ -589,7 +570,6 @@ const columns = computed<DataTableColumns<PricingTableRow>>(() => [
     width: 238,
     render: renderMultiplierEditor,
   },
-  { title: t("额度有效价格"), key: "effective", width: 330, render: renderEffectiveRates },
 ]);
 
 async function loadPricing() {
@@ -868,16 +848,6 @@ onMounted(() => void loadProviderCatalog());
 :deep(.tiny-rate) {
   border-bottom: 1px dotted currentColor;
   cursor: help;
-}
-:deep(.effective-rates) {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2px 12px;
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
-}
-:deep(.effective-rates b) {
-  color: var(--ocg-subtle);
 }
 :global(.pricing-refresh-comparison) {
   min-width: min(560px, 76vw);

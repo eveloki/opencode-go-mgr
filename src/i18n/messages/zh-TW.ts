@@ -490,7 +490,6 @@ export const zhTWMessages = {
   "缓存读": "快取讀取",
   "缓存写": "快取寫入",
   "本地调整": "本機調整",
-  "额度有效价格": "額度有效價格",
   "无": "無",
   "适用于：{scope}": "適用於：{scope}",
   "精确值：{value} / 百万 tokens": "精確值：{value}／百萬 tokens",
