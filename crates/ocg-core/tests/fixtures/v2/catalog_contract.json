@@ -21,7 +21,7 @@
   ],
   "risk_notice_fields": ["acknowledgement_id", "version", "content_hash"],
   "custom_create": {
-    "custom_config_fields": ["base_url", "upstream_protocol", "auth_scheme"],
+    "custom_config_fields": ["endpoint_url", "upstream_protocol"],
     "model_capability_fields": ["model_id", "protocol"]
   },
   "plans": [
@@ -61,9 +61,8 @@
       "routable": true,
       "model_aliases_empty": true,
       "required_form_field_ids": [
-        "base_url",
+        "endpoint_url",
         "upstream_protocol",
-        "auth_scheme",
         "model_capabilities"
       ]
     }

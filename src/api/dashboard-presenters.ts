@@ -34,9 +34,8 @@ export type AccountProtocol = "chat_completions" | "responses" | "messages";
 
 export interface AccountCustomConfig {
   account_id: string;
-  base_url: string;
-  upstream_protocols: AccountProtocol[];
-  auth_scheme: "bearer" | "x-api-key";
+  endpoint_url: string;
+  upstream_protocol: AccountProtocol;
   created_at: string;
   updated_at: string;
 }
@@ -88,9 +87,12 @@ export interface Account {
 }
 
 export interface AccountCustomConfigInput {
-  base_url: string;
-  upstream_protocols: AccountProtocol[];
-  auth_scheme: "bearer" | "x-api-key";
+  endpoint_url: string;
+  upstream_protocol: AccountProtocol;
+}
+
+export interface AccountCustomConfigUpdateInput extends AccountCustomConfigInput {
+  model_capabilities: AccountModelCapabilityInput[];
 }
 
 export interface AccountModelCapabilityInput {
@@ -134,9 +136,8 @@ export interface ManagedAccountInput {
 }
 
 export interface CustomModelDiscoveryInput {
-  base_url: string;
-  upstream_protocols: AccountProtocol[];
-  auth_scheme: "bearer" | "x-api-key";
+  endpoint_url: string;
+  upstream_protocol: AccountProtocol;
   api_key?: string;
   account_id?: string;
 }
@@ -481,9 +482,8 @@ export function presentAccount(value: V3Account): Account {
     plan_routable: value.planRoutable,
     custom_config: value.customConfig === null ? null : {
       account_id: value.customConfig.accountId,
-      base_url: value.customConfig.baseUrl,
-      upstream_protocols: [...value.customConfig.upstreamProtocols],
-      auth_scheme: value.customConfig.authScheme,
+      endpoint_url: value.customConfig.endpointUrl,
+      upstream_protocol: value.customConfig.upstreamProtocol,
       created_at: value.customConfig.createdAt,
       updated_at: value.customConfig.updatedAt,
     },
@@ -508,9 +508,8 @@ export function accountCreateInput(value: AccountInput): Omit<V3AccountCreate, "
     purchaseDate: value.purchase_date,
     notes: value.notes,
     customConfig: value.custom_config ? {
-      baseUrl: value.custom_config.base_url,
-      upstreamProtocols: [...value.custom_config.upstream_protocols],
-      authScheme: value.custom_config.auth_scheme,
+      endpointUrl: value.custom_config.endpoint_url,
+      upstreamProtocol: value.custom_config.upstream_protocol,
     } : undefined,
     modelCapabilities: value.model_capabilities?.map((capability) => ({
       modelId: capability.model_id,

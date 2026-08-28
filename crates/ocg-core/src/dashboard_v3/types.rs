@@ -748,9 +748,8 @@ pub struct AccountMutation {
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountCustomConfig {
     pub account_id: String,
-    pub base_url: String,
-    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
-    pub auth_scheme: AccountAuthScheme,
+    pub endpoint_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -869,17 +868,17 @@ pub struct AccountManagedKeyVerify {
     pub key: String,
 }
 
-/// PUT `/accounts/{id}/custom-config` body. Protocol set and auth scheme are
-/// editable; a change re-opens verification as pending without disabling.
+/// PUT `/accounts/{id}/custom-config` body. The endpoint binding and complete
+/// model capability list are replaced atomically under one CAS expectation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountCustomConfigUpdate {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
-    pub base_url: String,
-    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
-    pub auth_scheme: AccountAuthScheme,
+    pub endpoint_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
+    pub model_capabilities: Vec<AccountModelCapabilityWrite>,
 }
 
 /// Create-time Custom destination (no timestamps). Nested under `AccountCreate`.
@@ -887,9 +886,8 @@ pub struct AccountCustomConfigUpdate {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountCustomConfigWrite {
-    pub base_url: String,
-    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
-    pub auth_scheme: AccountAuthScheme,
+    pub endpoint_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
 }
 
 /// PUT `/accounts/{id}/model-capabilities` body.
@@ -1493,9 +1491,8 @@ pub struct ProtocolProbeResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CustomModelDiscoveryRequest {
-    pub base_url: String,
-    pub upstream_protocols: Vec<AccountUpstreamProtocol>,
-    pub auth_scheme: AccountAuthScheme,
+    pub endpoint_url: String,
+    pub upstream_protocol: AccountUpstreamProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3831,25 +3828,25 @@ mod tests {
     #[test]
     fn custom_model_discovery_is_an_operational_probe_without_cas() {
         let request: CustomModelDiscoveryRequest = serde_json::from_value(json!({
-            "baseUrl": "https://api.example.com/v1",
-            "upstreamProtocols": ["chat_completions"],
-            "authScheme": "bearer",
+            "endpointUrl": "https://api.example.com/v1/chat/completions",
+            "upstreamProtocol": "chat_completions",
             "apiKey": "sk-secret"
         }))
         .unwrap();
-        assert_eq!(request.base_url, "https://api.example.com/v1");
         assert_eq!(
-            request.upstream_protocols,
-            vec![AccountUpstreamProtocol::ChatCompletions]
+            request.endpoint_url,
+            "https://api.example.com/v1/chat/completions"
         );
-        assert_eq!(request.auth_scheme, AccountAuthScheme::Bearer);
+        assert_eq!(
+            request.upstream_protocol,
+            AccountUpstreamProtocol::ChatCompletions
+        );
         assert_eq!(request.api_key.as_deref(), Some("sk-secret"));
         assert!(request.account_id.is_none());
 
         let with_account: CustomModelDiscoveryRequest = serde_json::from_value(json!({
-            "baseUrl": "http://127.0.0.1:9/v1",
-            "upstreamProtocols": ["messages"],
-            "authScheme": "x-api-key",
+            "endpointUrl": "http://127.0.0.1:9/v1/messages",
+            "upstreamProtocol": "messages",
             "accountId": "acct-1"
         }))
         .unwrap();
@@ -3858,26 +3855,23 @@ mod tests {
 
         assert!(
             serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
-                "baseUrl": "https://api.example.com/v1",
-                "upstreamProtocols": ["chat_completions"],
-                "authScheme": "bearer",
+                "endpointUrl": "https://api.example.com/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
                 "expectedRevision": 11
             }))
             .is_err()
         );
         assert!(
             serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
-                "base_url": "https://api.example.com/v1",
-                "upstreamProtocols": ["chat_completions"],
-                "authScheme": "bearer"
+                "endpoint_url": "https://api.example.com/v1/chat/completions",
+                "upstreamProtocol": "chat_completions"
             }))
             .is_err()
         );
         assert!(
             serde_json::from_value::<CustomModelDiscoveryRequest>(json!({
-                "baseUrl": "https://api.example.com/v1",
-                "upstreamProtocols": ["chat_completions"],
-                "authScheme": "bearer",
+                "endpointUrl": "https://api.example.com/v1/chat/completions",
+                "upstreamProtocol": "chat_completions",
                 "key": "sk-secret"
             }))
             .is_err()
@@ -3898,17 +3892,15 @@ mod tests {
         assert_eq!(value["pricingRevision"], "seed");
         assert!(value.get("apiKey").is_none());
         assert!(value.get("api_key").is_none());
-        assert!(value.get("baseUrl").is_none());
+        assert!(value.get("endpointUrl").is_none());
         assert_secret_free(&value);
 
         let schema = contract_schema();
         let request_schema = &schema["$defs"]["CustomModelDiscoveryRequest"];
         assert_eq!(request_schema["additionalProperties"], false);
         let required = request_schema["required"].as_array().unwrap();
-        assert!(required.iter().any(|value| value == "baseUrl"));
-        assert!(required.iter().any(|value| value == "upstreamProtocols"));
-        assert!(!required.iter().any(|value| value == "upstreamProtocol"));
-        assert!(required.iter().any(|value| value == "authScheme"));
+        assert!(required.iter().any(|value| value == "endpointUrl"));
+        assert!(required.iter().any(|value| value == "upstreamProtocol"));
         assert!(!required.iter().any(|value| value == "apiKey"));
         assert!(!required.iter().any(|value| value == "accountId"));
         assert!(!required.iter().any(|value| value == "expectedRevision"));

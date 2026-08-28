@@ -238,7 +238,8 @@ materializes model, protocol, endpoint, and auth per candidate. Adapters
 do not probe billable inference paths to discover protocol support. The
 OpenCode `MODEL_PROTOCOLS` table is Go-specific. Dynamic Zen `-free` IDs
 unknown to the table default to Chat. Custom rematerializes per account to
-that card's declared protocol, isolated origin, and auth scheme.
+that card's single declared protocol and complete Endpoint, deriving auth
+from the protocol.
 
 `zen_models.rs` owns the only Zen Free model-discovery path. A protected
 Providers-page refresh calls the fixed keyless
@@ -355,20 +356,16 @@ normalized to `not_required`, because its public catalog is not Key
 verification. Enabled state is preserved. Go, Zen Free, Custom, and unknown
 pairs are otherwise untouched.
 
-Custom API (`custom.rs` + `custom_http.rs`) accepts any syntactically
-valid HTTP or HTTPS origin; URL-embedded credentials, query, and fragment
-are rejected. It does not follow redirects and does not forward dashboard
-or client auth; only the configured Bearer or `x-api-key` is sent. Joined
-endpoints must preserve scheme, host, port, and base-path containment.
-`connect_timeout_secs` is clamped to 5–60 seconds. The account declares a
-protocol set of 1–3 of chat_completions / responses / messages (chosen via
-checkboxes in the account form), uniform across all its models; declared
-protocols route immediately as preset evidence. Verification is optional:
-a Custom account can be enabled while `verification_status` is `pending`.
-The verify action probes every selected protocol with the first declared
-model, succeeding only on a `2xx` JSON object for each, without discovering
-or rewriting capabilities and without auto-enabling. Editing the Key, base
-URL, declared capabilities, protocol set, or auth scheme resets
+Custom API (`custom.rs` + `custom_http.rs`) accepts one syntactically valid
+complete HTTP/HTTPS inference Endpoint; URL-embedded credentials, query,
+fragment, and redirects are rejected. It does not forward dashboard/client
+auth. Chat/Responses derive Bearer auth and Messages derives `x-api-key`.
+The account declares one protocol, uniform across all models and used as the
+effective preferred protocol; other supported client formats convert to it.
+Config and the complete capability list update atomically. Verification is
+optional and sends one minimal request to the saved Endpoint. Standard
+protocol suffixes alone may derive `/models`; other paths require manual model
+entry. Editing the Key, Endpoint, declared capabilities, or protocol resets
 `verification_status` to `pending` but keeps the account enabled. Custom
 costs and usage are unpriced/unknown with no provider quota debit.
 
@@ -401,7 +398,7 @@ is no Tauri `invoke` path.
   account_control / gateway_keys / settings / ...
            |
            v
-  SQLite schema v31
+  SQLite schema v32
            ^
            |
   ocg-manager-cli  same services, no argv CAS

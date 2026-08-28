@@ -796,9 +796,8 @@ async fn create_verified_custom(
             "name": name,
             "key": key,
             "customConfig": {
-                "baseUrl": origin,
-                "upstreamProtocols": ["chat_completions"],
-                "authScheme": "bearer"
+                "endpointUrl": format!("{}/chat/completions", origin.trim_end_matches('/')),
+                "upstreamProtocol": "chat_completions"
             },
             "modelCapabilities": [{
                 "modelId": CUSTOM_MODEL,

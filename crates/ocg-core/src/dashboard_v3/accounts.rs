@@ -202,13 +202,13 @@ fn create_account_locked(
     if requires_custom {
         match custom_config.as_ref() {
             Some(config) => {
-                crate::custom::validate_custom_base_url(&config.base_url)
+                crate::custom::validate_custom_endpoint_url(&config.endpoint_url)
                     .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
             }
             None => {
                 return Err(V3ApiError::invalid_request_at(
                     state,
-                    "Custom API accounts require a base URL, at least one upstream protocol, and an auth scheme",
+                    "Custom API accounts require a complete endpoint URL and one upstream protocol",
                 ));
             }
         }
@@ -223,10 +223,11 @@ fn create_account_locked(
                 .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
         }
         if let Some(config) = custom_config.as_ref() {
-            let protocols = crate::models::normalize_upstream_protocols(&config.upstream_protocols)
-                .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
-            crate::custom::validate_custom_capability_expansion(&protocols, &model_capabilities)
-                .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+            crate::custom::validate_custom_capability_expansion(
+                config.upstream_protocol,
+                &model_capabilities,
+            )
+            .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
         }
     } else {
         if custom_config.is_some() {
@@ -595,18 +596,18 @@ fn put_custom_config_locked(
         "custom config is only available for Custom API accounts",
     )?;
     let config = AccountCustomConfigInput {
-        base_url: input.base_url,
-        upstream_protocols: input
-            .upstream_protocols
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        auth_scheme: input.auth_scheme.into(),
+        endpoint_url: input.endpoint_url,
+        upstream_protocol: input.upstream_protocol.into(),
     };
+    let capabilities = input
+        .model_capabilities
+        .iter()
+        .map(capability_write_to_input)
+        .collect::<Vec<_>>();
     state
         .db
         .lock()
-        .commit_account_custom_config(id, &config, true)
+        .commit_account_custom_config_and_capabilities(id, &config, &capabilities)
         .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
     mutation_after_commit(state, id, true)
 }
@@ -838,13 +839,8 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
 fn custom_config_from_model(config: crate::models::AccountCustomConfig) -> AccountCustomConfig {
     AccountCustomConfig {
         account_id: config.account_id,
-        base_url: config.base_url,
-        upstream_protocols: config
-            .upstream_protocols
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        auth_scheme: config.auth_scheme.into(),
+        endpoint_url: config.endpoint_url,
+        upstream_protocol: config.upstream_protocol.into(),
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
     }
@@ -864,14 +860,8 @@ fn capability_from_model(
 
 fn custom_config_write_to_input(write: &AccountCustomConfigWrite) -> AccountCustomConfigInput {
     AccountCustomConfigInput {
-        base_url: write.base_url.clone(),
-        upstream_protocols: write
-            .upstream_protocols
-            .iter()
-            .copied()
-            .map(Into::into)
-            .collect(),
-        auth_scheme: write.auth_scheme.into(),
+        endpoint_url: write.endpoint_url.clone(),
+        upstream_protocol: write.upstream_protocol.into(),
     }
 }
 

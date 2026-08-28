@@ -65,7 +65,7 @@ mod custom_verify_probe {
 
     /// Bind an injected Custom probe to one CoreState process generation.
     ///
-    /// The override is ignored unless the captured Custom base URL is an
+    /// The override is ignored unless the captured Custom endpoint URL is an
     /// unambiguous loopback HTTP(S) origin.
     #[must_use]
     pub fn install_custom_verify_probe_for_tests(
@@ -367,7 +367,7 @@ async fn run_custom_probe(job: &CustomVerificationJob) -> Result<(), CustomVerif
     #[cfg(debug_assertions)]
     {
         if let Some(probe) = custom_verify_probe::override_for(job.process_generation)
-            && custom_verify_probe::base_url_is_loopback(&job.custom_config.base_url)
+            && custom_verify_probe::base_url_is_loopback(&job.custom_config.endpoint_url)
         {
             return probe(
                 &job.config,

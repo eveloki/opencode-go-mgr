@@ -237,8 +237,8 @@ fn seed_credit_balance(harness: &V3Harness, account_id: &str) {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v31() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+fn dashboard_v3_schema_version_stays_at_v32() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
 }
 
 #[test]
@@ -518,9 +518,8 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
                 "providerId": CUSTOM_PROVIDER_ID,
                 "offeringId": CUSTOM_API_OFFERING_ID,
                 "customConfig": {
-                    "baseUrl": "https://api.example.com/v1",
-                    "upstreamProtocols": ["messages"],
-                    "authScheme": "x-api-key"
+                    "endpointUrl": "https://api.example.com/v1/messages",
+                    "upstreamProtocol": "messages"
                 },
                 "modelCapabilities": [{ "modelId": "org/model", "protocol": "messages" }]
             }),

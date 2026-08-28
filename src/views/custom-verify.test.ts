@@ -125,22 +125,22 @@ test("the card exposes verify for pending/failed Custom accounts without gating 
   assert.match(card, /目标端点由管理员自行选择并负责/);
 });
 
-test("the form declares an account-level protocol set and expands it over plain model IDs", () => {
+test("the form declares one complete Endpoint and one account-level protocol", () => {
   assert.match(form, /目标端点由管理员自行选择并负责/);
   assert.doesNotMatch(form, /\$emit\('verify'\)/);
-  // Protocol selection is a checkbox group; capabilities carry no per-row protocol.
-  assert.match(form, /<n-checkbox-group/);
-  assert.match(form, /v-model:value="form\.upstreamProtocols"/);
-  assert.match(form, /至少选择一个协议；所选协议对该账号下全部模型统一生效。/);
+  assert.match(form, /v-model:value="form\.endpointUrl"/);
+  assert.match(form, /v-model:value="form\.upstreamProtocol"/);
+  assert.match(form, /isStandardCustomInferenceEndpoint/);
+  assert.match(form, /仅标准推理 Endpoint 可自动推导 \/models；请手动添加模型 ID。/);
   assert.doesNotMatch(form, /capabilityProtocol/);
-  // Protocol and auth scheme stay editable after create; no immutability hints.
+  assert.doesNotMatch(form, /authScheme|auth_scheme/);
+  // Endpoint and protocol stay editable after create; no immutability hints.
   assert.doesNotMatch(form, /fieldImmutableAfterCreate/);
   assert.doesNotMatch(form, /创建后不可修改/);
-  // Base URL validation delegates to the shared trusted-URL helper.
-  assert.match(form, /customBaseUrlIssue\(value \?\? ""\)/);
-  // Edit mode forwards base URL, protocol set, auth scheme, and the expanded rows.
-  assert.match(form, /payload\.base_url = form\.value\.baseUrl\.trim\(\)/);
-  assert.match(form, /payload\.upstream_protocols = canonicalCustomProtocols/);
+  assert.match(form, /customEndpointUrlIssue\(value \?\? ""\)/);
+  // Edit mode forwards the complete Endpoint, protocol, and expanded rows.
+  assert.match(form, /payload\.endpoint_url = form\.value\.endpointUrl\.trim\(\)/);
+  assert.match(form, /payload\.upstream_protocol = form\.value\.upstreamProtocol/);
   assert.match(form, /payload\.model_capabilities = expandCustomModelCapabilities\(/);
 });
 

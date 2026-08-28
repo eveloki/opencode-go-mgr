@@ -76,13 +76,8 @@ fn prepare_custom_model_discovery(
         })?;
     Ok(PreparedCustomModelDiscovery {
         custom_config: AccountCustomConfigInput {
-            base_url: input.base_url,
-            upstream_protocols: input
-                .upstream_protocols
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            auth_scheme: input.auth_scheme.into(),
+            endpoint_url: input.endpoint_url,
+            upstream_protocol: input.upstream_protocol.into(),
         },
         api_key,
     })

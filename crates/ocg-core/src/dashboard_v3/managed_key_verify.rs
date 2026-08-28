@@ -667,13 +667,8 @@ fn account_from_state(state: &CoreState, account: ModelAccount) -> Result<Accoun
 fn custom_config_from_model(config: crate::models::AccountCustomConfig) -> AccountCustomConfig {
     AccountCustomConfig {
         account_id: config.account_id,
-        base_url: config.base_url,
-        upstream_protocols: config
-            .upstream_protocols
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        auth_scheme: config.auth_scheme.into(),
+        endpoint_url: config.endpoint_url,
+        upstream_protocol: config.upstream_protocol.into(),
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
     }

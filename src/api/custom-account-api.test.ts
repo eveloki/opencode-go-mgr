@@ -91,22 +91,22 @@ test("verify posts to the verify route with CAS tokens", async () => {
   assert.deepEqual(requests[0]?.body, { expectedRevision: 7, processGeneration: 99 });
 });
 
-test("custom config PUT sends the flattened config with CAS tokens", async () => {
+test("custom config PUT sends one Endpoint, protocol, and capability list with CAS tokens", async () => {
   setupControlPlane(9);
   const requests = installBrowser(() => ({ account: v3Account("custom-1") }));
 
   await dashboardApi.updateAccountCustomConfig("custom-1", {
-    base_url: "http://192.168.1.10:8080/v1",
-    upstream_protocols: ["chat_completions", "messages"],
-    auth_scheme: "bearer",
+    endpoint_url: "http://192.168.1.10:8080/v1/messages",
+    upstream_protocol: "messages",
+    model_capabilities: [{ model_id: "model-a", protocol: "messages", source: "manual" }],
   });
 
   assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/custom-config");
   assert.equal(requests[0]?.method, "PUT");
   assert.deepEqual(requests[0]?.body, {
-    baseUrl: "http://192.168.1.10:8080/v1",
-    upstreamProtocols: ["chat_completions", "messages"],
-    authScheme: "bearer",
+    endpointUrl: "http://192.168.1.10:8080/v1/messages",
+    upstreamProtocol: "messages",
+    modelCapabilities: [{ modelId: "model-a", protocol: "messages", source: "manual" }],
     expectedRevision: 9,
     processGeneration: 99,
   });
@@ -138,9 +138,8 @@ test("model discovery posts only the transient form fields to its protected rout
   const requests = installBrowser(() => ({ models: ["model-a"], truncated: false }));
 
   await dashboardApi.discoverCustomModels({
-    base_url: "https://api.example.com/v1",
-    upstream_protocols: ["messages", "chat_completions"],
-    auth_scheme: "x-api-key",
+    endpoint_url: "https://api.example.com/v1/messages",
+    upstream_protocol: "messages",
     api_key: "new-key",
     account_id: "custom-1",
   });
@@ -148,9 +147,8 @@ test("model discovery posts only the transient form fields to its protected rout
   assert.equal(requests[0]?.url, "/dashboard/api/v3/custom/models/discover");
   assert.equal(requests[0]?.method, "POST");
   assert.deepEqual(requests[0]?.body, {
-    baseUrl: "https://api.example.com/v1",
-    upstreamProtocols: ["messages", "chat_completions"],
-    authScheme: "x-api-key",
+    endpointUrl: "https://api.example.com/v1/messages",
+    upstreamProtocol: "messages",
     apiKey: "new-key",
     accountId: "custom-1",
   });

@@ -15,7 +15,7 @@ rebind → compensation) is acquired before `gateway_lifecycle` when a
 settings write also rebinds. Never hold a `parking_lot` lock across those
 awaits.
 
-Two credential tiers share one `access_keys` table (schema v31) and one
+Two credential tiers share one `access_keys` table (schema v32) and one
 auth snapshot:
 
 - Primary key: fixed id `00000000-0000-0000-0000-000000000001`, display
@@ -191,6 +191,11 @@ Historical versions still matter on upgrade:
 - **v31:** adds `provider_contract_model_protocol_overrides` for
   per-model/per-protocol enablement and stops reading the deprecated
   `provider_contract_scopes` switch columns.
+- **v32:** replaces Custom `base_url`, protocol-set JSON, and configurable
+  auth with one complete `endpoint_url` and one `upstream_protocol`. Historical
+  Custom rows choose Chat Completions, then Responses, then Messages, and are
+  disabled/pending for administrator review while non-selected protocol state
+  is removed in the same migration.
 
 GUI data directory: Windows `%USERPROFILE%\.ocg-mgr` or macOS/Linux
 `~/.ocg-mgr`. CLI default: `~/.ocg-mgr-cli`. Docker stores SQLite, keys,

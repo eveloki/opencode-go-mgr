@@ -430,9 +430,8 @@ fn materialize_custom_account_plan(
                 account.id
             ))
         })?;
-    // Declared capabilities are expanded model x protocol rows; the contract
-    // selects among the account-level protocol set, passing the client wire
-    // format through when the account declared it.
+    // Every Custom account has one declared upstream protocol. The contract
+    // passes the same client format through or converts every other format to it.
     let upstream = crate::provider_contracts::select_upstream_protocol(
         contract,
         parsed.client,
@@ -450,8 +449,7 @@ fn materialize_custom_account_plan(
         false,
         Some(upstream),
         Some(CustomRouteSpec {
-            base_url: runtime.config.base_url.clone(),
-            auth_scheme: runtime.config.auth_scheme,
+            endpoint_url: runtime.config.endpoint_url.clone(),
         }),
     )
 }
@@ -585,8 +583,8 @@ mod tests {
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID,
         CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, CredentialKind,
         GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-        ProviderAdapterKind, QuotaScope, UpstreamAuthScheme, UpstreamProtocolKind,
-        ZEN_FREE_ACCOUNT_ID, ZEN_FREE_ACCOUNT_NAME,
+        ProviderAdapterKind, QuotaScope, UpstreamProtocolKind, ZEN_FREE_ACCOUNT_ID,
+        ZEN_FREE_ACCOUNT_NAME,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -1214,14 +1212,6 @@ mod tests {
         model_id: &str,
         protocol: UpstreamProtocolKind,
     ) -> CustomAccountRuntime {
-        custom_runtime_multi(account_id, model_id, &[protocol])
-    }
-
-    fn custom_runtime_multi(
-        account_id: &str,
-        model_id: &str,
-        protocols: &[UpstreamProtocolKind],
-    ) -> CustomAccountRuntime {
         CustomAccountRuntime {
             account_id: account_id.into(),
             enabled: true,
@@ -1230,22 +1220,25 @@ mod tests {
             has_key: true,
             config: AccountCustomConfig {
                 account_id: account_id.into(),
-                base_url: "http://127.0.0.1:9".into(),
-                upstream_protocols: protocols.to_vec(),
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: match protocol {
+                    UpstreamProtocolKind::ChatCompletions => {
+                        "http://127.0.0.1:9/v1/chat/completions"
+                    }
+                    UpstreamProtocolKind::Responses => "http://127.0.0.1:9/v1/responses",
+                    UpstreamProtocolKind::Messages => "http://127.0.0.1:9/v1/messages",
+                }
+                .into(),
+                upstream_protocol: protocol,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
-            capabilities: protocols
-                .iter()
-                .map(|protocol| AccountModelCapability {
-                    account_id: account_id.into(),
-                    model_id: model_id.into(),
-                    protocol: *protocol,
-                    verified_at: None,
-                    source: "manual".into(),
-                })
-                .collect(),
+            capabilities: vec![AccountModelCapability {
+                account_id: account_id.into(),
+                model_id: model_id.into(),
+                protocol,
+                verified_at: None,
+                source: "manual".into(),
+            }],
         }
     }
 
@@ -1415,19 +1408,20 @@ mod tests {
     }
 
     #[test]
-    fn custom_dual_protocol_passes_each_client_wire_format_through() {
+    fn custom_single_protocol_converts_other_client_wire_formats() {
         fn route_upstream(client: ApiFormat, body: Bytes) -> ApiFormat {
-            let parsed = parse_client_request(client, body.clone()).unwrap();
+            let parsed = if client == ApiFormat::Gemini {
+                parse_gemini("local-custom".into(), false, body.clone()).unwrap()
+            } else {
+                parse_client_request(client, body.clone()).unwrap()
+            };
             let resolved =
                 alias::resolve_with_custom("local-custom", &["local-custom".into()]).unwrap();
-            let account = custom_account("custom-dual");
-            let runtime = custom_runtime_multi(
-                "custom-dual",
+            let account = custom_account("custom-single");
+            let runtime = custom_runtime(
+                "custom-single",
                 "local-custom",
-                &[
-                    UpstreamProtocolKind::ChatCompletions,
-                    UpstreamProtocolKind::Messages,
-                ],
+                UpstreamProtocolKind::Messages,
             );
             let contracts = contracts_for(std::slice::from_ref(&runtime));
             let mut runtimes = std::collections::HashMap::new();
@@ -1445,13 +1439,26 @@ mod tests {
                 &std::collections::HashMap::new(),
                 &contracts,
             )
-            .expect("declared dual-protocol account must route both client formats");
+            .expect("single-protocol account must convert supported client formats");
             assert_eq!(set.routes.len(), 1);
             set.routes[0].plan.upstream
         }
 
         let chat = route_upstream(ApiFormat::ChatCompletions, chat_body("local-custom"));
-        assert_eq!(chat, ApiFormat::ChatCompletions);
+        assert_eq!(chat, ApiFormat::Messages);
+        let responses = route_upstream(
+            ApiFormat::Responses,
+            Bytes::from(
+                serde_json::to_vec(&json!({
+                    "model": "local-custom",
+                    "input": "hi",
+                    "store": false,
+                    "max_output_tokens": 4
+                }))
+                .unwrap(),
+            ),
+        );
+        assert_eq!(responses, ApiFormat::Messages);
         let messages = route_upstream(
             ApiFormat::Messages,
             Bytes::from(
@@ -1464,6 +1471,17 @@ mod tests {
             ),
         );
         assert_eq!(messages, ApiFormat::Messages);
+        let gemini = route_upstream(
+            ApiFormat::Gemini,
+            Bytes::from(
+                serde_json::to_vec(&json!({
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                    "generationConfig": {"maxOutputTokens": 4}
+                }))
+                .unwrap(),
+            ),
+        );
+        assert_eq!(gemini, ApiFormat::Messages);
     }
 
     #[test]

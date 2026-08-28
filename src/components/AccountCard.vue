@@ -243,8 +243,8 @@
     </div>
     <div v-else-if="isCustom" class="custom-endpoint">
       <div class="custom-endpoint__meta">
-        <span v-if="account.custom_config?.base_url" class="custom-endpoint__url">
-          {{ account.custom_config.base_url }}
+        <span v-if="account.custom_config?.endpoint_url" class="custom-endpoint__url">
+          {{ account.custom_config.endpoint_url }}
         </span>
         <span class="custom-endpoint__models">
           {{ t("{count} 个模型", { count: account.model_capabilities.length }) }}

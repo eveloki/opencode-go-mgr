@@ -25,14 +25,14 @@ The registry is sealed. Built-in Plan families are:
 | OpenCode Go | `opencode` / `go` | Yes | One officially distributable API key per card; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
 | Command Code GOAT | `command-code` / `goat` | Yes | Public Provider catalog; GOAT preset models default on, additional models default off in the Providers matrix; no account-level GOAT/All or Max mode |
-| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; declare 1–3 upstream protocols via checkboxes, uniform across all models; protocol and auth scheme editable after create; verification is optional but shows an unverified hint; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; one complete inference Endpoint and one upstream protocol per account; verification is optional but shows an unverified hint; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
 `routable=false` offering before it mutates the row, revision, or timestamps.
 Command Code GOAT does not use directory fetch as Key verification; an enabled,
 ready account with a non-empty Key can route models enabled in the Provider
 matrix. Custom API is catalog-routable and can be enabled even while
-verification is `pending`; editing config/capabilities/key/protocol/auth resets
+verification is `pending`; editing the Endpoint, capabilities, Key, or protocol resets
 verification status to `pending` but keeps the enabled state. Disabled drafts
 remain saveable. The desktop UI uses Dashboard V3 HTTP and has no separate
 Tauri invoke mutation path.
@@ -48,31 +48,34 @@ catalog. It does not prove that a stored Key is valid. The Providers matrix is
 the only model-supply control: GOAT preset rows default on, newly discovered
 rows default off, and inference 401/403 is the real Key-auth signal.
 
-Custom API is a live trusted-administrator destination. The card stores a base
-URL, a protocol set (Chat Completions, Responses, Messages — choose at least one
-via checkboxes), one auth scheme (Bearer or `x-api-key`), and at least one model
-capability. The selected protocols are uniform across every model on the
-account. Use **Fetch models** only as an explicit form action: it sends `GET /models` to the
-configured base URL with the entered Key (or, while editing, the stored Custom
-Key), merges valid returned IDs into the editable list, and does not save,
-verify, enable, or otherwise change the account. The fetch is bounded and may
-report a truncated result; manual model IDs remain supported.
+Custom API is a live trusted-administrator destination. The card stores one
+complete inference Endpoint, one upstream protocol (Chat Completions,
+Responses, or Messages), and at least one model capability. That protocol is
+uniform across every model on the account and is the effective preferred
+protocol: matching client traffic passes through, while other supported client
+formats, including Gemini, convert to it. **Fetch models** is available only
+when the Endpoint ends in the selected protocol's standard path
+(`/chat/completions`, `/responses`, or `/messages`); the UI then derives the
+sibling `/models` URL. Non-standard paths are never guessed and keep manual
+model entry available. Fetching does not save, verify, or enable the account.
 
 A trusted administrator may configure any syntactically valid HTTP or HTTPS
 origin, including LAN, loopback, and other self-selected destinations.
 URL-embedded credentials, query strings, and fragments are rejected. The gateway
-never follows redirects, never forwards dashboard or client authentication, and
-constructs only the configured Bearer or `x-api-key` credential. Joined
-endpoints stay inside the configured scheme, host, port, and base-path prefix.
+never follows redirects and never forwards dashboard or client authentication.
+Chat Completions and Responses use only `Authorization: Bearer <key>`; Messages
+uses only `x-api-key: <key>`. There is no configurable auth scheme, dual-auth
+request, or 401 auth-header retry. The saved inference Endpoint is requested
+verbatim and no protocol suffix is appended.
 Custom HTTP uses the same process-wide Direct / Manual / Auto proxy policy;
 connect and request timeouts are bounded from the configured connect timeout
 (clamped 5–60 seconds).
 
 Verification is optional. A Custom account can be created, saved, and enabled
 without verifying; when enabled but unverified the card shows an unverified
-hint. The **Verify** action remains available and sends one protocol-correct,
-non-stream, token-bounded JSON request to the first declared model for every
-selected protocol; only a `2xx` JSON object for each succeeds. Verification does
+hint. The **Verify** action remains available and sends exactly one
+protocol-correct, non-stream, token-bounded JSON request to the complete
+Endpoint using the first declared model; only a `2xx` JSON object succeeds. Verification does
 not discover or mutate capabilities and never auto-enables the account.
 Eligible accounts (enabled + ready + non-empty key) expose their declared model
 IDs on authenticated `GET /v1/models` and can be selected for those IDs.
@@ -81,12 +84,15 @@ names; matching is case-insensitive for kebab IDs, and names with `/`, `_`, or
 whitespace never fold onto a kebab alias. Custom overlay never steals a
 published Go or Zen Free alias. Overlap with another Plan's unique raw ID
 returns `ambiguous_model_id` and does not call upstream. Undeclared names stay
-unknown (`400`). Changing the base URL, key, declared capabilities, protocol
-set, or auth scheme re-pends verification but leaves the account enabled.
-Upstream protocol and auth scheme can be edited after create. Custom traffic is
+unknown (`400`). Changing the Endpoint, Key, declared capabilities, or protocol
+re-pends verification but leaves the account enabled. Endpoint and upstream
+protocol can be edited after create; the config and complete model-capability
+set are replaced in one CAS transaction. Disabling the declared protocol makes
+the model unroutable; no fixed-priority fallback or override can enable an
+undeclared protocol. Custom traffic is
 unpriced: logs record `cost_state=unknown` with no quota debit, and Custom has
 no provider usage refresh. `MODEL_PROTOCOLS` remains Go-specific; Custom
-converts the client protocol to each selected upstream protocol.
+converts the client protocol to the account's single upstream protocol.
 
 **Add account** is a grouped plan list with a detail pane (**Ready to add** /
 **Draft plans** / **Unavailable**), not a card grid. Zen Free is a backend-owned

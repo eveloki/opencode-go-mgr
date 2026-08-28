@@ -153,7 +153,7 @@ Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选�
 
 JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解析、usage、流式与路由身份类型。Gemini 只是客户端格式。已知模型使用 `ocg-domain` 中硬编码的 `MODEL_PROTOCOLS`：客户端协议在 `supported` 内则透传，否则转到 `preferred`。未知模型在所有受支持的客户端格式上返回 `400`；请求路径不试探协议。非空 `safetySettings` 返回 `400`；空数组可以接受。`topK` 与 `thinkingConfig` 只是兼容提示，不保证与 Gemini 等价。
 
-`materialize.rs` 只解析一次客户端协议与 Alias，再按候选物化 model、protocol、endpoint 与 auth。适配器不会通过可计费推理路径试探协议支持。OpenCode `MODEL_PROTOCOLS` 表只服务 Go。表中未知的动态 Zen `-free` ID 默认按 Chat 物化。Custom 按账号把协议、隔离 origin 与鉴权方案重新物化为该卡声明值。
+`materialize.rs` 只解析一次客户端协议与 Alias，再按候选物化 model、protocol、endpoint 与 auth。适配器不会通过可计费推理路径试探协议支持。OpenCode `MODEL_PROTOCOLS` 表只服务 Go。表中未知的动态 Zen `-free` ID 默认按 Chat 物化。Custom 按账号把唯一协议、完整 Endpoint、隔离 origin 与由协议自动决定的鉴权重新物化为该卡声明值。
 
 `zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的供应商页显式刷新通过全局代理请求固定无 Key endpoint `https://opencode.ai/zen/v1/models`，不跟随重定向，只保留合法且以 `-free` 结尾的 ID；完整快照先持久化，再切换运行时。每个模型同时公布原 ID 与去掉 `-free` 的 Alias。失败或过滤结果为空时保留旧快照，`/v1/models` 只读取这份快照。Go 所属的 `ox-alpha-free` 是保留排除项。
 
@@ -216,7 +216,7 @@ JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解�
 
 所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会把历史 Command Code 验证状态统一为 `not_required`，因为公开目录不是 Key 验证；enabled 状态保持不变。Go、Zen Free、Custom 与未知 pair 的其他状态不受影响。
 
-Custom API（`custom.rs` + `custom_http.rs`）接受任意语法合法的 HTTP 或 HTTPS 源；拒绝 URL 内嵌凭据、query 与 fragment。不跟随重定向，不转发 dashboard 或客户端鉴权，只构造已配置的 Bearer 或 `x-api-key`。拼接 endpoint 必须保持 scheme、host、port 与 base-path 前缀。`connect_timeout_secs` 夹到 5–60 秒。账号通过表单复选框声明 1–3 个协议（chat_completions / responses / messages），对该账号所有模型统一生效；声明的协议立即作为预设证据参与路由。Custom 验证为可选：`verification_status` 为 `pending` 时仍可启用。verify 动作用第一个声明模型探测每个已选协议，只有全部返回 `2xx` JSON object 才算成功，不会发现/改写能力，也不会自动启用。修改 Key、base URL、声明能力、协议集或鉴权方案会把 `verification_status` 重置为 `pending`，但账号保持启用。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
+Custom API（`custom.rs` + `custom_http.rs`）接受一个语法合法的完整 HTTP/HTTPS 推理 Endpoint；拒绝 URL 内嵌凭据、query、fragment 与重定向，不转发 dashboard 或客户端鉴权。Chat/Responses 自动使用 Bearer，Messages 自动使用 `x-api-key`。账号声明一个协议，对全部模型统一生效并直接作为 effective preferred protocol；其他受支持客户端格式转换到它。配置与完整能力列表原子更新。验证可选，只向保存的 Endpoint 发送一次最小请求。只有标准协议后缀可推导 `/models`，其他路径必须手工填写模型。修改 Key、Endpoint、声明能力或协议会把 `verification_status` 重置为 `pending`，但账号保持启用。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
 
 
 ## 控制面
@@ -245,7 +245,7 @@ Vue SPA 是当前唯一的面板客户端，走 HTTP Dashboard V3。CLI 调用�
   account_control / gateway_keys / settings / ...
            |
            v
-  SQLite schema v31
+  SQLite schema v32
            ^
            |
   ocg-manager-cli  同一组服务，无 argv CAS

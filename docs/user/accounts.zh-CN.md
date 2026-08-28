@@ -18,12 +18,12 @@ Free 按出口 IP 共享额度与冷却，Custom API 不做供应商额度核算
 | OpenCode Go | `opencode` / `go` | 是 | 每张卡一份官方分发的 API Key；托管注册仍是 Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 一张不带鉴权头、无需凭据的匿名单例卡；可排序、可启停，不可删除；额度按出口 IP 共享 |
 | Command Code GOAT | `command-code` / `goat` | 是 | 使用公开的供应商目录；GOAT 预设模型默认开启，额外模型在供应商矩阵中默认关闭；没有账号级 GOAT/全部或 Max 模式 |
-| Custom API | `custom` / `api` | 是 | 受信管理员目的地；通过复选框声明 1–3 个上游协议，对该账号所有模型统一生效；协议与鉴权方案创建后可编辑；验证为可选，未验证时显示提示；合格声明 ID 会出现在 `/v1/models`；费用 unpriced/unknown，不扣额度 |
+| Custom API | `custom` / `api` | 是 | 受信管理员目的地；每张账号卡保存一个完整推理 Endpoint 和一个上游协议；验证为可选，未验证时显示提示；合格声明 ID 会出现在 `/v1/models`；费用 unpriced/unknown，不扣额度 |
 
 所有持久化变更路径（数据库闸口，以及 dashboard / CLI 共用服务）都会在改动行、revision
 或时间戳之前，拒绝为目录内真正 `routable=false` 的 offering 设置 `enabled=true`。
 Command Code GOAT 不把目录获取当作 Key 验证；enabled、ready 且 Key 非空的账号可路由供应商矩阵中已启用的模型。Custom API 在目录中可路由，且即使 verification 为 `pending`
-也可启用；编辑配置、能力、Key、协议或鉴权方案会把验证状态重置为 `pending`，但保持启用状态。禁用草稿仍可保存。桌面 UI 只经 Dashboard V3 HTTP 变更，没有独立的
+也可启用；编辑 Endpoint、能力、Key 或协议会把验证状态重置为 `pending`，但保持启用状态。禁用草稿仍可保存。桌面 UI 只经 Dashboard V3 HTTP 变更，没有独立的
 Tauri invoke 变更路径。
 
 OpenCode Go 与 Command Code GOAT 只接受各自官方 Provider API **Key**；浏览器 Cookie 与反向代理凭据不是账号
@@ -33,26 +33,22 @@ API，绝不发往 OpenCode。Custom API
 
 Command Code 官方 `GET /models` 是公开的供应商级目录刷新，不能证明已保存 Key 有效。供应商矩阵是唯一模型供应控制面：GOAT 预设默认开启，新发现模型默认关闭，推理返回的 401/403 才是真实 Key 鉴权信号。
 
-Custom API 是已上线的受信管理员目的地。账号卡保存 base URL、一组上游协议（Chat
-Completions、Responses、Messages，通过复选框至少选一种）、一种鉴权方案（Bearer 或 `x-api-key`），以及至少一条模型能力。对该账号而言，选定的所有协议对所有模型统一生效。**获取模型**
-只是表单中的显式操作：它使用当前配置的 base URL 发出 `GET /models`，并用新建表单输入的
-Key 或编辑时已保存的 Custom Key；返回的合法 ID 会合并到仍可编辑的模型列表，但不会保存、验证、启用或以其他方式修改账号。获取有边界，可能提示结果被截断；仍可手动填写模型 ID。
+Custom API 是已上线的受信管理员目的地。账号卡保存一个完整推理 Endpoint、一个上游协议（Chat
+Completions、Responses 或 Messages）和至少一条模型能力。该协议对账号内全部模型统一生效，也是 effective preferred protocol：同协议客户端请求直接透传，其他受支持客户端格式（包括 Gemini）统一转换到它。只有 Endpoint 以所选协议的标准路径（`/chat/completions`、`/responses` 或 `/messages`）结尾时才可 **获取模型**，此时界面推导同级 `/models`；非标准路径不猜测，仍可手动添加模型。获取不会保存、验证或启用账号。
 
 受信管理员可配置任意语法合法的 HTTP 或 HTTPS 源，包括局域网、回环与其他自选目的地。URL
-内嵌凭据、query 与 fragment 会被拒绝。Gateway 不会跟随重定向，也不会转发 dashboard 或客户端鉴权，只构造已配置的
-Bearer 或 `x-api-key`。拼接后的 endpoint 必须保持已配置的 scheme、host、port 与 base-path
-前缀。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；连接与请求超时按配置的连接超时夹到
+内嵌凭据、query 与 fragment 会被拒绝。Gateway 不会跟随重定向，也不会转发 dashboard 或客户端鉴权。Chat Completions 与 Responses 只使用 `Authorization: Bearer <key>`；Messages 只使用 `x-api-key: <key>`。不存在可配置鉴权方式、双鉴权头或 401 后换头重试。保存的完整 Endpoint 会被原样请求，不再拼接协议后缀。Custom HTTP 使用同一套进程级 Direct / Manual / Auto 代理策略；连接与请求超时按配置的连接超时夹到
 5–60 秒。
 
-Custom 验证为可选。账号可以不经验证直接创建、保存并启用；已启用但未验证时卡片会显示未验证提示。**验证** 动作仍保留，并对第一个声明模型按每个已选协议各发送一次协议正确、非流式、token
-受限的 JSON 请求；只有每个协议都返回 `2xx` JSON object 才算成功。验证不会发现或改写能力，也不会自动启用账号。合格账号（enabled
+Custom 验证为可选。账号可以不经验证直接创建、保存并启用；已启用但未验证时卡片会显示未验证提示。**验证** 动作仍保留，并使用第一个声明模型向完整 Endpoint 只发送一次所选协议的非流式、token
+受限 JSON 请求；只有返回 `2xx` JSON object 才算成功。验证不会发现或改写能力，也不会自动启用账号。合格账号（enabled
 + ready + 非空 Key）会把声明的模型 ID 暴露在带鉴权的 `GET /v1/models`
 上，并可为这些 ID 被选中。声明的能力 ID 既是客户端名称也是上游模型名；kebab ID 按大小写折叠匹配，含
 `/`、`_` 或空白的名称不会折成 kebab 别名。Custom overlay 不会抢占已公布的 Go 或 Zen Free
 别名。与另一 Plan 的唯一原始 ID 重叠时返回 `ambiguous_model_id`，且不调用上游。未声明名称仍视为未知（`400`）。更改
-base URL、Key、声明能力、协议集或鉴权方案会使验证状态变为 `pending`，但账号保持启用。上游协议与鉴权方案创建后可编辑。Custom
+Endpoint、Key、声明能力或协议会使验证状态变为 `pending`，但账号保持启用。Endpoint 与上游协议创建后可编辑，配置和完整模型能力列表在一个 CAS 事务中替换；关闭唯一声明协议会使模型不可路由，固定优先级回退或覆盖都不能启用未声明协议。Custom
 流量不计价：日志记 `cost_state=unknown`，不扣额度，也没有官方用量刷新。`MODEL_PROTOCOLS`
-仍只服务 OpenCode Go；Custom 把客户端协议转换到该账号选择的每个上游协议。
+仍只服务 OpenCode Go；Custom 把客户端协议转换到该账号唯一的上游协议。
 
 **账号** 的 **新增账号** 是分组方案列表加详情（**可添加** / **草稿方案** / **暂不可用**），不是卡片网格。Zen
 Free 是系统管理的单例，不会出现在新增列表里，只在账号列表中启停。选中 OpenCode Go

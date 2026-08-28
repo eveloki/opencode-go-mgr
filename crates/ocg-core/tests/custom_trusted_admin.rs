@@ -29,6 +29,16 @@ fn custom_origin(harness: &V2Harness) -> String {
         .to_string()
 }
 
+fn custom_endpoint(base_url: &str, protocol: &str) -> String {
+    let suffix = match protocol {
+        "chat_completions" => "chat/completions",
+        "responses" => "responses",
+        "messages" => "messages",
+        other => panic!("unsupported Custom test protocol {other}"),
+    };
+    format!("{}/{suffix}", base_url.trim_end_matches('/'))
+}
+
 fn protocol_success_replies(
     keys: &[&str],
     body: &'static str,
@@ -67,9 +77,10 @@ async fn create_verified_enabled_custom(
     key: &str,
     model_id: &str,
     protocol: &str,
-    auth_scheme: &str,
+    _auth_scheme: &str,
 ) -> Value {
     let origin = custom_origin(harness);
+    let endpoint = custom_endpoint(&origin, protocol);
     let (status, draft) = harness
         .create_account(json!({
             "provider_id": CUSTOM_PROVIDER_ID,
@@ -78,9 +89,8 @@ async fn create_verified_enabled_custom(
             "key": key,
             "expected_revision": harness.settings_revision().await,
             "custom_config": {
-                "base_url": origin,
-                "upstream_protocols": [protocol],
-                "auth_scheme": auth_scheme
+                "endpoint_url": endpoint,
+                "upstream_protocol": protocol
             },
             "model_capabilities": [{
                 "model_id": model_id,
@@ -485,9 +495,12 @@ async fn same_custom_model_uses_account_order_and_config_change_stales() {
         .put_json(
             &format!("/accounts/{}/custom-config", first["id"].as_str().unwrap()),
             &json!({
-                "base_url": format!("{}/v2", custom_origin(&harness)),
-                "upstream_protocols": ["chat_completions"],
-                "auth_scheme": "bearer"
+                "endpoint_url": format!("{}/v2/chat/completions", custom_origin(&harness)),
+                "upstream_protocol": "chat_completions",
+                "model_capabilities": [{
+                    "model_id": CUSTOM_MODEL,
+                    "protocol": "chat_completions"
+                }]
             }),
         )
         .await;
@@ -517,9 +530,8 @@ async fn custom_stream_does_not_cross_account_retry_after_output() {
                 "key": CUSTOM_ACCOUNT_KEY,
                 "expected_revision": harness.settings_revision().await,
                 "custom_config": {
-                    "base_url": origin,
-                    "upstream_protocols": ["chat_completions"],
-                    "auth_scheme": "bearer"
+                    "endpoint_url": custom_endpoint(&origin, "chat_completions"),
+                    "upstream_protocol": "chat_completions"
                 },
                 "model_capabilities": [{
                     "model_id": CUSTOM_MODEL,
@@ -554,9 +566,8 @@ async fn custom_stream_does_not_cross_account_retry_after_output() {
                 "key": CUSTOM_KEY_2,
                 "expected_revision": harness.settings_revision().await,
                 "custom_config": {
-                    "base_url": origin,
-                    "upstream_protocols": ["chat_completions"],
-                    "auth_scheme": "bearer"
+                    "endpoint_url": custom_endpoint(&origin, "chat_completions"),
+                    "upstream_protocol": "chat_completions"
                 },
                 "model_capabilities": [{
                     "model_id": CUSTOM_MODEL,
@@ -648,9 +659,10 @@ async fn create_pending_custom(
     key: &str,
     model_id: &str,
     protocol: &str,
-    auth_scheme: &str,
+    _auth_scheme: &str,
     base_url: &str,
 ) -> Value {
+    let endpoint = custom_endpoint(base_url, protocol);
     let (status, draft) = harness
         .create_account(json!({
             "provider_id": CUSTOM_PROVIDER_ID,
@@ -659,9 +671,8 @@ async fn create_pending_custom(
             "key": key,
             "expected_revision": harness.settings_revision().await,
             "custom_config": {
-                "base_url": base_url,
-                "upstream_protocols": [protocol],
-                "auth_scheme": auth_scheme
+                "endpoint_url": endpoint,
+                "upstream_protocol": protocol
             },
             "model_capabilities": [{
                 "model_id": model_id,
@@ -891,9 +902,12 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
             .put_json(
                 &format!("/accounts/{id}/custom-config"),
                 &json!({
-                    "base_url": "http://127.0.0.1:1",
-                    "upstream_protocols": ["chat_completions"],
-                    "auth_scheme": "bearer"
+                    "endpoint_url": "http://127.0.0.1:1/v1/chat/completions",
+                    "upstream_protocol": "chat_completions",
+                    "model_capabilities": [{
+                        "model_id": CUSTOM_MODEL,
+                        "protocol": "chat_completions"
+                    }]
                 }),
             )
             .await;
@@ -904,8 +918,8 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         let after = harness.account_by_id(&id).await;
         assert_eq!(after["verification_status"].as_str(), Some("pending"));
         assert_eq!(
-            after["custom_config"]["base_url"].as_str(),
-            Some("http://127.0.0.1:1")
+            after["custom_config"]["endpoint_url"].as_str(),
+            Some("http://127.0.0.1:1/v1/chat/completions")
         );
         harness.shutdown();
     }

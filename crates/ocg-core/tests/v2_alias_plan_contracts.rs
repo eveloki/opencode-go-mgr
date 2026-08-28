@@ -637,11 +637,11 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         "Custom is catalog-routable but create stays a disabled pending draft: {body}"
     );
     assert_eq!(
-        body["custom_config"]["base_url"]
+        body["custom_config"]["endpoint_url"]
             .as_str()
-            .map(|value| value.trim_end_matches('/')),
+            .map(|value| value.trim_end_matches("/chat/completions")),
         Some(harness.upstream_base_url.trim_end_matches('/')),
-        "Custom create must persist custom_config.base_url: {body}"
+        "Custom create must persist the complete custom_config.endpoint_url: {body}"
     );
     let capabilities = body["model_capabilities"]
         .as_array()

@@ -12,7 +12,7 @@
 //! forbidden-header helpers.
 
 use crate::models::{AppConfig, ProxyMode};
-use crate::provider::{ProviderBindingError, UpstreamAuthScheme};
+use crate::provider::{ProviderBindingError, UpstreamAuthScheme, UpstreamProtocolKind};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -36,31 +36,47 @@ pub struct CustomUrlTarget {
     pub host: CustomUrlHost,
 }
 
-/// Syntactic Custom base-URL gate. Administrators explicitly trust Custom
+/// Syntactic Custom inference-endpoint gate. Administrators explicitly trust Custom
 /// destinations, so any http/https origin is accepted. Credentials and
 /// non-HTTP(S) schemes stay rejected; DNS / IP / hostname policy is not applied.
-pub fn validate_custom_base_url(value: &str) -> Result<String, ProviderBindingError> {
+pub fn validate_custom_endpoint_url(value: &str) -> Result<String, ProviderBindingError> {
     let value = value.trim();
     if value.is_empty() {
         return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL is required".to_string(),
+            "endpoint URL is required".to_string(),
         ));
     }
     if value.len() > 2048 {
         return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL is too long".to_string(),
+            "endpoint URL is too long".to_string(),
         ));
     }
     let parsed = reqwest::Url::parse(value).map_err(|error| {
-        ProviderBindingError::InvalidCustomBaseUrl(format!("invalid base URL: {error}"))
+        ProviderBindingError::InvalidCustomBaseUrl(format!("invalid endpoint URL: {error}"))
     })?;
     inspect_custom_url(&parsed)?;
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL must not include a query or fragment".to_string(),
+            "endpoint URL must not include a query or fragment".to_string(),
         ));
     }
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+pub fn parse_custom_endpoint_url(value: &str) -> Result<reqwest::Url, CustomHttpError> {
+    let canonical = validate_custom_endpoint_url(value).map_err(CustomHttpError::from)?;
+    reqwest::Url::parse(&canonical)
+        .map_err(|error| CustomHttpError::InvalidUrl(format!("invalid endpoint URL: {error}")))
+}
+
+/// Custom authentication is a protocol invariant, not user configuration.
+pub const fn custom_auth_scheme(protocol: UpstreamProtocolKind) -> UpstreamAuthScheme {
+    match protocol {
+        UpstreamProtocolKind::ChatCompletions | UpstreamProtocolKind::Responses => {
+            UpstreamAuthScheme::Bearer
+        }
+        UpstreamProtocolKind::Messages => UpstreamAuthScheme::XApiKey,
+    }
 }
 
 /// Inspect scheme, credentials, and host of a Custom URL.
@@ -71,12 +87,12 @@ pub fn validate_custom_base_url(value: &str) -> Result<String, ProviderBindingEr
 pub fn inspect_custom_url(parsed: &reqwest::Url) -> Result<CustomUrlTarget, ProviderBindingError> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL must use http or https".to_string(),
+            "endpoint URL must use http or https".to_string(),
         ));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(ProviderBindingError::InvalidCustomBaseUrl(
-            "base URL must not include credentials".to_string(),
+            "endpoint URL must not include credentials".to_string(),
         ));
     }
     Ok(CustomUrlTarget {
@@ -86,7 +102,7 @@ pub fn inspect_custom_url(parsed: &reqwest::Url) -> Result<CustomUrlTarget, Prov
 
 fn custom_url_host(parsed: &reqwest::Url) -> Result<CustomUrlHost, ProviderBindingError> {
     let host = parsed.host().ok_or_else(|| {
-        ProviderBindingError::InvalidCustomBaseUrl("base URL must include a host".to_string())
+        ProviderBindingError::InvalidCustomBaseUrl("endpoint URL must include a host".to_string())
     })?;
     // `url::Host` is not a direct dependency (manifests stay frozen). IPv6
     // Display includes brackets; strip them to recover the parsed `Ipv6Addr`.
@@ -362,15 +378,6 @@ pub fn build_custom_http_client(config: &AppConfig) -> Result<CustomHttpClient, 
     })
 }
 
-/// Join `path` onto a persisted Custom base URL while keeping the origin and
-/// path prefix. Absolute URLs, protocol-relative targets, decoded dot-segments,
-/// encoded slash/backslash, and nested percent-encoding are rejected as
-/// endpoint override.
-pub fn join_custom_endpoint(base_url: &str, path: &str) -> Result<reqwest::Url, CustomHttpError> {
-    let canonical = validate_custom_base_url(base_url).map_err(CustomHttpError::from)?;
-    join_inference_endpoint(&canonical, path).map_err(CustomHttpError::from)
-}
-
 const FORBIDDEN_CLIENT_HEADERS: &[&str] = &[
     "cookie",
     "set-cookie",
@@ -580,71 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn join_custom_endpoint_preserves_prefix_and_rejects_override() {
-        let joined =
-            join_custom_endpoint("https://api.example.com/v1", "chat/completions").unwrap();
-        assert_eq!(
-            joined.as_str(),
-            "https://api.example.com/v1/chat/completions"
-        );
-        let absolute_slash =
-            join_custom_endpoint("https://api.example.com/v1", "/chat/completions").unwrap();
-        assert_eq!(
-            absolute_slash.as_str(),
-            "https://api.example.com/v1/chat/completions"
-        );
-        assert_eq!(
-            join_custom_endpoint("https://api.example.com", "v1/models")
-                .unwrap()
-                .as_str(),
-            "https://api.example.com/v1/models"
-        );
-        assert_eq!(
-            join_custom_endpoint("http://127.0.0.1:9/v1", "messages")
-                .unwrap()
-                .as_str(),
-            "http://127.0.0.1:9/v1/messages"
-        );
-        assert_eq!(
-            join_custom_endpoint("http://10.0.0.8/prefix", "responses")
-                .unwrap()
-                .as_str(),
-            "http://10.0.0.8/prefix/responses"
-        );
-        assert!(
-            join_custom_endpoint("https://api.example.com/v1", "https://evil.example/x").is_err()
-        );
-        assert!(join_custom_endpoint("https://api.example.com/v1", "//evil.example/x").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "../admin").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "foo/../admin").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "foo/./bar").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "%2e%2e/admin").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "foo/%2e%2e/admin").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "foo%2fadmin").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "foo%2Fadmin").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "foo%5cadmin").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "foo%5Cadmin").is_err());
-        assert!(join_custom_endpoint("https://api.example.com/v1", "%252e%252e/admin").is_err());
-        assert!(
-            join_custom_endpoint("https://api.example.com/v1", "foo/%252E%252E/admin").is_err()
-        );
-        assert!(
-            join_custom_endpoint("https://api.example.com/v1", "%252f%252fevil.example/x").is_err()
-        );
-        assert!(join_custom_endpoint("https://api.example.com/v1", "foo%255cadmin").is_err());
-        assert!(
-            join_custom_endpoint("https://api.example.com/v1", "%25252e%25252e/admin").is_err()
-        );
-        assert!(join_custom_endpoint("https://api.example.com/v1", "nested%2520space").is_err());
-        assert_eq!(
-            join_custom_endpoint("https://api.example.com/v1", "hello%20world")
-                .unwrap()
-                .as_str(),
-            "https://api.example.com/v1/hello%20world"
-        );
-    }
-
-    #[test]
     fn http_inference_transport_is_policy_neutral_and_owns_join_auth_and_timeout() {
         let spec_none = HttpInferenceTransportSpec::no_redirects();
         let spec_follow = HttpInferenceTransportSpec::follow_redirects();
@@ -684,12 +626,6 @@ mod tests {
             with_userinfo.is_ok(),
             "neutral join must not apply Custom URL trust validation"
         );
-        assert!(
-            join_custom_endpoint("https://user:pass@api.example.com/v1", "chat/completions")
-                .is_err(),
-            "Custom join keeps credential rejection"
-        );
-
         let bearer =
             HttpInferenceTransport::isolated_headers(UpstreamAuthScheme::Bearer, "sk-test")
                 .unwrap();

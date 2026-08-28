@@ -41,7 +41,7 @@ Anthropic, Gemini, or Claude Desktop format.
     (system browser)              clients + Key
                \                    /
                 v                  v
-              SQLite schema v31 (local only)
+              SQLite schema v32 (local only)
 ```
 
 Text diagrams for request flow, Plans, the seven dashboard views, and protocol

@@ -1,8 +1,6 @@
 use crate::kernel::protocol::model_protocol;
 use crate::models::UpstreamChannel;
-use crate::provider::{
-    COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_MESSAGES_PATH, UpstreamAuthScheme,
-};
+use crate::provider::{COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_MESSAGES_PATH};
 use axum::http::StatusCode;
 use bytes::Bytes;
 use serde_json::{Value, json};
@@ -116,8 +114,7 @@ pub struct MaterializeSpec {
 /// Isolated Custom origin and auth scheme materialized per account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomRouteSpec {
-    pub base_url: String,
-    pub auth_scheme: UpstreamAuthScheme,
+    pub endpoint_url: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolError {

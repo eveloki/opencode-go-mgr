@@ -5,9 +5,9 @@ import { providerApi } from "../api/providers.ts";
 import type { ProviderUsageResponse } from "../api/providers.ts";
 import type {
   Account,
+  AccountCustomConfigUpdateInput,
   AccountInput,
   AccountModelCapabilityInput,
-  AccountProtocol,
   AccountUpdate,
   UsageWindow,
 } from "../api/dashboard.ts";
@@ -116,7 +116,7 @@ export const useAccountsStore = defineStore("accounts", () => {
     return mutate(() => dashboardApi.verifyAccountConnection(id).then(applyAccount));
   }
 
-  async function putCustomConfig(id: string, config: { base_url: string; upstream_protocols: AccountProtocol[]; auth_scheme: "bearer" | "x-api-key" }): Promise<Account> {
+  async function putCustomConfig(id: string, config: AccountCustomConfigUpdateInput): Promise<Account> {
     return mutate(() => dashboardApi.updateAccountCustomConfig(id, config).then(applyAccount));
   }
 

@@ -2,16 +2,16 @@
 //! per-account route identity.
 //!
 //! Account model capabilities are the client-facing IDs and the exact upstream
-//! IDs, expanded over the account-level protocol set. Verification sends one
-//! protocol-correct non-stream request per declared protocol against the first
-//! declared model. Discovery never mutates the declared list.
+//! IDs, each bound to the account's one upstream protocol. Verification sends
+//! one protocol-correct non-stream request against the first declared model.
+//! Discovery never mutates the declared list.
 //! The adapter identity is Configurable HTTP, not a base class other providers
-//! inherit from. Custom keeps configurable URL/auth and explicit enablement;
+//! inherit from. Custom keeps a configurable full endpoint and explicit enablement;
 //! connection verification is an optional tool, not an enablement gate.
 
 use crate::custom_http::{
-    self, CustomHttpClient, CustomHttpError, HttpInferenceTransport, InferenceHttpError,
-    join_custom_endpoint, json_content_headers,
+    self, CustomHttpClient, HttpInferenceTransport, InferenceHttpError, custom_auth_scheme,
+    json_content_headers, parse_custom_endpoint_url,
 };
 use crate::kernel::ids::{CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID};
 use crate::kernel::protocol::ApiFormat;
@@ -20,9 +20,7 @@ use crate::models::{
     AccountModelCapabilityInput, AppConfig, CustomModelDiscoveryResult,
 };
 use crate::provider::ConnectionVerificationStatus;
-use crate::provider::{
-    UpstreamAuthScheme, UpstreamProtocolKind, custom_endpoint_relative_path, is_custom_api,
-};
+use crate::provider::{UpstreamProtocolKind, is_custom_api};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -35,7 +33,7 @@ pub use crate::kernel::ids::custom_model_id_matches;
 /// Custom destination URL trust policy lives with the outbound boundary in
 /// [`crate::custom_http`]; re-exported here for the Custom runtime surface.
 pub use crate::custom_http::{
-    CustomUrlHost, CustomUrlTarget, inspect_custom_url, validate_custom_base_url,
+    CustomUrlHost, CustomUrlTarget, inspect_custom_url, validate_custom_endpoint_url,
 };
 
 /// Upper bound for a Custom verification response. The probe only needs a 2xx
@@ -69,7 +67,6 @@ pub struct CustomAccountRuntime {
 impl CustomAccountRuntime {
     pub fn eligible(&self) -> bool {
         self.enabled
-            && self.verification_status == ConnectionVerificationStatus::Verified
             && self.setup_ready
             && self.has_key
             && is_custom_api(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
@@ -124,13 +121,6 @@ pub fn api_format_for_custom_protocol(protocol: UpstreamProtocolKind) -> ApiForm
     }
 }
 
-pub fn join_custom_protocol_url(
-    base_url: &str,
-    protocol: UpstreamProtocolKind,
-) -> Result<reqwest::Url, CustomHttpError> {
-    join_custom_endpoint(base_url, custom_endpoint_relative_path(protocol))
-}
-
 /// Immutable identity of the Custom account a verification probe was issued
 /// against. Commit is allowed only when this exact contract still exists and
 /// the account is still unverified (`pending` or `failed`).
@@ -141,9 +131,8 @@ pub struct CustomVerificationContract {
     pub account_updated_at: String,
     /// Encrypted key ciphertext, not the plaintext secret.
     pub key_cipher: String,
-    pub base_url: String,
-    pub upstream_protocols: Vec<UpstreamProtocolKind>,
-    pub auth_scheme: UpstreamAuthScheme,
+    pub endpoint_url: String,
+    pub upstream_protocol: UpstreamProtocolKind,
     /// Declared capability IDs in persistence order.
     pub capabilities: Vec<(String, UpstreamProtocolKind)>,
 }
@@ -160,9 +149,8 @@ impl CustomVerificationContract {
             account_id: account_id.into(),
             account_updated_at: account_updated_at.into(),
             key_cipher: key_cipher.into(),
-            base_url: config.base_url.clone(),
-            upstream_protocols: config.upstream_protocols.clone(),
-            auth_scheme: config.auth_scheme,
+            endpoint_url: config.endpoint_url.clone(),
+            upstream_protocol: config.upstream_protocol,
             capabilities: capabilities
                 .iter()
                 .map(|capability| (capability.model_id.clone(), capability.protocol))
@@ -189,8 +177,8 @@ impl fmt::Display for CustomModelDiscoveryFailure {
 
 impl std::error::Error for CustomModelDiscoveryFailure {}
 
-/// Fetch declared model IDs from the one safe endpoint formed by the Custom
-/// base URL. This never probes completion endpoints and never writes account
+/// Fetch declared model IDs from the standard `/models` endpoint derived from
+/// the configured inference endpoint. This never probes completion endpoints or writes account
 /// state. OpenAI- and Anthropic-compatible list envelopes both use `data`.
 pub async fn discover_custom_models(
     config: &AppConfig,
@@ -219,17 +207,13 @@ async fn discover_custom_models_inner(
             message: "Custom model discovery requires an API key".to_string(),
         });
     }
-    let mut url = join_custom_endpoint(&input.base_url, "models").map_err(|error| {
-        CustomModelDiscoveryFailure {
-            message: format!("invalid Custom model discovery endpoint: {error}"),
-        }
-    })?;
+    let mut url = derive_custom_models_endpoint(&input.endpoint_url, input.upstream_protocol)?;
     let client = custom_http::build_custom_http_client(config).map_err(|error| {
         CustomModelDiscoveryFailure {
             message: format!("failed to build Custom HTTP client: {error}"),
         }
     })?;
-    let headers = model_discovery_headers(discovery_dialect(input)?);
+    let headers = model_discovery_headers(input.upstream_protocol);
     let timeout = Some(model_discovery_request_timeout(config));
     let mut models = Vec::new();
     let mut seen_models = HashSet::new();
@@ -240,7 +224,7 @@ async fn discover_custom_models_inner(
             .send_isolated(
                 reqwest::Method::GET,
                 url.clone(),
-                input.auth_scheme,
+                custom_auth_scheme(input.upstream_protocol),
                 api_key,
                 headers.clone(),
                 None,
@@ -297,18 +281,33 @@ fn model_discovery_request_timeout(config: &AppConfig) -> Duration {
     )
 }
 
-/// Discovery keeps a single dialect: the first protocol of the declared set.
-/// `/models` list semantics are identical across the three dialects.
-fn discovery_dialect(
-    input: &AccountCustomConfigInput,
-) -> Result<UpstreamProtocolKind, CustomModelDiscoveryFailure> {
-    input
-        .upstream_protocols
-        .first()
-        .copied()
-        .ok_or_else(|| CustomModelDiscoveryFailure {
-            message: "custom config requires at least one upstream protocol".to_string(),
-        })
+pub fn derive_custom_models_endpoint(
+    endpoint_url: &str,
+    protocol: UpstreamProtocolKind,
+) -> Result<reqwest::Url, CustomModelDiscoveryFailure> {
+    let mut url =
+        parse_custom_endpoint_url(endpoint_url).map_err(|error| CustomModelDiscoveryFailure {
+            message: format!("invalid Custom inference endpoint: {error}"),
+        })?;
+    let suffix = match protocol {
+        UpstreamProtocolKind::ChatCompletions => "/chat/completions",
+        UpstreamProtocolKind::Responses => "/responses",
+        UpstreamProtocolKind::Messages => "/messages",
+    };
+    let path = url.path().trim_end_matches('/');
+    let prefix = path.strip_suffix(suffix).ok_or_else(|| CustomModelDiscoveryFailure {
+        message: format!(
+            "cannot derive Custom /models endpoint: the configured {:?} endpoint must end with `{suffix}`; add model IDs manually",
+            protocol
+        ),
+    })?;
+    let models_path = if prefix.is_empty() {
+        "/models".to_string()
+    } else {
+        format!("{}/models", prefix.trim_end_matches('/'))
+    };
+    url.set_path(&models_path);
+    Ok(url)
 }
 
 fn model_discovery_headers(protocol: UpstreamProtocolKind) -> reqwest::header::HeaderMap {
@@ -491,43 +490,26 @@ pub fn first_declared_capability(
     capabilities.first()
 }
 
-/// Write-expansion invariant: every capability protocol belongs to the
-/// account-level protocol set, and the written rows are exactly the full
-/// "declared model x selected protocol" expansion. Partial expansions are
-/// rejected so stored rows always mirror the account-level protocol set.
+/// Every declared model has exactly one capability row using the account's
+/// single upstream protocol.
 pub fn validate_custom_capability_expansion(
-    protocols: &[UpstreamProtocolKind],
+    protocol: UpstreamProtocolKind,
     capabilities: &[AccountModelCapabilityInput],
 ) -> Result<(), String> {
+    let mut seen = HashSet::new();
     for capability in capabilities {
-        if !protocols.contains(&capability.protocol) {
+        if capability.protocol != protocol {
             return Err(
-                "model capability protocol must be in account custom_config.upstream_protocols"
+                "model capability protocol must equal account custom_config.upstream_protocol"
                     .to_string(),
             );
         }
-    }
-    let mut declared_models: Vec<&str> = Vec::new();
-    for capability in capabilities {
-        if !declared_models.contains(&capability.model_id.as_str()) {
-            declared_models.push(capability.model_id.as_str());
+        if !seen.insert(capability.model_id.to_ascii_lowercase()) {
+            return Err(format!(
+                "duplicate model capability `{}` for the single Custom upstream protocol",
+                capability.model_id
+            ));
         }
-    }
-    let mut expected_pairs = HashSet::new();
-    for model_id in &declared_models {
-        for protocol in protocols {
-            expected_pairs.insert((*model_id, protocol.as_str()));
-        }
-    }
-    let actual_pairs: HashSet<(&str, &str)> = capabilities
-        .iter()
-        .map(|capability| (capability.model_id.as_str(), capability.protocol.as_str()))
-        .collect();
-    if actual_pairs != expected_pairs {
-        return Err(
-            "model capabilities must expand every declared model over every selected upstream protocol"
-                .to_string(),
-        );
     }
     Ok(())
 }
@@ -562,34 +544,24 @@ pub fn minimal_verification_body(
     })
 }
 
-/// POST one protocol-correct non-stream request per declared upstream
-/// protocol, each against the first declared model. Only a 2xx JSON object
-/// from every protocol proves verified. Never uses GET /models and never
-/// mutates capabilities.
+/// POST one protocol-correct non-stream request to the configured full endpoint.
+/// Only a 2xx JSON object proves verified. Never uses GET /models or mutates capabilities.
 pub async fn probe_custom_connection(
     config: &AppConfig,
     custom_config: &AccountCustomConfig,
     first_capability: &AccountModelCapability,
     api_key: &str,
 ) -> Result<(), CustomVerifyFailure> {
-    if custom_config.upstream_protocols.is_empty() {
-        return Err(CustomVerifyFailure {
-            message: "custom config requires at least one upstream protocol".to_string(),
-        });
-    }
     let client = CustomHttpClient::from_config(config)?;
-    for protocol in &custom_config.upstream_protocols {
-        probe_custom_protocol(
-            config,
-            custom_config,
-            *protocol,
-            &first_capability.model_id,
-            api_key,
-            &client,
-        )
-        .await?;
-    }
-    Ok(())
+    probe_custom_protocol(
+        config,
+        custom_config,
+        custom_config.upstream_protocol,
+        &first_capability.model_id,
+        api_key,
+        &client,
+    )
+    .await
 }
 
 async fn probe_custom_protocol(
@@ -600,7 +572,7 @@ async fn probe_custom_protocol(
     api_key: &str,
     client: &CustomHttpClient,
 ) -> Result<(), CustomVerifyFailure> {
-    let url = join_custom_protocol_url(&custom_config.base_url, protocol).map_err(|error| {
+    let url = parse_custom_endpoint_url(&custom_config.endpoint_url).map_err(|error| {
         CustomVerifyFailure {
             message: format!("invalid Custom verification endpoint: {error}"),
         }
@@ -616,7 +588,7 @@ async fn probe_custom_protocol(
         .send_isolated(
             reqwest::Method::POST,
             url,
-            custom_config.auth_scheme,
+            custom_auth_scheme(protocol),
             api_key,
             extra,
             Some(body),
@@ -684,49 +656,56 @@ mod tests {
     use std::net::IpAddr;
 
     #[test]
-    fn custom_base_url_trusts_administrator_http_origins_and_rejects_credentials() {
+    fn custom_endpoint_url_trusts_administrator_http_origins_and_rejects_credentials() {
         use crate::provider::validate_custom_model_id;
 
-        assert!(validate_custom_base_url("https://api.example.com/v1").is_ok());
-        assert!(validate_custom_base_url("http://127.0.0.1:8080/v1").is_ok());
-        assert!(validate_custom_base_url("http://localhost:3000").is_ok());
-        assert!(validate_custom_base_url("http://app.localhost/v1").is_ok());
-        assert!(validate_custom_base_url("http://api.example.com/v1").is_ok());
-        assert!(validate_custom_base_url("https://192.168.1.8/v1").is_ok());
-        assert!(validate_custom_base_url("http://10.0.0.1:9000/v1").is_ok());
-        assert!(validate_custom_base_url("https://169.254.169.254/latest").is_ok());
-        assert!(validate_custom_base_url("http://metadata.google.internal/").is_ok());
-        assert!(validate_custom_base_url("https://[::ffff:169.254.169.254]/").is_ok());
-        assert!(validate_custom_base_url("https://[2001:db8::1]/v1").is_ok());
-        assert!(validate_custom_base_url("https://user:pass@api.example.com").is_err());
-        assert!(validate_custom_base_url("https://api.example.com/v1?x=1").is_err());
-        assert!(validate_custom_base_url("https://api.example.com/v1#frag").is_err());
-        assert!(validate_custom_base_url("javascript:alert(1)").is_err());
-        assert!(validate_custom_base_url("ftp://api.example.com/v1").is_err());
+        assert!(validate_custom_endpoint_url("https://api.example.com/v1/responses").is_ok());
+        assert!(validate_custom_endpoint_url("http://127.0.0.1:8080/v1/messages").is_ok());
+        assert!(validate_custom_endpoint_url("http://localhost:3000/chat/completions").is_ok());
+        assert!(validate_custom_endpoint_url("http://app.localhost/v1/responses").is_ok());
+        assert!(validate_custom_endpoint_url("http://api.example.com/v1/responses").is_ok());
+        assert!(validate_custom_endpoint_url("https://192.168.1.8/v1/responses").is_ok());
+        assert!(validate_custom_endpoint_url("http://10.0.0.1:9000/v1/messages").is_ok());
+        assert!(validate_custom_endpoint_url("https://169.254.169.254/latest").is_ok());
+        assert!(validate_custom_endpoint_url("http://metadata.google.internal/messages").is_ok());
+        assert!(validate_custom_endpoint_url("https://[::ffff:169.254.169.254]/responses").is_ok());
+        assert!(validate_custom_endpoint_url("https://[2001:db8::1]/v1/responses").is_ok());
+        assert!(
+            validate_custom_endpoint_url("https://user:pass@api.example.com/messages").is_err()
+        );
+        assert!(validate_custom_endpoint_url("https://api.example.com/responses?x=1").is_err());
+        assert!(validate_custom_endpoint_url("https://api.example.com/responses#frag").is_err());
+        assert!(validate_custom_endpoint_url("javascript:alert(1)").is_err());
+        assert!(validate_custom_endpoint_url("ftp://api.example.com/responses").is_err());
         assert_eq!(
             validate_custom_model_id("deepseek/deepseek-v4-flash").unwrap(),
             "deepseek/deepseek-v4-flash"
         );
         assert!(validate_custom_model_id("").is_err());
         assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::ChatCompletions),
-            "chat/completions"
+            derive_custom_models_endpoint(
+                "https://api.example.com/v1/chat/completions",
+                UpstreamProtocolKind::ChatCompletions,
+            )
+            .unwrap()
+            .as_str(),
+            "https://api.example.com/v1/models"
         );
-        assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::Responses),
-            "responses"
-        );
-        assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::Messages),
-            "messages"
+        assert!(
+            derive_custom_models_endpoint(
+                "https://api.example.com/v1/custom-chat",
+                UpstreamProtocolKind::ChatCompletions,
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn custom_url_host_uses_url_host_not_bracketed_host_str() {
-        assert!(validate_custom_base_url("http://[::ffff:127.0.0.1]/v1").is_ok());
-        assert!(validate_custom_base_url("http://[::1]/v1").is_ok());
-        let mapped_loopback = validate_custom_base_url("http://[::ffff:127.0.0.1]/v1").unwrap();
+        assert!(validate_custom_endpoint_url("http://[::ffff:127.0.0.1]/v1/responses").is_ok());
+        assert!(validate_custom_endpoint_url("http://[::1]/v1/responses").is_ok());
+        let mapped_loopback =
+            validate_custom_endpoint_url("http://[::ffff:127.0.0.1]/v1/responses").unwrap();
         let parsed = reqwest::Url::parse(&mapped_loopback).unwrap();
         match inspect_custom_url(&parsed).unwrap().host {
             CustomUrlHost::Ip(ip) => {
@@ -736,7 +715,8 @@ mod tests {
                 panic!("mapped loopback must stay an IP host, got {domain}")
             }
         }
-        let metadata = validate_custom_base_url("https://[::ffff:169.254.169.254]/latest").unwrap();
+        let metadata =
+            validate_custom_endpoint_url("https://[::ffff:169.254.169.254]/latest").unwrap();
         let parsed = reqwest::Url::parse(&metadata).unwrap();
         match inspect_custom_url(&parsed).unwrap().host {
             CustomUrlHost::Ip(_) => {}
@@ -747,14 +727,14 @@ mod tests {
     }
 
     #[test]
-    fn custom_base_url_normalizes_decimal_loopback_literals() {
+    fn custom_endpoint_url_normalizes_decimal_loopback_literals() {
         assert_eq!(
-            validate_custom_base_url("http://127.1:8080/v1").unwrap(),
-            "http://127.0.0.1:8080/v1"
+            validate_custom_endpoint_url("http://127.1:8080/v1/responses").unwrap(),
+            "http://127.0.0.1:8080/v1/responses"
         );
         assert_eq!(
-            validate_custom_base_url("http://127.0.1/v1").unwrap(),
-            "http://127.0.0.1/v1"
+            validate_custom_endpoint_url("http://127.0.1/v1/responses").unwrap(),
+            "http://127.0.0.1/v1/responses"
         );
         let parsed = reqwest::Url::parse("http://127.1/v1").unwrap();
         match inspect_custom_url(&parsed).unwrap().host {
@@ -764,62 +744,63 @@ mod tests {
     }
 
     #[test]
-    fn custom_base_url_errors_keep_existing_variants_and_messages() {
+    fn custom_endpoint_url_errors_keep_existing_variants_and_messages() {
         assert_eq!(
-            validate_custom_base_url("").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl("base URL is required".to_string())
+            validate_custom_endpoint_url("").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl("endpoint URL is required".to_string())
         );
         assert_eq!(
-            validate_custom_base_url("   ").unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl("base URL is required".to_string())
+            validate_custom_endpoint_url("   ").unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl("endpoint URL is required".to_string())
         );
         let too_long = format!("https://api.example.com/{}", "a".repeat(2048));
         assert_eq!(
-            validate_custom_base_url(&too_long).unwrap_err(),
-            ProviderBindingError::InvalidCustomBaseUrl("base URL is too long".to_string())
+            validate_custom_endpoint_url(&too_long).unwrap_err(),
+            ProviderBindingError::InvalidCustomBaseUrl("endpoint URL is too long".to_string())
         );
-        let parsed_err = validate_custom_base_url("not a url").unwrap_err();
+        let parsed_err = validate_custom_endpoint_url("not a url").unwrap_err();
         match parsed_err {
             ProviderBindingError::InvalidCustomBaseUrl(message) => {
-                assert!(message.starts_with("invalid base URL: "), "{message}");
+                assert!(message.starts_with("invalid endpoint URL: "), "{message}");
             }
             other => panic!("expected InvalidCustomBaseUrl, got {other:?}"),
         }
         assert_eq!(
-            validate_custom_base_url("https://api.example.com/v1?x=1").unwrap_err(),
+            validate_custom_endpoint_url("https://api.example.com/v1/responses?x=1").unwrap_err(),
             ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must not include a query or fragment".to_string()
+                "endpoint URL must not include a query or fragment".to_string()
             )
         );
         assert_eq!(
-            validate_custom_base_url("https://api.example.com/v1#frag").unwrap_err(),
+            validate_custom_endpoint_url("https://api.example.com/v1/responses#frag").unwrap_err(),
             ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must not include a query or fragment".to_string()
+                "endpoint URL must not include a query or fragment".to_string()
             )
         );
         assert_eq!(
-            validate_custom_base_url("ftp://api.example.com/v1").unwrap_err(),
+            validate_custom_endpoint_url("ftp://api.example.com/v1/responses").unwrap_err(),
             ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must use http or https".to_string()
+                "endpoint URL must use http or https".to_string()
             )
         );
         assert_eq!(
-            validate_custom_base_url("javascript:alert(1)").unwrap_err(),
+            validate_custom_endpoint_url("javascript:alert(1)").unwrap_err(),
             ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must use http or https".to_string()
+                "endpoint URL must use http or https".to_string()
             )
         );
         assert_eq!(
-            validate_custom_base_url("https://user:pass@api.example.com").unwrap_err(),
+            validate_custom_endpoint_url("https://user:pass@api.example.com/responses")
+                .unwrap_err(),
             ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must not include credentials".to_string()
+                "endpoint URL must not include credentials".to_string()
             )
         );
         let hostless = reqwest::Url::parse("file:///tmp").unwrap();
         assert_eq!(
             inspect_custom_url(&hostless).unwrap_err(),
             ProviderBindingError::InvalidCustomBaseUrl(
-                "base URL must use http or https".to_string()
+                "endpoint URL must use http or https".to_string()
             )
         );
     }
@@ -853,9 +834,8 @@ mod tests {
             has_key: true,
             config: AccountCustomConfig {
                 account_id: "acc".into(),
-                base_url: "http://127.0.0.1:9".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
+                endpoint_url: "http://127.0.0.1:9/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             },
@@ -927,7 +907,11 @@ mod tests {
 
     #[test]
     fn model_discovery_cursor_replaces_query_and_rejects_loops() {
-        let mut url = join_custom_endpoint("https://api.example.com/v1", "models").unwrap();
+        let mut url = derive_custom_models_endpoint(
+            "https://api.example.com/v1/responses",
+            UpstreamProtocolKind::Responses,
+        )
+        .unwrap();
         let mut cursors = HashSet::new();
         advance_model_discovery_cursor(&mut url, &mut cursors, "first").unwrap();
         assert_eq!(
@@ -1006,12 +990,8 @@ mod tests {
     fn verification_contract_identity_covers_revision_key_config_and_order() {
         let config = AccountCustomConfig {
             account_id: "acc".into(),
-            base_url: "http://127.0.0.1:9".into(),
-            upstream_protocols: vec![
-                UpstreamProtocolKind::Responses,
-                UpstreamProtocolKind::Messages,
-            ],
-            auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
+            endpoint_url: "http://127.0.0.1:9/v1/responses".into(),
+            upstream_protocol: UpstreamProtocolKind::Responses,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1035,13 +1015,7 @@ mod tests {
             CustomVerificationContract::from_parts("acc", "rev-1", "cipher-a", &config, &caps);
         assert_eq!(contract.account_updated_at, "rev-1");
         assert_eq!(contract.key_cipher, "cipher-a");
-        assert_eq!(
-            contract.upstream_protocols,
-            vec![
-                UpstreamProtocolKind::Responses,
-                UpstreamProtocolKind::Messages
-            ]
-        );
+        assert_eq!(contract.upstream_protocol, UpstreamProtocolKind::Responses);
         assert_eq!(
             contract.capabilities,
             vec![
@@ -1093,9 +1067,8 @@ mod tests {
         };
         let custom_config = AccountCustomConfig {
             account_id: "acc".into(),
-            base_url: format!("http://127.0.0.1:{}", addr.port()),
-            upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-            auth_scheme: crate::provider::UpstreamAuthScheme::Bearer,
+            endpoint_url: format!("http://127.0.0.1:{}/v1/chat/completions", addr.port()),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

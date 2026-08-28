@@ -28,7 +28,7 @@ Default bind is `127.0.0.1:9042`. Override with `serve --host 0.0.0.0` and `serv
 
 ## Authentication
 
-Gateway API endpoints need the **Key** in one of three header forms: `Authorization: Bearer <key>`, `x-api-key: <key>`, or `x-goog-api-key: <key>`. The gateway strips the client auth header before forwarding and injects the selected account's credential instead. OpenCode Go sends `x-api-key` to Messages upstreams and `Authorization: Bearer` to Chat Completions / Responses. Custom API builds only its configured Bearer or `x-api-key` header and never forwards dashboard or client credentials.
+Gateway API endpoints need the **Key** in one of three header forms: `Authorization: Bearer <key>`, `x-api-key: <key>`, or `x-goog-api-key: <key>`. The gateway strips the client auth header before forwarding and injects the selected account's credential instead. OpenCode Go sends `x-api-key` to Messages upstreams and `Authorization: Bearer` to Chat Completions / Responses. Custom API derives the one upstream header from its selected protocol: Messages uses `x-api-key`, while Chat Completions and Responses use Bearer. It never sends both or forwards dashboard/client credentials.
 
 Dashboard auth depends on the listener bind. The current SPA uses `/dashboard/api/v3/auth/status`, `/dashboard/api/v3/auth/register`, `/dashboard/api/v3/auth/login`, and `/dashboard/api/v3/auth/logout`. Register, login, and logout need the same `expectedRevision` / `processGeneration` tokens as other V3 writes. The matching `/dashboard/api/auth/...` routes are preserved only as a labeled V2 compatibility exception for cached older pages; they are not the current SPA data path.
 

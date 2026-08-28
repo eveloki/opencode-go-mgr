@@ -467,6 +467,7 @@ pub(crate) fn custom_create_payload(
     base_url: &str,
     model_id: &str,
 ) -> Value {
+    let endpoint_url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     json!({
         "provider_id": CUSTOM_PROVIDER_ID,
         "offering_id": CUSTOM_OFFERING_ID,
@@ -474,9 +475,8 @@ pub(crate) fn custom_create_payload(
         "key": key,
         "expected_revision": revision,
         "custom_config": {
-            "base_url": base_url,
-            "upstream_protocols": ["chat_completions"],
-            "auth_scheme": "bearer"
+            "endpoint_url": endpoint_url,
+            "upstream_protocol": "chat_completions"
         },
         "model_capabilities": [{
             "model_id": model_id,

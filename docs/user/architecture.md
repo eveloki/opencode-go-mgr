@@ -39,7 +39,7 @@ Desktop, CLI, and Docker are just three ways to host the same `ocg-core` process
                    \                      /
                     \                    /
              +----------------+------------------+
-             |         SQLite schema v31         |
+             |         SQLite schema v32         |
              |  GUI  ~/.ocg-mgr                  |
              |  CLI  ~/.ocg-mgr-cli              |
              +-----------------------------------+
@@ -95,7 +95,8 @@ Every account card is one Plan (`provider_id` + `offering_id`). Live Plans carry
     no upstream key
     catalog refresh on Providers
   Custom API
-    trusted-admin HTTP/HTTPS origin
+    one trusted-admin complete HTTP/HTTPS Endpoint
+    one upstream protocol; auth is derived automatically
 
 
   Custom API lifecycle
@@ -103,16 +104,16 @@ Every account card is one Plan (`provider_id` + `offering_id`). Live Plans carry
     save / update  ->  can be enabled while pending
            |
            v
-    verify every selected protocol
+    verify the selected protocol
     with the first declared model
-    (one minimal non-stream request per protocol;
-     2xx JSON object for each)
+    (one minimal non-stream request to the complete Endpoint;
+     one 2xx JSON object)
            |
            v
     verification status becomes verified
     (account may already be routable)
 
-  Key, base URL, declared capability, protocol set, or auth scheme change
+  Key, complete Endpoint, declared capability, or protocol change
   re-pends verification but keeps the card enabled.
 ```
 
@@ -139,7 +140,7 @@ The sidebar has seven views. `browser` is a hosted-session overlay, not a hidden
 
     AI client --Key--> this node --account credential--> Plan
 
-    Key            access_keys (schema v31)
+    Key            access_keys (schema v32)
                    Primary + optional sub keys (64 active cap)
     Account cred   Go key, Custom key, or Zen Free (none)
 ```

@@ -1,5 +1,5 @@
 use crate::crypto::KeyCipher;
-use crate::custom::validate_custom_base_url;
+use crate::custom::validate_custom_endpoint_url;
 use crate::kernel::ids::{PRIMARY_KEY_ID, PRIMARY_KEY_NAME};
 use crate::kernel::pricing::{
     PricingLimits, PricingSnapshot, ProviderPricingSnapshot, SEED_LIMITS,
@@ -61,7 +61,7 @@ pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// v26 and before any v27 write. Not created for a brand-new empty database.
 pub const PRE_V3_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v3.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 31;
+pub const CURRENT_SCHEMA_VERSION: i32 = 32;
 pub const V27_SCHEMA_VERSION: i32 = 27;
 /// Schema the v27 rewrite expects as its committed source. Historical databases
 /// always migrate through this version first.
@@ -1520,6 +1520,133 @@ fn migrate_to_v31(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v32: Custom accounts bind one upstream protocol to one complete inference
+/// endpoint. Historical multi-protocol rows are collapsed to the protocol that
+/// the v31 runtime already preferred (Chat, then Responses, then Messages).
+/// Migrated accounts are disabled and returned to pending verification so a
+/// changed wire-auth rule is never activated silently.
+fn migrate_to_v32(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 32 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        version == 31,
+        "v32 requires a canonical schema v31 source, found {version}"
+    );
+    // A few recovery/test paths can leave the schema marker behind after the
+    // v32 table shape is already present. The actual v32 migration is atomic,
+    // so recognizing the complete final shape is safe and keeps reopen
+    // idempotent without trying to read removed v31 columns.
+    if table_has_column(conn, "account_custom_configs", "endpoint_url")?
+        && table_has_column(conn, "account_custom_configs", "upstream_protocol")?
+    {
+        conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (32);")?;
+        return Ok(());
+    }
+    if !table_has_column(conn, "account_custom_configs", "base_url")? {
+        let row_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM account_custom_configs", [], |row| {
+                row.get(0)
+            })?;
+        anyhow::ensure!(
+            row_count == 0,
+            "cannot migrate nonempty Custom config table without base_url or endpoint_url"
+        );
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DROP TABLE account_custom_configs;
+             CREATE TABLE account_custom_configs (
+                account_id TEXT PRIMARY KEY,
+                endpoint_url TEXT NOT NULL,
+                upstream_protocol TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+             );
+             INSERT OR REPLACE INTO schema_version (version) VALUES (32);",
+        )?;
+        tx.commit()?;
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE account_custom_configs_v32 (
+            account_id TEXT PRIMARY KEY,
+            endpoint_url TEXT NOT NULL,
+            upstream_protocol TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        );
+        INSERT INTO account_custom_configs_v32 (
+            account_id, endpoint_url, upstream_protocol, created_at, updated_at
+        )
+        SELECT
+            account_id,
+            rtrim(base_url, '/') || CASE
+                WHEN EXISTS (SELECT 1 FROM json_each(upstream_protocols) WHERE value = 'chat_completions')
+                    THEN '/chat/completions'
+                WHEN EXISTS (SELECT 1 FROM json_each(upstream_protocols) WHERE value = 'responses')
+                    THEN '/responses'
+                ELSE '/messages'
+            END,
+            CASE
+                WHEN EXISTS (SELECT 1 FROM json_each(upstream_protocols) WHERE value = 'chat_completions')
+                    THEN 'chat_completions'
+                WHEN EXISTS (SELECT 1 FROM json_each(upstream_protocols) WHERE value = 'responses')
+                    THEN 'responses'
+                ELSE 'messages'
+            END,
+            created_at,
+            updated_at
+        FROM account_custom_configs;
+
+        DELETE FROM account_model_capabilities
+         WHERE account_id IN (SELECT account_id FROM account_custom_configs_v32)
+           AND protocol <> (
+               SELECT upstream_protocol FROM account_custom_configs_v32 c
+                WHERE c.account_id = account_model_capabilities.account_id
+           );
+        DELETE FROM provider_contract_model_protocols
+         WHERE scope_kind = 'custom_endpoint'
+           AND scope_id IN (SELECT account_id FROM account_custom_configs_v32)
+           AND protocol <> (
+               SELECT upstream_protocol FROM account_custom_configs_v32 c
+                WHERE c.account_id = provider_contract_model_protocols.scope_id
+           );
+        DELETE FROM provider_contract_model_protocol_overrides
+         WHERE scope_kind = 'custom_endpoint'
+           AND scope_id IN (SELECT account_id FROM account_custom_configs_v32)
+           AND protocol <> (
+               SELECT upstream_protocol FROM account_custom_configs_v32 c
+                WHERE c.account_id = provider_contract_model_protocol_overrides.scope_id
+           );",
+    )?;
+    if table_has_column(&tx, "accounts", "enabled")?
+        && table_has_column(&tx, "accounts", "verification_status")?
+        && table_has_column(&tx, "accounts", "connection_verified_at")?
+        && table_has_column(&tx, "accounts", "verification_error")?
+    {
+        tx.execute(
+            "UPDATE accounts
+                SET enabled = 0,
+                    verification_status = 'pending',
+                    connection_verified_at = NULL,
+                    verification_error = NULL
+              WHERE id IN (SELECT account_id FROM account_custom_configs_v32)",
+            [],
+        )?;
+    }
+    tx.execute_batch(
+        "DROP TABLE account_custom_configs;
+         ALTER TABLE account_custom_configs_v32 RENAME TO account_custom_configs;
+         INSERT OR REPLACE INTO schema_version (version) VALUES (32);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod v27_test_hooks {
     use super::V27MigrationFault;
@@ -1648,72 +1775,46 @@ fn insert_account_row(
     Ok(())
 }
 
-fn upstream_protocols_json(protocols: &[UpstreamProtocolKind]) -> Result<String> {
-    Ok(serde_json::to_string(
-        &protocols
-            .iter()
-            .map(|protocol| protocol.as_str())
-            .collect::<Vec<_>>(),
-    )?)
-}
-
-fn parse_upstream_protocols_json(value: &str) -> Result<Vec<UpstreamProtocolKind>> {
-    let raw: Vec<String> = serde_json::from_str(value)?;
-    let mut protocols = Vec::with_capacity(raw.len());
-    for item in raw {
-        protocols.push(
-            UpstreamProtocolKind::try_from(item.as_str())
-                .map_err(|error| anyhow::anyhow!(error))?,
-        );
-    }
-    Ok(protocols)
-}
-
 fn persist_account_custom_config_on(
     conn: &Connection,
     account_id: &str,
     input: &AccountCustomConfigInput,
-    allow_protocol_auth_change: bool,
+    allow_protocol_change: bool,
 ) -> Result<()> {
-    let base_url = validate_custom_base_url(&input.base_url)?;
-    let protocols = normalize_upstream_protocols(&input.upstream_protocols)?;
-    let protocols_json = upstream_protocols_json(&protocols)?;
+    let endpoint_url = validate_custom_endpoint_url(&input.endpoint_url)?;
     let now = Utc::now().to_rfc3339();
     let existing = conn
         .query_row(
-            "SELECT upstream_protocols, auth_scheme FROM account_custom_configs WHERE account_id = ?1",
+            "SELECT upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
             [account_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| row.get::<_, String>(0),
         )
         .optional()?;
-    if let Some((protocols, auth_scheme)) = existing {
+    if let Some(protocol) = existing {
         anyhow::ensure!(
-            allow_protocol_auth_change
-                || (protocols == protocols_json && auth_scheme == input.auth_scheme.as_str()),
-            "Custom protocol and auth scheme cannot be changed after create"
+            allow_protocol_change || protocol == input.upstream_protocol.as_str(),
+            "Custom upstream protocol cannot be changed after create"
         );
         conn.execute(
             "UPDATE account_custom_configs
-             SET base_url = ?2, upstream_protocols = ?3, auth_scheme = ?4, updated_at = ?5
+             SET endpoint_url = ?2, upstream_protocol = ?3, updated_at = ?4
              WHERE account_id = ?1",
             params![
                 account_id,
-                base_url,
-                protocols_json,
-                input.auth_scheme.as_str(),
+                endpoint_url,
+                input.upstream_protocol.as_str(),
                 now,
             ],
         )?;
     } else {
         conn.execute(
             "INSERT INTO account_custom_configs (
-                account_id, base_url, upstream_protocols, auth_scheme, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                account_id, endpoint_url, upstream_protocol, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?4)",
             params![
                 account_id,
-                base_url,
-                protocols_json,
-                input.auth_scheme.as_str(),
+                endpoint_url,
+                input.upstream_protocol.as_str(),
                 now,
             ],
         )?;
@@ -1841,18 +1942,19 @@ fn persist_account_model_capabilities_on(
     if !capabilities.is_empty() {
         let expected_json: String = conn
             .query_row(
-                "SELECT upstream_protocols FROM account_custom_configs WHERE account_id = ?1",
+                "SELECT upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
                 [account_id],
                 |row| row.get(0),
             )
             .optional()?
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Custom model capabilities require a persisted custom_config.upstream_protocols"
+                    "Custom model capabilities require a persisted custom_config.upstream_protocol"
                 )
             })?;
-        let expected_protocols = parse_upstream_protocols_json(&expected_json)?;
-        crate::custom::validate_custom_capability_expansion(&expected_protocols, capabilities)
+        let expected_protocol = UpstreamProtocolKind::try_from(expected_json.as_str())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        crate::custom::validate_custom_capability_expansion(expected_protocol, capabilities)
             .map_err(|message| anyhow::anyhow!(message))?;
     }
     conn.execute(
@@ -1882,6 +1984,24 @@ fn persist_account_model_capabilities_on(
         )?;
     }
     mark_required_verification_stale_on(conn, account_id)?;
+    Ok(())
+}
+
+fn clear_custom_protocol_state_except_on(
+    conn: &Connection,
+    account_id: &str,
+    protocol: UpstreamProtocolKind,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocols
+         WHERE scope_kind = 'custom_endpoint' AND scope_id = ?1 AND protocol <> ?2",
+        params![account_id, protocol.as_str()],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocol_overrides
+         WHERE scope_kind = 'custom_endpoint' AND scope_id = ?1 AND protocol <> ?2",
+        params![account_id, protocol.as_str()],
+    )?;
     Ok(())
 }
 
@@ -2062,6 +2182,7 @@ impl Database {
         migrate_to_v29(&db.conn)?;
         migrate_to_v30(&db.conn)?;
         migrate_to_v31(&db.conn)?;
+        migrate_to_v32(&db.conn)?;
         Ok(db)
     }
 
@@ -4196,7 +4317,7 @@ impl Database {
         };
         let config = self.account_custom_config(account_id)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "Custom API accounts require a persisted base URL, protocol set, and auth scheme"
+                "Custom API accounts require a persisted endpoint URL and upstream protocol"
             )
         })?;
         let capabilities = self.list_account_model_capabilities_declared(account_id)?;
@@ -4268,7 +4389,7 @@ impl Database {
     pub fn account_custom_config(&self, account_id: &str) -> Result<Option<AccountCustomConfig>> {
         self.conn
             .query_row(
-                "SELECT account_id, base_url, upstream_protocols, auth_scheme, created_at, updated_at
+                "SELECT account_id, endpoint_url, upstream_protocol, created_at, updated_at
                  FROM account_custom_configs WHERE account_id = ?1",
                 [account_id],
                 account_custom_config_from_row,
@@ -4300,6 +4421,24 @@ impl Database {
         anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
         let tx = self.conn.unchecked_transaction()?;
         persist_account_custom_config_on(&tx, account_id, input, allow_protocol_auth_change)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically replace the Custom endpoint binding and its complete model
+    /// capability list so request-entry snapshots never observe mismatched
+    /// protocols.
+    pub(crate) fn commit_account_custom_config_and_capabilities(
+        &self,
+        account_id: &str,
+        input: &AccountCustomConfigInput,
+        capabilities: &[AccountModelCapabilityInput],
+    ) -> Result<()> {
+        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
+        let tx = self.conn.unchecked_transaction()?;
+        persist_account_custom_config_on(&tx, account_id, input, true)?;
+        persist_account_model_capabilities_on(&tx, account_id, capabilities)?;
+        clear_custom_protocol_state_except_on(&tx, account_id, input.upstream_protocol)?;
         tx.commit()?;
         Ok(())
     }
@@ -4336,7 +4475,7 @@ impl Database {
     pub fn list_custom_account_runtimes(&self) -> Result<Vec<crate::custom::CustomAccountRuntime>> {
         let mut stmt = self.conn.prepare(
             "SELECT a.id, a.enabled, a.verification_status, a.setup_step, a.key_cipher,
-                    c.account_id, c.base_url, c.upstream_protocols, c.auth_scheme,
+                    c.account_id, c.endpoint_url, c.upstream_protocol,
                     c.created_at, c.updated_at
              FROM accounts a
              INNER JOIN account_custom_configs c ON c.account_id = a.id
@@ -4362,25 +4501,15 @@ impl Database {
             let key_cipher: String = row.get(4)?;
             let config = AccountCustomConfig {
                 account_id: row.get(5)?,
-                base_url: row.get(6)?,
-                upstream_protocols: {
+                endpoint_url: row.get(6)?,
+                upstream_protocol: {
                     let value = row.get::<_, String>(7)?;
-                    parse_upstream_protocols_json(&value).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            7,
-                            Type::Text,
-                            error.to_string().into(),
-                        )
+                    UpstreamProtocolKind::try_from(value.as_str()).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
                     })?
                 },
-                auth_scheme: {
-                    let value = row.get::<_, String>(8)?;
-                    UpstreamAuthScheme::try_from(value.as_str()).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(8, Type::Text, Box::new(error))
-                    })?
-                },
-                created_at: parse_datetime(row.get::<_, String>(9)?),
-                updated_at: parse_datetime(row.get::<_, String>(10)?),
+                created_at: parse_datetime(row.get::<_, String>(8)?),
+                updated_at: parse_datetime(row.get::<_, String>(9)?),
             };
             Ok((
                 account_id,
@@ -7061,22 +7190,18 @@ fn custom_verification_contract_still_matches_on(
     {
         return Ok(false);
     }
-    let Some((base_url, protocols_json, auth_scheme)): Option<(String, String, String)> = conn
+    let Some((endpoint_url, protocol)): Option<(String, String)> = conn
         .query_row(
-            "SELECT base_url, upstream_protocols, auth_scheme
+            "SELECT endpoint_url, upstream_protocol
              FROM account_custom_configs WHERE account_id = ?1",
             [&contract.account_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
     else {
         return Ok(false);
     };
-    let protocols = parse_upstream_protocols_json(&protocols_json)?;
-    if base_url != contract.base_url
-        || protocols != contract.upstream_protocols
-        || auth_scheme != contract.auth_scheme.as_str()
-    {
+    if endpoint_url != contract.endpoint_url || protocol != contract.upstream_protocol.as_str() {
         return Ok(false);
     }
     let mut stmt = conn.prepare(
@@ -7099,21 +7224,17 @@ fn custom_verification_contract_still_matches_on(
 }
 
 fn account_custom_config_from_row(row: &Row<'_>) -> rusqlite::Result<AccountCustomConfig> {
-    let protocols_value = row.get::<_, String>(2)?;
-    let protocols = parse_upstream_protocols_json(&protocols_value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(2, Type::Text, error.to_string().into())
-    })?;
-    let auth_value = row.get::<_, String>(3)?;
-    let auth_scheme = UpstreamAuthScheme::try_from(auth_value.as_str()).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
-    })?;
+    let protocol_value = row.get::<_, String>(2)?;
+    let upstream_protocol =
+        UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+        })?;
     Ok(AccountCustomConfig {
         account_id: row.get(0)?,
-        base_url: row.get(1)?,
-        upstream_protocols: protocols,
-        auth_scheme,
-        created_at: parse_datetime(row.get::<_, String>(4)?),
-        updated_at: parse_datetime(row.get::<_, String>(5)?),
+        endpoint_url: row.get(1)?,
+        upstream_protocol,
+        created_at: parse_datetime(row.get::<_, String>(3)?),
+        updated_at: parse_datetime(row.get::<_, String>(4)?),
     })
 }
 
@@ -7549,9 +7670,8 @@ mod tests {
             db.create_account_with_contract(
                 &draft,
                 Some(&AccountCustomConfigInput {
-                    base_url: "https://api.example.com/v1".into(),
-                    upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                    auth_scheme: UpstreamAuthScheme::Bearer,
+                    endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                    upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                 }),
                 &[AccountModelCapabilityInput {
                     model_id: "org/model".into(),
@@ -12130,9 +12250,8 @@ mod tests {
         db.upsert_account_custom_config(
             "custom-1",
             &AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             },
             true,
         )
@@ -12140,9 +12259,8 @@ mod tests {
         let rejected = db.upsert_account_custom_config(
             "custom-1",
             &AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::Messages],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/messages".into(),
+                upstream_protocol: UpstreamProtocolKind::Messages,
             },
             false,
         );
@@ -12377,9 +12495,8 @@ mod tests {
             .create_account_with_contract(
                 &custom,
                 Some(&AccountCustomConfigInput {
-                    base_url: "https://api.example.com/v1".into(),
-                    upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                    auth_scheme: UpstreamAuthScheme::Bearer,
+                    endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                    upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                 }),
                 &[AccountModelCapabilityInput {
                     model_id: "org/model".into(),
@@ -12406,9 +12523,8 @@ mod tests {
         db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
                 model_id: "org/model".into(),
@@ -12424,9 +12540,8 @@ mod tests {
         let rejected = db.create_account_with_contract(
             &go,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[],
         );
@@ -12457,9 +12572,8 @@ mod tests {
         let empty_caps = db.create_account_with_contract(
             &custom_empty,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[],
         );
@@ -12474,7 +12588,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_capability_protocols_must_expand_the_config_protocol_set() {
+    fn custom_capability_protocol_must_equal_the_config_protocol() {
         let dir = temp_data_dir("custom-protocol-mismatch");
         let db = Database::open(dir.clone()).unwrap();
         let mut custom = account("custom-protocol");
@@ -12484,9 +12598,8 @@ mod tests {
         let mismatch = db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::Messages],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/messages".into(),
+                upstream_protocol: UpstreamProtocolKind::Messages,
             }),
             &[AccountModelCapabilityInput {
                 model_id: "org/model".into(),
@@ -12498,105 +12611,47 @@ mod tests {
             mismatch
                 .unwrap_err()
                 .to_string()
-                .contains("must be in account custom_config.upstream_protocols")
-        );
-        assert!(db.get_account("custom-protocol").unwrap().is_none());
-
-        // A partial expansion (only one protocol of the declared set) is
-        // rejected atomically as well.
-        let partial = db.create_account_with_contract(
-            &custom,
-            Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![
-                    UpstreamProtocolKind::ChatCompletions,
-                    UpstreamProtocolKind::Messages,
-                ],
-                auth_scheme: UpstreamAuthScheme::Bearer,
-            }),
-            &[AccountModelCapabilityInput {
-                model_id: "org/model".into(),
-                protocol: UpstreamProtocolKind::Messages,
-                source: None,
-            }],
-        );
-        assert!(
-            partial
-                .unwrap_err()
-                .to_string()
-                .contains("must expand every declared model over every selected upstream protocol")
+                .contains("must equal account custom_config.upstream_protocol")
         );
         assert!(db.get_account("custom-protocol").unwrap().is_none());
 
         db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![
-                    UpstreamProtocolKind::ChatCompletions,
-                    UpstreamProtocolKind::Messages,
-                ],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/messages".into(),
+                upstream_protocol: UpstreamProtocolKind::Messages,
             }),
-            &[
-                AccountModelCapabilityInput {
-                    model_id: "org/model".into(),
-                    protocol: UpstreamProtocolKind::ChatCompletions,
-                    source: None,
-                },
-                AccountModelCapabilityInput {
-                    model_id: "org/model".into(),
-                    protocol: UpstreamProtocolKind::Messages,
-                    source: None,
-                },
-            ],
+            &[AccountModelCapabilityInput {
+                model_id: "org/model".into(),
+                protocol: UpstreamProtocolKind::Messages,
+                source: None,
+            }],
         )
         .unwrap();
         let stored = db
             .list_account_model_capabilities("custom-protocol")
             .unwrap();
-        assert_eq!(stored.len(), 2);
-        assert!(
-            stored
-                .iter()
-                .any(|row| row.protocol == UpstreamProtocolKind::ChatCompletions)
-        );
-        assert!(
-            stored
-                .iter()
-                .any(|row| row.protocol == UpstreamProtocolKind::Messages)
-        );
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].protocol, UpstreamProtocolKind::Messages);
 
         let rejected = db.replace_account_model_capabilities(
             "custom-protocol",
-            &[
-                AccountModelCapabilityInput {
-                    model_id: "org/other".into(),
-                    protocol: UpstreamProtocolKind::ChatCompletions,
-                    source: None,
-                },
-                AccountModelCapabilityInput {
-                    model_id: "org/other".into(),
-                    protocol: UpstreamProtocolKind::Messages,
-                    source: None,
-                },
-                AccountModelCapabilityInput {
-                    model_id: "org/other".into(),
-                    protocol: UpstreamProtocolKind::Responses,
-                    source: None,
-                },
-            ],
+            &[AccountModelCapabilityInput {
+                model_id: "org/other".into(),
+                protocol: UpstreamProtocolKind::Responses,
+                source: None,
+            }],
         );
         assert!(
             rejected
                 .unwrap_err()
                 .to_string()
-                .contains("must be in account custom_config.upstream_protocols")
+                .contains("must equal account custom_config.upstream_protocol")
         );
         let kept = db
             .list_account_model_capabilities("custom-protocol")
             .unwrap();
-        assert_eq!(kept.len(), 2);
+        assert_eq!(kept.len(), 1);
         assert!(kept.iter().all(|row| row.model_id == "org/model"));
 
         drop(db);
@@ -12614,9 +12669,8 @@ mod tests {
         db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
                 model_id: "org/model".into(),
@@ -12642,9 +12696,8 @@ mod tests {
         db.upsert_account_custom_config(
             "custom-stale",
             &AccountCustomConfigInput {
-                base_url: "https://api.example.net/v2".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.net/v2/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             },
             false,
         )
@@ -12752,9 +12805,8 @@ mod tests {
         db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
                 model_id: "one".into(),
@@ -12805,9 +12857,8 @@ mod tests {
         db.upsert_account_custom_config(
             "custom-cas",
             &AccountCustomConfigInput {
-                base_url: "https://api.example.net/v2".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.net/v2/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             },
             false,
         )
@@ -12889,9 +12940,8 @@ mod tests {
         db.create_account_with_contract(
             &leftover,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
                 model_id: "one".into(),
@@ -12956,9 +13006,8 @@ mod tests {
                 db.create_account_with_contract(
                     &draft,
                     Some(&AccountCustomConfigInput {
-                        base_url: "https://api.example.com/v1".into(),
-                        upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                        auth_scheme: UpstreamAuthScheme::Bearer,
+                        endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                        upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                     }),
                     &[AccountModelCapabilityInput {
                         model_id: "org/model".into(),
@@ -13546,19 +13595,18 @@ mod tests {
     }
 
     #[test]
-    fn v29_to_v30_backfills_custom_protocol_set_and_drops_single_column() {
-        let dir = temp_data_dir("v29-v30-protocol-set");
+    fn v31_to_v32_collapses_custom_protocols_and_disables_the_account() {
+        let dir = temp_data_dir("v31-v32-single-protocol");
         let db = Database::open(dir.clone()).unwrap();
-        let mut custom = account("custom-v29");
+        let mut custom = account("custom-v31");
         custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
         custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
         custom.enabled = false;
         db.create_account_with_contract(
             &custom,
             Some(&AccountCustomConfigInput {
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::Messages],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/messages".into(),
+                upstream_protocol: UpstreamProtocolKind::Messages,
             }),
             &[AccountModelCapabilityInput {
                 model_id: "org/model".into(),
@@ -13567,32 +13615,63 @@ mod tests {
             }],
         )
         .unwrap();
-        // Rebuild the v29 single-protocol shape: one TEXT value per row.
         db.conn
             .execute_batch(
-                "ALTER TABLE account_custom_configs ADD COLUMN upstream_protocol TEXT;
-                 UPDATE account_custom_configs SET upstream_protocol = 'messages';
-                 ALTER TABLE account_custom_configs DROP COLUMN upstream_protocols;
+                "DROP TABLE account_custom_configs;
+                 CREATE TABLE account_custom_configs (
+                    account_id TEXT PRIMARY KEY,
+                    base_url TEXT NOT NULL,
+                    upstream_protocols TEXT NOT NULL,
+                    auth_scheme TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                 );
+                 INSERT INTO account_custom_configs (
+                    account_id, base_url, upstream_protocols, auth_scheme, created_at, updated_at
+                 ) VALUES (
+                    'custom-v31', 'https://api.example.com/v1',
+                    '[\"messages\",\"responses\",\"chat_completions\"]', 'x_api_key',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+                 );
+                 INSERT INTO account_model_capabilities
+                    (account_id, model_id, protocol, source)
+                 VALUES ('custom-v31', 'org/model', 'chat_completions', 'manual');
+                 UPDATE accounts
+                    SET enabled = 1, verification_status = 'verified',
+                        connection_verified_at = '2026-01-01T00:00:00Z'
+                  WHERE id = 'custom-v31';
                  DELETE FROM schema_version;
-                 INSERT OR REPLACE INTO schema_version (version) VALUES (29);",
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (31);",
             )
             .unwrap();
         drop(db);
 
         let db = Database::open(dir.clone()).unwrap();
         assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
-        assert!(
-            !table_has_column(&db.conn, "account_custom_configs", "upstream_protocol").unwrap(),
-            "v30 must drop the single-protocol column"
-        );
-        let config = db.account_custom_config("custom-v29").unwrap().unwrap();
+        let config = db.account_custom_config("custom-v31").unwrap().unwrap();
         assert_eq!(
-            config.upstream_protocols,
-            vec![UpstreamProtocolKind::Messages],
-            "v30 must backfill the single value as a one-element JSON array"
+            config.upstream_protocol,
+            UpstreamProtocolKind::ChatCompletions
         );
-        assert_eq!(config.base_url, "https://api.example.com/v1");
-        assert_eq!(config.auth_scheme, UpstreamAuthScheme::Bearer);
+        assert_eq!(
+            config.endpoint_url,
+            "https://api.example.com/v1/chat/completions"
+        );
+        let migrated = db.get_account("custom-v31").unwrap().unwrap();
+        assert!(!migrated.enabled);
+        let migrated_state = db
+            .account_verification_state("custom-v31")
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated_state.status, ConnectionVerificationStatus::Pending);
+        assert!(migrated_state.connection_verified_at.is_none());
+        let capabilities = db.list_account_model_capabilities("custom-v31").unwrap();
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(
+            capabilities[0].protocol,
+            UpstreamProtocolKind::ChatCompletions
+        );
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -14114,7 +14193,7 @@ mod tests {
         drop(db);
 
         let db = Database::open(dir.clone()).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 31);
+        assert_eq!(db.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         let table_exists: i64 = db
             .conn
             .query_row(

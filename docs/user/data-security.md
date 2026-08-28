@@ -32,9 +32,10 @@ no telemetry, no remote sync, and no recovery if the data directory is lost.
 - **Administrator password.** The single administrator password is stored as
   an Argon2 hash in SQLite. There is no self-service password recovery —
   protect the data directory.
-- **Custom API destinations.** Custom base URLs are administrator-trusted.
-  Any syntactically valid HTTP or HTTPS origin is allowed, including LAN and
-  loopback. URL-embedded credentials are rejected; redirects are never
+- **Custom API destinations.** Complete Custom inference Endpoints are
+  administrator-trusted. Any syntactically valid HTTP or HTTPS destination is
+  allowed, including LAN and loopback. URL-embedded credentials are rejected;
+  query strings and fragments are rejected; redirects are never
   followed; dashboard and client credentials are never forwarded. Choose
   destinations you intend to reach from this node.
 

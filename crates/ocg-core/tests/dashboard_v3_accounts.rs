@@ -194,9 +194,8 @@ fn mutation_account(body: &Value) -> Account {
 
 fn custom_write() -> Value {
     json!({
-        "baseUrl": "https://api.example.com/v1",
-        "upstreamProtocols": ["messages"],
-        "authScheme": "x-api-key"
+        "endpointUrl": "https://api.example.com/v1/messages",
+        "upstreamProtocol": "messages"
     })
 }
 
@@ -240,7 +239,11 @@ fn mutation_routes(id: &str) -> Vec<(Method, String, Value)> {
         (
             Method::PUT,
             format!("/accounts/{id}/custom-config"),
-            custom_write(),
+            json!({
+                "endpointUrl": "https://api.example.com/v1/messages",
+                "upstreamProtocol": "messages",
+                "modelCapabilities": [custom_capability()]
+            }),
         ),
         (
             Method::PUT,
@@ -251,8 +254,8 @@ fn mutation_routes(id: &str) -> Vec<(Method, String, Value)> {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v31() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+fn dashboard_v3_schema_version_stays_at_v32() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
 }
 
 #[tokio::test]
@@ -688,8 +691,8 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     );
     assert!(custom.plan_routable);
     assert_eq!(
-        custom.custom_config.as_ref().unwrap().base_url,
-        "https://api.example.com/v1"
+        custom.custom_config.as_ref().unwrap().endpoint_url,
+        "https://api.example.com/v1/messages"
     );
     assert_eq!(custom.model_capabilities[0].model_id, "org/model");
 
@@ -935,9 +938,9 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
         &cas(
             &harness,
             json!({
-                "baseUrl": "https://api.example.net/v2",
-                "upstreamProtocols": ["messages"],
-                "authScheme": "x-api-key"
+                "endpointUrl": "https://api.example.net/v2/messages",
+                "upstreamProtocol": "messages",
+                "modelCapabilities": [custom_capability()]
             }),
         ),
     )
@@ -955,7 +958,8 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
     assert!(updated.connection_verified_at.is_none());
     assert!(updated.verification_error.is_none());
 
-    // Protocol and auth scheme are editable after create; the change commits,
+    // The protocol is editable after create; the config and capability rows
+    // change in one CAS transaction,
     // advances CAS, and re-opens verification as pending while staying enabled.
     let before_protocol_change = harness.state.settings_revision();
     let (status, protocol) = send_json(
@@ -965,9 +969,12 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
         &cas(
             &harness,
             json!({
-                "baseUrl": "https://api.example.net/v2",
-                "upstreamProtocols": ["chat_completions"],
-                "authScheme": "x-api-key"
+                "endpointUrl": "https://api.example.net/v2/chat/completions",
+                "upstreamProtocol": "chat_completions",
+                "modelCapabilities": [{
+                    "modelId": "org/model",
+                    "protocol": "chat_completions"
+                }]
             }),
         ),
     )
@@ -1092,8 +1099,8 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_custom_config_commit_advances_revision_before_post_read_failure() {
-    let harness = start_loopback("accounts-custom-post-read").await;
+async fn dashboard_v3_custom_config_and_capabilities_roll_back_together() {
+    let harness = start_loopback("accounts-custom-atomic-rollback").await;
     let (status, custom) = send_json(
         &harness,
         Method::POST,
@@ -1116,12 +1123,10 @@ async fn dashboard_v3_custom_config_commit_advances_revision_before_post_read_fa
     let conn = rusqlite::Connection::open(harness.dir.join("data.sqlite")).unwrap();
     conn.busy_timeout(Duration::from_secs(5)).unwrap();
     conn.execute_batch(
-        "CREATE TRIGGER corrupt_custom_config_post_read
-         AFTER UPDATE OF base_url ON account_custom_configs
+        "CREATE TRIGGER fail_custom_config_update
+         BEFORE UPDATE OF endpoint_url ON account_custom_configs
          BEGIN
-             UPDATE account_custom_configs
-                SET upstream_protocols = '[\"invalid-after-commit\"]'
-              WHERE account_id = NEW.account_id;
+             SELECT RAISE(ABORT, 'forced atomic Custom update failure');
          END;",
     )
     .unwrap();
@@ -1134,25 +1139,34 @@ async fn dashboard_v3_custom_config_commit_advances_revision_before_post_read_fa
         &cas(
             &harness,
             json!({
-                "baseUrl": "https://committed.example.com/v2",
-                "upstreamProtocols": ["messages"],
-                "authScheme": "x-api-key"
+                "endpointUrl": "https://committed.example.com/v2/messages",
+                "upstreamProtocol": "messages",
+                "modelCapabilities": [custom_capability()]
             }),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    assert_v3_error(&body, ERROR_INTERNAL);
-    assert_eq!(harness.state.settings_revision(), before + 1);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_v3_error(&body, ERROR_INVALID_REQUEST);
+    assert_eq!(harness.state.settings_revision(), before);
     let stored: (String, String) = conn
         .query_row(
-            "SELECT base_url, upstream_protocols FROM account_custom_configs WHERE account_id = ?1",
+            "SELECT endpoint_url, upstream_protocol FROM account_custom_configs WHERE account_id = ?1",
             [&custom_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(stored.0, "https://committed.example.com/v2");
-    assert_eq!(stored.1, "[\"invalid-after-commit\"]");
+    assert_eq!(stored.0, "https://api.example.com/v1/messages");
+    assert_eq!(stored.1, "messages");
+    let capabilities = harness
+        .state
+        .db
+        .lock()
+        .list_account_model_capabilities(&custom_id)
+        .unwrap();
+    assert_eq!(capabilities.len(), 1);
+    assert_eq!(capabilities[0].model_id, "org/model");
+    assert_eq!(capabilities[0].protocol.as_str(), "messages");
 
     drop(conn);
     harness.stop();

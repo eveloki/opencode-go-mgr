@@ -91,8 +91,8 @@ test("USER guides describe the Providers control plane and drop stale locations"
   assert.match(userZh, /可能消耗\s*额度/);
   assert.match(userEn, /\?view=pricing/);
   assert.match(userZh, /\?view=pricing/);
-  assert.match(userEn, /schema v31/i);
-  assert.match(userZh, /schema v31/);
+  assert.match(userEn, /schema v32/i);
+  assert.match(userZh, /schema v32/);
   assert.match(userEn, /\*\*Open\s+provider\*\*/);
   assert.match(userZh, /\*\*前往供应商\*\*/);
   assert.doesNotMatch(userEn, /There is no separate provider page/);

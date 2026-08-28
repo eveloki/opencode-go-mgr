@@ -203,8 +203,8 @@ fn forward_log(account_id: &str, model: &str, cost: Option<f64>, cost_state: &st
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v31() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+fn dashboard_v3_schema_version_stays_at_v32() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
 }
 
 #[tokio::test]

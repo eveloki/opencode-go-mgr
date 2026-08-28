@@ -656,9 +656,8 @@ export const providerApi = {
     if (!config) throw new Error("Custom account has no configured destination");
     const discovered = await dashboardV3.discoverCustomModels({
       accountId,
-      baseUrl: config.baseUrl,
-      authScheme: config.authScheme,
-      upstreamProtocols: [...config.upstreamProtocols],
+      endpointUrl: config.endpointUrl,
+      upstreamProtocol: config.upstreamProtocol,
     });
     return {
       scope_kind: "custom_endpoint",

@@ -8,7 +8,7 @@
 
 锁顺序：(1) `settings_update`，(2) `db`，(3) `config`，(4) `http_client`， (5) `gateway`，(6) `pricing`，(7) `zen_free_models`，(8) `provider_contracts`，(9) `routing`，(10) `credential_snapshot`。反向获取会造成死锁；持有 `routing` 锁时不应执行 DB 或网络 I/O。异步闸口：设置写同时重绑时， `settings_host_effects`（持久化 → 监听器重绑 → 补偿）先于 `gateway_lifecycle`。这些 await 期间应释放 `parking_lot` 锁。
 
-两层凭证共用一张 `access_keys` 表（schema v31）和一份鉴权快照：
+两层凭证共用一张 `access_keys` 表（schema v32）和一份鉴权快照：
 
 - 主 Key：固定 id `00000000-0000-0000-0000-000000000001`，显示名 `"Primary"`。始终启用，没有删除入口。公开 `AppConfig` 与面板 API 仍暴露 `gateway_key`；v27 之后经消毒的 config JSON **不再** 是该值的数据库权威。
 - 子 Key：非主行，活跃上限 64，软删保留身份/名称并清除明文。只经 `/dashboard/api/v3/keys*` 生命周期 API 变更。CLI 没有子 Key 命令。
@@ -72,6 +72,7 @@ Profile 删除先停浏览器，校验账号 ID 防目录穿越，再把新旧 P
 - **v29：** 从目录中移除 SCNet Token Plans，并在迁移期间删除所有现有 SCNet 账号行。
 - **v30：** 将 `account_custom_configs.upstream_protocol` 回填为 JSON `upstream_protocols` 集合（1–3 个 chat_completions / responses / messages）；Custom 配置/能力编辑保持账号启用，但将 `verification_status` 重置为 `pending`。
 - **v31：** 新增 `provider_contract_model_protocol_overrides` 表以支持按模型/按协议启用，并停止读取已弃用的 `provider_contract_scopes` 开关列。
+- **v32：** Custom API 由 `base_url`、协议集合 JSON 与可配置鉴权收敛为一个完整 `endpoint_url` 和一个 `upstream_protocol`。历史 Custom 行按 Chat Completions → Responses → Messages 选择协议，并置为 disabled/pending 供管理员复核；非所选协议状态在同一迁移事务中移除。
 
 GUI 数据目录：Windows `%USERPROFILE%\.ocg-mgr` 或 macOS/Linux `~/.ocg-mgr`。 CLI 默认 `~/.ocg-mgr-cli`。Docker 将 SQLite、Key 与 `.encryption-key` 放在 `ocg-data`，长期 Cookie 与浏览器状态放在 `ocg-browser-profiles`。两卷都是高敏感持久状态，必须在服务停止后成对备份；`ocg-browser-runtime` 只含运行时控制 token，不应加入备份。浏览器 Profile 不由 OCG Manager 加密。
 

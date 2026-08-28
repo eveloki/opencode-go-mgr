@@ -57,7 +57,7 @@
       这些本地列表检查不需要真实供应商 Key；发版冒烟不得执行可能计费的推理。
 - [ ] 有界假上游 Custom API 冒烟（不需要真实供应商 Key）：拒绝 URL 内嵌凭据；
       `2xx` JSON object 验证成功；账号仍保持禁用；必须显式启用；声明的模型/协议
-      可转发；拒绝重定向；不转发 dashboard/client 鉴权，只发送已配置的 Bearer 或
+      可转发；拒绝重定向；不转发 dashboard/client 鉴权，只发送由协议自动决定的 Bearer 或
       `x-api-key`；成功日志为 unpriced/`cost_state=unknown` 且不扣额度；编辑 URL、
       Key 或能力会使验证失效并禁用账号。确认 Direct/Manual/Auto 继承进程级代理。
 - [ ] 在 Windows 验证 Edge/Chrome 优先级，在 macOS/Linux 验证浏览器发现；用两个

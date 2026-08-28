@@ -48,9 +48,10 @@ get billed for a bad guess.
   not validate the Key; an invalid Key surfaces as inference 401/403.
 - **Saving Custom API does not start routing.** The card is created disabled
   `pending`, but you can enable it immediately; an unverified badge is shown
-  while verification is `pending`. Verify probes every selected protocol with a
-  `2xx` JSON response. Changing the URL, key, declared models, protocol set,
-  or auth scheme re-pends verification but leaves the card enabled.
+  while verification is `pending`. Verify sends one minimal request in the
+  selected protocol to the complete Endpoint and expects a `2xx` JSON response.
+  Changing the Endpoint, key, declared models, or protocol re-pends verification
+  but leaves the card enabled.
 - **Gemini requests fail with `400` over `safetySettings`.** The gateway
   cannot map Google's safety thresholds to a Chat/Messages upstream, so it
   rejects non-empty arrays. Remove the field and retry; do not assume the

@@ -15,9 +15,8 @@ use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::Account;
 use crate::provider::{
     BUILTIN_PLANS, COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
-    OPENCODE_CONSTRUCTABLE_PROTOCOLS, PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES,
-    ProviderAdapterKind, ProviderRegistry, StructuralProbeCeiling, UpstreamProtocolKind,
-    command_code_goat_includes_model,
+    OPENCODE_CONSTRUCTABLE_PROTOCOLS, ProviderAdapterKind, ProviderRegistry,
+    StructuralProbeCeiling, UpstreamProtocolKind, command_code_goat_includes_model,
 };
 use crate::redaction::sanitize_upstream_error_value_with_known_secret;
 use chrono::{DateTime, Utc};
@@ -268,8 +267,8 @@ pub enum ProtocolOverrideState {
     /// Follow persisted evidence and adapter safety ceiling.
     #[default]
     Auto,
-    /// Enable the protocol unconditionally (declaration-is-truth), even
-    /// beyond static support, probe evidence, and the adapter safety ceiling.
+    /// Request protocol enablement. Adapter-specific safety ceilings may still
+    /// reject or suppress protocols the adapter cannot legally route.
     ForceOn,
     /// Disable the protocol regardless of evidence.
     ForceOff,
@@ -1039,17 +1038,13 @@ fn preferred_protocol(
                 .unwrap_or(UpstreamProtocolKind::ChatCompletions)
         }
         ProviderAdapterKind::ConfigurableHttp => {
-            // Preferred = first of the fixed priority order that the account
-            // declared for this model.
-            let declared_protocols: Vec<UpstreamProtocolKind> = declared
+            // A Custom endpoint binds every declared model to exactly one
+            // upstream protocol; that protocol is also the conversion target.
+            declared
                 .iter()
                 .filter(|(id, _)| custom_model_id_matches(id, model_id))
                 .map(|(_, protocol)| *protocol)
-                .collect();
-            PROTOCOL_FALLBACK_CHAT_RESPONSES_MESSAGES
-                .iter()
-                .copied()
-                .find(|protocol| declared_protocols.contains(protocol))
+                .next()
                 .unwrap_or(UpstreamProtocolKind::ChatCompletions)
         }
     }
@@ -1108,9 +1103,14 @@ fn merge_model_contract(
         // through the explicit overrides the probe handler persists.
         let evidence_available = (statically_verified || source.confers_support()) && supported;
         let (available, enabled) = match override_state {
-            // Declaration-is-truth: an explicit force_on wins unconditionally,
-            // even beyond static support and the adapter safety ceiling.
-            ProtocolOverrideState::ForceOn if adapter == ProviderAdapterKind::CommandCodeGoat => {
+            // Sealed and configurable HTTP adapters may force on only a
+            // protocol already admitted by their adapter safety ceiling.
+            ProtocolOverrideState::ForceOn
+                if matches!(
+                    adapter,
+                    ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::ConfigurableHttp
+                ) =>
+            {
                 (supported, supported)
             }
             ProtocolOverrideState::ForceOn => (true, true),
@@ -1222,9 +1222,7 @@ mod tests {
     use crate::custom::CustomAccountRuntime;
     use crate::kernel::ids::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM;
     use crate::models::{AccountCustomConfig, AccountModelCapability};
-    use crate::provider::{
-        CUSTOM_API_OFFERING_ID, ConnectionVerificationStatus, UpstreamAuthScheme,
-    };
+    use crate::provider::{CUSTOM_API_OFFERING_ID, ConnectionVerificationStatus};
 
     fn empty_persisted() -> PersistedContracts {
         PersistedContracts::default()
@@ -1679,9 +1677,8 @@ mod tests {
             has_key: true,
             config: AccountCustomConfig {
                 account_id: "custom-1".into(),
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![UpstreamProtocolKind::ChatCompletions],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
@@ -1717,35 +1714,25 @@ mod tests {
     }
 
     #[test]
-    fn custom_declared_protocol_set_expands_ceiling_and_selects_pass_through() {
-        let declared = vec![
-            ("declared-model".to_string(), UpstreamProtocolKind::Messages),
-            (
-                "declared-model".to_string(),
-                UpstreamProtocolKind::ChatCompletions,
-            ),
-        ];
+    fn custom_declared_protocol_is_preferred_and_other_clients_fall_back_to_it() {
+        let declared = vec![("declared-model".to_string(), UpstreamProtocolKind::Messages)];
         let runtime = CustomAccountRuntime {
-            account_id: "custom-dual".into(),
+            account_id: "custom-single".into(),
             enabled: true,
             verification_status: ConnectionVerificationStatus::Verified,
             setup_ready: true,
             has_key: true,
             config: AccountCustomConfig {
-                account_id: "custom-dual".into(),
-                base_url: "https://api.example.com/v1".into(),
-                upstream_protocols: vec![
-                    UpstreamProtocolKind::Messages,
-                    UpstreamProtocolKind::ChatCompletions,
-                ],
-                auth_scheme: UpstreamAuthScheme::Bearer,
+                account_id: "custom-single".into(),
+                endpoint_url: "https://api.example.com/v1/messages".into(),
+                upstream_protocol: UpstreamProtocolKind::Messages,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
             capabilities: declared
                 .iter()
                 .map(|(model_id, protocol)| AccountModelCapability {
-                    account_id: "custom-dual".into(),
+                    account_id: "custom-single".into(),
                     model_id: model_id.clone(),
                     protocol: *protocol,
                     verified_at: None,
@@ -1758,20 +1745,24 @@ mod tests {
             "declared-model",
             &declared,
         );
-        assert!(ceiling.contains(&UpstreamProtocolKind::ChatCompletions));
         assert!(ceiling.contains(&UpstreamProtocolKind::Messages));
+        assert!(!ceiling.contains(&UpstreamProtocolKind::ChatCompletions));
         assert!(!ceiling.contains(&UpstreamProtocolKind::Responses));
 
-        let set = build_effective_contracts(&zen_seed(), &[runtime], empty_persisted());
-        let custom = set.custom_endpoints.get("custom-dual").unwrap();
+        let set = build_effective_contracts(
+            &zen_seed(),
+            std::slice::from_ref(&runtime),
+            empty_persisted(),
+        );
+        let custom = set.custom_endpoints.get("custom-single").unwrap();
         let model = custom.model("declared-model").unwrap();
         assert!(model.routable);
         assert_eq!(
             model.preferred_protocol,
-            UpstreamProtocolKind::ChatCompletions,
-            "preferred follows the fixed priority, not declaration order"
+            UpstreamProtocolKind::Messages,
+            "the account's only declared protocol is always preferred"
         );
-        let scope = ContractScope::custom_endpoint("custom-dual");
+        let scope = ContractScope::custom_endpoint("custom-single");
         let selected = set
             .select_upstream(&scope, ApiFormat::Messages, "declared-model")
             .unwrap();
@@ -1779,14 +1770,36 @@ mod tests {
         let selected = set
             .select_upstream(&scope, ApiFormat::ChatCompletions, "declared-model")
             .unwrap();
-        assert_eq!(selected, ApiFormat::ChatCompletions);
+        assert_eq!(selected, ApiFormat::Messages);
         let selected = set
             .select_upstream(&scope, ApiFormat::Responses, "declared-model")
             .unwrap();
         assert_eq!(
             selected,
-            ApiFormat::ChatCompletions,
+            ApiFormat::Messages,
             "an undeclared client protocol falls back to the preferred protocol"
+        );
+
+        let mut persisted = empty_persisted();
+        persisted.overrides.insert(
+            scope,
+            vec![PersistedModelProtocolOverride {
+                scope: ContractScope::custom_endpoint("custom-single"),
+                model_id: "declared-model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                state: ProtocolOverrideState::ForceOn,
+                updated_at: Utc::now(),
+            }],
+        );
+        let set = build_effective_contracts(&zen_seed(), &[runtime], persisted);
+        let chat = &set.custom_endpoints["custom-single"]
+            .model("declared-model")
+            .unwrap()
+            .protocols["chat_completions"];
+        assert!(!chat.available);
+        assert!(
+            !chat.enabled,
+            "force_on cannot enable an undeclared Custom protocol"
         );
     }
 

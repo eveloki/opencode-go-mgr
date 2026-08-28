@@ -308,30 +308,23 @@
         "accountId": {
           "type": "string"
         },
-        "authScheme": {
-          "$ref": "#/$defs/AccountAuthScheme"
-        },
-        "baseUrl": {
+        "createdAt": {
           "type": "string"
         },
-        "createdAt": {
+        "endpointUrl": {
           "type": "string"
         },
         "updatedAt": {
           "type": "string"
         },
-        "upstreamProtocols": {
-          "items": {
-            "$ref": "#/$defs/AccountUpstreamProtocol"
-          },
-          "type": "array"
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
         }
       },
       "required": [
         "accountId",
-        "baseUrl",
-        "upstreamProtocols",
-        "authScheme",
+        "endpointUrl",
+        "upstreamProtocol",
         "createdAt",
         "updatedAt"
       ],
@@ -339,12 +332,9 @@
     },
     "AccountCustomConfigUpdate": {
       "additionalProperties": false,
-      "description": "PUT `/accounts/{id}/custom-config` body. Protocol set and auth scheme are\neditable; a change re-opens verification as pending without disabling.",
+      "description": "PUT `/accounts/{id}/custom-config` body. The endpoint binding and complete\nmodel capability list are replaced atomically under one CAS expectation.",
       "properties": {
-        "authScheme": {
-          "$ref": "#/$defs/AccountAuthScheme"
-        },
-        "baseUrl": {
+        "endpointUrl": {
           "type": "string"
         },
         "expectedRevision": {
@@ -352,24 +342,27 @@
           "minimum": 0,
           "type": "integer"
         },
+        "modelCapabilities": {
+          "items": {
+            "$ref": "#/$defs/AccountModelCapabilityWrite"
+          },
+          "type": "array"
+        },
         "processGeneration": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
-        "upstreamProtocols": {
-          "items": {
-            "$ref": "#/$defs/AccountUpstreamProtocol"
-          },
-          "type": "array"
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
         }
       },
       "required": [
         "expectedRevision",
         "processGeneration",
-        "baseUrl",
-        "upstreamProtocols",
-        "authScheme"
+        "endpointUrl",
+        "upstreamProtocol",
+        "modelCapabilities"
       ],
       "type": "object"
     },
@@ -377,23 +370,16 @@
       "additionalProperties": false,
       "description": "Create-time Custom destination (no timestamps). Nested under `AccountCreate`.",
       "properties": {
-        "authScheme": {
-          "$ref": "#/$defs/AccountAuthScheme"
-        },
-        "baseUrl": {
+        "endpointUrl": {
           "type": "string"
         },
-        "upstreamProtocols": {
-          "items": {
-            "$ref": "#/$defs/AccountUpstreamProtocol"
-          },
-          "type": "array"
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
         }
       },
       "required": [
-        "baseUrl",
-        "upstreamProtocols",
-        "authScheme"
+        "endpointUrl",
+        "upstreamProtocol"
       ],
       "type": "object"
     },
@@ -1428,23 +1414,16 @@
             "null"
           ]
         },
-        "authScheme": {
-          "$ref": "#/$defs/AccountAuthScheme"
-        },
-        "baseUrl": {
+        "endpointUrl": {
           "type": "string"
         },
-        "upstreamProtocols": {
-          "items": {
-            "$ref": "#/$defs/AccountUpstreamProtocol"
-          },
-          "type": "array"
+        "upstreamProtocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
         }
       },
       "required": [
-        "baseUrl",
-        "upstreamProtocols",
-        "authScheme"
+        "endpointUrl",
+        "upstreamProtocol"
       ],
       "type": "object"
     },

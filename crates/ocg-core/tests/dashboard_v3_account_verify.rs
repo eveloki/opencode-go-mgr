@@ -429,7 +429,7 @@ async fn create_custom_account(
     key: &str,
     base_url: &str,
     protocol: &str,
-    auth_scheme: &str,
+    _auth_scheme: &str,
     models: &[&str],
 ) -> String {
     let capabilities: Vec<Value> = models
@@ -441,6 +441,13 @@ async fn create_custom_account(
             })
         })
         .collect();
+    let suffix = match protocol {
+        "chat_completions" => "chat/completions",
+        "responses" => "responses",
+        "messages" => "messages",
+        other => panic!("unsupported Custom test protocol {other}"),
+    };
+    let endpoint_url = format!("{}/{suffix}", base_url.trim_end_matches('/'));
     let (status, created) = send_json(
         harness,
         Method::POST,
@@ -453,9 +460,8 @@ async fn create_custom_account(
                 "providerId": CUSTOM_PROVIDER_ID,
                 "offeringId": CUSTOM_API_OFFERING_ID,
                 "customConfig": {
-                    "baseUrl": base_url,
-                    "upstreamProtocols": [protocol],
-                    "authScheme": auth_scheme
+                    "endpointUrl": endpoint_url,
+                    "upstreamProtocol": protocol
                 },
                 "modelCapabilities": capabilities
             }),
@@ -473,8 +479,8 @@ async fn create_custom_account(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v31() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+fn dashboard_v3_schema_version_stays_at_v32() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
 }
 
 #[test]
@@ -1124,8 +1130,8 @@ async fn custom_verify_x_api_key_does_not_forward_dashboard_auth() {
 }
 
 #[tokio::test]
-async fn custom_verify_probes_every_declared_protocol_with_the_first_model() {
-    let harness = start_loopback("verify-custom-dual").await;
+async fn custom_verify_probes_only_the_single_declared_protocol() {
+    let harness = start_loopback("verify-custom-single").await;
     force_direct_proxy(&harness);
     let origin = start_origin(StatusCode::OK, SUCCESS_BODY, Duration::ZERO).await;
     let (status, created) = send_json(
@@ -1135,17 +1141,15 @@ async fn custom_verify_probes_every_declared_protocol_with_the_first_model() {
         &cas(
             &harness,
             json!({
-                "name": "custom-dual",
+                "name": "custom-single",
                 "key": CUSTOM_KEY,
                 "providerId": CUSTOM_PROVIDER_ID,
                 "offeringId": CUSTOM_API_OFFERING_ID,
                 "customConfig": {
-                    "baseUrl": origin.url,
-                    "upstreamProtocols": ["chat_completions", "messages"],
-                    "authScheme": "bearer"
+                    "endpointUrl": format!("{}/messages", origin.url),
+                    "upstreamProtocol": "messages"
                 },
                 "modelCapabilities": [
-                    { "modelId": CUSTOM_MODEL, "protocol": "chat_completions" },
                     { "modelId": CUSTOM_MODEL, "protocol": "messages" }
                 ]
             }),
@@ -1168,16 +1172,14 @@ async fn custom_verify_probes_every_declared_protocol_with_the_first_model() {
         AccountVerificationStatus::Verified
     );
     let calls = origin.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2, "one probe per declared protocol: {calls:?}");
+    assert_eq!(calls.len(), 1, "exactly one probe is allowed: {calls:?}");
     assert_eq!(calls[0].method, "POST");
-    assert_eq!(calls[0].path, "/chat/completions");
-    assert_eq!(calls[1].method, "POST");
-    assert_eq!(calls[1].path, "/messages");
+    assert_eq!(calls[0].path, "/messages");
     assert!(
         calls
             .iter()
             .all(|call| call.body.contains(CUSTOM_MODEL) && call.body.contains("\"stream\":false")),
-        "each protocol probes the first declared model: {calls:?}"
+        "the selected protocol probes the first declared model: {calls:?}"
     );
     assert_secret_free(&body, &[CUSTOM_KEY]);
     harness.stop();

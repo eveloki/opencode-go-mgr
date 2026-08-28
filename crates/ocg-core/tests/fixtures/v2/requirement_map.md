@@ -18,7 +18,7 @@ WebSocket families (`dashboard_v2_rest_retirement.rs`).
 | `go_alias_request_still_routes_and_logs_opencode_go` | OpenCode Go alias routing remains compatible. |
 | `zen_free_explicit_free_model_stays_anonymous` | Zen Free stays anonymous (no account Key) and compatible. |
 | `go_import_remains_immediately_routable_without_verification` | Go import stays `not_required` and enabled after create. |
-| `goat_creates_live_while_custom_creates_a_pending_draft` | GOAT creates live without directory verification. Custom create sends `custom_config:{base_url,upstream_protocol,auth_scheme}` plus non-empty `model_capabilities` and remains an explicitly enabled/verified trusted-admin route. |
+| `goat_creates_live_while_custom_creates_a_pending_draft` | GOAT creates live without directory verification. Custom create sends `custom_config:{endpoint_url,upstream_protocol}` plus non-empty `model_capabilities` and remains an explicitly enabled/verified trusted-admin route. |
 | `disabled_draft_is_not_selected_for_alias_routing` | Disabled drafts are not selected for alias routing. |
 | `goat_account_reports_verification_not_applicable` | GOAT reports `not_required`; its public catalog refresh is account-free and sends no Authorization header. Custom verification runtime remains available and is covered by the Custom trusted-admin black-box tests. |
 | `account_secrets_absent_from_json_errors_and_logs` | Account Keys never appear in dashboard JSON, errors, or logs. |

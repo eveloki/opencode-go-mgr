@@ -174,7 +174,8 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.match(accountForm, /label: entry\.display_name/);
   assert.match(accountForm, /t\("添加 \{plan\} 账号"/);
   assert.match(accountForm, /'aria-label': `\$\{t\('模型 ID'\)\} \$\{index \+ 1\}`/);
-  assert.match(accountForm, /<n-checkbox-group/);
+  assert.match(accountForm, /v-model:value="form\.upstreamProtocol"/);
+  assert.doesNotMatch(accountForm, /<n-checkbox-group/);
   assert.match(accountForm, /:aria-label="`\$\{t\('删除'\)\} \$\{t\('模型能力'\)\} \$\{index \+ 1\}`"/);
   assert.doesNotMatch(accountForm, /fieldImmutableAfterCreate/);
   assert.doesNotMatch(accountForm, /创建后不可修改/);

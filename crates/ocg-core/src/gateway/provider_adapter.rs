@@ -20,8 +20,7 @@
 //! loopback origin only and still uses `/provider/v1/...`.
 //! Configurable HTTP is the Custom API identity, not a base class.
 
-use crate::custom::join_custom_protocol_url;
-use crate::custom_http::join_inference_endpoint;
+use crate::custom_http::{custom_auth_scheme, join_inference_endpoint, parse_custom_endpoint_url};
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
@@ -394,7 +393,7 @@ impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
             return Err("Custom API does not serve the Zen free channel".to_string());
         }
         let custom = plan.custom_route.as_ref().ok_or_else(|| {
-            "Custom API account is missing a persisted base URL, protocol set, and auth scheme"
+            "Custom API account is missing a persisted endpoint URL and upstream protocol"
                 .to_string()
         })?;
         let protocol = protocol_kind_for(plan.upstream)?;
@@ -408,16 +407,18 @@ impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
                 plan.model, plan.upstream
             ));
         }
-        let _ = join_custom_protocol_url(&custom.base_url, protocol)
-            .map_err(|error| error.to_string())?;
+        let endpoint =
+            parse_custom_endpoint_url(&custom.endpoint_url).map_err(|error| error.to_string())?;
+        let endpoint_path = endpoint.path().to_string();
+        let mut base = endpoint;
+        base.set_path("");
+        base.set_query(None);
+        base.set_fragment(None);
         Ok(AttemptSpec {
-            base_url: custom.base_url.trim_end_matches('/').to_string(),
-            path: format!(
-                "/{}",
-                crate::provider::custom_endpoint_relative_path(protocol)
-            ),
+            base_url: base.as_str().trim_end_matches('/').to_string(),
+            path: endpoint_path,
             upstream: plan.upstream,
-            auth: match custom.auth_scheme {
+            auth: match custom_auth_scheme(protocol) {
                 UpstreamAuthScheme::Bearer => UpstreamAuth::Bearer,
                 UpstreamAuthScheme::XApiKey => UpstreamAuth::XApiKey,
             },
@@ -455,8 +456,8 @@ fn descriptor_auth(auth: InferenceAuthDescriptor) -> Result<UpstreamAuth, String
         }
         InferenceAuthDescriptor::Bearer => Ok(UpstreamAuth::Bearer),
         InferenceAuthDescriptor::None => Ok(UpstreamAuth::None),
-        InferenceAuthDescriptor::ConfigurableBearerOrXApiKey => {
-            Err("Configurable HTTP auth is taken from the account route spec".to_string())
+        InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey => {
+            Err("Configurable HTTP auth is derived from the account protocol".to_string())
         }
     }
 }
@@ -858,7 +859,7 @@ mod tests {
             ),
         )
         .unwrap_err();
-        assert!(custom_missing.contains("missing a persisted base URL"));
+        assert!(custom_missing.contains("missing a persisted endpoint URL"));
         let custom_route = resolve_route(
             &custom,
             &config,
@@ -867,16 +868,15 @@ mod tests {
                 UpstreamChannel::Go,
                 ApiFormat::ChatCompletions,
                 Some(CustomRouteSpec {
-                    base_url: "http://127.0.0.1:9/v1".into(),
-                    auth_scheme: UpstreamAuthScheme::XApiKey,
+                    endpoint_url: "http://127.0.0.1:9/v1/messages".into(),
                 }),
             ),
         )
         .unwrap();
         assert_eq!(custom_route.auth, UpstreamAuth::XApiKey);
         assert!(!custom_route.follow_redirects);
-        assert_eq!(custom_route.base_url, "http://127.0.0.1:9/v1");
-        assert_eq!(custom_route.path, "/chat/completions");
+        assert_eq!(custom_route.base_url, "http://127.0.0.1:9");
+        assert_eq!(custom_route.path, "/v1/messages");
         assert_eq!(
             custom_route.proxy_routing,
             ProxyRoutingModel::IsolatedTrustedAdmin
@@ -935,7 +935,7 @@ mod tests {
         assert!(!CommandCodeGoatAdapter::inference(goat_plan).loopback_test_seam_only);
         assert_eq!(
             ConfigurableHttpAdapter::inference(custom_plan).auth,
-            InferenceAuthDescriptor::ConfigurableBearerOrXApiKey
+            InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey
         );
     }
 
@@ -972,7 +972,7 @@ mod tests {
                 ProviderAdapterKind::ConfigurableHttp => {
                     assert_eq!(
                         descriptor.inference.auth,
-                        InferenceAuthDescriptor::ConfigurableBearerOrXApiKey
+                        InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey
                     );
                     assert!(!descriptor.inference.follow_redirects);
                 }

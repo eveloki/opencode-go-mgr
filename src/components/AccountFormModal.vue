@@ -89,55 +89,36 @@
         </n-form-item>
 
         <n-form-item
-          v-if="hasField('base_url')"
-          path="baseUrl"
-          :label="t('Base URL')"
+          v-if="isCustomPlan"
+          path="endpointUrl"
+          :label="t('完整 Endpoint')"
           class="full-width-field"
         >
           <n-input
-            v-model:value="form.baseUrl"
-            :input-props="{ 'aria-label': t('Base URL') }"
-            :placeholder="t('https://api.example.com/v1')"
+            v-model:value="form.endpointUrl"
+            :input-props="{ 'aria-label': t('完整 Endpoint') }"
+            :placeholder="endpointPlaceholder"
           />
         </n-form-item>
 
         <n-form-item
-          v-if="hasField('upstream_protocol')"
-          path="upstreamProtocols"
+          v-if="isCustomPlan"
+          path="upstreamProtocol"
           :label="t('上游协议')"
         >
           <div class="protocol-field">
-            <n-checkbox-group
-              v-model:value="form.upstreamProtocols"
+            <n-select
+              v-model:value="form.upstreamProtocol"
+              :options="upstreamProtocolOptions"
+              :placeholder="t('上游协议')"
               :aria-label="t('上游协议')"
-            >
-              <n-checkbox
-                v-for="option in upstreamProtocolOptions"
-                :key="option.value"
-                :value="option.value"
-                :label="option.label"
-              />
-            </n-checkbox-group>
-            <p class="field-hint">
-              {{ t("至少选择一个协议；所选协议对该账号下全部模型统一生效。") }}
-            </p>
+            />
+            <p class="field-hint">{{ t("所选协议对该账号下全部模型统一生效。") }}</p>
           </div>
         </n-form-item>
 
         <n-form-item
-          v-if="hasField('auth_scheme')"
-          path="authScheme"
-          :label="t('鉴权方式')"
-        >
-          <n-select
-            v-model:value="form.authScheme"
-            :options="authSchemeOptions"
-            :placeholder="t('鉴权方式')"
-          />
-        </n-form-item>
-
-        <n-form-item
-          v-if="hasField('model_capabilities')"
+          v-if="isCustomPlan"
           path="modelCapabilities"
           :label="t('模型能力')"
           class="full-width-field"
@@ -155,6 +136,9 @@
               </n-button>
               <span v-if="discoverySuccess" class="field-hint">{{ discoverySuccess }}</span>
             </div>
+            <p v-if="!canInferModelEndpoint" class="field-hint">
+              {{ t("仅标准推理 Endpoint 可自动推导 /models；请手动添加模型 ID。") }}
+            </p>
             <n-alert v-if="discoveryError" type="error" :show-icon="false">
               {{ discoveryError }}
             </n-alert>
@@ -229,8 +213,6 @@ import type { FormInst, FormRules } from "naive-ui";
 import {
   NAlert,
   NButton,
-  NCheckbox,
-  NCheckboxGroup,
   NDatePicker,
   NForm,
   NFormItem,
@@ -256,10 +238,12 @@ import {
   type AccountCreateFormValues,
 } from "../domain/account-create-payload.ts";
 import {
-  CUSTOM_BASE_URL_ISSUE_KEYS,
-  canonicalCustomProtocols,
-  customBaseUrlIssue,
+  CUSTOM_ENDPOINT_URL_ISSUE_KEYS,
+  CUSTOM_PROTOCOLS,
+  customEndpointUrlIssue,
+  customInferenceEndpointPlaceholder,
   expandCustomModelCapabilities,
+  isStandardCustomInferenceEndpoint,
 } from "../domain/custom-account.ts";
 import { protocolDisplayName } from "../domain/provider-contracts.ts";
 
@@ -272,12 +256,10 @@ export type AccountFormPayload = {
   purchase_date?: string;
   notes: string;
   /** Custom API edit only; persisted via the dedicated custom-config route. */
-  base_url?: string;
+  endpoint_url?: string;
   /** Custom API edit only; persisted via the dedicated custom-config route. */
-  upstream_protocols?: AccountProtocol[];
-  /** Custom API edit only; persisted via the dedicated custom-config route. */
-  auth_scheme?: "bearer" | "x-api-key";
-  /** Custom API edit only; model × protocol rows persisted via the dedicated capabilities route. */
+  upstream_protocol?: AccountProtocol;
+  /** Custom API edit only; atomically persisted with the dedicated custom-config route. */
   model_capabilities?: Array<{ model_id: string; protocol: AccountProtocol }>;
 };
 
@@ -288,18 +270,16 @@ type FormModel = {
   purchaseDate: number | null;
   notes: string;
   offeringId: string;
-  baseUrl: string;
-  upstreamProtocols: AccountProtocol[];
-  authScheme: "bearer" | "x-api-key" | null;
+  endpointUrl: string;
+  upstreamProtocol: AccountProtocol | null;
   modelCapabilities: AccountCreateCapability[];
 };
 
 type ModelDiscoveryContext = {
   show: boolean;
   accountId: string;
-  baseUrl: string;
-  upstreamProtocols: string;
-  authScheme: FormModel["authScheme"];
+  endpointUrl: string;
+  upstreamProtocol: FormModel["upstreamProtocol"];
   key: string;
 };
 
@@ -405,23 +385,16 @@ const keyPlaceholder = computed(() => {
 const purchaseDateRequired = computed(() => fieldRequired("purchase_date"));
 
 const upstreamProtocolOptions = computed(() => {
-  const available = catalogEntry.value?.upstream_protocols
-    ?? ["chat_completions", "responses", "messages"];
-  return canonicalCustomProtocols(available).map((value) => ({
+  return CUSTOM_PROTOCOLS.map((value) => ({
     value,
     label: protocolDisplayName(value),
   }));
 });
 
-const authSchemeOptions = computed(() => {
-  const schemes = catalogEntry.value?.auth_schemes ?? ["bearer"];
-  return schemes.map((value) => ({ value, label: value }));
-});
-
-const canDiscoverModels = computed(() => isCustomPlan.value
-  && !!form.value.baseUrl.trim()
-  && form.value.upstreamProtocols.length > 0
-  && !!form.value.authScheme
+const endpointPlaceholder = computed(() => customInferenceEndpointPlaceholder(form.value.upstreamProtocol));
+const canInferModelEndpoint = computed(() => isCustomPlan.value
+  && isStandardCustomInferenceEndpoint(form.value.endpointUrl, form.value.upstreamProtocol));
+const canDiscoverModels = computed(() => canInferModelEndpoint.value
   && (!!form.value.key.trim() || !!props.account?.id));
 
 const rules = computed<FormRules>(() => {
@@ -462,38 +435,22 @@ const rules = computed<FormRules>(() => {
     };
   }
 
-  if (hasField("base_url") && fieldRequired("base_url")) {
-    base.baseUrl = {
+  if (isCustomPlan.value) {
+    base.endpointUrl = {
       required: true,
       validator: (_rule: unknown, value: string) => {
-        const issue = customBaseUrlIssue(value ?? "");
-        return issue ? new Error(t(CUSTOM_BASE_URL_ISSUE_KEYS[issue])) : true;
+        const issue = customEndpointUrlIssue(value ?? "");
+        return issue ? new Error(t(CUSTOM_ENDPOINT_URL_ISSUE_KEYS[issue])) : true;
       },
       trigger: ["input", "blur"],
     };
-  }
-
-  if (hasField("upstream_protocol") && fieldRequired("upstream_protocol")) {
-    base.upstreamProtocols = {
-      required: true,
-      type: "array",
-      validator: (_rule: unknown, value: AccountProtocol[]) =>
-        Array.isArray(value) && value.length > 0,
-      message: t("请至少选择一个上游协议"),
-      trigger: ["change", "blur"],
-    };
-  }
-
-  if (hasField("auth_scheme") && fieldRequired("auth_scheme")) {
-    base.authScheme = {
+    base.upstreamProtocol = {
       required: true,
       type: "string",
-      message: t("鉴权方式"),
+      validator: (_rule: unknown, value: AccountProtocol | null) => !!value,
+      message: t("请选择上游协议"),
       trigger: ["change", "blur"],
     };
-  }
-
-  if (hasField("model_capabilities") && fieldRequired("model_capabilities")) {
     base.modelCapabilities = {
       required: true,
       type: "array",
@@ -522,9 +479,8 @@ function currentModelDiscoveryContext(): ModelDiscoveryContext {
   return {
     show: props.show,
     accountId: props.account?.id ?? "",
-    baseUrl: form.value.baseUrl,
-    upstreamProtocols: canonicalCustomProtocols(form.value.upstreamProtocols).join(","),
-    authScheme: form.value.authScheme,
+    endpointUrl: form.value.endpointUrl,
+    upstreamProtocol: form.value.upstreamProtocol,
     key: form.value.key,
   };
 }
@@ -533,9 +489,8 @@ function modelDiscoveryContextMatches(expected: ModelDiscoveryContext): boolean 
   const current = currentModelDiscoveryContext();
   return current.show === expected.show
     && current.accountId === expected.accountId
-    && current.baseUrl === expected.baseUrl
-    && current.upstreamProtocols === expected.upstreamProtocols
-    && current.authScheme === expected.authScheme
+    && current.endpointUrl === expected.endpointUrl
+    && current.upstreamProtocol === expected.upstreamProtocol
     && current.key === expected.key;
 }
 
@@ -577,9 +532,8 @@ function blankForm(): FormModel {
     purchaseDate: timestampFromLocalDate(localDateString()) ?? Date.now(),
     notes: "",
     offeringId: plan?.offering_ids[0] ?? "",
-    baseUrl: "",
-    upstreamProtocols: [],
-    authScheme: null,
+    endpointUrl: "",
+    upstreamProtocol: "chat_completions",
     modelCapabilities: [],
   };
 }
@@ -601,9 +555,8 @@ function formFromAccount(account: Account): FormModel {
       ?? Date.now(),
     notes: account.notes ?? "",
     offeringId: account.offering_id,
-    baseUrl: account.custom_config?.base_url ?? "",
-    upstreamProtocols: canonicalCustomProtocols(account.custom_config?.upstream_protocols ?? []),
-    authScheme: account.custom_config?.auth_scheme ?? null,
+    endpointUrl: account.custom_config?.endpoint_url ?? "",
+    upstreamProtocol: account.custom_config?.upstream_protocol ?? "chat_completions",
     modelCapabilities,
   };
 }
@@ -628,7 +581,7 @@ function removeCapability(index: number) {
 }
 
 async function discoverModels() {
-  if (!canDiscoverModels.value || form.value.upstreamProtocols.length === 0 || !form.value.authScheme) return;
+  if (!canDiscoverModels.value || !form.value.upstreamProtocol) return;
   const context = currentModelDiscoveryContext();
   const generation = ++discoveryGeneration;
   discoveringModels.value = true;
@@ -636,9 +589,8 @@ async function discoverModels() {
   discoverySuccess.value = "";
   try {
     const result = await dashboardApi.discoverCustomModels({
-      base_url: form.value.baseUrl.trim(),
-      upstream_protocols: canonicalCustomProtocols(form.value.upstreamProtocols),
-      auth_scheme: form.value.authScheme,
+      endpoint_url: form.value.endpointUrl.trim(),
+      upstream_protocol: form.value.upstreamProtocol,
       ...(form.value.key.trim() ? { api_key: form.value.key.trim() } : {}),
       ...(props.account?.id ? { account_id: props.account.id } : {}),
     });
@@ -697,12 +649,11 @@ async function handleSave() {
       payload.key = form.value.key.trim();
     }
     if (isCustomPlan.value) {
-      payload.base_url = form.value.baseUrl.trim();
-      payload.upstream_protocols = canonicalCustomProtocols(form.value.upstreamProtocols);
-      payload.auth_scheme = form.value.authScheme ?? undefined;
+      payload.endpoint_url = form.value.endpointUrl.trim();
+      payload.upstream_protocol = form.value.upstreamProtocol ?? undefined;
       payload.model_capabilities = expandCustomModelCapabilities(
         form.value.modelCapabilities.map((cap) => cap.model_id),
-        form.value.upstreamProtocols,
+        form.value.upstreamProtocol ?? "chat_completions",
       );
     }
     emit("save", payload);
@@ -721,11 +672,8 @@ async function handleSave() {
     key: form.value.key,
     purchase_date: form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate),
     notes: form.value.notes,
-    base_url: form.value.baseUrl,
-    upstream_protocols: form.value.upstreamProtocols.length > 0
-      ? canonicalCustomProtocols(form.value.upstreamProtocols)
-      : undefined,
-    auth_scheme: form.value.authScheme ?? undefined,
+    endpoint_url: form.value.endpointUrl,
+    upstream_protocol: form.value.upstreamProtocol ?? undefined,
     model_capabilities: form.value.modelCapabilities.length > 0 ? form.value.modelCapabilities : undefined,
   };
 

@@ -1,22 +1,18 @@
 import type {
   Account,
-  AccountCustomConfigInput,
+  AccountCustomConfigUpdateInput,
   AccountModelCapability,
   AccountModelCapabilityInput,
   AccountProtocol,
   AccountUpdate,
 } from "../api/dashboard.ts";
-import type { MessageKey } from "../i18n/index.ts";
 
 /**
  * Custom API accounts are administrator-trusted endpoints: the UI accepts any
- * backend-valid http:// or https:// base URL, including LAN, localhost, and
- * metadata addresses, and never re-imposes public-only/HTTPS-only/private-host
- * blockers. Client-side validation only rejects obviously malformed input,
- * non-http(s) schemes, and URL-embedded credentials — everything else is the
- * backend's call.
+ * backend-valid http:// or https:// inference endpoint, including LAN,
+ * localhost, and metadata addresses. Client-side validation only rejects
+ * malformed input, non-http(s) schemes, and URL-embedded credentials.
  */
-
 export const CUSTOM_PROVIDER_ID = "custom";
 export const CUSTOM_OFFERING_ID = "api";
 
@@ -27,14 +23,14 @@ export function isCustomApiAccount(
     && account.offering_id === CUSTOM_OFFERING_ID;
 }
 
-export type CustomBaseUrlIssue = "empty" | "malformed" | "not_http" | "with_credentials";
+export type CustomEndpointUrlIssue = "empty" | "malformed" | "not_http" | "with_credentials";
 
-export const CUSTOM_BASE_URL_ISSUE_KEYS = {
-  empty: "请填写 Base URL",
-  malformed: "Base URL 格式无效",
-  not_http: "Base URL 必须是 http:// 或 https:// URL",
-  with_credentials: "Base URL 不能包含用户名或密码",
-} as const satisfies Record<CustomBaseUrlIssue, MessageKey>;
+export const CUSTOM_ENDPOINT_URL_ISSUE_KEYS = {
+  empty: "请填写完整 Endpoint",
+  malformed: "Endpoint 格式无效",
+  not_http: "Endpoint 必须是 http:// 或 https:// URL",
+  with_credentials: "Endpoint 不能包含用户名或密码",
+} as const satisfies Record<CustomEndpointUrlIssue, string>;
 
 export const MAX_CUSTOM_MODEL_ID_CHARS = 200;
 
@@ -50,8 +46,8 @@ export const CUSTOM_CAPABILITY_ISSUE_KEYS = {
   duplicate_model_id: "模型 ID 不能重复",
   model_id_too_long: "模型 ID 最多 200 个字符",
   model_id_has_control_character: "模型 ID 不能包含控制字符",
-  protocol_mismatch: "模型能力协议必须属于所选上游协议",
-} as const satisfies Record<CustomCapabilityIssue, MessageKey>;
+  protocol_mismatch: "模型能力必须使用所选上游协议",
+} as const satisfies Record<CustomCapabilityIssue, string>;
 
 export class CustomCapabilityError extends Error {
   readonly issue: CustomCapabilityIssue;
@@ -62,12 +58,7 @@ export class CustomCapabilityError extends Error {
   }
 }
 
-/**
- * Validate — never normalize — a Custom base URL. Trusted destinations such as
- * `http://192.168.1.10:8080/v1`, `http://localhost:3000`, and metadata IPs are
- * valid; only shape, scheme, and embedded credentials are rejected.
- */
-export function customBaseUrlIssue(value: string): CustomBaseUrlIssue | null {
+export function customEndpointUrlIssue(value: string): CustomEndpointUrlIssue | null {
   const trimmed = value.trim();
   if (!trimmed) return "empty";
   let parsed: URL;
@@ -82,61 +73,67 @@ export function customBaseUrlIssue(value: string): CustomBaseUrlIssue | null {
   return null;
 }
 
-/**
- * Stable comparison identity for a backend-valid Custom base URL. This is
- * deliberately not the persisted payload: callers keep the administrator's
- * trimmed input while avoiding a config write for URL spellings that the URL
- * parser treats as the same endpoint.
- */
-export function canonicalCustomBaseUrl(value: string): string {
+/** Comparison identity only; the submitted endpoint preserves administrator input. */
+export function canonicalCustomEndpointUrl(value: string): string {
   const parsed = new URL(value.trim());
   if (parsed.username || parsed.password) {
-    throw new Error("Custom base URL must not contain credentials");
+    throw new Error("Custom Endpoint must not contain credentials");
   }
   const pathname = parsed.pathname.replace(/\/+$/u, "");
   return `${parsed.protocol}//${parsed.host}${pathname}${parsed.search}${parsed.hash}`;
 }
 
-/**
- * Canonical protocol ordering for a Custom account's declared set. The first
- * element doubles as the discovery dialect, so submissions always use this
- * fixed priority instead of click order.
- */
 export const CUSTOM_PROTOCOLS: readonly AccountProtocol[] = [
   "chat_completions",
   "responses",
   "messages",
 ];
 
-/** De-dupe and order a checked protocol set into the canonical priority. */
-export function canonicalCustomProtocols(
-  protocols: readonly AccountProtocol[],
-): AccountProtocol[] {
-  return CUSTOM_PROTOCOLS.filter((protocol) => protocols.includes(protocol));
+export function isCustomProtocol(value: unknown): value is AccountProtocol {
+  return typeof value === "string" && CUSTOM_PROTOCOLS.includes(value as AccountProtocol);
 }
 
-/** Expand a plain model-ID list into the model × protocol rows the backend persists. */
+export function customInferenceEndpointPlaceholder(protocol: AccountProtocol | null): string {
+  switch (protocol) {
+    case "responses": return "https://api.example.com/v1/responses";
+    case "messages": return "https://api.example.com/v1/messages";
+    case "chat_completions":
+    default: return "https://api.example.com/v1/chat/completions";
+  }
+}
+
+/** Standard paths are the only paths with an unambiguous derived `/models` URL. */
+export function isStandardCustomInferenceEndpoint(
+  endpointUrl: string,
+  protocol: AccountProtocol | null,
+): boolean {
+  if (!protocol || customEndpointUrlIssue(endpointUrl)) return false;
+  try {
+    const pathname = new URL(endpointUrl.trim()).pathname.replace(/\/+$/u, "");
+    const standardPath = {
+      chat_completions: "/chat/completions",
+      responses: "/responses",
+      messages: "/messages",
+    } satisfies Record<AccountProtocol, string>;
+    return pathname.endsWith(standardPath[protocol]);
+  } catch {
+    return false;
+  }
+}
+
+/** Expand each declared model into exactly the selected upstream protocol. */
 export function expandCustomModelCapabilities(
   modelIds: readonly string[],
-  upstreamProtocols: readonly AccountProtocol[],
+  upstreamProtocol: AccountProtocol,
 ): Pick<AccountModelCapabilityInput, "model_id" | "protocol">[] {
-  const protocols = canonicalCustomProtocols(upstreamProtocols);
-  return modelIds.flatMap((model_id) => protocols.map((protocol) => ({ model_id, protocol })));
+  return modelIds.map((model_id) => ({ model_id, protocol: upstreamProtocol }));
 }
 
-/**
- * Mirror the Custom capability constraints enforced by the backend before any
- * account mutation is sent. The normalized model ID is the backend's trimmed
- * value, so duplicates are caught even when users only differ by whitespace.
- * Every row's protocol must belong to the account's declared protocol set.
- */
 export function normalizeCustomCapabilities(
   capabilities: readonly Pick<AccountModelCapabilityInput, "model_id" | "protocol">[],
-  upstreamProtocols: readonly AccountProtocol[],
+  upstreamProtocol: AccountProtocol,
 ): AccountModelCapabilityInput[] {
   if (capabilities.length === 0) throw new CustomCapabilityError("missing");
-  const allowedProtocols = new Set(upstreamProtocols);
-  if (allowedProtocols.size === 0) throw new CustomCapabilityError("protocol_mismatch");
 
   const seenRows = new Set<string>();
   return capabilities.map((capability) => {
@@ -147,14 +144,13 @@ export function normalizeCustomCapabilities(
     if (/[\u0000-\u001F\u007F-\u009F]/u.test(model_id)) {
       throw new CustomCapabilityError("model_id_has_control_character");
     }
-    if (!allowedProtocols.has(capability.protocol)) {
+    if (capability.protocol !== upstreamProtocol) {
       throw new CustomCapabilityError("protocol_mismatch");
     }
-    const rowKey = `${model_id} ${capability.protocol}`;
-    if (!model_id || seenRows.has(rowKey)) {
+    if (!model_id || seenRows.has(model_id)) {
       throw new CustomCapabilityError(!model_id ? "missing" : "duplicate_model_id");
     }
-    seenRows.add(rowKey);
+    seenRows.add(model_id);
     return { model_id, protocol: capability.protocol, source: "manual" };
   });
 }
@@ -163,22 +159,21 @@ export type CustomAccountEditInput = {
   name: string;
   notes?: string;
   key?: string;
-  base_url?: string;
-  upstream_protocols?: readonly AccountProtocol[];
-  auth_scheme?: "bearer" | "x-api-key";
+  endpoint_url?: string;
+  upstream_protocol?: AccountProtocol;
   model_capabilities?: readonly Pick<AccountModelCapabilityInput, "model_id" | "protocol">[];
 };
 
 export type CustomAccountEditPlan = {
   account?: AccountUpdate;
-  customConfig?: AccountCustomConfigInput;
-  capabilities?: AccountModelCapabilityInput[];
+  customConfig?: AccountCustomConfigUpdateInput;
 };
 
 export type CustomAccountEditWriters = {
   account: (update: AccountUpdate) => Promise<void>;
-  customConfig: (config: AccountCustomConfigInput) => Promise<void>;
-  capabilities: (capabilities: AccountModelCapabilityInput[]) => Promise<void>;
+  customConfig: (config: AccountCustomConfigUpdateInput) => Promise<void>;
+  /** Accepted for source compatibility; edits now atomically use customConfig. */
+  capabilities?: (capabilities: AccountModelCapabilityInput[]) => Promise<void>;
 };
 
 function sameCapabilities(
@@ -191,19 +186,7 @@ function sameCapabilities(
   ));
 }
 
-function sameProtocolSet(
-  saved: readonly AccountProtocol[],
-  next: readonly AccountProtocol[],
-): boolean {
-  const ordered = canonicalCustomProtocols(next);
-  return saved.length === ordered.length && saved.every((protocol, index) => protocol === ordered[index]);
-}
-
-/**
- * Compute only the Custom account sections that actually changed. Validation
- * intentionally runs first so invalid capabilities cannot leave a metadata
- * PATCH behind before the dedicated route rejects the remaining edit.
- */
+/** Validate all Custom sections before any write, then combine config and models. */
 export function planCustomAccountEdit(
   account: Account,
   input: CustomAccountEditInput,
@@ -211,64 +194,50 @@ export function planCustomAccountEdit(
   const config = account.custom_config;
   if (!config) throw new Error("Custom account configuration is missing");
 
-  const base_url = (input.base_url ?? config.base_url).trim();
-  const baseUrlIssue = customBaseUrlIssue(base_url);
-  if (baseUrlIssue) throw new Error(CUSTOM_BASE_URL_ISSUE_KEYS[baseUrlIssue]);
-  const canonicalBaseUrl = canonicalCustomBaseUrl(base_url);
-  const canonicalSavedBaseUrl = canonicalCustomBaseUrl(config.base_url);
-
-  // Protocol set and auth scheme are editable after create; a change re-opens
-  // verification as pending on the backend without disabling the account.
-  const upstream_protocols = canonicalCustomProtocols(
-    input.upstream_protocols ?? config.upstream_protocols,
-  );
-  if (upstream_protocols.length === 0) {
-    throw new CustomCapabilityError("protocol_mismatch");
-  }
-  const auth_scheme = input.auth_scheme ?? config.auth_scheme;
+  const endpoint_url = (input.endpoint_url ?? config.endpoint_url).trim();
+  const endpointUrlIssue = customEndpointUrlIssue(endpoint_url);
+  if (endpointUrlIssue) throw new Error(CUSTOM_ENDPOINT_URL_ISSUE_KEYS[endpointUrlIssue]);
+  const canonicalEndpointUrl = canonicalCustomEndpointUrl(endpoint_url);
+  const canonicalSavedEndpointUrl = canonicalCustomEndpointUrl(config.endpoint_url);
+  const upstream_protocol = input.upstream_protocol ?? config.upstream_protocol;
+  if (!isCustomProtocol(upstream_protocol)) throw new CustomCapabilityError("protocol_mismatch");
 
   const capabilities = normalizeCustomCapabilities(
     input.model_capabilities ?? account.model_capabilities,
-    upstream_protocols,
+    upstream_protocol,
   );
   const name = input.name.trim();
   const notes = input.notes ?? "";
   const keyReplacement = input.key !== undefined;
   const metadataChanged = name !== account.name || notes !== account.notes || keyReplacement;
-  const configChanged = canonicalBaseUrl !== canonicalSavedBaseUrl
-    || !sameProtocolSet(config.upstream_protocols, upstream_protocols)
-    || auth_scheme !== config.auth_scheme;
+  const capabilitiesChanged = !sameCapabilities(account.model_capabilities, capabilities);
+  const configChanged = canonicalEndpointUrl !== canonicalSavedEndpointUrl
+    || upstream_protocol !== config.upstream_protocol;
 
   return {
     ...(metadataChanged
       ? { account: { name, notes, ...(input.key === undefined ? {} : { key: input.key }) } }
       : {}),
-    ...(configChanged
+    ...(configChanged || capabilitiesChanged || keyReplacement
       ? {
         customConfig: {
-          base_url,
-          upstream_protocols,
-          auth_scheme,
+          endpoint_url,
+          upstream_protocol,
+          model_capabilities: capabilities,
         },
       }
-      : {}),
-    ...(keyReplacement || !sameCapabilities(account.model_capabilities, capabilities)
-      ? { capabilities }
       : {}),
   };
 }
 
-/** Apply an already-validated edit plan in the only safe order. */
 export async function applyCustomAccountEditPlan(
   plan: CustomAccountEditPlan,
   writers: CustomAccountEditWriters,
 ): Promise<void> {
   if (plan.account) await writers.account(plan.account);
   if (plan.customConfig) await writers.customConfig(plan.customConfig);
-  if (plan.capabilities) await writers.capabilities(plan.capabilities);
 }
 
-/** Validate before handing any write to the dashboard transport. */
 export async function executeCustomAccountEdit(
   account: Account,
   input: CustomAccountEditInput,
@@ -277,7 +246,6 @@ export async function executeCustomAccountEdit(
   await applyCustomAccountEditPlan(planCustomAccountEdit(account, input), writers);
 }
 
-/** Pending or failed Custom accounts expose the verify-connection action. */
 export function customAccountNeedsVerification(
   account: Pick<Account, "provider_id" | "offering_id" | "verification_status">,
 ): boolean {

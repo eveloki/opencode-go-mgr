@@ -97,7 +97,7 @@ desktop-specific steps need a real machine.
       credentials are rejected; a `2xx` JSON object verifies; the card stays
       disabled; explicit enable is required; declared model/protocol
       forwarding succeeds; redirects are denied; dashboard/client auth is not
-      forwarded and only the configured Bearer or `x-api-key` is sent;
+      forwarded and only the protocol-derived Bearer or `x-api-key` is sent;
       successful logs are unpriced/`cost_state=unknown` with no quota debit;
       editing the URL, key, or capabilities re-pends verification and disables
       the account. Confirm Direct/Manual/Auto inherit the process-wide proxy.

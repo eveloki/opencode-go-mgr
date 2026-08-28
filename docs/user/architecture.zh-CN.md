@@ -39,7 +39,7 @@
                    \                      /
                     \                    /
              +----------------+------------------+
-             |         SQLite schema v31         |
+             |         SQLite schema v32         |
              |  桌面  ~/.ocg-mgr                 |
              |  CLI   ~/.ocg-mgr-cli             |
              +-----------------------------------+
@@ -95,7 +95,8 @@ Messages 与 Gemini generate / stream 上均为 `400`。重叠的原始 ID 返�
     无上游 Key
     在供应商页刷新目录
   Custom API
-    受信管理员 HTTP/HTTPS 目的地
+    一个受信管理员完整 HTTP/HTTPS Endpoint
+    一个上游协议；鉴权自动推导
 
 
   Custom API 生命周期
@@ -103,15 +104,15 @@ Messages 与 Gemini generate / stream 上均为 `400`。重叠的原始 ID 返�
     保存 / 更新  ->  pending 时也可启用
            |
            v
-    用第一个声明模型验证每个已选协议
-    （每个协议一次最小非流式请求；
-     每个都须 2xx JSON object）
+    用第一个声明模型验证所选协议
+    （向完整 Endpoint 发送一次最小非流式请求；
+     须返回一个 2xx JSON object）
            |
            v
     验证状态变为 verified
     （账号可能已在路由中）
 
-  Key、base URL、声明能力、协议集或鉴权方案变更
+  Key、完整 Endpoint、声明能力或协议变更
   会使验证状态变为 pending，但保持该卡启用。
 ```
 
@@ -138,7 +139,7 @@ Zen Free 只有启用开关；不需要时直接关掉卡片。目录刷新在�
 
     AI 客户端 --Key--> 本节点 --账号凭据--> Plan
 
-    Key            access_keys（schema v31）
+    Key            access_keys（schema v32）
                    主 Key + 可选子 Key（活跃上限 64）
     账号凭据       Go Key、Custom Key，或 Zen Free（无）
 ```

@@ -28,7 +28,7 @@ Gateway 监听 `http://<bind>:<port>`，暴露以下端点：
 
 ## 鉴权
 
-Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api-key: <key>` 或 `x-goog-api-key: <key>` 三种请求头。转发前 Gateway 会移除客户端鉴权头，再注入所选账号的凭据。OpenCode Go 在 Messages 上游使用 `x-api-key`，在 Chat Completions 与 Responses 上游使用 `Authorization: Bearer`。Custom API 只构造已配置的 Bearer 或 `x-api-key`，不会转发 dashboard 或客户端凭据。
+Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api-key: <key>` 或 `x-goog-api-key: <key>` 三种请求头。转发前 Gateway 会移除客户端鉴权头，再注入所选账号的凭据。OpenCode Go 在 Messages 上游使用 `x-api-key`，在 Chat Completions 与 Responses 上游使用 `Authorization: Bearer`。Custom API 由唯一上游协议决定鉴权：Messages 只使用 `x-api-key`，Chat Completions 与 Responses 只使用 Bearer；不会双发，也不会转发 dashboard 或客户端凭据。
 
 管理面板鉴权取决于监听地址。当前 SPA 使用 `/dashboard/api/v3/auth/status`、`/dashboard/api/v3/auth/register`、`/dashboard/api/v3/auth/login` 与 `/dashboard/api/v3/auth/logout`。注册、登录、退出需要与其他 V3 写入相同的 `expectedRevision` / `processGeneration` token。对应的 `/dashboard/api/auth/...` 路由只作为已标明的 V2 兼容例外，供缓存的旧页面使用，不是当前 SPA 数据路径。
 

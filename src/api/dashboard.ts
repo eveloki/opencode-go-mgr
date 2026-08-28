@@ -59,8 +59,8 @@ import {
   presentUsageRefresh,
   type Account,
   type AccountInput,
+  type AccountCustomConfigUpdateInput,
   type AccountModelCapabilityInput,
-  type AccountProtocol,
   type AccountUpdate,
   type AppConfig,
   type BrowserTarget,
@@ -191,13 +191,24 @@ export const dashboardApi = {
 
   updateAccountCustomConfig: (
     id: string,
-    config: { base_url: string; upstream_protocols: AccountProtocol[]; auth_scheme: "bearer" | "x-api-key" },
+    config: AccountCustomConfigUpdateInput,
     _ignoredRevision?: number,
-  ): Promise<Account> => mutatedAccount(withCas((expectation) => dashboardV3.putAccountCustomConfig(id, {
-    baseUrl: config.base_url,
-    upstreamProtocols: [...config.upstream_protocols],
-    authScheme: config.auth_scheme,
-  } satisfies WithoutExpectation<AccountCustomConfigUpdate>, expectation))),
+  ): Promise<Account> => mutatedAccount(withCas((expectation) => {
+    const payload = {
+      endpointUrl: config.endpoint_url,
+      upstreamProtocol: config.upstream_protocol,
+      modelCapabilities: config.model_capabilities.map((capability) => ({
+        modelId: capability.model_id,
+        protocol: capability.protocol,
+        source: capability.source,
+      })),
+    };
+    return dashboardV3.putAccountCustomConfig(
+      id,
+      payload satisfies WithoutExpectation<AccountCustomConfigUpdate>,
+      expectation,
+    );
+  })),
 
   updateAccountModelCapabilities: (
     id: string,
@@ -213,9 +224,8 @@ export const dashboardApi = {
 
   discoverCustomModels: async (input: CustomModelDiscoveryInput) => {
     const result = await dashboardV3.discoverCustomModels({
-      baseUrl: input.base_url,
-      upstreamProtocols: [...input.upstream_protocols],
-      authScheme: input.auth_scheme,
+      endpointUrl: input.endpoint_url,
+      upstreamProtocol: input.upstream_protocol,
       apiKey: input.api_key,
       accountId: input.account_id,
     });

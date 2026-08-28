@@ -144,10 +144,6 @@ export type AccountType = "key" | "managed";
  */
 export type AccountCredentialKind = "api_key" | "none";
 /**
- * Custom auth scheme. Wire values match V2 kebab-case.
- */
-export type AccountAuthScheme = "bearer" | "x-api-key";
-/**
  * Custom/upstream protocol. Wire values match V2 snake_case.
  */
 export type AccountUpstreamProtocol = "chat_completions" | "responses" | "messages";
@@ -163,6 +159,10 @@ export type AccountSetupStep = "google_account" | "opencode_registration" | "pay
  * Connection-verification status. Wire values match V2 snake_case.
  */
 export type AccountVerificationStatus = "not_required" | "pending" | "verified" | "failed";
+/**
+ * Custom auth scheme. Wire values match V2 kebab-case.
+ */
+export type AccountAuthScheme = "bearer" | "x-api-key";
 /**
  * Last explicit probe outcome stored on evidence. Distinct from
  * [`ProtocolProbeResult`].
@@ -401,11 +401,10 @@ export interface Account {
  */
 export interface AccountCustomConfig {
   accountId: string;
-  authScheme: AccountAuthScheme;
-  baseUrl: string;
   createdAt: string;
+  endpointUrl: string;
   updatedAt: string;
-  upstreamProtocols: AccountUpstreamProtocol[];
+  upstreamProtocol: AccountUpstreamProtocol;
 }
 /**
  * One declared Custom model capability as returned on an account.
@@ -456,9 +455,8 @@ export interface AccountCreate {
  * Create-time Custom destination (no timestamps). Nested under `AccountCreate`.
  */
 export interface AccountCustomConfigWrite {
-  authScheme: AccountAuthScheme;
-  baseUrl: string;
-  upstreamProtocols: AccountUpstreamProtocol[];
+  endpointUrl: string;
+  upstreamProtocol: AccountUpstreamProtocol;
 }
 /**
  * One declared Custom model capability on create or replace.
@@ -512,15 +510,15 @@ export interface AccountSetupUpdate {
   setupStep: AccountSetupStep;
 }
 /**
- * PUT `/accounts/{id}/custom-config` body. Protocol set and auth scheme are
- * editable; a change re-opens verification as pending without disabling.
+ * PUT `/accounts/{id}/custom-config` body. The endpoint binding and complete
+ * model capability list are replaced atomically under one CAS expectation.
  */
 export interface AccountCustomConfigUpdate {
-  authScheme: AccountAuthScheme;
-  baseUrl: string;
+  endpointUrl: string;
   expectedRevision: number;
+  modelCapabilities: AccountModelCapabilityWrite[];
   processGeneration: number;
-  upstreamProtocols: AccountUpstreamProtocol[];
+  upstreamProtocol: AccountUpstreamProtocol;
 }
 /**
  * PUT `/accounts/{id}/model-capabilities` body.
@@ -1341,9 +1339,8 @@ export interface ProxyTestResponse {
 export interface CustomModelDiscoveryRequest {
   accountId?: string | null;
   apiKey?: string | null;
-  authScheme: AccountAuthScheme;
-  baseUrl: string;
-  upstreamProtocols: AccountUpstreamProtocol[];
+  endpointUrl: string;
+  upstreamProtocol: AccountUpstreamProtocol;
 }
 /**
  * Custom model-list probe result. Identity tokens are the captured current

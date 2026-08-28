@@ -187,11 +187,20 @@ async fn send_raw(harness: &V3Harness, path: &str, body: &str) -> (StatusCode, V
     (status, body)
 }
 
-fn discover_body(base_url: &str, protocol: &str, auth: &str, api_key: Option<&str>) -> Value {
+fn inference_endpoint(base_url: &str, protocol: &str) -> String {
+    let suffix = match protocol {
+        "chat_completions" => "chat/completions",
+        "responses" => "responses",
+        "messages" => "messages",
+        other => panic!("unsupported Custom test protocol {other}"),
+    };
+    format!("{}/{suffix}", base_url.trim_end_matches('/'))
+}
+
+fn discover_body(base_url: &str, protocol: &str, _auth: &str, api_key: Option<&str>) -> Value {
     let mut body = json!({
-        "baseUrl": base_url,
-        "upstreamProtocols": [protocol],
-        "authScheme": auth,
+        "endpointUrl": inference_endpoint(base_url, protocol),
+        "upstreamProtocol": protocol,
     });
     if let Some(api_key) = api_key {
         body["apiKey"] = json!(api_key);
@@ -312,7 +321,7 @@ fn point_direct(harness: &V3Harness) {
     harness.state.set_config(config).unwrap();
 }
 
-async fn create_custom_account(harness: &V3Harness, base_url: &str, auth: &str) -> String {
+async fn create_custom_account(harness: &V3Harness, base_url: &str, _auth: &str) -> String {
     let (status, created) = send_json(
         harness,
         Method::POST,
@@ -325,9 +334,8 @@ async fn create_custom_account(harness: &V3Harness, base_url: &str, auth: &str) 
                 "providerId": CUSTOM_PROVIDER_ID,
                 "offeringId": CUSTOM_API_OFFERING_ID,
                 "customConfig": {
-                    "baseUrl": base_url,
-                    "upstreamProtocols": ["chat_completions"],
-                    "authScheme": auth
+                    "endpointUrl": inference_endpoint(base_url, "chat_completions"),
+                    "upstreamProtocol": "chat_completions"
                 },
                 "modelCapabilities": [{
                     "modelId": "org/model",
@@ -345,8 +353,8 @@ async fn create_custom_account(harness: &V3Harness, base_url: &str, auth: &str) 
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v31() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+fn dashboard_v3_schema_version_stays_at_v32() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
 }
 
 #[tokio::test]
@@ -536,7 +544,7 @@ async fn successful_bearer_discovery_is_secret_free_and_does_not_mutate() {
 }
 
 #[tokio::test]
-async fn x_api_key_discovery_sends_isolated_auth_and_messages_sets_anthropic_version() {
+async fn discovery_derives_isolated_auth_from_the_selected_protocol() {
     let harness = start_loopback("discover-auth-scheme").await;
     let origin = start_discovery_origin(OriginScript::Fixed {
         status: StatusCode::OK,
@@ -559,8 +567,8 @@ async fn x_api_key_discovery_sends_isolated_auth_and_messages_sets_anthropic_ver
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let call = origin.last();
-    assert_eq!(call.x_api_key.as_deref(), Some(CUSTOM_KEY));
-    assert!(call.authorization.is_none(), "{call:?}");
+    assert!(call.x_api_key.is_none(), "{call:?}");
+    assert_eq!(call.authorization.as_deref(), Some(CUSTOM_BEARER));
     assert!(call.anthropic_version.is_none(), "{call:?}");
 
     let (status, body) = send_json(
@@ -573,7 +581,8 @@ async fn x_api_key_discovery_sends_isolated_auth_and_messages_sets_anthropic_ver
     assert_eq!(status, StatusCode::OK, "{body}");
     let call = origin.last();
     assert_eq!(call.anthropic_version.as_deref(), Some("2023-06-01"));
-    assert_eq!(call.authorization.as_deref(), Some(CUSTOM_BEARER));
+    assert_eq!(call.x_api_key.as_deref(), Some(CUSTOM_KEY));
+    assert!(call.authorization.is_none(), "{call:?}");
     harness.stop();
 }
 
@@ -727,6 +736,24 @@ async fn discovery_rejects_malformed_inputs_before_upstream() {
     assert_secret_free(&embedded, &[CUSTOM_KEY, "user:pass@"]);
     assert_eq!(harness.state.settings_revision(), before);
 
+    let (status, nonstandard) = send_json(
+        &harness,
+        Method::POST,
+        "/custom/models/discover",
+        &json!({
+            "endpointUrl": format!("{}/custom-inference", origin.url.trim_end_matches('/')),
+            "upstreamProtocol": "chat_completions",
+            "apiKey": CUSTOM_KEY
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{nonstandard}");
+    assert_v3_error(&nonstandard, ERROR_INVALID_REQUEST);
+    let message = nonstandard["message"].as_str().unwrap();
+    assert!(message.contains("/chat/completions"), "{nonstandard}");
+    assert!(message.contains("manually"), "{nonstandard}");
+    assert_eq!(origin.call_count(), 0);
+
     let go = send_json(
         &harness,
         Method::POST,
@@ -746,9 +773,8 @@ async fn discovery_rejects_malformed_inputs_before_upstream() {
         Method::POST,
         "/custom/models/discover",
         &json!({
-            "baseUrl": origin.url,
-            "upstreamProtocols": ["chat_completions"],
-            "authScheme": "bearer",
+            "endpointUrl": inference_endpoint(&origin.url, "chat_completions"),
+            "upstreamProtocol": "chat_completions",
             "accountId": go_id
         }),
     )
@@ -768,9 +794,8 @@ async fn discovery_rejects_malformed_inputs_before_upstream() {
         Method::POST,
         "/custom/models/discover",
         &json!({
-            "baseUrl": origin.url,
-            "upstreamProtocols": ["chat_completions"],
-            "authScheme": "bearer",
+            "endpointUrl": inference_endpoint(&origin.url, "chat_completions"),
+            "upstreamProtocol": "chat_completions",
             "accountId": "missing-account"
         }),
     )
@@ -806,9 +831,8 @@ async fn stored_key_discovery_does_not_use_a_stale_expected_revision() {
         Method::POST,
         "/custom/models/discover",
         &json!({
-            "baseUrl": origin.url,
-            "upstreamProtocols": ["chat_completions"],
-            "authScheme": "bearer",
+            "endpointUrl": inference_endpoint(&origin.url, "chat_completions"),
+            "upstreamProtocol": "chat_completions",
             "accountId": account_id
         }),
     )
@@ -935,7 +959,7 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
     assert!(!v3_text.contains(CUSTOM_KEY), "{v3_auth}");
     assert_eq!(v3["revision"], before);
     assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
     harness.stop();
 }
 
@@ -991,9 +1015,8 @@ async fn stored_key_hostile_upstream_ids_are_dropped_without_echoing_plaintext()
         Method::POST,
         "/custom/models/discover",
         &json!({
-            "baseUrl": origin.url,
-            "upstreamProtocols": ["chat_completions"],
-            "authScheme": "bearer",
+            "endpointUrl": inference_endpoint(&origin.url, "chat_completions"),
+            "upstreamProtocol": "chat_completions",
             "accountId": account_id
         }),
     )

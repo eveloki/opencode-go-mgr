@@ -281,20 +281,14 @@ const NOTES_FIELD: PlanFormField = PlanFormField {
     required: false,
     immutable_after_create: false,
 };
-const BASE_URL_FIELD: PlanFormField = PlanFormField {
-    id: "base_url",
+const ENDPOINT_URL_FIELD: PlanFormField = PlanFormField {
+    id: "endpoint_url",
     kind: "url",
     required: true,
     immutable_after_create: false,
 };
 const PROTOCOL_FIELD: PlanFormField = PlanFormField {
     id: "upstream_protocol",
-    kind: "select",
-    required: true,
-    immutable_after_create: false,
-};
-const AUTH_SCHEME_FIELD: PlanFormField = PlanFormField {
-    id: "auth_scheme",
     kind: "select",
     required: true,
     immutable_after_create: false,
@@ -310,13 +304,12 @@ const GO_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
 const GOAT_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
-const CUSTOM_FORM_FIELDS: [PlanFormField; 7] = [
+const CUSTOM_FORM_FIELDS: [PlanFormField; 6] = [
     NAME_FIELD,
     KEY_FIELD,
     NOTES_FIELD,
-    BASE_URL_FIELD,
+    ENDPOINT_URL_FIELD,
     PROTOCOL_FIELD,
-    AUTH_SCHEME_FIELD,
     MODELS_FIELD,
 ];
 
@@ -753,7 +746,7 @@ pub enum InferenceAuthDescriptor {
     OpenCodeProtocolDefault,
     Bearer,
     None,
-    ConfigurableBearerOrXApiKey,
+    ProtocolDerivedBearerOrXApiKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1314,7 +1307,7 @@ impl InferenceAdapter for ConfigurableHttpAdapter {
             channel: Some(InferenceChannelKind::Go),
             credential_kind: plan.offering.credential_kind,
             quota_scope: plan.offering.quota_scope,
-            auth: InferenceAuthDescriptor::ConfigurableBearerOrXApiKey,
+            auth: InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey,
             follow_redirects: false,
             origin: InferenceOriginKind::AccountConfigured,
             loopback_test_seam_only: false,
@@ -1843,7 +1836,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_model_ids_and_endpoint_relative_paths_stay_stable() {
+    fn custom_model_ids_stay_stable() {
         assert_eq!(
             validate_custom_model_id("deepseek/deepseek-v4-flash").unwrap(),
             "deepseek/deepseek-v4-flash"
@@ -2068,7 +2061,7 @@ mod tests {
         assert_eq!(custom.kind, ProviderAdapterKind::ConfigurableHttp);
         assert_eq!(
             custom.inference.auth,
-            InferenceAuthDescriptor::ConfigurableBearerOrXApiKey
+            InferenceAuthDescriptor::ProtocolDerivedBearerOrXApiKey
         );
         assert!(!custom.inference.follow_redirects);
         assert_eq!(

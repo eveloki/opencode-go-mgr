@@ -485,8 +485,8 @@ mod dependency_guard {
             "db production source must not reference gateway_keys"
         );
         assert!(
-            db_source.contains("CURRENT_SCHEMA_VERSION: i32 = 31"),
-            "schema version must remain 31"
+            db_source.contains("CURRENT_SCHEMA_VERSION: i32 = 32"),
+            "schema version must remain 32"
         );
 
         let graph = production_graph(&src_root, &modules);

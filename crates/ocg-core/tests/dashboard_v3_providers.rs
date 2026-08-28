@@ -307,9 +307,8 @@ fn custom_create_body() -> Value {
         "providerId": CUSTOM_PROVIDER_ID,
         "offeringId": CUSTOM_API_OFFERING_ID,
         "customConfig": {
-            "baseUrl": "https://api.example.com/v1",
-            "upstreamProtocols": ["messages"],
-            "authScheme": "x-api-key"
+            "endpointUrl": "https://api.example.com/v1/messages",
+            "upstreamProtocol": "messages"
         },
         "modelCapabilities": [{
             "modelId": "org/model",
@@ -319,8 +318,8 @@ fn custom_create_body() -> Value {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v31() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+fn dashboard_v3_schema_version_stays_at_v32() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
 }
 
 #[tokio::test]
@@ -1339,6 +1338,19 @@ async fn dashboard_v3_custom_endpoint_model_protocol_overrides_enforce_cas_and_p
     assert_v3_error(&missing, ERROR_NOT_FOUND);
     assert_eq!(harness.state.settings_revision(), before);
 
+    let (status, undeclared) = send_json(
+        &harness,
+        Method::PUT,
+        &path,
+        &cas(&harness, json!({
+            "overrides": [{ "modelId": "org/model", "protocol": "chat_completions", "state": "force_on" }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{undeclared}");
+    assert_v3_error(&undeclared, ERROR_INVALID_REQUEST);
+    assert_eq!(harness.state.settings_revision(), before);
+
     let (status, switched) = send_json(
         &harness,
         Method::PUT,
@@ -1455,6 +1467,6 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     assert_eq!(v3_zen["enabled"], false);
     assert!(v3_zen.get("account").is_none());
 
-    assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
     harness.stop();
 }

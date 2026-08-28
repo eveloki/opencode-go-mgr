@@ -617,6 +617,26 @@ pub(super) async fn put_custom_endpoint_model_protocol_overrides(
     let scope = ContractScope::parse(provider_contracts::SCOPE_KIND_CUSTOM_ENDPOINT, &scope_id)
         .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
     validate_custom_endpoint_scope(&state, &scope)?;
+    let ContractScope::CustomEndpoint(account_id) = &scope else {
+        unreachable!("custom endpoint scope was validated above");
+    };
+    let declared_protocol = state
+        .db
+        .lock()
+        .account_custom_config(account_id)
+        .map_err(V3ApiError::internal)?
+        .ok_or_else(|| V3ApiError::not_found_at(&state, "custom endpoint config not found"))?
+        .upstream_protocol;
+    if input
+        .overrides
+        .iter()
+        .any(|item| crate::provider::UpstreamProtocolKind::from(item.protocol) != declared_protocol)
+    {
+        return Err(V3ApiError::invalid_request_at(
+            &state,
+            "custom endpoint overrides must use the account's declared upstream protocol",
+        ));
+    }
     commit_model_protocol_overrides(&state, &scope, input.overrides)
 }
 
