@@ -26,9 +26,9 @@ get billed for a bad guess.
   received HTTP 410. Refresh the page; if that is not enough, install the
   matching desktop, CLI, or Docker build.
 - **A dashboard save failed with a conflict / 409.** Another tab in the same
-  running process wrote first. The current SPA does not automatically recover
-  from the server's `revisionConflict` code; refresh the affected page, then
-  re-apply the change.
+  running process wrote first. The SPA refreshes the affected data from the
+  server's `revisionConflict` code but does not replay the change. Review the
+  current value, then submit again.
 - **Local bar at 100% but requests still succeed.** That is a *false* circuit
   breaker — local accounting only. Continue using the account; the gateway
   will keep forwarding.

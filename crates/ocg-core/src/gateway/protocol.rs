@@ -886,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn muse_spark_contributor_passthroughs_chat_and_responses() {
+    fn muse_spark_contributor_routes_every_client_to_responses() {
         let chat = prepare_request(
             ApiFormat::ChatCompletions,
             bytes(json!({
@@ -894,8 +894,8 @@ mod tests {
                 "messages": [{"role": "user", "content": "hi"}]
             })),
         )
-        .expect("Chat should passthrough Muse Spark contributor");
-        assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
+        .expect("Chat should convert Muse Spark contributor to Responses");
+        assert_eq!(chat.upstream, ApiFormat::Responses);
         let responses = prepare_request(
             ApiFormat::Responses,
             bytes(json!({
@@ -956,27 +956,16 @@ mod tests {
         .expect("flash passthroughs Responses");
         assert_eq!(flash_responses.upstream, ApiFormat::Responses);
 
-        let glm_responses = prepare_request(
-            ApiFormat::Responses,
-            bytes(json!({
-                "model": "glm-5.2",
-                "input": "hi",
-                "store": false
-            })),
-        )
-        .unwrap();
-        assert_eq!(glm_responses.upstream, ApiFormat::Responses);
-
-        let glm_messages = prepare_request(
+        let flash_messages = prepare_request(
             ApiFormat::Messages,
             bytes(json!({
-                "model": "glm-5.2",
+                "model": "deepseek-v4-flash",
                 "max_tokens": 8,
                 "messages": [{"role": "user", "content": "hi"}]
             })),
         )
         .unwrap();
-        assert_eq!(glm_messages.upstream, ApiFormat::Messages);
+        assert_eq!(flash_messages.upstream, ApiFormat::Messages);
 
         let minimax_chat = prepare_request(
             ApiFormat::ChatCompletions,
@@ -1007,7 +996,7 @@ mod tests {
             })),
         )
         .unwrap();
-        assert_eq!(luna_chat.upstream, ApiFormat::ChatCompletions);
+        assert_eq!(luna_chat.upstream, ApiFormat::Responses);
 
         let luna_responses = prepare_request(
             ApiFormat::Responses,
@@ -1521,7 +1510,7 @@ mod tests {
         prepare_request(
             ApiFormat::ChatCompletions,
             bytes(json!({
-                "model":"minimax-m2.7",
+                "model":"hy3",
                 "messages":[{"role":"user","content":"hi"}],
                 "response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"}}}
             })),
@@ -1597,7 +1586,7 @@ mod tests {
 
     #[test]
     fn chat_request_routes_minimax_to_messages_with_image_and_tool_result() {
-        // Live probe: MiniMax accepts Chat natively, so Chat client passthroughs.
+        // The current snapshot exposes MiniMax M2.7 through Messages only.
         let chat = prepare_request(
             ApiFormat::ChatCompletions,
             bytes(json!({
@@ -1606,8 +1595,8 @@ mod tests {
                 "messages": [{"role":"user","content":"hi"}]
             })),
         )
-        .expect("Chat request passthroughs");
-        assert_eq!(chat.upstream, ApiFormat::ChatCompletions);
+        .expect("Chat request converts to Messages");
+        assert_eq!(chat.upstream, ApiFormat::Messages);
 
         // Conversion to preferred Messages still runs for unsupported client formats.
         let request = json!({

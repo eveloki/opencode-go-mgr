@@ -6,7 +6,7 @@ The dashboard is the gateway's own single-page Vue 3 interface: **Dashboard**, *
 
 ## Dashboard V3
 
-The current SPA talks only to **`/dashboard/api/v3`**. All views — Connection Center, Access Keys, Accounts, Providers, Applications, Logs, Settings — plus login, register, and logout use that path. Writes carry `expectedRevision` and `processGeneration` for CAS; if another tab saves first, the server returns HTTP 409 with code `revisionConflict`. The SPA does not auto-recover from that code yet, so refresh the page and re-apply the change. These tokens are process-local, so separate processes sharing one data directory are not a coordinated CAS domain. The OpenCode Go pricing snapshot uses its own `pricingRevision`, independent of the settings tokens.
+The current SPA talks only to **`/dashboard/api/v3`**. All views — Connection Center, Access Keys, Accounts, Providers, Applications, Logs, Settings — plus login, register, and logout use that path. Writes carry `expectedRevision` and `processGeneration` for CAS; if another tab saves first, the server returns HTTP 409 with code `revisionConflict`. The SPA refreshes its control tokens and the affected resource, but never auto-replays the rejected change; review the current value and submit again. These tokens are process-local, so separate processes sharing one data directory are not a coordinated CAS domain. The OpenCode Go pricing snapshot uses its own `pricingRevision`, independent of the settings tokens.
 
 Plaintext Keys travel only inside the Connection Center payload (`GET /dashboard/api/v3/connection`). The Settings resource never contains Key values. The browser keeps secrets in memory; signing out or a 401 session expiry wipes them immediately.
 

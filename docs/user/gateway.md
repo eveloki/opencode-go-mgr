@@ -2,7 +2,7 @@
 
 # Gateway Behavior
 
-OCG Manager exposes one HTTP surface on `127.0.0.1:9042` that speaks five client protocols and routes requests to whichever OpenCode Go, Zen Free, or Custom API account wins selection — so every client can keep believing every upstream speaks the same dialect.
+OCG Manager exposes one HTTP surface on `127.0.0.1:9042` that speaks five client protocols and routes requests to whichever eligible OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN, Kimi Code CN, or Custom API account wins selection — so every client can keep believing every upstream speaks the same dialect.
 
 ## Endpoints
 

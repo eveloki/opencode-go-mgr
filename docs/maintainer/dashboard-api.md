@@ -21,9 +21,8 @@ Mutations require top-level `expectedRevision` and `processGeneration`
 `400` `missingExpectedRevision`; a mismatch returns `409` `revisionConflict`
 with `currentRevision` and `processGeneration` in the error envelope. The Vue
 `controlPlane` store records both tokens from every V3 payload. On 409 the
-client should refresh tokens from `GET /contract` without replaying the
-mutation; the current client still checks the obsolete snake-case code
-`revision_conflict`, see [Known Debt](known-debt.md). Tokens are process-local
+client refreshes the control tokens and affected resource without replaying
+the mutation; the user can review current state and submit again. Tokens are process-local
 and do not coordinate separate processes sharing a data directory.
 
 Operations that are not mutations skip CAS and never bump revision:

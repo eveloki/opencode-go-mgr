@@ -3,11 +3,12 @@
 # What OCG Manager Does
 
 OCG Manager is a local gateway that stores provider API keys in a SQLite
-database — officially distributed OpenCode Go keys and trusted Custom API
+database — including supported provider-plan keys and trusted Custom API
 destinations — and exposes a loopback gateway at `http://127.0.0.1:9042/v1`.
 Each account card is one **Plan** (provider + offering). Clients send
 **aliases** from the local registry or eligible Custom model IDs; live routing
-is OpenCode Go, Zen Free, and Custom API. The Vue 3 dashboard is at
+is OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN Token Plan, Kimi Code
+CN, and Custom API. The Vue 3 dashboard is at
 `/dashboard/` and the current SPA talks JSON at `/dashboard/api/v3`. Every node
 is independent: no remote sync, no Admin API, no telemetry.
 

@@ -79,7 +79,8 @@ The **Settings** view holds the gateway's persistent configuration:
   `http://127.0.0.1:7890`; a proxy failure never silently falls back to a direct
   connection. `Force direct connection` ignores system and environment proxy
   configuration. Proxy URLs cannot contain credentials. For these three modes,
-  the policy covers model forwarding (OpenCode Go, Zen Free, and Custom API),
+  the policy covers model forwarding (OpenCode Go, Zen Free, Command Code
+  GOAT, MiniMax CN, Kimi Code CN, and Custom API),
   account-key tests and Custom verification, official OpenCode Go usage API,
   pricing refreshes, release checks, and signed desktop installer downloads;
   authenticated `GET /v1/models` and protected

@@ -130,7 +130,7 @@ export class DashboardAuthError extends Error {
 
 export class DashboardRequestError extends Error {
   readonly status: number;
-  /** Stable V3 error code (`revision_conflict`, `gone`, `throttled`, …). */
+  /** Stable V3 error code (`revisionConflict`, `gone`, `throttled`, …). */
   readonly code: string;
   readonly currentRevision: number | null;
   readonly processGeneration: number | null;
@@ -157,10 +157,10 @@ export class DashboardRequestError extends Error {
   }
 }
 
-/** 409 `revision_conflict`: the mutation was rejected before any write. */
+/** 409 `revisionConflict`: the mutation was rejected before any write. */
 export class DashboardConflictError extends DashboardRequestError {
   constructor(message: string, currentRevision: number | null, processGeneration: number | null) {
-    super(message, 409, "revision_conflict", currentRevision, processGeneration);
+    super(message, 409, "revisionConflict", currentRevision, processGeneration);
     this.name = "DashboardConflictError";
   }
 }
@@ -207,7 +207,7 @@ export function goneGuidance(): string {
 
 export function isRevisionConflict(error: unknown): error is DashboardConflictError {
   return error instanceof DashboardConflictError
-    || (error instanceof DashboardRequestError && error.status === 409 && error.code === "revision_conflict");
+    || (error instanceof DashboardRequestError && error.status === 409 && error.code === "revisionConflict");
 }
 
 export function isGone(error: unknown): error is DashboardGoneError {
@@ -272,7 +272,7 @@ export async function requestV3<T>(
       ? Number(retryAfterHeader)
       : null;
     const nextAllowedAt = typeof body?.nextAllowedAt === "string" ? body.nextAllowedAt : null;
-    if (response.status === 409 && body?.code === "revision_conflict") {
+    if (response.status === 409 && body?.code === "revisionConflict") {
       throw new DashboardConflictError(message, currentRevision, processGeneration);
     }
     if (response.status === 410) {

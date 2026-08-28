@@ -98,41 +98,6 @@ pub const COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS: &[&str] = &[
     "xai/grok-4.6",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoatModelAccess {
-    #[default]
-    Goat,
-    All,
-}
-
-impl GoatModelAccess {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Goat => "goat",
-            Self::All => "all",
-        }
-    }
-
-    pub fn allows(self, model_id: &str) -> bool {
-        self == Self::All || command_code_goat_includes_model(model_id)
-    }
-}
-
-impl TryFrom<&str> for GoatModelAccess {
-    type Error = String;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "goat" => Ok(Self::Goat),
-            "all" => Ok(Self::All),
-            _ => Err(format!(
-                "unknown GOAT model access `{value}`; expected goat or all"
-            )),
-        }
-    }
-}
-
 pub fn command_code_goat_includes_model(model_id: &str) -> bool {
     let model_id = model_id.trim();
     !model_id.is_empty()
@@ -1986,9 +1951,6 @@ mod tests {
         assert!(!command_code_goat_includes_model(
             "anthropic/claude-opus-4.1"
         ));
-        assert!(GoatModelAccess::Goat.allows("gpt-5.6-sol"));
-        assert!(!GoatModelAccess::Goat.allows("gpt-5.6-terra"));
-        assert!(GoatModelAccess::All.allows("gpt-5.6-terra"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 # Architecture Diagrams
 
-These are text maps of a single local node, current as of HEAD. Live routes: OpenCode Go, Zen Free, Command Code GOAT, and Custom API. Each diagram points to the chapter that owns the details; when a picture and a chapter disagree, trust the chapter and the code.
+These are text maps of a single local node, current as of HEAD. Live routes: OpenCode Go, Zen Free, Command Code GOAT, MiniMax CN Token Plan, Kimi Code CN, and Custom API. Each diagram points to the chapter that owns the details; when a picture and a chapter disagree, trust the chapter and the code.
 
 ## Contents
 

@@ -354,20 +354,23 @@ concurrent settings changes affect only later requests.
 ## Plan catalog
 
 `BUILTIN_PLANS` and `ProviderAdapterKind` live in `ocg-domain::provider`
-(facade `ocg_core::provider`). Five families:
+(facade `ocg_core::provider`). Six families:
 
 | Family | IDs | Routable | Notes |
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` / `go` | yes | Official keys only |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | yes | Credentialless singleton, DB-owned |
 | Command Code GOAT | `command-code` / `goat` | yes | Fixed official origin; public Provider catalog; model supply controlled by the Provider matrix |
+| MiniMax CN Token Plan | `minimax` / `cn-token-plan` | yes | Fixed CN origin and Chat Completions protocol |
+| Kimi Code CN | `kimi-code` / `cn` | yes | Fixed CN origin and Chat Completions protocol |
 | Custom API | `custom` / `api` | yes | Trusted-admin destination |
 
 Every persistent mutation path rejects `enabled=true` for a
 `routable=false` offering before touching the row, revision, or timestamps.
 On every `Database::open`, historical Command Code verification states are
 normalized to `not_required`, because its public catalog is not Key
-verification. Enabled state is preserved. Go, Zen Free, Custom, and unknown
+verification. Enabled state is preserved. Go, Zen Free, GOAT, MiniMax, Kimi,
+Custom, and unknown
 pairs are otherwise untouched.
 
 Custom API (`custom.rs` + `custom_http.rs`) accepts one syntactically valid
@@ -423,13 +426,13 @@ mutation. CAS details: [Dashboard API](dashboard-api.md).
 
 ## Persistence map
 
-Authoritative schema is v31. `sub_gateway_keys` exists only in pre-v27
+Authoritative schema is v32. `sub_gateway_keys` exists only in pre-v27
 databases and is dropped by the migration. GUI data dir is
 `%USERPROFILE%\.ocg-mgr` on Windows and `~/.ocg-mgr` elsewhere; CLI
 defaults to `~/.ocg-mgr-cli`.
 
 ```text
-  data.sqlite                         CURRENT_SCHEMA_VERSION = 31
+  data.sqlite                         CURRENT_SCHEMA_VERSION = 32
     access_keys                       Primary id PRIMARY_KEY_ID
                                       cannot disable/delete Primary
                                       64 active sub-key cap

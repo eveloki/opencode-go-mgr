@@ -4,11 +4,6 @@
 
 ## Known Debt
 
-- The server emits 409 code `revisionConflict`, but
-  `src/api/dashboard-v3.ts` still checks `revision_conflict`. The matching
-  frontend test also mocks the obsolete spelling, so real conflicts do not
-  trigger the intended token/resource refresh. Fix pending; users must refresh
-  and re-apply manually.
 - Auto-start is capability-gated: only Windows release/installed Tauri
   processes inject the registry sync hook. Development builds, the CLI,
   Docker, macOS, and Linux dashboards do not expose the switch. Dock

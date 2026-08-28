@@ -6,8 +6,8 @@
 //!
 //! Runtime 401/429 rules here freeze Stage 0 `forwarder` behavior, including
 //! cases that differ from unused [`ocg_domain::provider::ErrorCooldownDescriptor`]
-//! flags (`inference_401_passthrough` is false for OpenCode Go; SCNet 429 still
-//! parses Go windows because it is not in the generic GOAT/Custom set).
+//! flags (`inference_401_passthrough` is false for OpenCode Go; only OpenCode
+//! responses use the provider-specific usage-window parser).
 //!
 //! HTTP classification takes `free_channel: bool` rather than a host channel
 //! enum. Window parsing, cooldown durations, and 429 body text stay in the host.

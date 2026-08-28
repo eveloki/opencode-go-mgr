@@ -74,9 +74,11 @@ pub fn model_views(catalog: &ZenFreeModelCatalog) -> Vec<ZenFreeModelView> {
         .filter_map(|model_id| {
             stripped_free_alias(model_id).map(|alias| ZenFreeModelView {
                 model_id: model_id.clone(),
-                alias: static_alias_authorized(alias)
-                    .then(|| alias.to_string())
-                    .unwrap_or_default(),
+                alias: if static_alias_authorized(alias) {
+                    alias.to_string()
+                } else {
+                    String::new()
+                },
             })
         })
         .collect()

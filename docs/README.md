@@ -39,14 +39,14 @@ When docs disagree, prefer the source below and fix the other side.
 | Model context/input/reasoning capabilities | `src/views/application-guides.ts` (`APPLICATION_MODEL_METADATA`); [`user/applications.md`](user/applications.md) / [`user/applications.zh-CN.md`](user/applications.zh-CN.md) mirrors the table |
 | Dashboard HTTP API | `crates/ocg-core/src/dashboard_v3/` mounted at `/dashboard/api/v3`; frozen contract `schema/dashboard-api-v3.schema.json`; SPA client `src/api/dashboard-v3.ts` + presenters `src/api/dashboard.ts` / `src/api/providers.ts` + contract types `src/api/generated/dashboard-v3.ts`. Composition root `crates/ocg-core/src/host_router.rs`. Protected unversioned `/dashboard/api` REST is a structured `410` tombstone; auth/session, browser WebSocket, and inference stay distinct. |
 | Access keys | SQLite `access_keys` (current schema v32; introduced in v27) via `crates/ocg-core/src/gateway_keys.rs` and `dashboard_v3/keys.rs`. Primary id is `PRIMARY_KEY_ID`. Historical `sub_gateway_keys` is not the live authority |
-| SQLite schema | `crates/ocg-core/src/db.rs` (`CURRENT_SCHEMA_VERSION = 31`); upgrade/backup/rollback contract: [`maintainer/storage-migration.md`](maintainer/storage-migration.md) |
+| SQLite schema | `crates/ocg-core/src/db.rs` (`CURRENT_SCHEMA_VERSION = 32`); upgrade/backup/rollback contract: [`maintainer/storage-migration.md`](maintainer/storage-migration.md) |
 | Release artifacts, CI, signing | [`maintainer/release-artifacts.md`](maintainer/release-artifacts.md) / [`maintainer/release-artifacts.zh-CN.md`](maintainer/release-artifacts.zh-CN.md), [`maintainer/ci.md`](maintainer/ci.md) / [`maintainer/ci.zh-CN.md`](maintainer/ci.zh-CN.md), and [`maintainer/releasing.md`](maintainer/releasing.md) / [`maintainer/releasing.zh-CN.md`](maintainer/releasing.zh-CN.md) |
 | Current package version pins | `package.json` / workspace `Cargo.toml` / `src-tauri/tauri.conf.json` / `compose.example.yaml` |
 | UI copy for the access credential | Panel shows **Key** (`DESIGN.md`, `src/theme.ts`); never “Gateway Key” |
 | Design tokens | [../DESIGN.md](../DESIGN.md) + `src/theme.ts` |
 | Agent coding constraints | [../AGENTS.md](../AGENTS.md) |
 
-Example version in Docker snippets should match the current release line (currently **v1.8.2**). Do not leave older patch pins in [`user/docker.md`](user/docker.md) / [`.env.example`](../.env.example) / [`compose.example.yaml`](../compose.example.yaml) after a version bump. The product README no longer pins a clone tag.
+Example version in Docker snippets should match the current release line (currently **v2.0.0**). Do not leave older patch pins in [`user/docker.md`](user/docker.md) / [`.env.example`](../.env.example) / [`compose.example.yaml`](../compose.example.yaml) after a version bump. The product README no longer pins a clone tag.
 
 ## Reading order
 

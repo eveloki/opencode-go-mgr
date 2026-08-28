@@ -1,7 +1,7 @@
 {
   "name": "ocg-manager-ui",
   "private": true,
-  "version": "1.8.2",
+  "version": "2.0.0",
   "packageManager": "pnpm@10.29.2",
   "type": "module",
   "scripts": {
@@ -11,7 +11,6 @@
     "dev": "tauri dev",
     "build": "node scripts/release.mjs",
     "build:web": "vue-tsc && vite build",
-    "test:routing:live": "pwsh -NoProfile -File scripts/test-routing-live.ps1",
     "release:check": "node scripts/release.mjs --check",
     "test:rust": "cargo test --workspace --locked",
     "test:web": "node --experimental-strip-types --test \"scripts/*.test.mjs\" \"src/**/*.test.ts\"",

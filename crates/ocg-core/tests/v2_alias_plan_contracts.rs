@@ -251,7 +251,23 @@ async fn client_models_list_exposes_aliases_not_raw_upstream_ids() {
         harness.fake_calls()
     );
     let ids = client_model_ids(&body);
-    let expected = ocg_core::alias::published_routeable_aliases();
+    let contracts = harness.state.provider_contracts();
+    let expected = ocg_core::alias::published_routeable_aliases()
+        .into_iter()
+        .filter(
+            |published| match ocg_core::alias::resolve(&published.alias) {
+                Ok(ocg_core::alias::ResolvedModel::Alias { mappings, .. }) => {
+                    mappings.iter().any(|mapping| {
+                        mapping.routeable && contracts.mapping_has_enabled_protocol(mapping)
+                    })
+                }
+                Ok(ocg_core::alias::ResolvedModel::PinnedRaw { mapping, .. }) => {
+                    mapping.routeable && contracts.mapping_has_enabled_protocol(&mapping)
+                }
+                _ => false,
+            },
+        )
+        .collect::<Vec<_>>();
     for published in &expected {
         let index = ids
             .iter()

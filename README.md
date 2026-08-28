@@ -10,8 +10,8 @@ Each account card binds one Plan (provider/offering) and, when the Plan needs
 one, one credential. Clients speak OpenAI, Anthropic, Gemini, or Claude
 Desktop and send local aliases; the gateway converts each request to the
 Plan's upstream protocol and the answer back. Live routing: OpenCode Go,
-Zen Free, and Custom API. No telemetry, no remote sync — your keys never
-leave the machine.
+Zen Free, Command Code GOAT, MiniMax CN Token Plan, Kimi Code CN, and Custom
+API. No telemetry, no remote sync — your keys never leave the machine.
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">

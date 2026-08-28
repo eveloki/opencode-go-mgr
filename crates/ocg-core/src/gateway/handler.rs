@@ -935,8 +935,9 @@ mod tests {
             .expect("rewritten request should use the existing preparation path");
 
         assert_eq!(plan.model, "glm-5.2");
-        // glm-5.2 supports Messages natively (live probe); alias rewrite keeps Messages.
-        assert_eq!(plan.upstream, ApiFormat::Messages);
+        // The current protocol snapshot exposes glm-5.2 through Chat only, so
+        // the Claude Desktop Messages request is converted after alias rewrite.
+        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
 
         let parsed = parse_client_request(ApiFormat::Messages, body).expect("parse once");
         assert_eq!(parsed.requested_model, CLAUDE_DESKTOP_OPUS_ALIAS);
@@ -971,7 +972,7 @@ mod tests {
                 .as_deref(),
             Some("glm-5.2")
         );
-        assert_eq!(plan.upstream, ApiFormat::Messages);
+        assert_eq!(plan.upstream, ApiFormat::ChatCompletions);
     }
 
     #[test]

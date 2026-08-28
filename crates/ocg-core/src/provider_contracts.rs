@@ -317,26 +317,6 @@ impl TryFrom<&str> for ProtocolOverrideState {
     }
 }
 
-/// Deprecated scope-level protocol switches. The database columns remain for
-/// backward compatibility but effective contract derivation no longer reads
-/// them; per-model/per-protocol overrides now control enablement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProtocolSwitches {
-    pub chat_completions: bool,
-    pub responses: bool,
-    pub messages: bool,
-}
-
-impl Default for ProtocolSwitches {
-    fn default() -> Self {
-        Self {
-            chat_completions: true,
-            responses: true,
-            messages: true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedScopeRow {
     pub scope: ContractScope,
@@ -344,7 +324,6 @@ pub struct PersistedScopeRow {
     pub catalog_refreshed_at: Option<DateTime<Utc>>,
     pub catalog_source: String,
     pub catalog_source_url: String,
-    pub switches: ProtocolSwitches,
     pub revision: u64,
     pub updated_at: DateTime<Utc>,
 }
@@ -1538,7 +1517,6 @@ mod tests {
                 catalog_refreshed_at: Some(now),
                 catalog_source: CATALOG_SOURCE_OPENCODE_MODELS.into(),
                 catalog_source_url: "https://opencode.ai/zen/go/v1/models".into(),
-                switches: ProtocolSwitches::default(),
                 revision: 1,
                 updated_at: now,
             },
@@ -1578,7 +1556,6 @@ mod tests {
                 catalog_refreshed_at: Some(now),
                 catalog_source: CATALOG_SOURCE_OPENCODE_MODELS.into(),
                 catalog_source_url: "https://opencode.ai/zen/go/v1/models".into(),
-                switches: ProtocolSwitches::default(),
                 revision: 2,
                 updated_at: now,
             },
@@ -1712,7 +1689,6 @@ mod tests {
                 catalog_refreshed_at: Some(now),
                 catalog_source: CATALOG_SOURCE_COMMAND_CODE_MODELS.into(),
                 catalog_source_url: COMMAND_CODE_GOAT_BASE_URL.into(),
-                switches: ProtocolSwitches::default(),
                 revision: 1,
                 updated_at: now,
             },
@@ -1776,7 +1752,6 @@ mod tests {
                 catalog_refreshed_at: Some(Utc::now()),
                 catalog_source: CATALOG_SOURCE_CUSTOM_DISCOVERY.into(),
                 catalog_source_url: String::new(),
-                switches: ProtocolSwitches::default(),
                 revision: 1,
                 updated_at: Utc::now(),
             },

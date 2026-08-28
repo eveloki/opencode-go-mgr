@@ -436,7 +436,6 @@ pub(super) async fn refresh_contract_catalog(
                 now,
                 provider_contracts::CATALOG_SOURCE_COMMAND_CODE_MODELS,
                 &source_url,
-                now,
             )
             .map_err(V3ApiError::internal)?;
             state
@@ -606,7 +605,6 @@ pub(super) async fn refresh_contract_catalog(
             now,
             provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
             &source_url,
-            now,
         )
         .map_err(V3ApiError::internal)?;
         state
@@ -674,7 +672,7 @@ pub(super) async fn reset_provider_model_protocols_to_static(
     let models = state
         .provider_contracts()
         .scope(&scope)
-        .map(|contract| contract.catalog.models.iter().cloned().collect::<Vec<_>>())
+        .map(|contract| contract.catalog.models.to_vec())
         .ok_or_else(|| V3ApiError::not_found_at(&state, "provider scope not found"))?;
     let now = Utc::now();
     {
@@ -1409,7 +1407,7 @@ fn provider_contracts_from_state(
         let mut models: Vec<EffectiveModelContract> = contract
             .models
             .values()
-            .map(|model| model_contract_from_provider(&provider_id, model, contracts))
+            .map(|model| model_contract_from_provider(provider_id, model, contracts))
             .collect();
         if provider_id == OPENCODE_PROVIDER_ID {
             // Presentation-only filter: Zen Free owns every `-free` id, so the

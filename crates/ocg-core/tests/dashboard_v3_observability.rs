@@ -386,7 +386,7 @@ async fn dashboard_v3_observability_gets_are_local_secret_free_and_share_one_sna
     assert_eq!(status, StatusCode::OK, "{models_body}");
     let models: ApplicationModels = serde_json::from_value(models_body.clone()).unwrap();
     assert!(models.models.contains(&"deepseek-v4-flash".into()));
-    assert!(models.models.contains(&"minimax-m2.7-highspeed".into()));
+    assert!(!models.models.contains(&"minimax-m2.7-highspeed".into()));
     assert!(!models.models.iter().any(|id| id.ends_with("-free")));
     assert!(!models.models.iter().any(|id| id.contains('/')));
 
@@ -525,7 +525,7 @@ async fn dashboard_v3_and_v2_observability_coexist_with_stable_v2_shapes() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_application_models_empty_intersection_and_highspeed() {
+async fn dashboard_v3_application_models_follow_current_routeable_intersection() {
     let harness = start_loopback("obs-app-models").await;
     let _guard =
         install_official_pricing_fetch_for_tests(harness.state.process_generation(), |_| {
@@ -538,7 +538,7 @@ async fn dashboard_v3_application_models_empty_intersection_and_highspeed() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let models: ApplicationModels = serde_json::from_value(body).unwrap();
     assert!(models.models.contains(&"minimax-m2.7".into()));
-    assert!(models.models.contains(&"minimax-m2.7-highspeed".into()));
+    assert!(!models.models.contains(&"minimax-m2.7-highspeed".into()));
     assert!(!models.models.contains(&"glm-5".into()));
 
     let mut pricing = harness.state.pricing_snapshot().as_ref().clone();

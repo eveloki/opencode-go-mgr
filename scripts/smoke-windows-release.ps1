@@ -41,12 +41,46 @@ function Wait-Dashboard {
       $html = (Invoke-WebRequest http://127.0.0.1:9042/dashboard/ -UseBasicParsing).Content
       if ($html -notmatch 'id="app"') { throw 'Dashboard HTML is incomplete' }
       if (!$ExpectedVersion) { return $null }
-      $status = Invoke-RestMethod http://127.0.0.1:9042/dashboard/api/settings/update-status
-      if ($status.current_version -eq $ExpectedVersion) { return $status }
+      $status = Invoke-RestMethod http://127.0.0.1:9042/dashboard/api/v3/settings/update-status
+      if ($status.currentVersion -eq $ExpectedVersion) { return $status }
     } catch {}
     Start-Sleep 1
   }
   throw "Installed GUI did not expose dashboard version $ExpectedVersion"
+}
+
+function Get-V3Settings {
+  return Invoke-RestMethod http://127.0.0.1:9042/dashboard/api/v3/settings
+}
+
+function Set-V3AutoStart {
+  param([bool]$Enabled)
+  $settings = Get-V3Settings
+  $body = @{
+    autoStart = $Enabled
+    expectedRevision = [uint64]$settings.revision
+    processGeneration = [uint64]$settings.processGeneration
+  } | ConvertTo-Json
+  Invoke-RestMethod `
+    http://127.0.0.1:9042/dashboard/api/v3/settings `
+    -Method Put `
+    -ContentType 'application/json' `
+    -Body $body | Out-Null
+}
+
+# The currently published v1.8.2 binary predates Dashboard V3. This helper is
+# intentionally limited to the pre-upgrade bootstrap phase; every candidate
+# read and write below uses V3 with CAS.
+function Set-LegacyBootstrapAutoStart {
+  param([bool]$Enabled)
+  $settingsUrl = 'http://127.0.0.1:9042/dashboard/api/settings'
+  $settings = Invoke-RestMethod $settingsUrl
+  $settings.auto_start = $Enabled
+  Invoke-RestMethod `
+    $settingsUrl `
+    -Method Post `
+    -ContentType 'application/json' `
+    -Body ($settings | ConvertTo-Json) | Out-Null
 }
 
 function Stop-InstalledGui {
@@ -126,7 +160,6 @@ $data = [IO.Path]::GetFullPath($DataDirectory)
 if (Test-Path -LiteralPath $data) { throw "Hosted runner profile is not clean: $data" }
 $sentinel = Join-Path $data preserve-me
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$settingsUrl = 'http://127.0.0.1:9042/dashboard/api/settings'
 $bootstrapOverwrite = [bool]$PreviousInstaller
 $sentinelValue = if ($PreviousTag) { "preserved-from-$PreviousTag" } else { 'preserved' }
 
@@ -144,9 +177,7 @@ try {
 
     New-Item -ItemType Directory -Force $data | Out-Null
     Set-Content $sentinel $sentinelValue
-    $settings = Invoke-RestMethod $settingsUrl
-    $settings.auto_start = $true
-    Invoke-RestMethod $settingsUrl -Method Post -ContentType 'application/json' -Body ($settings | ConvertTo-Json) | Out-Null
+    Set-LegacyBootstrapAutoStart -Enabled $true
     $expectedStartupValue = "`"$guiPath`" --startup"
     $startupValue = (Get-ItemProperty -LiteralPath $runKey -Name 'OCG Manager').'OCG Manager'
     if ($startupValue -ne $expectedStartupValue) { throw "Published install wrote unexpected startup value: $startupValue" }
@@ -162,11 +193,11 @@ try {
     }
 
     $updateStatus = Wait-Dashboard -ExpectedVersion $CandidateVersion -Attempts 90
-    if ($updateStatus.current_version -ne $CandidateVersion) {
-      throw "Unexpected updated GUI version: $($updateStatus.current_version)"
+    if ($updateStatus.currentVersion -ne $CandidateVersion) {
+      throw "Unexpected updated GUI version: $($updateStatus.currentVersion)"
     }
-    $updatedSettings = Invoke-RestMethod $settingsUrl
-    if (!$updatedSettings.auto_start) { throw 'Overwrite update did not preserve the auto-start setting' }
+    $updatedSettings = Get-V3Settings
+    if (!$updatedSettings.autoStart) { throw 'Overwrite update did not preserve the auto-start setting' }
     if ((Get-Content $sentinel -Raw).Trim() -ne $sentinelValue) {
       throw 'Overwrite update did not preserve the data sentinel'
     }
@@ -183,20 +214,16 @@ try {
     Set-Content $sentinel $sentinelValue
   }
 
-  $settings = Invoke-RestMethod $settingsUrl
-  $settings.auto_start = $true
-  Invoke-RestMethod $settingsUrl -Method Post -ContentType 'application/json' -Body ($settings | ConvertTo-Json) | Out-Null
+  Set-V3AutoStart -Enabled $true
   $startupValue = (Get-ItemProperty -LiteralPath $runKey -Name 'OCG Manager').'OCG Manager'
   $expectedStartupValue = "`"$guiPath`" --startup"
   if ($startupValue -ne $expectedStartupValue) { throw "Unexpected startup value: $startupValue" }
 
-  $settings.auto_start = $false
-  Invoke-RestMethod $settingsUrl -Method Post -ContentType 'application/json' -Body ($settings | ConvertTo-Json) | Out-Null
+  Set-V3AutoStart -Enabled $false
   if (Test-RegistryValue -Path $runKey -Name 'OCG Manager') {
     throw 'Disabling auto-start left the startup entry behind'
   }
-  $settings.auto_start = $true
-  Invoke-RestMethod $settingsUrl -Method Post -ContentType 'application/json' -Body ($settings | ConvertTo-Json) | Out-Null
+  Set-V3AutoStart -Enabled $true
   $startupValue = (Get-ItemProperty -LiteralPath $runKey -Name 'OCG Manager').'OCG Manager'
   if ($startupValue -ne $expectedStartupValue) { throw "Unexpected restored startup value: $startupValue" }
 } finally {

@@ -33,6 +33,11 @@ if ($workflow -match 'function\s+Invoke-Installer') {
 }
 foreach ($requiredPattern in @(
   'Test-CandidateVersion',
+  'Get-V3Settings',
+  'Set-V3AutoStart',
+  'Set-LegacyBootstrapAutoStart',
+  'expectedRevision',
+  'processGeneration',
   '\.WaitForExit\(1000 \* \$TimeoutSeconds\)',
   '\.Kill\(\$true\)',
   'Test-RegistryValue',
@@ -45,6 +50,43 @@ foreach ($requiredPattern in @(
 }
 if ($script -match '\.PSObject\.Properties\.Name') {
   throw 'Windows release smoke must handle an empty registry value collection under StrictMode'
+}
+if ([regex]::Matches($script, '/dashboard/api/settings').Count -ne 1) {
+  throw 'Windows release smoke must contain exactly one legacy settings URL for the published-release bootstrap'
+}
+$legacyHelper = $ast.Find({
+  param($node)
+  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Set-LegacyBootstrapAutoStart'
+}, $true)
+if (
+  !$legacyHelper -or
+  $legacyHelper.Extent.Text -notmatch '/dashboard/api/settings' -or
+  $legacyHelper.Extent.Text -notmatch 'auto_start' -or
+  $legacyHelper.Extent.Text -notmatch '-Method Post' -or
+  $legacyHelper.Extent.Text -match '/dashboard/api/v3/'
+) {
+  throw 'Legacy auto-start compatibility must stay inside its narrow V2 bootstrap helper'
+}
+$legacyCalls = @($ast.FindAll({
+  param($node)
+  $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -eq 'Set-LegacyBootstrapAutoStart'
+}, $true))
+if ($legacyCalls.Count -ne 1) {
+  throw 'Legacy auto-start helper must be called exactly once'
+}
+$bootstrapIf = $ast.Find({
+  param($node)
+  $node -is [System.Management.Automation.Language.IfStatementAst] -and
+    $node.Extent.Text -match '\$bootstrapOverwrite'
+}, $true)
+if (
+  !$bootstrapIf -or
+  $legacyCalls[0].Extent.StartOffset -lt $bootstrapIf.Extent.StartOffset -or
+  $legacyCalls[0].Extent.EndOffset -gt $bootstrapIf.Extent.EndOffset
+) {
+  throw 'Legacy auto-start helper may run only inside the previous-release overwrite bootstrap'
 }
 $versionHelper = $ast.Find({
   param($node)

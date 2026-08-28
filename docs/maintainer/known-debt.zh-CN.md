@@ -4,7 +4,6 @@
 
 ## 已知缺口
 
-- 服务端的 409 错误码是 `revisionConflict`，但 `src/api/dashboard-v3.ts` 仍检查 `revision_conflict`，对应前端测试也模拟了旧拼写。因此真实冲突不会触发预期的 token / 资源刷新；修复前需手动刷新并重新提交。
 - `auto_start` 受能力门控：只有 Windows release / 已安装的 Tauri 进程注入注册表同步钩子。开发构建、CLI、Docker、macOS、Linux 面板不暴露该开关。Dock 可见性仅 macOS Tauri。
 - 生成的 Tauri schema 文件会让 diff 变吵；只在 Tauri 配置确实改动时才需要修改它们。
 - 流式用量仅在上游发出 usage chunk 时精确；Chat 流式请求会设置 `stream_options.include_usage`。没有 chunk 时 Go 行记为 `success_no_usage`； Zen 无 usage 的成功仍为 `success` / `free`。

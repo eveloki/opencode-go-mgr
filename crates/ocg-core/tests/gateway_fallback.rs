@@ -67,11 +67,6 @@ const CHAT_STREAM_WITH_COMMON_KEY: &str = concat!(
     "data: {\"id\":\"chat-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"before text after\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n",
     "data: [DONE]\n\n"
 );
-const RESPONSES_STREAM_BODY: &str = concat!(
-    "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream\",\"model\":\"deepseek-v4-flash\",\"status\":\"in_progress\"}}\n\n",
-    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n",
-    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream\",\"model\":\"deepseek-v4-flash\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
-);
 const MESSAGES_STREAM_BODY: &str = concat!(
     "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-stream\",\"model\":\"minimax-m2.7\",\"usage\":{\"input_tokens\":6,\"cache_read_input_tokens\":4}}}\n\n",
     "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
@@ -606,10 +601,26 @@ fn chat_stream_text(body: &str) -> String {
         .collect()
 }
 
-fn assert_local_openai_alias_list(body: &str) {
+fn alias_has_enabled_protocol(state: &Arc<CoreStateInner>, alias_name: &str) -> bool {
+    let contracts = state.provider_contracts();
+    match alias::resolve(alias_name) {
+        Ok(alias::ResolvedModel::Alias { mappings, .. }) => mappings
+            .iter()
+            .any(|mapping| mapping.routeable && contracts.mapping_has_enabled_protocol(mapping)),
+        Ok(alias::ResolvedModel::PinnedRaw { mapping, .. }) => {
+            mapping.routeable && contracts.mapping_has_enabled_protocol(&mapping)
+        }
+        _ => false,
+    }
+}
+
+fn assert_local_openai_alias_list(state: &Arc<CoreStateInner>, body: &str) {
     let payload: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(payload["object"], "list", "{body}");
-    let expected = ocg_core::alias::published_routeable_aliases();
+    let expected = ocg_core::alias::published_routeable_aliases()
+        .into_iter()
+        .filter(|published| alias_has_enabled_protocol(state, &published.alias))
+        .collect::<Vec<_>>();
     let data = payload["data"].as_array().expect("OpenAI list data");
     for published in &expected {
         let item = data
@@ -648,7 +659,7 @@ async fn model_discovery_returns_local_list_with_zero_accounts() {
 
     let (status, body) = models(port).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_local_openai_alias_list(&body);
+    assert_local_openai_alias_list(&state, &body);
     assert!(
         calls.lock().unwrap().is_empty(),
         "GET /v1/models must not call upstream: {:?}",
@@ -677,9 +688,9 @@ async fn model_discovery_does_not_create_inference_logs() {
 
     let (status, body) = models(port).await;
     assert_eq!(status, StatusCode::OK);
-    assert_local_openai_alias_list(&body);
+    assert_local_openai_alias_list(&state, &body);
     assert!(
-        !body.contains("mimo-v2.5-free") && body.contains("mimo-v2.5"),
+        !body.contains("hy3-free") && body.contains("hy3"),
         "Zen Free must publish only the suffix-stripped Alias: {body}"
     );
     assert!(
@@ -730,6 +741,7 @@ fn expected_local_application_models(state: &Arc<CoreStateInner>) -> Vec<String>
         .collect::<HashSet<_>>();
     alias::routeable_aliases_for(OPENCODE_PROVIDER_ID, GO_OFFERING_ID)
         .into_iter()
+        .filter(|alias| alias_has_enabled_protocol(state, alias))
         .filter(|alias| {
             priced.contains(alias)
                 || alias
@@ -799,7 +811,7 @@ async fn application_models_is_local_with_zero_accounts() {
         .collect::<Vec<_>>();
     assert_eq!(ids, expected_local_application_models(&state));
     assert!(ids.contains(&"deepseek-v4-flash".to_string()));
-    assert!(ids.contains(&"minimax-m2.7-highspeed".to_string()));
+    assert!(!ids.contains(&"minimax-m2.7-highspeed".to_string()));
     assert!(!ids.iter().any(|id| id.contains('/')));
     assert!(
         !ids.iter()
@@ -870,13 +882,7 @@ async fn application_models_intersects_priced_go_aliases_in_registry_order() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         body,
-        serde_json::json!([
-            "glm-5.1",
-            "grok-4.5",
-            "kimi-k3",
-            "minimax-m2.7",
-            "minimax-m2.7-highspeed"
-        ])
+        serde_json::json!(["glm-5.1", "grok-4.5", "kimi-k3", "minimax-m2.7"])
     );
     assert_eq!(
         body.as_array()
@@ -958,8 +964,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         Case {
             client_path: "/v1/chat/completions",
             model: "minimax-m2.7",
-            upstream_path: "/v1/chat/completions",
-            upstream_body: SUCCESS_BODY,
+            upstream_path: "/v1/messages",
+            upstream_body: MESSAGES_SUCCESS_BODY,
         },
         Case {
             client_path: "/v1/responses",
@@ -976,8 +982,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         Case {
             client_path: "/v1/responses",
             model: "glm-5.2",
-            upstream_path: "/v1/responses",
-            upstream_body: RESPONSES_SUCCESS_BODY,
+            upstream_path: "/v1/chat/completions",
+            upstream_body: SUCCESS_BODY,
         },
         Case {
             client_path: "/v1/responses",
@@ -1006,8 +1012,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         Case {
             client_path: "/v1/messages",
             model: "glm-5.2",
-            upstream_path: "/v1/messages",
-            upstream_body: MESSAGES_SUCCESS_BODY,
+            upstream_path: "/v1/chat/completions",
+            upstream_body: SUCCESS_BODY,
         },
     ];
 
@@ -1426,8 +1432,8 @@ async fn converts_streams_across_chat_messages_and_responses() {
         Case {
             client_path: "/v1/responses",
             model: "glm-5.2",
-            upstream_path: "/v1/responses",
-            upstream_body: RESPONSES_STREAM_BODY,
+            upstream_path: "/v1/chat/completions",
+            upstream_body: CHAT_STREAM_BODY,
             expected_events: &[
                 "event: response.created",
                 "response.output_text.delta",
@@ -1437,8 +1443,8 @@ async fn converts_streams_across_chat_messages_and_responses() {
         Case {
             client_path: "/v1/chat/completions",
             model: "minimax-m2.7",
-            upstream_path: "/v1/chat/completions",
-            upstream_body: CHAT_STREAM_BODY,
+            upstream_path: "/v1/messages",
+            upstream_body: MESSAGES_STREAM_BODY,
             expected_events: &["finish_reason", "data: [DONE]"],
         },
         Case {
@@ -2640,7 +2646,7 @@ async fn registered_zen_promo_routes_to_zen_not_go() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1"]);
     let (port, gateway_handle) = start_gateway(state).await;
 
-    for model in ["mimo-v2.5-free", "mimo-v2.5"] {
+    for model in ["hy3-free", "hy3"] {
         let (status, body) = protocol_call(port, "/v1/chat/completions", model).await;
         assert_eq!(status, StatusCode::OK, "{model} {body}");
     }
@@ -2661,12 +2667,12 @@ async fn registered_zen_promo_routes_to_zen_not_go() {
 }
 
 #[tokio::test]
-async fn go_named_free_stays_on_go() {
+async fn go_named_free_without_current_protocol_is_rejected_locally() {
     let replies = HashMap::from([(
         "key-1".to_string(),
         VecDeque::from([MockReply {
             status: 200,
-            body: SUCCESS_BODY,
+            body: RESPONSES_SUCCESS_BODY,
         }]),
     )]);
     let (mock_base, calls, stop_mock) = start_mock_upstream(replies).await;
@@ -2674,18 +2680,10 @@ async fn go_named_free_stays_on_go() {
     let (port, gateway_handle) = start_gateway(state).await;
 
     let (status, body) = protocol_call(port, "/v1/chat/completions", "ox-alpha-free").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let (status, body) = protocol_call(port, "/v1/chat/completions", "brand-new-promo-free").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|call| call.path.as_str())
-            .collect::<Vec<_>>(),
-        ["/zen/go/v1/chat/completions"]
-    );
+    assert!(calls.lock().unwrap().is_empty());
 
     gateway::stop_gateway(gateway_handle);
     let _ = stop_mock.send(());
@@ -2714,7 +2712,7 @@ async fn registered_zen_model_401_is_returned_without_credential_fallback_or_bre
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "hy3-free").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(
         calls
@@ -2808,7 +2806,7 @@ async fn zen_free_429_is_anonymous_and_cools_the_singleton_egress_route() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "hy3-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
         calls
@@ -2842,12 +2840,12 @@ async fn zen_free_429_is_anonymous_and_cools_the_singleton_egress_route() {
     assert!(captured.x_goog_api_key.is_none());
 
     set_account_enabled(&state, "acct-1", false);
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "hy3-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 1);
 
     state.db.lock().delete_account("acct-1").unwrap();
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "hy3-free").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(calls.lock().unwrap().len(), 1);
 
@@ -2884,10 +2882,10 @@ async fn zen_free_is_anonymous_across_all_client_formats_and_logs_route_identity
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
-        let (status, body) = protocol_call(port, path, "mimo-v2.5-free").await;
+        let (status, body) = protocol_call(port, path, "hy3-free").await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
     }
-    let (status, body) = gemini_call(port, "mimo-v2.5-free").await;
+    let (status, body) = gemini_call(port, "hy3-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let captured = calls.lock().unwrap().clone();
@@ -2938,7 +2936,7 @@ async fn zen_free_non_stream_success_without_usage_is_still_zero_cost_free() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "hy3-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.status, "success");
@@ -2966,7 +2964,7 @@ async fn zen_free_stream_success_without_usage_is_still_zero_cost_free() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, body) = protocol_stream_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    let (status, body) = protocol_stream_call(port, "/v1/chat/completions", "hy3-free").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let log = state.db.lock().list_forward_logs(1).unwrap().remove(0);
     assert_eq!(log.status, "success");
@@ -3009,14 +3007,14 @@ async fn zen_free_401_and_403_stop_without_touching_a_normal_credential() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "hy3-free").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert!(
         body.to_string().contains("anonymous route disabled"),
         "{body}"
     );
 
-    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5-free").await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "hy3-free").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(body.to_string().contains("403"), "{body}");
     let captured = calls.lock().unwrap().clone();
@@ -3060,7 +3058,7 @@ async fn ordered_zen_candidate_429_falls_through_to_the_next_normal_card() {
     let (state, dir) = build_state(format!("{mock_base}/zen/go"), &["normal-key"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "hy3").await;
     assert_eq!(status, 200, "{body}");
     let captured = calls.lock().unwrap().clone();
     assert_eq!(
@@ -3070,9 +3068,9 @@ async fn ordered_zen_candidate_429_falls_through_to_the_next_normal_card() {
             .collect::<Vec<_>>(),
         ["", "normal-key"]
     );
-    assert!(captured[0].body.contains("mimo-v2.5-free"));
-    assert!(captured[1].body.contains("mimo-v2.5"));
-    assert!(!captured[1].body.contains("mimo-v2.5-free"));
+    assert!(captured[0].body.contains("hy3-free"));
+    assert!(captured[1].body.contains("hy3"));
+    assert!(!captured[1].body.contains("hy3-free"));
     let logs = state.db.lock().list_forward_logs(10).unwrap();
     assert_eq!(logs.len(), 2);
     assert!(logs.iter().any(|log| {
@@ -3113,14 +3111,14 @@ async fn shared_alias_strict_priority_follows_the_persisted_card_order() {
         .reorder_accounts(&["acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
         .unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
-    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "hy3").await;
     assert_eq!(status, 200, "{body}");
     state
         .db
         .lock()
         .reorder_accounts(&[ZEN_FREE_ACCOUNT_ID.into(), "acct-1".into()])
         .unwrap();
-    let (status, body) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
+    let (status, body) = protocol_call(port, "/v1/chat/completions", "hy3").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
         calls
@@ -3182,8 +3180,8 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
         .expect("GOAT account");
     assert!(state.provider_contracts().production_protocol_allowed(
         &goat_account,
-        "claude-sonnet-4-6",
-        ocg_core::provider::UpstreamProtocolKind::Messages,
+        COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
+        ocg_core::provider::UpstreamProtocolKind::ChatCompletions,
     ));
     let _goat_route = install_goat_loopback_route_for_test(goat_id.clone(), base_url).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
@@ -3880,7 +3878,7 @@ async fn model_discovery_does_not_advance_round_robin_generation_cursor() {
     assert_eq!(chat(port).await.0, 200);
     let (status, body) = models(port).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_local_openai_alias_list(&body);
+    assert_local_openai_alias_list(&state, &body);
     assert_eq!(chat(port).await.0, 200);
 
     let calls = calls.lock().unwrap();
@@ -4369,7 +4367,7 @@ async fn list_mode_routes_listed_models_through_the_proxy_leg_and_labels_logs() 
         "key-1".to_string(),
         VecDeque::from([MockReply {
             status: 200,
-            body: SUCCESS_BODY,
+            body: RESPONSES_SUCCESS_BODY,
         }]),
     )]))
     .await;
@@ -4443,7 +4441,7 @@ async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
         &state,
         format!("{upstream_base}/zen/go"),
         &proxy_base,
-        &["mimo-v2.5-free"],
+        &["hy3-free"],
     );
     state
         .db
@@ -4452,7 +4450,7 @@ async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
         .unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
-    let (status, _) = protocol_call(port, "/v1/chat/completions", "mimo-v2.5").await;
+    let (status, _) = protocol_call(port, "/v1/chat/completions", "hy3").await;
     assert_eq!(status, StatusCode::OK);
 
     assert_eq!(
@@ -4469,7 +4467,7 @@ async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
     let logs = forward_log_rows(&state).await;
     let free_row = logs
         .iter()
-        .find(|log| log.model == "mimo-v2.5-free")
+        .find(|log| log.model == "hy3-free")
         .expect("free attempt row");
     assert_eq!(
         free_row.route, "proxy",
@@ -4477,7 +4475,7 @@ async fn list_mode_free_fallback_reroutes_to_the_default_leg_mid_request() {
     );
     let go_row = logs
         .iter()
-        .find(|log| log.model == "mimo-v2.5" && log.status == "success")
+        .find(|log| log.model == "hy3" && log.status == "success")
         .expect("Go fallback success row");
     assert_eq!(go_row.route, "direct");
 
@@ -4531,7 +4529,7 @@ async fn list_mode_midflight_config_switch_keeps_the_entry_snapshot() {
         },
         MockReply {
             status: 200,
-            body: SUCCESS_BODY,
+            body: RESPONSES_SUCCESS_BODY,
         },
     ])));
     let switched = Arc::new(AtomicBool::new(false));

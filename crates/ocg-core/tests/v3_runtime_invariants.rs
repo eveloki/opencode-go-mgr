@@ -33,7 +33,7 @@ mod harness;
 use harness::*;
 
 const GO_MODEL: &str = "deepseek-v4-flash";
-const ZEN_ONLY_MODEL: &str = "deepseek-v4-flash-free";
+const ZEN_ONLY_MODEL: &str = "nemotron-3-ultra-free";
 const SHARED_ALIAS: &str = "mimo-v2.5";
 const CUSTOM_MODEL: &str = "custom-v3-model";
 const CUSTOM_KEY_A: &str = "v3-custom-key-a";

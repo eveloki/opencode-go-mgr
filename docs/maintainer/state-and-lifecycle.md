@@ -148,7 +148,7 @@ and profile are removed.
 ## Persistence
 
 `crates/ocg-core/src/db.rs` defines the SQLite schema, migrations, and
-queries. Current schema is **v31**. `provider_contracts.rs` owns provider
+queries. Current schema is **v32**. `provider_contracts.rs` owns provider
 contract scopes, per-model/per-protocol overrides, effective contract
 derivation, and model-protocol evidence. `models.rs` defines shared
 serde types and `AppConfig`. Key obfuscation is `ocg-infra::crypto`

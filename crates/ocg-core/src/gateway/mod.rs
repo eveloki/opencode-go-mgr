@@ -385,30 +385,31 @@ mod tests {
             .get("x-ocg-request-id")
             .and_then(|value| value.to_str().ok())
             .expect("validation failure should keep correlation id");
-        let db = state.db.lock();
-        let logs: Vec<_> = db
-            .list_forward_logs(100)
-            .expect("request logs should query")
-            .into_iter()
-            .filter(|row| row.request_id.as_deref() == Some(invalid_request_id))
-            .collect();
-        assert_eq!(logs.len(), 1, "real local failures should stay diagnosable");
-        assert_eq!(logs[0].error_stage.as_deref(), Some("parse"));
-        assert_eq!(logs[0].client_key_id.as_deref(), Some(PRIMARY_KEY_ID));
-        assert_eq!(logs[0].client_key_name.as_deref(), Some(PRIMARY_KEY_NAME));
-        let diagnostic = logs[0]
-            .diagnostic
-            .as_ref()
-            .expect("parse failure should keep bounded diagnostic detail");
-        assert!(diagnostic["upstream_body_bytes"].is_null());
-        assert_eq!(diagnostic["client_body_bytes"], 1);
-        assert!(
-            db.query_gateway_logs(10, Some(invalid_request_id))
-                .expect("runtime logs should query")
-                .is_empty(),
-            "request failures must not enter runtime logs"
-        );
-        drop(db);
+        {
+            let db = state.db.lock();
+            let logs: Vec<_> = db
+                .list_forward_logs(100)
+                .expect("request logs should query")
+                .into_iter()
+                .filter(|row| row.request_id.as_deref() == Some(invalid_request_id))
+                .collect();
+            assert_eq!(logs.len(), 1, "real local failures should stay diagnosable");
+            assert_eq!(logs[0].error_stage.as_deref(), Some("parse"));
+            assert_eq!(logs[0].client_key_id.as_deref(), Some(PRIMARY_KEY_ID));
+            assert_eq!(logs[0].client_key_name.as_deref(), Some(PRIMARY_KEY_NAME));
+            let diagnostic = logs[0]
+                .diagnostic
+                .as_ref()
+                .expect("parse failure should keep bounded diagnostic detail");
+            assert!(diagnostic["upstream_body_bytes"].is_null());
+            assert_eq!(diagnostic["client_body_bytes"], 1);
+            assert!(
+                db.query_gateway_logs(10, Some(invalid_request_id))
+                    .expect("runtime logs should query")
+                    .is_empty(),
+                "request failures must not enter runtime logs"
+            );
+        }
 
         let _ = handle.shutdown.send(());
         handle.task.await.expect("test gateway should stop");

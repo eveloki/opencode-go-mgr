@@ -2,7 +2,7 @@
 
 # Gateway 行为
 
-OCG Manager 在 `127.0.0.1:9042` 只暴露一个 HTTP 入口，同时讲五种客户端协议，并把请求转给 OpenCode Go、Zen Free 或 Custom API 中胜出的账号卡——这样每个客户端都可以继续假装所有上游都说同一种方言。
+OCG Manager 在 `127.0.0.1:9042` 只暴露一个 HTTP 入口，同时讲五种客户端协议，并把请求转给 OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN、Kimi Code CN 或 Custom API 中胜出的合格账号卡——这样每个客户端都可以继续假装所有上游都说同一种方言。
 
 ## 端点
 

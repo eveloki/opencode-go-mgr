@@ -73,7 +73,8 @@ desktop-specific steps need a real machine.
       and a tool call.
 - [ ] Cover schema v16 migration, schema v27 (`access_keys`, pre-v3 backup +
       SHA-256 sidecar, dropped `sub_gateway_keys` and `accounts.usage_sync_*`,
-      ciphertext validated not rewritten), Alias / upstream log identity, optional native
+      ciphertext validated not rewritten), v29 SCNet removal, v30/v31 contract
+      compatibility, v32 single-protocol Custom conversion, Alias / upstream log identity, optional native
       cost, historical GOAT verification states normalize to `not_required`, Zen Free catalog
       persistence, provider contract scopes / model-protocol tables, legacy
       `key + ready`, managed transitions (forward one step / rewind earlier

@@ -9,8 +9,7 @@ use crate::provider::*;
 use crate::provider_contracts::{
     CATALOG_SOURCE_COMMAND_CODE_MODELS, CATALOG_SOURCE_OFFICIAL_ZEN, ContractEvidenceSource,
     ContractScope, PersistedContracts, PersistedModelProtocol, PersistedModelProtocolOverride,
-    PersistedScopeRow, ProbeResultKind, ProtocolOverrideState, ProtocolSwitches,
-    SCOPE_KIND_CUSTOM_ENDPOINT,
+    PersistedScopeRow, ProbeResultKind, ProtocolOverrideState, SCOPE_KIND_CUSTOM_ENDPOINT,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
@@ -363,22 +362,14 @@ fn persist_scope_from_row(row: &Row<'_>) -> rusqlite::Result<PersistedScopeRow> 
     let models: Vec<String> = serde_json::from_str(&models_json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
     })?;
-    // The switch columns are deprecated: effective contract derivation now uses
-    // per-model/per-protocol overrides. They are still read so legacy rows load.
-    let switches = ProtocolSwitches {
-        chat_completions: row.get::<_, i64>(6)? != 0,
-        responses: row.get::<_, i64>(7)? != 0,
-        messages: row.get::<_, i64>(8)? != 0,
-    };
     Ok(PersistedScopeRow {
         scope: scope_from_row(&kind, &id)?,
         catalog_models: models,
         catalog_refreshed_at: parse_rfc3339_opt(row.get(3)?, 3)?,
         catalog_source: row.get(4)?,
         catalog_source_url: row.get(5)?,
-        switches,
-        revision: row.get::<_, i64>(9)? as u64,
-        updated_at: parse_rfc3339_column(row.get(10)?, 10)?,
+        revision: row.get::<_, i64>(6)? as u64,
+        updated_at: parse_rfc3339_column(row.get(7)?, 7)?,
     })
 }
 
@@ -457,9 +448,7 @@ fn persist_override_from_row(row: &Row<'_>) -> rusqlite::Result<PersistedModelPr
 fn load_scope_on(conn: &Connection, scope: &ContractScope) -> Result<Option<PersistedScopeRow>> {
     conn.query_row(
         "SELECT scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
-                catalog_source, catalog_source_url,
-                chat_completions_enabled, responses_enabled, messages_enabled,
-                revision, updated_at
+                catalog_source, catalog_source_url, revision, updated_at
          FROM provider_contract_scopes
          WHERE scope_kind = ?1 AND scope_id = ?2",
         params![scope.kind_str(), scope.id()],
@@ -3593,9 +3582,7 @@ impl Database {
         {
             let mut stmt = self.conn.prepare(
                 "SELECT scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
-                        catalog_source, catalog_source_url,
-                        chat_completions_enabled, responses_enabled, messages_enabled,
-                        revision, updated_at
+                        catalog_source, catalog_source_url, revision, updated_at
                  FROM provider_contract_scopes",
             )?;
             let rows = stmt.query_map([], persist_scope_from_row)?;
@@ -3642,9 +3629,7 @@ impl Database {
         self.conn
             .query_row(
                 "SELECT scope_kind, scope_id, catalog_models_json, catalog_refreshed_at,
-                        catalog_source, catalog_source_url,
-                        chat_completions_enabled, responses_enabled, messages_enabled,
-                        revision, updated_at
+                        catalog_source, catalog_source_url, revision, updated_at
                  FROM provider_contract_scopes
                  WHERE scope_kind = ?1 AND scope_id = ?2",
                 params![scope.kind_str(), scope.id()],
@@ -3679,7 +3664,6 @@ impl Database {
         refreshed_at: DateTime<Utc>,
         source: &str,
         source_url: &str,
-        now: DateTime<Utc>,
     ) -> Result<PersistedScopeRow> {
         let tx = self.conn.unchecked_transaction()?;
         upsert_contract_catalog_on(
@@ -3689,9 +3673,9 @@ impl Database {
             Some(refreshed_at),
             source,
             source_url,
-            now,
+            refreshed_at,
         )?;
-        mark_new_catalog_models_default_off_on(&tx, scope, previous_models, models, now)?;
+        mark_new_catalog_models_default_off_on(&tx, scope, previous_models, models, refreshed_at)?;
         let row = load_scope_on(&tx, scope)?
             .ok_or_else(|| anyhow::anyhow!("contract scope was not persisted"))?;
         tx.commit()?;
@@ -4581,63 +4565,6 @@ impl Database {
             });
         }
         Ok(runtimes)
-    }
-
-    pub fn goat_model_access(&self, account_id: &str) -> Result<Option<GoatModelAccess>> {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT goat_model_access FROM accounts
-                 WHERE id = ?1 AND provider_id = ?2 AND offering_id = ?3",
-                params![account_id, COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        value
-            .map(|value| GoatModelAccess::try_from(value.as_str()).map_err(anyhow::Error::msg))
-            .transpose()
-    }
-
-    pub fn set_goat_model_access(
-        &self,
-        account_id: &str,
-        model_access: GoatModelAccess,
-    ) -> Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE accounts SET goat_model_access = ?2, updated_at = ?3
-             WHERE id = ?1 AND provider_id = ?4 AND offering_id = ?5",
-            params![
-                account_id,
-                model_access.as_str(),
-                Utc::now().to_rfc3339(),
-                COMMAND_CODE_PROVIDER_ID,
-                GOAT_OFFERING_ID,
-            ],
-        )?;
-        anyhow::ensure!(changed == 1, "Command Code GOAT account not found");
-        Ok(())
-    }
-
-    pub fn list_goat_catalog_models(&self, account_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT model_id FROM account_model_capabilities
-             WHERE account_id = ?1 AND source = ?2
-             ORDER BY rowid ASC",
-        )?;
-        let rows = stmt.query_map(
-            params![account_id, crate::provider::COMMAND_CODE_GOAT_MODELS_SOURCE],
-            |row| row.get::<_, String>(0),
-        )?;
-        let mut models = Vec::new();
-        let mut seen = HashSet::new();
-        for row in rows {
-            let model = row?;
-            let key = model.to_ascii_lowercase();
-            if seen.insert(key) {
-                models.push(model);
-            }
-        }
-        Ok(models)
     }
 
     pub fn capture_goat_verification_contract(
@@ -12022,7 +11949,7 @@ mod tests {
             .expect("zen provider scope should be backfilled");
         assert_eq!(scope.catalog_models, ["backfill-coder-free"]);
         assert_eq!(scope.catalog_source, CATALOG_SOURCE_OFFICIAL_ZEN);
-        assert!(scope.switches.chat_completions);
+        assert!(scope.revision >= 1);
         drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -14389,7 +14316,6 @@ mod tests {
                 now,
                 crate::provider_contracts::CATALOG_SOURCE_OPENCODE_MODELS,
                 "https://opencode.ai/zen/go/v1/models",
-                now,
             )
             .unwrap();
 
@@ -14461,7 +14387,6 @@ mod tests {
             now,
             CATALOG_SOURCE_COMMAND_CODE_MODELS,
             COMMAND_CODE_GOAT_BASE_URL,
-            now,
         )
         .unwrap();
         db.refresh_contract_catalog_with_default_off(
@@ -14471,7 +14396,6 @@ mod tests {
             now,
             CATALOG_SOURCE_COMMAND_CODE_MODELS,
             COMMAND_CODE_GOAT_BASE_URL,
-            now,
         )
         .unwrap();
 

@@ -6,7 +6,7 @@
 
 ## 面板 V3
 
-当前 SPA **只** 访问 `/dashboard/api/v3`。接入中心、接入 Key、账号、供应商、应用、日志、设置，以及登录、注册、退出，全部走这条路径。写入携带 `expectedRevision` 与 `processGeneration` 做 CAS；若同一进程的另一个标签页先保存，服务端返回 HTTP 409，错误码 `revisionConflict`。当前 SPA 尚未自动处理该错误码，请刷新页面后重新提交。这些 token 只属于当前进程；多个进程共用一个数据目录时，并不构成统一的 CAS 域。OpenCode Go 价格快照使用独立的 `pricingRevision`，与设置 token 无关。
+当前 SPA **只** 访问 `/dashboard/api/v3`。接入中心、接入 Key、账号、供应商、应用、日志、设置，以及登录、注册、退出，全部走这条路径。写入携带 `expectedRevision` 与 `processGeneration` 做 CAS；若同一进程的另一个标签页先保存，服务端返回 HTTP 409，错误码 `revisionConflict`。SPA 会刷新控制 token 与受影响资源，但不会自动重放被拒绝的变更；确认当前值后再次提交即可。这些 token 只属于当前进程；多个进程共用一个数据目录时，并不构成统一的 CAS 域。OpenCode Go 价格快照使用独立的 `pricingRevision`，与设置 token 无关。
 
 明文 Key 只出现在接入中心载荷（`GET /dashboard/api/v3/connection`）里。Settings 资源从不包含 Key 值。浏览器只把秘密留在内存；退出登录或 401 会话失效会立即清除。
 

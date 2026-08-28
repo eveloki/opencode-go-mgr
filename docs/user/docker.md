@@ -11,7 +11,7 @@ matching tag. It is the only version that does not complain when you close
 your laptop lid.
 
 ```bash
-git clone --branch v1.8.2 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
+git clone --branch v2.0.0 --depth 1 https://github.com/klarkxy/opencode-go-mgr.git
 cd opencode-go-mgr
 cp .env.example .env
 # PowerShell: Copy-Item .env.example .env
@@ -28,7 +28,7 @@ Image tags move; decide how pinned you want to be.
 - The checkout's `compose.yaml` defaults to `latest`; the Release
   `compose.example.yaml` pins its matching full version.
 - For repeatable production deployments, set `OCG_IMAGE` in `.env` to a full
-  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:1.8.2`.
+  release tag such as `ghcr.io/klarkxy/opencode-go-mgr:2.0.0`.
 - Full-version and `sha-<commit>` tags identify one release and are intended
   not to move; `1.5` and `latest` do. Only a digest such as
   `ghcr.io/klarkxy/opencode-go-mgr@sha256:...` is truly immutable.
@@ -176,13 +176,13 @@ provenance, and a GitHub signed provenance attestation. Inspect and verify a
 release with:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:1.8.2
-docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.2
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr:2.0.0
+docker buildx imagetools inspect ghcr.io/klarkxy/opencode-go-mgr-browser:2.0.0
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr:1.8.2 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr:2.0.0 \
   --repo klarkxy/opencode-go-mgr
 gh attestation verify \
-  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:1.8.2 \
+  oci://ghcr.io/klarkxy/opencode-go-mgr-browser:2.0.0 \
   --repo klarkxy/opencode-go-mgr
 ```
 

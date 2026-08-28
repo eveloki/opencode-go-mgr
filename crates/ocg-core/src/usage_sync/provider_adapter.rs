@@ -233,14 +233,15 @@ mod tests {
         assert!(go.automatic_sync);
         assert!(go.authoritative_for_quota);
 
-        assert!(provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none());
+        let goat = provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+        assert_eq!(goat.evidence, ProviderUsageEvidence::Unavailable);
+        assert!(!goat.automatic_sync);
+        assert!(!goat.authoritative_for_quota);
 
-        let zen =
+        assert!(
             provider_usage_capability(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID)
-                .unwrap();
-        assert_eq!(zen.endpoint, None);
-        assert!(!zen.experimental);
-        assert!(!zen.authoritative_for_quota);
+                .is_none()
+        );
 
         assert!(provider_usage_capability(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).is_none());
         for descriptor in crate::provider::ProviderRegistry::iter() {
@@ -254,7 +255,10 @@ mod tests {
                     assert!(capability.authoritative_for_quota);
                 }
                 ProviderAdapterKind::CommandCodeGoat => {
-                    assert!(capability.is_none());
+                    let capability = capability.expect("GOAT publishes local-state usage");
+                    assert_eq!(capability.evidence, ProviderUsageEvidence::Unavailable);
+                    assert!(!capability.automatic_sync);
+                    assert!(!capability.authoritative_for_quota);
                 }
                 ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
                     let capability = capability.expect("sealed CN Plan publishes usage");
@@ -262,9 +266,7 @@ mod tests {
                     assert!(!capability.automatic_sync);
                 }
                 ProviderAdapterKind::ZenFree => {
-                    let capability = capability.expect("Zen publishes local-state usage");
-                    assert!(!capability.experimental);
-                    assert!(!capability.automatic_sync);
+                    assert!(capability.is_none());
                 }
                 ProviderAdapterKind::ConfigurableHttp => {
                     assert!(capability.is_none());
@@ -293,15 +295,21 @@ mod tests {
         let goat_plan = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         let goat_usage = CommandCodeGoatAdapter::usage(goat_plan);
         assert!(!goat_usage.experimental);
-        assert!(!goat_usage.publishes_capability);
+        assert!(goat_usage.publishes_capability);
         assert!(!goat_usage.automatic_sync);
-        assert!(provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).is_none());
+        let goat = provider_usage_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
+        assert_eq!(goat.evidence, ProviderUsageEvidence::Unavailable);
+        assert!(!goat.automatic_sync);
 
         let zen_plan =
             builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();
         let zen_usage = ZenFreeAdapter::usage(zen_plan);
-        assert!(zen_usage.publishes_capability);
+        assert!(!zen_usage.publishes_capability);
         assert!(!zen_usage.authoritative_for_quota);
+        assert!(
+            provider_usage_capability(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID)
+                .is_none()
+        );
 
         let custom_plan = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
         assert!(!ConfigurableHttpAdapter::usage(custom_plan).publishes_capability);

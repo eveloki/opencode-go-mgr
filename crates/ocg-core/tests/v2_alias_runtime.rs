@@ -131,24 +131,20 @@ fn assert_local_openai_alias_list(body: &Value) {
         .find(|item| item["id"] == "deepseek-v4-flash")
         .expect("Go alias");
     assert_eq!(go["owned_by"], ocg_core::provider::OPENCODE_PROVIDER_ID);
-    let go_named_free = data
-        .iter()
-        .find(|item| item["id"] == "ox-alpha-free")
-        .expect("Go alias whose name contains free");
-    assert_eq!(
-        go_named_free["owned_by"],
-        ocg_core::provider::OPENCODE_PROVIDER_ID
+    assert!(
+        data.iter().all(|item| item["id"] != "ox-alpha-free"),
+        "aliases without current protocol evidence must stay unpublished"
     );
     assert!(
         data.iter()
             .all(|item| item["id"] != "deepseek-v4-flash-free"),
         "Zen raw -free IDs must not be published"
     );
-    let zen = data
+    let shared = data
         .iter()
-        .find(|item| item["id"] == "mimo-v2.5")
-        .expect("registered stripped Zen alias");
-    assert_eq!(zen["owned_by"], ocg_core::provider::OPENCODE_PROVIDER_ID);
+        .find(|item| item["id"] == "hy3")
+        .expect("current shared Go and Zen alias");
+    assert_eq!(shared["owned_by"], ocg_core::provider::OPENCODE_PROVIDER_ID);
     assert!(
         data.iter()
             .all(|item| item["id"]

@@ -37,11 +37,11 @@ Rust，Windows 也不必重做 dashboard 构建：
 - **macOS GUI**——挂载 DMG，`codesign --verify --deep --strict`， `lipo -archs` 校验 universal，`--startup` 启动后等 dashboard。
 - **Linux GUI**——`dpkg-deb --info` / `dpkg-deb --contents` 校验 deb，`file` 校验 AppImage；用 `dbus-run-session -- xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 WEBKIT_DISABLE_COMPOSITING_MODE=1` 启动后等 dashboard。
 
-`scripts/smoke-windows-release.ps1` 仍在探测遗留 V2 URL
-`http://127.0.0.1:9042/dashboard/api/settings/update-status` 与
-`/dashboard/api/settings`。在本架构下这些已鉴权路径返回 `410`；V3 候选必须对
-`/dashboard/api/v3/settings/update-status` 以及对应的 V3 settings 读取路径进行
-冒烟。在依赖该脚本做发布冒烟前，先把它更新到 V3 路径。
+`scripts/smoke-windows-release.ps1` 仅在引导当前已发布的 v1.8.2 时调用一次遗留
+V2 settings 路径，因为该版本早于 Dashboard V3。覆盖安装重启后，版本探测及所有
+settings 读写都使用 V3；候选版自启写入先从
+`GET /dashboard/api/v3/settings` 取得实时 `revision` / `processGeneration`，再发送带
+CAS 的 V3 `PUT`。
 
 ## draft-release 与 verify-release
 

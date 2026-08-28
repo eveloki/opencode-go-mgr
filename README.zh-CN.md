@@ -4,7 +4,7 @@
 
 一个本地 Gateway：把你的各厂商 API Key 收进一个 SQLite 数据库，在一个端口（`http://127.0.0.1:9042`）上讲五种客户端协议——这样你机器上的每个 AI 工具就不必再假装自己管得住 Key 了。
 
-每张账号卡绑定一个 Plan（provider/offering），Plan 需要时再存一份凭据。客户端用 OpenAI、Anthropic、Gemini 或 Claude Desktop 协议发送本地别名；Gateway 把请求转到该 Plan 的上游协议，再把响应转回来。当前可路由：OpenCode Go、Zen Free、Custom API。无遥测、无远端同步——Key 不出本机。
+每张账号卡绑定一个 Plan（provider/offering），Plan 需要时再存一份凭据。客户端用 OpenAI、Anthropic、Gemini 或 Claude Desktop 协议发送本地别名；Gateway 把请求转到该 Plan 的上游协议，再把响应转回来。当前可路由：OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN Token Plan、Kimi Code CN、Custom API。无遥测、无远端同步——Key 不出本机。
 
 <p align="center">
   <a href="https://github.com/klarkxy/opencode-go-mgr">
@@ -40,7 +40,7 @@ Gateway: http://127.0.0.1:9042/v1
 ```
 
 1. 安装并启动。Gateway 就绪后管理面板会在系统浏览器中打开；托盘图标随时唤回。
-2. 在 **账号** 视图导入 OpenCode Go 账号 Key、选择无需凭据的 Zen Free，或添加 Custom API 目的地（声明协议与模型后即可启用，验证为可选项）。复制 **Key**——这是客户端唯一需要知道的秘密。
+2. 在 **账号** 视图添加所需 Plan：导入 OpenCode Go、Command Code GOAT、MiniMax CN 或 Kimi Code CN 的 Key，选择无需凭据的 Zen Free，或添加 Custom API 目的地。复制 **Key**——这是客户端唯一需要知道的秘密。
 3. 把客户端指向 `http://127.0.0.1:9042/v1`。**应用** 视图有各客户端的配置教程。
 
 ```bash

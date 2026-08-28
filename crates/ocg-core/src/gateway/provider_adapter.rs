@@ -949,7 +949,7 @@ mod tests {
             &chat_plan(
                 "local-model",
                 UpstreamChannel::Go,
-                ApiFormat::ChatCompletions,
+                ApiFormat::Messages,
                 Some(CustomRouteSpec {
                     endpoint_url: "http://127.0.0.1:9/v1/messages".into(),
                 }),

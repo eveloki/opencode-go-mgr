@@ -308,7 +308,7 @@ async fn main() -> anyhow::Result<()> {
     let first_key = |accounts: &[&StoredAccount]| -> anyhow::Result<Option<String>> {
         accounts
             .first()
-            .map(|account| cipher.decrypt(&account.key_cipher).map_err(Into::into))
+            .map(|account| cipher.decrypt(&account.key_cipher))
             .transpose()
     };
     let go_key = first_key(&go_accounts)?;
@@ -556,12 +556,7 @@ async fn stream_evidence(response: reqwest::Response, protocol: Protocol) -> (bo
 }
 
 fn sanitize(value: &str) -> String {
-    value
-        .replace('\n', " ")
-        .replace('\r', " ")
-        .chars()
-        .take(300)
-        .collect()
+    value.replace(['\n', '\r'], " ").chars().take(300).collect()
 }
 
 fn redact(value: &str, key: Option<&str>) -> String {

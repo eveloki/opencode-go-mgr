@@ -41,7 +41,7 @@
       Key，并实际启动 Claude Desktop 与 Gemini CLI 各完成一次文本和工具调用。
 - [ ] 覆盖 schema v16 迁移、schema v27（`access_keys`、pre-v3 备份 + SHA-256
       sidecar、删除 `sub_gateway_keys` 与 `accounts.usage_sync_*`、密文只校验
-      不重加密）、别名 / 上游日志身份、可选原生成本、历史 GOAT 验证状态统一为 `not_required`、Zen Free 模型
+      不重加密）、v29 SCNet 清理、v30/v31 合约兼容、v32 Custom 单协议转换、别名 / 上游日志身份、可选原生成本、历史 GOAT 验证状态统一为 `not_required`、Zen Free 模型
       快照持久化、供应商合约范围 / 模型协议表、旧账号 `key + ready`、托管状态
       机（前进一格 / 回退更早步骤、不支持跳步）、Pending 路由隔离、邀请 URL 白
       名单与演示默认写回，以及 Key 验证的 `2xx`/`429`/`401`/`403`/网络/`5xx`

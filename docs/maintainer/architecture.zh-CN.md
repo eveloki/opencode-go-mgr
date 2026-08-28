@@ -207,16 +207,18 @@ Command Code GOAT 的请求计费只读取其最新、已验证的 Provider 范�
 
 ## Plan 目录
 
-`BUILTIN_PLANS` 与 `ProviderAdapterKind` 在 `ocg-domain::provider`（门面 `ocg_core::provider`）。五个家族：
+`BUILTIN_PLANS` 与 `ProviderAdapterKind` 在 `ocg-domain::provider`（门面 `ocg_core::provider`）。六个家族：
 
 | 家族 | ID | 可路由 | 说明 |
 | --- | --- | --- | --- |
 | OpenCode Go | `opencode` / `go` | 是 | 只接受官方分发 Key |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 无凭据单例，数据库持有 |
 | Command Code GOAT | `command-code` / `goat` | 是 | 固定官方源；公开供应商目录；模型供应由供应商矩阵控制 |
+| MiniMax CN Token Plan | `minimax` / `cn-token-plan` | 是 | 固定中国区源与 Chat Completions 协议 |
+| Kimi Code CN | `kimi-code` / `cn` | 是 | 固定中国区源与 Chat Completions 协议 |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地 |
 
-所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会把历史 Command Code 验证状态统一为 `not_required`，因为公开目录不是 Key 验证；enabled 状态保持不变。Go、Zen Free、Custom 与未知 pair 的其他状态不受影响。
+所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会把历史 Command Code 验证状态统一为 `not_required`，因为公开目录不是 Key 验证；enabled 状态保持不变。Go、Zen Free、GOAT、MiniMax、Kimi、Custom 与未知 pair 的其他状态不受影响。
 
 Custom API（`custom.rs` + `custom_http.rs`）接受一个语法合法的完整 HTTP/HTTPS 推理 Endpoint；拒绝 URL 内嵌凭据、query、fragment 与重定向，不转发 dashboard 或客户端鉴权。Chat/Responses 自动使用 Bearer，Messages 自动使用 `x-api-key`。账号声明一个协议，对全部模型统一生效并直接作为 effective preferred protocol；其他受支持客户端格式转换到它。配置与完整能力列表原子更新。验证可选，只向保存的 Endpoint 发送一次最小请求。只有标准协议后缀可推导 `/models`，其他路径必须手工填写模型。修改 Key、Endpoint、声明能力或协议会把 `verification_status` 重置为 `pending`，但账号保持启用。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
 
@@ -257,10 +259,10 @@ Vue SPA 是当前唯一的面板客户端，走 HTTP Dashboard V3。CLI 调用�
 
 ## 持久化地图
 
-权威 schema 是 v31。`sub_gateway_keys` 只出现在迁到 v27 之前的历史库，迁完即丢弃。GUI 数据目录在 Windows 为 `%USERPROFILE%\.ocg-mgr`，在 macOS/Linux 为 `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
+权威 schema 是 v32。`sub_gateway_keys` 只出现在迁到 v27 之前的历史库，迁完即丢弃。GUI 数据目录在 Windows 为 `%USERPROFILE%\.ocg-mgr`，在 macOS/Linux 为 `~/.ocg-mgr`；CLI 默认 `~/.ocg-mgr-cli`。
 
 ```text
-  data.sqlite                         CURRENT_SCHEMA_VERSION = 31
+  data.sqlite                         CURRENT_SCHEMA_VERSION = 32
     access_keys                       主 Key id PRIMARY_KEY_ID
                                       主 Key 不可禁用/删除
                                       子 Key 活跃上限 64
