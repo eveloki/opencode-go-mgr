@@ -6,16 +6,15 @@
 //! in `gateway::routing` and is re-exported from there.
 
 use crate::kernel::catalog::CredentialKind;
-use crate::kernel::ids::{
-    ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
-    CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID,
-};
 use crate::models::{Account, RoutingMode, UpstreamChannel};
+use crate::provider::ProviderAdapterKind;
 use chrono::{DateTime, Utc};
 use ocg_gateway::selector::{BaseAvailability, Candidate as GatewayCandidate, SelectionPolicy};
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use crate::kernel::ids::{ANONYMOUS_FREE_OFFERING_ID, OPENCODE_ZEN_FREE_PROVIDER_ID};
 
 pub const CONVERSATION_TTL: Duration = ocg_gateway::selector::CONVERSATION_TTL;
 pub const MAX_CONVERSATIONS: usize = ocg_gateway::selector::MAX_CONVERSATIONS;
@@ -285,6 +284,24 @@ pub(crate) fn account_is_available_for_at(
         && !account.is_cooling_for(channel, now)
 }
 
+/// Runtime channel owned by one valid sealed provider/offering binding.
+///
+/// Keeping this mapping beside selector eligibility prevents observability and
+/// other read paths from growing their own, incomplete provider lists.
+pub(crate) fn account_channel(account: &Account) -> Option<UpstreamChannel> {
+    if account.validate_provider_binding().is_err() {
+        return None;
+    }
+    match ProviderAdapterKind::from_offering(&account.provider_id, &account.offering_id)? {
+        ProviderAdapterKind::OpenCodeGo
+        | ProviderAdapterKind::CommandCodeGoat
+        | ProviderAdapterKind::MiniMaxCn
+        | ProviderAdapterKind::KimiCn
+        | ProviderAdapterKind::ConfigurableHttp => Some(UpstreamChannel::Go),
+        ProviderAdapterKind::ZenFree => Some(UpstreamChannel::Free),
+    }
+}
+
 pub(crate) fn free_channel_is_exhausted_at(accounts: &[Account], now: DateTime<Utc>) -> bool {
     accounts
         .iter()
@@ -297,18 +314,7 @@ pub(crate) fn free_channel_is_exhausted_at(accounts: &[Account], now: DateTime<U
 }
 
 fn account_matches_channel(account: &Account, channel: UpstreamChannel) -> bool {
-    if account.validate_provider_binding().is_err() {
-        return false;
-    }
-    match (account.provider_id.as_str(), account.offering_id.as_str()) {
-        (OPENCODE_PROVIDER_ID, GO_OFFERING_ID)
-        | (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID)
-        | (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID) => channel == UpstreamChannel::Go,
-        (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => {
-            channel == UpstreamChannel::Free
-        }
-        _ => false,
-    }
+    account_channel(account) == Some(channel)
 }
 
 fn selection_policy(mode: RoutingMode) -> SelectionPolicy {

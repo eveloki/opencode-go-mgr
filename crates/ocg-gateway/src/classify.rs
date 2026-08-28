@@ -170,12 +170,13 @@ fn policy_for_kind(kind: ProviderAdapterKind) -> ProviderErrorPolicy {
             inference_401: Auth401Policy::Passthrough,
             rate_limit_429: RateLimit429Policy::GoWindow,
         },
-        ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::ConfigurableHttp => {
-            ProviderErrorPolicy {
-                inference_401: Auth401Policy::RotatePersistAuthError,
-                rate_limit_429: RateLimit429Policy::GenericFiveMinute,
-            }
-        }
+        ProviderAdapterKind::CommandCodeGoat
+        | ProviderAdapterKind::MiniMaxCn
+        | ProviderAdapterKind::KimiCn
+        | ProviderAdapterKind::ConfigurableHttp => ProviderErrorPolicy {
+            inference_401: Auth401Policy::RotatePersistAuthError,
+            rate_limit_429: RateLimit429Policy::GenericFiveMinute,
+        },
     }
 }
 
@@ -367,7 +368,10 @@ mod tests {
                     assert_eq!(policy.inference_401, Auth401Policy::Passthrough);
                     assert_eq!(policy.rate_limit_429, RateLimit429Policy::GoWindow);
                 }
-                ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::ConfigurableHttp => {
+                ProviderAdapterKind::CommandCodeGoat
+                | ProviderAdapterKind::MiniMaxCn
+                | ProviderAdapterKind::KimiCn
+                | ProviderAdapterKind::ConfigurableHttp => {
                     assert_eq!(policy.inference_401, Auth401Policy::RotatePersistAuthError);
                     assert_eq!(policy.rate_limit_429, RateLimit429Policy::GenericFiveMinute);
                 }

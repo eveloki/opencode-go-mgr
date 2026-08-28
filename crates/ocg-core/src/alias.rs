@@ -12,9 +12,10 @@ pub use ocg_gateway::alias::{
     AMBIGUOUS_MODEL_ID, AliasEntry, CUSTOM_DYNAMIC_UPSTREAM, ProviderMapping, PublishedAlias,
     ResolveError, ResolvedModel, canonical_alias_for_provider_model, is_published_alias,
     published_aliases, published_routeable_aliases, published_routeable_aliases_with_all_catalogs,
-    published_routeable_aliases_with_zen, resolve, resolve_with_all_catalogs,
-    resolve_with_catalogs, resolve_with_custom, resolve_with_provider_models,
-    routeable_aliases_for, routeable_aliases_for_with_zen,
+    published_routeable_aliases_with_extended_catalogs, published_routeable_aliases_with_zen,
+    resolve, resolve_with_all_catalogs, resolve_with_catalogs, resolve_with_custom,
+    resolve_with_extended_catalogs, resolve_with_provider_models, routeable_aliases_for,
+    routeable_aliases_for_with_zen,
 };
 
 type ResolveName = fn(&str) -> Result<ResolvedModel, ResolveError>;
@@ -26,6 +27,17 @@ type ResolveAllCatalogs =
     fn(&str, &[String], &[String], &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
 type RouteableWithZen = fn(&str, &str, &[String]) -> Vec<String>;
 type RouteableAllCatalogs = fn(&[String], &[String], &[String]) -> Vec<PublishedAlias>;
+type ResolveExtendedCatalogs = fn(
+    &str,
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+) -> Result<ResolvedModel, ResolveError>;
+type RouteableExtendedCatalogs =
+    fn(&[String], &[String], &[String], &[String], &[String]) -> Vec<PublishedAlias>;
 
 const _: ResolveName = resolve;
 const _: ResolveName = ocg_gateway::alias::resolve;
@@ -33,10 +45,12 @@ const _: ResolveCustom = resolve_with_custom;
 const _: ResolveProviderModels = resolve_with_provider_models;
 const _: ResolveCatalogs = resolve_with_catalogs;
 const _: ResolveAllCatalogs = resolve_with_all_catalogs;
+const _: ResolveExtendedCatalogs = resolve_with_extended_catalogs;
 const _: fn() -> Vec<String> = published_aliases;
 const _: fn() -> Vec<PublishedAlias> = published_routeable_aliases;
 const _: fn(&[String]) -> Vec<PublishedAlias> = published_routeable_aliases_with_zen;
 const _: RouteableAllCatalogs = published_routeable_aliases_with_all_catalogs;
+const _: RouteableExtendedCatalogs = published_routeable_aliases_with_extended_catalogs;
 const _: fn(&str, &str) -> Vec<String> = routeable_aliases_for;
 const _: RouteableWithZen = routeable_aliases_for_with_zen;
 const _: fn(&str) -> bool = is_published_alias;

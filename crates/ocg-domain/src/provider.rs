@@ -10,7 +10,8 @@ use crate::catalog::{
 };
 use crate::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
-    CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
+    CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, KIMI_CN_OFFERING_ID, KIMI_PROVIDER_ID,
+    MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
     OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,27 @@ pub const COMMAND_CODE_GOAT_MESSAGES_PATH: &str = "/messages";
 pub const COMMAND_CODE_GOAT_MODELS_PATH: &str = "/models";
 pub const COMMAND_CODE_GOAT_MODELS_SOURCE: &str = "command_code_get_models";
 pub const COMMAND_CODE_GOAT_MODEL_SOURCE: &str = "command_code_verified_models";
+/// Public GOAT plan windows. OCG uses these only to project locally priced
+/// request logs; Command Code does not expose a machine-readable usage API.
+pub const COMMAND_CODE_GOAT_QUOTA_5H: f64 = 14.0;
+pub const COMMAND_CODE_GOAT_QUOTA_WEEK: f64 = 35.0;
+pub const COMMAND_CODE_GOAT_QUOTA_MONTH: f64 = 70.0;
 pub const MAX_COMMAND_CODE_MODELS_CATALOG: usize = 1_000;
+
+/// Official MiniMax CN Token Plan endpoints. The Plan Key is sent as Bearer
+/// auth to all three surfaces; redirects stay disabled in the host adapter.
+pub const MINIMAX_CN_BASE_URL: &str = "https://api.minimaxi.com/v1";
+pub const MINIMAX_CN_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+pub const MINIMAX_CN_MODELS_PATH: &str = "/models";
+pub const MINIMAX_CN_USAGE_URL: &str = "https://api.minimaxi.com/v1/token_plan/remains";
+pub const MINIMAX_CN_MODEL_SOURCE: &str = "minimax_cn_get_models";
+pub const MAX_MINIMAX_CN_MODELS_CATALOG: usize = 1_000;
+pub const KIMI_CN_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+pub const KIMI_CN_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+pub const KIMI_CN_MODELS_PATH: &str = "/models";
+pub const KIMI_CN_USAGE_URL: &str = "https://api.kimi.com/coding/v1/usages";
+pub const KIMI_CN_MODEL_SOURCE: &str = "kimi_cn_get_models";
+pub const MAX_KIMI_CN_MODELS_CATALOG: usize = 1_000;
 
 /// Models included by the GOAT subscription page. These are the default-on
 /// rows in the Provider model/protocol matrix. Models discovered beyond this
@@ -304,6 +325,8 @@ const GO_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
 const GOAT_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
+const MINIMAX_CN_FORM_FIELDS: [PlanFormField; 3] = [NAME_FIELD, KEY_FIELD, NOTES_FIELD];
+const KIMI_CN_FORM_FIELDS: [PlanFormField; 3] = [NAME_FIELD, KEY_FIELD, NOTES_FIELD];
 const CUSTOM_FORM_FIELDS: [PlanFormField; 6] = [
     NAME_FIELD,
     KEY_FIELD,
@@ -325,6 +348,7 @@ const GOAT_PROTOCOLS: [UpstreamProtocolKind; 2] = [
     UpstreamProtocolKind::ChatCompletions,
     UpstreamProtocolKind::Messages,
 ];
+const CHAT_PROTOCOLS: [UpstreamProtocolKind; 1] = [UpstreamProtocolKind::ChatCompletions];
 const CUSTOM_PROTOCOLS: [UpstreamProtocolKind; 3] = [
     UpstreamProtocolKind::ChatCompletions,
     UpstreamProtocolKind::Responses,
@@ -341,7 +365,7 @@ const fn key_offering(provider_id: &'static str, offering_id: &'static str) -> B
     }
 }
 
-pub const BUILTIN_PLANS: [BuiltinPlan; 4] = [
+pub const BUILTIN_PLANS: [BuiltinPlan; 6] = [
     BuiltinPlan {
         offering: key_offering(OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
         display_name: "OpenCode Go",
@@ -401,14 +425,54 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 4] = [
         routable: true,
         managed_registration: false,
         pricing_availability: "available",
-        usage_availability: "unavailable",
-        manual_usage_calibration: false,
-        quota_unit: "unpriced",
+        usage_availability: "local_state",
+        manual_usage_calibration: true,
+        quota_unit: "usd",
         model_source: COMMAND_CODE_GOAT_MODEL_SOURCE,
         key_prefix: None,
         auth_schemes: &BEARER_AUTH,
         upstream_protocols: &GOAT_PROTOCOLS,
         form_fields: &GOAT_FORM_FIELDS,
+    },
+    BuiltinPlan {
+        offering: key_offering(MINIMAX_PROVIDER_ID, MINIMAX_CN_OFFERING_ID),
+        display_name: "MiniMax CN Token Plan",
+        display_family: "MiniMax",
+        creation_availability: CreationAvailability::Available,
+        creation_unavailable_reason: None,
+        verification_policy: VerificationPolicy::NotRequired,
+        verification_runtime_availability: "not_applicable",
+        routable: true,
+        managed_registration: false,
+        pricing_availability: "unpriced",
+        usage_availability: "available",
+        manual_usage_calibration: false,
+        quota_unit: "request",
+        model_source: MINIMAX_CN_MODEL_SOURCE,
+        key_prefix: Some("sk-cp"),
+        auth_schemes: &BEARER_AUTH,
+        upstream_protocols: &CHAT_PROTOCOLS,
+        form_fields: &MINIMAX_CN_FORM_FIELDS,
+    },
+    BuiltinPlan {
+        offering: key_offering(KIMI_PROVIDER_ID, KIMI_CN_OFFERING_ID),
+        display_name: "Kimi Code CN",
+        display_family: "Kimi",
+        creation_availability: CreationAvailability::Available,
+        creation_unavailable_reason: None,
+        verification_policy: VerificationPolicy::NotRequired,
+        verification_runtime_availability: "not_applicable",
+        routable: true,
+        managed_registration: false,
+        pricing_availability: "unpriced",
+        usage_availability: "available",
+        manual_usage_calibration: false,
+        quota_unit: "request",
+        model_source: KIMI_CN_MODEL_SOURCE,
+        key_prefix: Some("sk-ki"),
+        auth_schemes: &BEARER_AUTH,
+        upstream_protocols: &CHAT_PROTOCOLS,
+        form_fields: &KIMI_CN_FORM_FIELDS,
     },
     BuiltinPlan {
         offering: key_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
@@ -432,11 +496,13 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 4] = [
     },
 ];
 
-pub const BUILTIN_OFFERINGS: [BuiltinOffering; 4] = [
+pub const BUILTIN_OFFERINGS: [BuiltinOffering; 6] = [
     BUILTIN_PLANS[0].offering,
     BUILTIN_PLANS[1].offering,
     BUILTIN_PLANS[2].offering,
     BUILTIN_PLANS[3].offering,
+    BUILTIN_PLANS[4].offering,
+    BUILTIN_PLANS[5].offering,
 ];
 
 pub fn default_provider_id() -> String {
@@ -473,14 +539,18 @@ pub enum ProviderAdapterKind {
     OpenCodeGo,
     ZenFree,
     CommandCodeGoat,
+    MiniMaxCn,
+    KimiCn,
     ConfigurableHttp,
 }
 
 impl ProviderAdapterKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::OpenCodeGo,
         Self::ZenFree,
         Self::CommandCodeGoat,
+        Self::MiniMaxCn,
+        Self::KimiCn,
         Self::ConfigurableHttp,
     ];
 
@@ -489,6 +559,8 @@ impl ProviderAdapterKind {
             (OPENCODE_PROVIDER_ID, GO_OFFERING_ID) => Some(Self::OpenCodeGo),
             (OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID) => Some(Self::ZenFree),
             (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => Some(Self::CommandCodeGoat),
+            (MINIMAX_PROVIDER_ID, MINIMAX_CN_OFFERING_ID) => Some(Self::MiniMaxCn),
+            (KIMI_PROVIDER_ID, KIMI_CN_OFFERING_ID) => Some(Self::KimiCn),
             (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID) => Some(Self::ConfigurableHttp),
             _ => None,
         }
@@ -499,6 +571,8 @@ impl ProviderAdapterKind {
             Self::OpenCodeGo => "opencode_go",
             Self::ZenFree => "zen_free",
             Self::CommandCodeGoat => "command_code_goat",
+            Self::MiniMaxCn => "minimax_cn",
+            Self::KimiCn => "kimi_cn",
             Self::ConfigurableHttp => "configurable_http",
         }
     }
@@ -510,13 +584,19 @@ impl ProviderAdapterKind {
             Self::OpenCodeGo => Some(OPENCODE_PROVIDER_ID),
             Self::ZenFree => Some(OPENCODE_ZEN_FREE_PROVIDER_ID),
             Self::CommandCodeGoat => Some(COMMAND_CODE_PROVIDER_ID),
+            Self::MiniMaxCn => Some(MINIMAX_PROVIDER_ID),
+            Self::KimiCn => Some(KIMI_PROVIDER_ID),
             Self::ConfigurableHttp => None,
         }
     }
 
     pub const fn catalog_refresh_supported(self) -> bool {
         match self {
-            Self::OpenCodeGo | Self::ZenFree | Self::CommandCodeGoat => true,
+            Self::OpenCodeGo
+            | Self::ZenFree
+            | Self::CommandCodeGoat
+            | Self::MiniMaxCn
+            | Self::KimiCn => true,
             Self::ConfigurableHttp => false,
         }
     }
@@ -524,7 +604,7 @@ impl ProviderAdapterKind {
     pub const fn protocol_probe_supported(self) -> bool {
         match self {
             Self::OpenCodeGo | Self::ZenFree | Self::ConfigurableHttp => true,
-            Self::CommandCodeGoat => false,
+            Self::CommandCodeGoat | Self::MiniMaxCn | Self::KimiCn => false,
         }
     }
 }
@@ -543,6 +623,14 @@ pub struct ZenFreeAdapter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CommandCodeGoatAdapter;
 
+/// Zero-sized MiniMax CN Token Plan adapter identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MiniMaxCnAdapter;
+
+/// Zero-sized Kimi Code CN adapter identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KimiCnAdapter;
+
 /// Zero-sized Configurable HTTP adapter identity (Custom API). Not a base class
 /// other adapters inherit from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -559,24 +647,33 @@ pub fn is_command_code_goat(provider_id: &str, offering_id: &str) -> bool {
 /// Command Code catalog. Rejects arrays at the root, empty snapshots, and
 /// oversized directories. First spelling of each case-insensitive ID wins.
 pub fn parse_command_code_models_catalog(bytes: &[u8]) -> Result<Vec<String>, String> {
+    parse_provider_models_catalog(bytes, "Command Code")
+}
+
+/// Normalize a Provider GET `/models` response while retaining the caller's
+/// sealed Provider label in validation errors.
+pub fn parse_provider_models_catalog(
+    bytes: &[u8],
+    provider_label: &str,
+) -> Result<Vec<String>, String> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| "Command Code GET /models did not return JSON".to_string())?;
+        .map_err(|_| format!("{provider_label} GET /models did not return JSON"))?;
     let object = value
         .as_object()
-        .ok_or_else(|| "Command Code GET /models did not return a JSON object".to_string())?;
+        .ok_or_else(|| format!("{provider_label} GET /models did not return a JSON object"))?;
     let items = object
         .get("data")
         .or_else(|| object.get("models"))
         .and_then(|value| value.as_array())
         .ok_or_else(|| {
-            "Command Code GET /models did not include a data or models array".to_string()
+            format!("{provider_label} GET /models did not include a data or models array")
         })?;
     let mut models = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for item in items {
         if models.len() >= MAX_COMMAND_CODE_MODELS_CATALOG {
             return Err(format!(
-                "Command Code GET /models exceeded {MAX_COMMAND_CODE_MODELS_CATALOG} models"
+                "{provider_label} GET /models exceeded {MAX_COMMAND_CODE_MODELS_CATALOG} models"
             ));
         }
         let id = match item {
@@ -597,7 +694,9 @@ pub fn parse_command_code_models_catalog(bytes: &[u8]) -> Result<Vec<String>, St
         }
     }
     if models.is_empty() {
-        return Err("Command Code GET /models returned no usable model ids".to_string());
+        return Err(format!(
+            "{provider_label} GET /models returned no usable model ids"
+        ));
     }
     Ok(models)
 }
@@ -607,16 +706,6 @@ pub fn is_custom_api(provider_id: &str, offering_id: &str) -> bool {
         ProviderAdapterKind::from_offering(provider_id, offering_id),
         Some(ProviderAdapterKind::ConfigurableHttp)
     )
-}
-
-/// Relative path appended onto a Custom base URL prefix. Callers must join
-/// without escaping the origin or persisted path prefix.
-pub fn custom_endpoint_relative_path(protocol: UpstreamProtocolKind) -> &'static str {
-    match protocol {
-        UpstreamProtocolKind::ChatCompletions => "chat/completions",
-        UpstreamProtocolKind::Responses => "responses",
-        UpstreamProtocolKind::Messages => "messages",
-    }
 }
 
 /// Static code-owned registry of built-in provider offerings. Lookup is by
@@ -713,6 +802,7 @@ pub enum ModelCatalogKind {
     BuiltinGoProtocolTable,
     ZenFreePersistedSnapshot,
     BuiltinCommandCodeProtocolTable,
+    ProviderPersistedSnapshot,
     AccountDeclaredCapabilities,
 }
 
@@ -766,6 +856,7 @@ pub struct InferenceRoutingDescriptor {
 pub enum ProtocolMatrixKind {
     OpenCodeModelProtocols,
     CommandCodeNative,
+    FixedChatCompletions,
     AccountDeclaredProtocol,
 }
 
@@ -874,6 +965,8 @@ mod sealed {
 impl sealed::Sealed for OpenCodeGoAdapter {}
 impl sealed::Sealed for ZenFreeAdapter {}
 impl sealed::Sealed for CommandCodeGoatAdapter {}
+impl sealed::Sealed for MiniMaxCnAdapter {}
+impl sealed::Sealed for KimiCnAdapter {}
 impl sealed::Sealed for ConfigurableHttpAdapter {}
 
 /// Static model-catalog capability contract. Sealed to the five concrete
@@ -954,6 +1047,8 @@ impl ProviderAdapterKind {
             Self::OpenCodeGo => ProviderCapabilities::compose(OpenCodeGoAdapter, plan),
             Self::ZenFree => ProviderCapabilities::compose(ZenFreeAdapter, plan),
             Self::CommandCodeGoat => ProviderCapabilities::compose(CommandCodeGoatAdapter, plan),
+            Self::MiniMaxCn => ProviderCapabilities::compose(MiniMaxCnAdapter, plan),
+            Self::KimiCn => ProviderCapabilities::compose(KimiCnAdapter, plan),
             Self::ConfigurableHttp => ProviderCapabilities::compose(ConfigurableHttpAdapter, plan),
         }
     }
@@ -1130,13 +1225,13 @@ impl UsageAdapter for ZenFreeAdapter {
     fn usage(plan: BuiltinPlan) -> UsageDescriptor {
         UsageDescriptor {
             catalog_availability: plan.usage_availability,
-            contract: UsageContractKind::LocalState,
+            contract: UsageContractKind::Unavailable,
             endpoint: None,
             experimental: false,
             automatic_sync: false,
             authoritative_for_quota: false,
             affects_inference_eligibility: false,
-            publishes_capability: true,
+            publishes_capability: false,
             manual_calibration: plan.manual_usage_calibration,
         }
     }
@@ -1237,13 +1332,13 @@ impl UsageAdapter for CommandCodeGoatAdapter {
     fn usage(plan: BuiltinPlan) -> UsageDescriptor {
         UsageDescriptor {
             catalog_availability: plan.usage_availability,
-            contract: UsageContractKind::Unavailable,
+            contract: UsageContractKind::LocalState,
             endpoint: None,
             experimental: false,
             automatic_sync: false,
             authoritative_for_quota: false,
             affects_inference_eligibility: false,
-            publishes_capability: false,
+            publishes_capability: true,
             manual_calibration: plan.manual_usage_calibration,
         }
     }
@@ -1278,6 +1373,220 @@ impl CardCapabilities for CommandCodeGoatAdapter {
             discover_models: false,
             usage_refresh: false,
             manual_usage_calibration: plan.manual_usage_calibration,
+            connection_verify: CardVerifyAction::NotApplicable,
+            protocol_and_auth_immutable_after_create: false,
+            protocol_probe: false,
+            catalog_refresh: true,
+        }
+    }
+}
+
+impl ModelCatalogAdapter for MiniMaxCnAdapter {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
+        ModelCatalogDescriptor {
+            kind: ModelCatalogKind::ProviderPersistedSnapshot,
+            catalog_source: plan.model_source,
+            publishes_client_aliases: true,
+            admin_explicit_refresh: true,
+            overlays_declared_ids: false,
+            snapshot_is_adapter_input_only: false,
+        }
+    }
+}
+
+impl InferenceAdapter for MiniMaxCnAdapter {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
+        InferenceRoutingDescriptor {
+            catalog_routable: plan.routable,
+            production_inference: true,
+            channel: Some(InferenceChannelKind::Go),
+            credential_kind: plan.offering.credential_kind,
+            quota_scope: plan.offering.quota_scope,
+            auth: InferenceAuthDescriptor::Bearer,
+            follow_redirects: false,
+            origin: InferenceOriginKind::OfficialFixed,
+            loopback_test_seam_only: false,
+        }
+    }
+}
+
+impl ProtocolProbeAdapter for MiniMaxCnAdapter {
+    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
+        ProtocolProbeDescriptor {
+            request_path_may_trial: false,
+            matrix: ProtocolMatrixKind::FixedChatCompletions,
+            unknown_zen_free_defaults_to_chat: false,
+            fallback_priority: &CHAT_PROTOCOLS,
+            explicit_probe: false,
+            structural_ceiling: StructuralProbeCeiling::Unavailable,
+        }
+    }
+}
+
+impl VerificationAdapter for MiniMaxCnAdapter {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
+        VerificationDescriptor {
+            policy: plan.verification_policy,
+            runtime_availability: plan.verification_runtime_availability,
+            never_auto_enable: false,
+            probe_first_declared_model: false,
+            uses_get_models: false,
+        }
+    }
+}
+
+impl UsageAdapter for MiniMaxCnAdapter {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
+        UsageDescriptor {
+            catalog_availability: plan.usage_availability,
+            contract: UsageContractKind::Authoritative,
+            endpoint: Some(MINIMAX_CN_USAGE_URL),
+            experimental: false,
+            automatic_sync: false,
+            authoritative_for_quota: false,
+            affects_inference_eligibility: false,
+            publishes_capability: true,
+            manual_calibration: false,
+        }
+    }
+}
+
+impl PricingAdapter for MiniMaxCnAdapter {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
+        catalog_pricing(plan)
+    }
+}
+
+impl ErrorPolicyAdapter for MiniMaxCnAdapter {
+    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
+        ErrorCooldownDescriptor {
+            parse_opencode_go_windows_on_429: false,
+            schedule_official_go_usage_after_429: false,
+            generic_provider_key_cooldown: true,
+            egress_ip_shared_free_cooldown: false,
+            inference_401_passthrough: false,
+            success_cost_state_free: false,
+        }
+    }
+}
+
+impl CardCapabilities for MiniMaxCnAdapter {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
+        CardActionsDescriptor {
+            persisted_enable_allowed: plan.routable,
+            enable_requires_verification: false,
+            managed_registration: false,
+            fetch_zen_models: false,
+            discover_models: false,
+            usage_refresh: true,
+            manual_usage_calibration: false,
+            connection_verify: CardVerifyAction::NotApplicable,
+            protocol_and_auth_immutable_after_create: false,
+            protocol_probe: false,
+            catalog_refresh: true,
+        }
+    }
+}
+
+impl ModelCatalogAdapter for KimiCnAdapter {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
+        ModelCatalogDescriptor {
+            kind: ModelCatalogKind::ProviderPersistedSnapshot,
+            catalog_source: plan.model_source,
+            publishes_client_aliases: true,
+            admin_explicit_refresh: true,
+            overlays_declared_ids: false,
+            snapshot_is_adapter_input_only: false,
+        }
+    }
+}
+
+impl InferenceAdapter for KimiCnAdapter {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
+        InferenceRoutingDescriptor {
+            catalog_routable: plan.routable,
+            production_inference: true,
+            channel: Some(InferenceChannelKind::Go),
+            credential_kind: plan.offering.credential_kind,
+            quota_scope: plan.offering.quota_scope,
+            auth: InferenceAuthDescriptor::Bearer,
+            follow_redirects: false,
+            origin: InferenceOriginKind::OfficialFixed,
+            loopback_test_seam_only: false,
+        }
+    }
+}
+
+impl ProtocolProbeAdapter for KimiCnAdapter {
+    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
+        ProtocolProbeDescriptor {
+            request_path_may_trial: false,
+            matrix: ProtocolMatrixKind::FixedChatCompletions,
+            unknown_zen_free_defaults_to_chat: false,
+            fallback_priority: &CHAT_PROTOCOLS,
+            explicit_probe: false,
+            structural_ceiling: StructuralProbeCeiling::Unavailable,
+        }
+    }
+}
+
+impl VerificationAdapter for KimiCnAdapter {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
+        VerificationDescriptor {
+            policy: plan.verification_policy,
+            runtime_availability: plan.verification_runtime_availability,
+            never_auto_enable: false,
+            probe_first_declared_model: false,
+            uses_get_models: false,
+        }
+    }
+}
+
+impl UsageAdapter for KimiCnAdapter {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
+        UsageDescriptor {
+            catalog_availability: plan.usage_availability,
+            contract: UsageContractKind::Authoritative,
+            endpoint: Some(KIMI_CN_USAGE_URL),
+            experimental: false,
+            automatic_sync: false,
+            authoritative_for_quota: false,
+            affects_inference_eligibility: false,
+            publishes_capability: true,
+            manual_calibration: false,
+        }
+    }
+}
+
+impl PricingAdapter for KimiCnAdapter {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
+        catalog_pricing(plan)
+    }
+}
+
+impl ErrorPolicyAdapter for KimiCnAdapter {
+    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
+        ErrorCooldownDescriptor {
+            parse_opencode_go_windows_on_429: false,
+            schedule_official_go_usage_after_429: false,
+            generic_provider_key_cooldown: true,
+            egress_ip_shared_free_cooldown: false,
+            inference_401_passthrough: false,
+            success_cost_state_free: false,
+        }
+    }
+}
+
+impl CardCapabilities for KimiCnAdapter {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
+        CardActionsDescriptor {
+            persisted_enable_allowed: plan.routable,
+            enable_requires_verification: false,
+            managed_registration: false,
+            fetch_zen_models: false,
+            discover_models: false,
+            usage_refresh: true,
+            manual_usage_calibration: false,
             connection_verify: CardVerifyAction::NotApplicable,
             protocol_and_auth_immutable_after_create: false,
             protocol_probe: false,
@@ -1728,14 +2037,15 @@ mod tests {
 
     #[test]
     fn catalog_hardcodes_plans_and_keeps_unverified_offerings_unroutable() {
-        assert_eq!(BUILTIN_PLANS.len(), 4);
+        assert_eq!(BUILTIN_PLANS.len(), 6);
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert!(goat.routable);
         assert_eq!(goat.verification_policy, VerificationPolicy::NotRequired);
         assert_eq!(goat.verification_runtime_availability, "not_applicable");
         assert_eq!(goat.creation_availability, CreationAvailability::Available);
         assert_eq!(goat.pricing_availability, "available");
-        assert_eq!(goat.usage_availability, "unavailable");
+        assert_eq!(goat.usage_availability, "local_state");
+        assert!(goat.manual_usage_calibration);
         assert_eq!(goat.auth_schemes, &BEARER_AUTH);
         assert_eq!(goat.upstream_protocols, &GOAT_PROTOCOLS);
         assert!(
@@ -1868,18 +2178,6 @@ mod tests {
             Err(ProviderBindingError::InvalidModelId(message))
                 if message == "model id must not contain control characters"
         ));
-        assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::ChatCompletions),
-            "chat/completions"
-        );
-        assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::Responses),
-            "responses"
-        );
-        assert_eq!(
-            custom_endpoint_relative_path(UpstreamProtocolKind::Messages),
-            "messages"
-        );
     }
 
     #[test]
@@ -1947,6 +2245,8 @@ mod tests {
                 ProviderAdapterKind::OpenCodeGo
                 | ProviderAdapterKind::ZenFree
                 | ProviderAdapterKind::CommandCodeGoat
+                | ProviderAdapterKind::MiniMaxCn
+                | ProviderAdapterKind::KimiCn
                 | ProviderAdapterKind::ConfigurableHttp => {
                     assert!(descriptor.inference.production_inference);
                     assert!(descriptor.inference.catalog_routable);
@@ -1962,7 +2262,7 @@ mod tests {
         assert_eq!(seen.len(), ProviderAdapterKind::ALL.len());
         assert!(ProviderAdapterKind::from_offering("unknown", "unknown").is_none());
         assert!(ProviderRegistry::get("unknown", "unknown").is_none());
-        assert_eq!(ProviderAdapterKind::ALL.len(), 4);
+        assert_eq!(ProviderAdapterKind::ALL.len(), 6);
     }
 
     #[test]
@@ -2035,9 +2335,9 @@ mod tests {
         assert!(!goat.inference.follow_redirects);
         assert_eq!(goat.inference.auth, InferenceAuthDescriptor::Bearer);
         assert!(!goat.usage.experimental);
-        assert!(!goat.usage.publishes_capability);
-        assert_eq!(goat.usage.contract, UsageContractKind::Unavailable);
-        assert!(!goat.usage.manual_calibration);
+        assert!(goat.usage.publishes_capability);
+        assert_eq!(goat.usage.contract, UsageContractKind::LocalState);
+        assert!(goat.usage.manual_calibration);
         assert!(goat.error_cooldown.generic_provider_key_cooldown);
         assert_eq!(
             goat.protocol_probe.matrix,
@@ -2122,6 +2422,8 @@ mod tests {
                 ProviderAdapterKind::OpenCodeGo => compose(OpenCodeGoAdapter, plan),
                 ProviderAdapterKind::ZenFree => compose(ZenFreeAdapter, plan),
                 ProviderAdapterKind::CommandCodeGoat => compose(CommandCodeGoatAdapter, plan),
+                ProviderAdapterKind::MiniMaxCn => compose(MiniMaxCnAdapter, plan),
+                ProviderAdapterKind::KimiCn => compose(KimiCnAdapter, plan),
                 ProviderAdapterKind::ConfigurableHttp => compose(ConfigurableHttpAdapter, plan),
             };
             let descriptor =

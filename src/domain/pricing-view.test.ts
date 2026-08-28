@@ -211,7 +211,7 @@ test("pricing catalog keeps refresh explicit and exposes accessible grouped mult
   assert.doesNotMatch(catalog, /plan\.id !== "command-code-goat"/);
 });
 
-test("legacy offering sections keep GOAT unpriced", () => {
+test("legacy offering sections expose the GOAT pricing table", () => {
   const sections = buildPricingOfferingSections(null);
   assert.deepEqual(
     sections.map(({ provider_id, offering_id, presentation }) => (
@@ -219,16 +219,20 @@ test("legacy offering sections keep GOAT unpriced", () => {
     )),
     [
       "opencode/go:table",
-      "command-code/goat:unpriced",
+      "command-code/goat:table",
       "opencode-zen-free/anonymous-free:free",
     ],
   );
 });
 
-test("GOAT usage helper does not apply legacy window quotas or load GOAT calibration", () => {
+test("GOAT usage helper exposes local log-estimate windows", () => {
   const usage = readFileSync(new URL("./useAccountUsage.ts", import.meta.url), "utf8");
-  assert.match(usage, /if \(isCommandCodeGoatAccount\(account\)\) return \[\]/);
+  const providers = readFileSync(new URL("./account-providers.ts", import.meta.url), "utf8");
+  assert.match(usage, /providerApi\.getProviderUsage\(accountId\)/);
+  assert.match(usage, /limitsFromProviderWindows\(providerUsage\.quota_windows\)/);
+  assert.match(usage, /account && isCommandCodeGoatAccount\(account\)/);
   assert.doesNotMatch(usage, /COMMAND_CODE_GOAT_USAGE_LIMITS/);
+  assert.doesNotMatch(providers, /COMMAND_CODE_GOAT_USAGE_LIMITS|window_5h: 14/);
   const retry = usage.slice(usage.indexOf("async function retryQuotaLimits"));
   assert.doesNotMatch(retry, /isCommandCodeGoatAccount/);
   assert.match(retry, /account\.provider_id === "opencode"/);

@@ -121,10 +121,10 @@ test("scoped pricing groups stay on one provider and include Zen Free or Custom 
   assert.deepEqual(go.map(({ plan }) => plan.id), ["opencode-go"]);
 });
 
-test("GOAT keeps local accounting unpriced while showing its official reference", () => {
+test("GOAT exposes provider pricing for local quota estimates", () => {
   const goat = buildScopedPlanPricingGroups("command-code", null, goSnapshot(), {})[0]!;
 
-  assert.equal(goat.pricingAvailability, "unpriced");
+  assert.equal(goat.pricingAvailability, "available");
   assert.equal(goat.content.kind, "goat-reference");
   assert.deepEqual(resolvePlanPricingDisplay(goat), {
     state: "reference",

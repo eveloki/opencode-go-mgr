@@ -145,6 +145,23 @@ pub fn build_no_redirect(spec: &OutboundProxySpec) -> Result<reqwest::Client> {
         .build()?)
 }
 
+/// Rebuild an already-selected route leg with redirects disabled. The label
+/// must come from a `ForwardRouteSet` produced from the same spec snapshot.
+pub fn build_no_redirect_for_label(
+    spec: &OutboundProxySpec,
+    label: RouteLabel,
+) -> Result<reqwest::Client> {
+    let builder = match label {
+        RouteLabel::Auto => tuned(reqwest::Client::builder()),
+        RouteLabel::Proxy => proxy_leg_builder(&spec.proxy_url)?,
+        RouteLabel::Direct => direct_leg_builder(),
+    };
+    Ok(builder
+        .redirect(no_redirect_policy())
+        .connect_timeout(spec.connect_timeout)
+        .build()?)
+}
+
 /// Applies the process-wide outbound proxy policy while leaving callers free to
 /// choose their own redirect, total-timeout, and response-size policies. Under
 /// list mode this builds the direction's default leg: whitelist default is

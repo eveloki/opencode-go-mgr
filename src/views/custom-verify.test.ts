@@ -99,10 +99,10 @@ test("Custom edits validate before dispatching only their changed sections", () 
   assert.match(catchBody, /refreshAccountState\(editing\.id\)/);
 });
 
-test("no Go usage or official refresh is ever requested for Custom accounts", () => {
+test("no account usage or official refresh is ever requested for Custom accounts", () => {
   assert.match(accounts, /if \(accountHasUsageDisplay\(created\) && accountIsReady\(created\)\)/);
-  assert.match(accounts, /function accountHasUsageDisplay[\s\S]*provider_id === "opencode" && account\.offering_id === "go"/);
-  assert.doesNotMatch(accounts.slice(accounts.indexOf("function accountHasUsageDisplay"), accounts.indexOf("async function refreshAccountState")), /isCommandCodeGoatAccount/);
+  assert.match(accounts, /function accountHasUsageDisplay[\s\S]*isCommandCodeGoatAccount[\s\S]*provider_id === "opencode" && account\.offering_id === "go"/);
+  assert.doesNotMatch(accounts.slice(accounts.indexOf("function accountHasUsageDisplay"), accounts.indexOf("async function refreshAccountState")), /isCustomApiAccount/);
   assert.doesNotMatch(accounts, /isCustomApiAccount\(created\)/);
   assert.match(accounts, /accountIsReady\(account\) && accountHasUsageDisplay\(account\)/);
   assert.match(usage, /async function retryQuotaLimits[\s\S]*?account\.provider_id === "opencode"[\s\S]*?account\.offering_id === "go"/);

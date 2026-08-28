@@ -46,7 +46,7 @@ test("pricing sections keep the three known offerings in stable order without a 
     )),
     [
       "opencode/go:table",
-      "command-code/goat:unpriced",
+      "command-code/goat:table",
       "opencode-zen-free/anonymous-free:free",
     ],
   );
@@ -153,14 +153,17 @@ test("pricing catalog uses one keyboard-accessible plan-family tab switcher with
   assert.doesNotMatch(reference, /SCNet Token Plan 已归档/);
   assert.doesNotMatch(reference, /当前仍是禁用草稿|实验性接入|每月 Credits/);
   // GOAT delegates to the provider pricing snapshot, never a live meter.
-  assert.match(reference, /<GoatQuotaReference :snapshot="snapshot" \/>/);
+  assert.match(reference, /<GoatQuotaReference[\s\S]*?:snapshot="snapshot"[\s\S]*?@save-multiplier=/);
   assert.doesNotMatch(reference, /另加处理费/);
-  assert.doesNotMatch(reference, /订阅制|官方来源|NButton|NTag/);
+  assert.doesNotMatch(reference, /订阅制|官方来源|NTag/);
   const quota = readFileSync(new URL("../components/GoatQuotaReference.vue", import.meta.url), "utf8");
   assert.match(quota, /未知价格不会参与费用估算/);
   assert.match(quota, /GOAT_PRICING_REFERENCE\.models/);
   assert.match(quota, /class="pricing-ledger"/);
   assert.match(quota, /<n-data-table/);
+  assert.match(quota, /t\("官方倍率"\)/);
+  assert.match(quota, /NInputNumber/);
+  assert.doesNotMatch(quota, /5 小时额度|周额度|月额度|月费|monthlyPriceUsd|monthlyCreditsUsd|model_allowance|rollingLimitsUsd/);
   assert.doesNotMatch(quota, /<table|goat-pricing-summary|goat-pricing-table-wrap/);
   assert.doesNotMatch(quota, /provider-usage|used|remaining|percentage/);
 });
@@ -185,7 +188,7 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.doesNotMatch(accountForm, /实验性 · 未配置/);
   assert.match(accountCard, /planLabel\(account, catalog\)/);
   assert.doesNotMatch(accountCard, /<AccountTestPopover/);
-  assert.match(accountCard, /前往供应商/);
+  assert.doesNotMatch(accountCard, /有效协议|前往供应商|contractSummary/);
   assert.match(accountCard, /plan\.value\?\.manual_usage_calibration \?\? false/);
   assert.match(accountCard, /grid-template-columns: repeat\(4, 40px\)/);
   assert.match(accountCard, /account-action--enabled/);
@@ -201,21 +204,24 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.doesNotMatch(chooser, /GiftOutlined|"zen-free"/);
 });
 
-test("GOAT has no account Key-verification gate; usage meters stay DTO-driven", () => {
+test("GOAT has no account Key-verification gate and keeps local quota estimates", () => {
   const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
   const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
 
-  // Manual calibration renders only when the catalog entry allows it; the old
-  // hardcoded GOAT $14/$35/$70 meter fallback is gone from the card.
+  // The catalog enables the shared local estimate/calibration surface, while
+  // GOAT loads independently from the OpenCode Go pricing request.
   assert.match(card, /plan\.value\?\.manual_usage_calibration \?\? false/);
-  assert.doesNotMatch(card, /manual_usage_calibration \?\? isGoat/);
   const providers = readFileSync(new URL("../domain/account-providers.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(providers, /COMMAND_CODE_GOAT_USAGE_LIMITS|window_5h: 14|window_week: 35|window_month: 70/);
-  assert.doesNotMatch(accounts, /loaded\.some\(isCommandCodeGoatAccount\)|GOAT keeps a manual display/);
+  const usage = readFileSync(new URL("../domain/useAccountUsage.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(providers, /COMMAND_CODE_GOAT_USAGE_LIMITS|window_5h: 14/);
+  assert.match(usage, /providerApi\.getProviderUsage\(accountId\)/);
+  assert.match(usage, /account && isCommandCodeGoatAccount\(account\)/);
+  assert.match(accounts, /loaded\.some\(isCommandCodeGoatAccount\)/);
+  assert.match(card, /根据 OCG 内已定价请求估算/);
 
   assert.doesNotMatch(card, /goatVerificationOffered|goatToggleBlocked/);
   assert.doesNotMatch(card, /验证连接成功后才能启用/);
-  assert.doesNotMatch(accounts, /isCommandCodeGoatAccount/);
+  assert.match(accounts, /isCommandCodeGoatAccount/);
   assert.match(accounts, /if \(!isCustomApiAccount\(account\)\) return/);
 });
 

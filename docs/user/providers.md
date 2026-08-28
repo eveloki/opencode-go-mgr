@@ -31,13 +31,15 @@ successful provider-level probe pins `force_on`. Failed account attempts are
 reported and retained as evidence, but never pin the shared protocol
 `force_off`; only an explicit switch can do that.
 
-For the built-in **OpenCode Go**, **Zen Free**, and **Command Code GOAT** scopes,
+For the built-in **OpenCode Go**, **Zen Free**, **Command Code GOAT**,
+**MiniMax CN**, and **Kimi Code CN** scopes,
 the catalog header offers **Restore static
 protocol snapshot**. It makes no upstream request, keeps the current model
 catalog, clears manual switches and probe evidence, and restores the static
-protocol snapshot dated **2026-08-27**. Any current-catalog protocol pair that
-is absent from that static snapshot is explicitly left off, so a newly
-discovered model cannot become routable through fallback alone.
+protocol snapshot dated **2026-08-27**. Any current-catalog protocol pair absent
+from that static snapshot is left off, except MiniMax CN and Kimi Code CN rows:
+their sealed adapters declare Chat Completions as their only supported upstream
+protocol.
 
 The compact source line, refresh action, and matrix share one content panel;
 there is no separate catalog-summary card and no refresh-account selector.
@@ -48,13 +50,24 @@ account, Zen Free uses the fixed keyless directory
 official `/models` directory without selecting an account. Refresh is always
 explicit.
 
+MiniMax and Kimi require an eligible account Key. MiniMax refreshes
+`https://api.minimaxi.com/v1/models`; Kimi refreshes
+`https://api.kimi.com/coding/v1/models`. Their saved rows can join an Alias
+already authorized by the original OpenCode Go static table; unmatched rows
+remain exact raw model IDs. In the Kimi catalog, upstream `kimi-for-coding`
+joins Alias `kimi-k2.7-code`, while upstream `kimi-k3` joins Alias `kimi-k3`.
+Forwarding retains those exact upstream IDs. No request-time upstream lookup is
+performed.
+
 Before the first successful refresh, the built-in static catalog is the initial
 preset. After success, the saved official snapshot is authoritative and
-replaces that preset. Models newly added by a refresh are visible in the matrix
-with Chat Completions, Responses, and Messages all disabled. They become
-enabled only after you turn on a cell or a successful Test confirms it. Existing
-overrides and probe results for surviving models are preserved. A failed or
-empty refresh keeps the previous snapshot.
+replaces that preset. Models newly added by a refresh are visible in the matrix.
+For OpenCode Go and Command Code, new protocol cells remain disabled until you
+turn one on or a successful Test confirms it. MiniMax CN and Kimi Code CN rows
+instead enable their sealed Chat Completions contract immediately; Responses
+and Messages stay unsupported. Existing overrides and probe results for
+surviving models are preserved. A failed or empty refresh keeps the previous
+snapshot.
 
 Custom API continues to use each account's declared model IDs; discovery never
 silently replaces that declaration. The account form **Fetch models** action is
@@ -64,11 +77,14 @@ preset starts enabled, while additional models discovered later start disabled
 until you enable their supported protocol in the matrix. It has no separate
 Max or account-level GOAT/All mode.
 
-Local catalogs feed Alias resolution without another request-time upstream
-call. A model is advertised only when its saved contract has an effective,
-known, enabled protocol. Alias names follow the OpenCode Go catalog. Zen Free
-publishes only the suffix-stripped Alias while the original `-free` ID remains
-available as an exact raw pin, as described under
+Local catalogs feed resolution without another request-time upstream call. The
+original OpenCode Go static table is the sole built-in Alias namespace: saved
+Zen, Command, MiniMax, and Kimi rows may join an existing lowercase kebab-case
+Alias, but never add a new one. Unmatched built-in rows remain exact raw model
+IDs and are not advertised as new Aliases; CN mappings keep the upstream ID's
+exact spelling. A Zen Free row gains its suffix-stripped Alias only when that
+Alias is already authorized; the original `-free` ID remains an exact raw pin,
+as described under
 [Zen Free models](routing.md#zen-free-models).
 
 If every model/protocol cell for a Provider is off, that Provider contributes
@@ -95,19 +111,29 @@ keep separate revisions and last-good snapshots; one failing does not touch
 the other. If a Provider later owns several priced Plans, the same action
 refreshes those Plans only. Refresh stays manual:
 
-- OpenCode Go shows revision, documentation timestamp, window limits, token
-  rates, `Usage`, and the quota-debit multiplier, and can fetch
+- OpenCode Go shows revision, documentation timestamp, token rates, `Usage`,
+  and the quota-debit multiplier, and can fetch
   `https://opencode.ai/docs/go/` after you press refresh. A failed fetch or
   validation keeps the last successful snapshot. The allowance is not a quota
   pool and does not route requests: it only derives that debit multiplier
   (`monthly limit / Usage`). Saving a temporary override creates a new
   persistent revision for later estimates.
-- Command Code GOAT shows its saved official subscription/rate snapshot from
-  `https://commandcode.ai/docs/plans/goat`. It is display/reference data and
-  does not enter OpenCode Go quota debit or invent a GOAT usage API.
+- Command Code GOAT shows its saved official rate snapshot from
+  `https://commandcode.ai/docs/plans/goat`; subscription price and time-window
+  allowance cards are not shown. Each priced model's applied multiplier can be
+  edited and saved. The saved provider revision prices later requests; missing
+  or ambiguous rows stay unpriced. A refresh asks before replacing edited
+  multipliers. This remains separate from OpenCode Go. GOAT account cards use
+  those priced OCG request logs for a local `$14 / $35 / $70` window estimate
+  with manual baseline correction. It is deliberately not described as
+  official usage because Command Code exposes no machine-readable usage API.
 - Zen Free has no price (egress-IP-shared free quota).
 - Custom API is unpriced: successful forwards log `cost_state=unknown` with
   no quota debit and no official usage refresh.
+- MiniMax CN and Kimi Code CN are unpriced in OCG, but their account cards can
+  manually read the official subscription windows (`/token_plan/remains` and
+  `/usages`). These snapshots are display-only, never auto-polled, and never
+  gate inference.
 
 There is no model-level quota pool.
 

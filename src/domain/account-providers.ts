@@ -3,6 +3,7 @@ import type {
   AccountCredentialKind,
   AccountQuotaScope,
 } from "../api/dashboard";
+import { PLAN_DEFINITIONS } from "./plans.ts";
 
 /**
  * Built-in provider/offering registry. The backend owns the DTO fields
@@ -29,39 +30,34 @@ export const DEFAULT_OFFERING_ID = "go";
 
 export const COMMAND_CODE_PROVIDER_ID = "command-code";
 export const COMMAND_CODE_GOAT_OFFERING_ID = "goat";
+export const MINIMAX_PROVIDER_ID = "minimax";
+export const KIMI_PROVIDER_ID = "kimi";
+export const CN_OFFERING_ID = "cn";
 
 /** Built-in singleton Zen Free account; created and owned by the backend. */
 export const ZEN_FREE_ACCOUNT_ID = "00000000-0000-0000-0000-000000000002";
 export const ZEN_FREE_PROVIDER_ID = "opencode-zen-free";
 export const ZEN_FREE_OFFERING_ID = "anonymous-free";
 
-export const PROVIDER_OFFERINGS: readonly ProviderOffering[] = [
-  {
-    provider_id: DEFAULT_PROVIDER_ID,
-    offering_id: DEFAULT_OFFERING_ID,
-    label: "OpenCode Go",
-    credential_kind: "api_key",
-    quota_scope: "key",
-    managed_registration: true,
-  },
-  {
-    provider_id: COMMAND_CODE_PROVIDER_ID,
-    offering_id: COMMAND_CODE_GOAT_OFFERING_ID,
-    label: "Command Code GOAT",
-    credential_kind: "api_key",
-    quota_scope: "key",
-    managed_registration: false,
-  },
-];
+const ALL_PROVIDER_OFFERINGS: readonly ProviderOffering[] = PLAN_DEFINITIONS.flatMap((plan) => (
+  plan.offering_ids.map((offeringId) => ({
+    provider_id: plan.provider_id,
+    offering_id: offeringId,
+    label: plan.label,
+    credential_kind: plan.credential_kind,
+    quota_scope: plan.quota_scope,
+    managed_registration: plan.managed_registration,
+  }))
+));
 
-export const ZEN_FREE_OFFERING: ProviderOffering = {
-  provider_id: ZEN_FREE_PROVIDER_ID,
-  offering_id: ZEN_FREE_OFFERING_ID,
-  label: "Zen Free",
-  credential_kind: "none",
-  quota_scope: "egress-ip",
-  managed_registration: false,
-};
+export const ZEN_FREE_OFFERING: ProviderOffering = ALL_PROVIDER_OFFERINGS.find((offering) => (
+  offering.provider_id === ZEN_FREE_PROVIDER_ID
+  && offering.offering_id === ZEN_FREE_OFFERING_ID
+))!;
+
+export const PROVIDER_OFFERINGS: readonly ProviderOffering[] = ALL_PROVIDER_OFFERINGS.filter(
+  (offering) => offering !== ZEN_FREE_OFFERING,
+);
 
 export function isZenFreeAccount(
   account: Pick<Account, "id" | "provider_id">,
@@ -77,17 +73,18 @@ export function isCommandCodeGoatAccount(
     && account.offering_id === COMMAND_CODE_GOAT_OFFERING_ID;
 }
 
+export function isOfficialCnPlanAccount(
+  account: Pick<Account, "provider_id" | "offering_id">,
+): boolean {
+  return (account.provider_id === MINIMAX_PROVIDER_ID || account.provider_id === KIMI_PROVIDER_ID)
+    && account.offering_id === CN_OFFERING_ID;
+}
+
 export function findProviderOffering(
   providerId: string,
   offeringId: string,
 ): ProviderOffering | undefined {
-  if (
-    providerId === ZEN_FREE_OFFERING.provider_id
-    && offeringId === ZEN_FREE_OFFERING.offering_id
-  ) {
-    return ZEN_FREE_OFFERING;
-  }
-  return PROVIDER_OFFERINGS.find(
+  return ALL_PROVIDER_OFFERINGS.find(
     (offering) => offering.provider_id === providerId && offering.offering_id === offeringId,
   );
 }

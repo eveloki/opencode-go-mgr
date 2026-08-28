@@ -942,7 +942,7 @@ export const esESMessages = {
   "使用 {model} 的 {protocol} 协议测试账号 {name}": "Probar la cuenta {name} con {model} por {protocol}",
   "首选": "Preferido",
   "{model} · {protocol} 测试成功": "Prueba de {model} · {protocol} correcta",
-  "服务商未开放用量查询，显示值由你手工校准。": "El proveedor no ofrece consulta de uso; los valores mostrados se calibran a mano.",
+  "根据 OCG 内已定价请求估算；不含其他客户端用量，可手工校准。": "Estimación de solicitudes con precio procesadas por OCG; no incluye otros clientes y puede calibrarse manualmente.",
   "加载供应商失败: {error}": "No se pudieron cargar los proveedores: {error}",
   "暂无供应商范围": "No hay ámbitos de proveedor",
   "模型目录": "Catálogo de modelos",

@@ -149,15 +149,15 @@ The only V3 payload that returns Key plaintext is `GET /dashboard/api/v3/connect
 
 ## Two local model lists
 
-Neither GET makes an upstream discovery call. The one exception is Zen Free catalog refresh, which is an explicit Providers action.
+Neither GET makes an upstream discovery call. Catalog refreshes are explicit Providers actions, not part of either GET.
 
 ```text
   GET /v1/models                         (clients; Key required)
-    published Go aliases
-      union last saved Zen Free aliases
+    routeable aliases authorized by the original static OpenCode Go table
       union eligible Custom declared IDs
+    saved built-in catalogs may join, but never create, those aliases
     eligible Custom = enabled + ready + non-empty key (verification optional)
-    Custom IDs must not steal published Go/Zen aliases
+    Custom IDs must not steal published built-in aliases
 
   GET /dashboard/api/v3/application-models   (dashboard session)
     Go routeable aliases intersect current Go pricing snapshot

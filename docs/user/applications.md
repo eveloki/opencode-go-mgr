@@ -48,10 +48,11 @@ The picker list comes from protected `GET /dashboard/api/v3/application-models`:
 currently routeable OpenCode Go aliases intersected with the active OpenCode Go
 pricing snapshot. Highspeed variants inherit the base model's pricing row. An
 empty intersection is `[]`, not an error. This is **not** authenticated
-`GET /v1/models`, which also includes the saved Zen Free catalog, enabled
-Command Code mappings under canonical aliases, and eligible Custom declared
-IDs. Both endpoints are local reads: no request-time upstream discovery or
-account selection.
+`GET /v1/models`, which lists routeable Aliases authorized by the original
+static OpenCode Go table plus eligible Custom declared IDs. Saved built-in
+Provider catalogs may join those Aliases but cannot create new ones. Both
+endpoints are local reads: no request-time upstream discovery or account
+selection.
 They publish only currently routable models that have an
 effective enabled protocol. Zen Free catalog refresh is an explicit
 **Providers** action. A pricing refresh there can change which Go aliases

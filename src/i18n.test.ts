@@ -196,7 +196,7 @@ test("v2 plan, form, draft, pricing, and Alias copy has no English fallback in a
     "该供应商范围当前不可路由",
     "刷新模型目录",
     "测试账号 {name} 的模型与协议",
-    "服务商未开放用量查询，显示值由你手工校准。",
+    "根据 OCG 内已定价请求估算；不含其他客户端用量，可手工校准。",
     "模型价格",
     "开",
     "关",

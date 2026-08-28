@@ -12,11 +12,14 @@ sticky, and round-robin all read from that order. There is no per-model quota
 pool.
 
 **Accounts** owns identity, the account **Key**, verification, enabled state,
-card order, managed registration, and local usage / calibration / cooldown. Each
-card shows a read-only contract summary (effective protocols, or a disabled /
-unroutable notice) and an **Open provider** deep link into
-**Providers**. Catalogs, protocol probes, per-model protocol overrides, and
-scoped pricing live on **Providers**, not here.
+card order, managed registration, and available usage / cooldown state.
+Cards intentionally omit provider contracts and protocol details. Catalogs,
+protocol probes, per-model protocol overrides, and scoped pricing live on
+**Providers**, not here. Command Code exposes no machine-readable account-usage
+endpoint, so GOAT cards show a clearly labelled local estimate: priced OCG
+request logs accumulate against the public `$14 / $35 / $70` windows. Traffic
+outside OCG and unpriced rows are not included; manual calibration can correct
+the displayed baseline.
 
 The registry is sealed. Built-in Plan families are:
 
@@ -25,6 +28,8 @@ The registry is sealed. Built-in Plan families are:
 | OpenCode Go | `opencode` / `go` | Yes | One officially distributable API key per card; managed signup remains Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | Yes | One credentialless, anonymous singleton; sortable and enableable, not deletable; quota shared by egress IP |
 | Command Code GOAT | `command-code` / `goat` | Yes | Public Provider catalog; GOAT preset models default on, additional models default off in the Providers matrix; no account-level GOAT/All or Max mode |
+| MiniMax CN Token Plan | `minimax` / `cn` | Yes | Dedicated `sk-cp` Key; fixed official Chat route, authenticated model directory, and manual official Token Plan usage refresh |
+| Kimi Code CN | `kimi` / `cn` | Yes | Dedicated Kimi Code Key; fixed official Chat route, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Custom API | `custom` / `api` | Yes | Trusted-administrator destination; one complete inference Endpoint and one upstream protocol per account; verification is optional but shows an unverified hint; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
@@ -37,11 +42,17 @@ verification status to `pending` but keeps the enabled state. Disabled drafts
 remain saveable. The desktop UI uses Dashboard V3 HTTP and has no separate
 Tauri invoke mutation path.
 
-Use only the official provider API **Key** for OpenCode Go or Command Code
-GOAT. Browser cookies and reverse-proxy credentials are not account Keys. GOAT
+Use only the official provider API **Key** for OpenCode Go, Command Code GOAT,
+MiniMax Token Plan, or Kimi Code. Browser cookies and reverse-proxy credentials are not account Keys. GOAT
 is a separate provider mapping and its Key is sent only to the fixed Command
 Code Provider API, never to OpenCode. Custom API is a separate trusted-administrator
 destination and must not send its key to an OpenCode endpoint.
+
+MiniMax and Kimi keys are also origin-bound: MiniMax CN uses
+`https://api.minimaxi.com/v1`; Kimi Code CN uses
+`https://api.kimi.com/coding/v1`. Model and usage refreshes are explicit
+dashboard actions. OCG does not poll either subscription endpoint, and usage
+display never changes routing eligibility.
 
 Command Code's official `GET /models` is public and refreshes one Provider-level
 catalog. It does not prove that a stored Key is valid. The Providers matrix is
@@ -161,15 +172,18 @@ identity step. Deleting an account likewise deletes its cookies/profile, and the
 confirmation states this explicitly. That login state can then be recovered only
 from a backup or by signing in again.
 
-Each completed OpenCode Go card shows the account name, cooldown state, and the
-5-hour / weekly / monthly usage bars driven by local accounting. Zen Free has its
-own anonymous, egress-IP-shared free cooldown rather than a key quota.
+Each ready OpenCode Go or GOAT card shows the account name, cooldown state, and
+5-hour / weekly / monthly usage bars. OpenCode Go periodically calibrates the
+local accounting against its official endpoint. GOAT has no such endpoint, so
+its bars remain a local projection of priced OCG logs. Zen Free has its own
+anonymous, egress-IP-shared free cooldown rather than a key quota.
 
 - **Usage baselines.** Type a percentage or drag a bar to set its current
   real-world usage baseline. After the value is saved, successful request cost
   recorded by OCG Manager continues to accumulate above that baseline. Reaching
   100% is still only a warning; it does not stop the gateway from selecting the
-  account. Manual calibration stays available for every ready account.
+  account. Manual calibration is shown only when the Plan declares it; GOAT
+  uses it to correct for traffic that OCG cannot observe.
 - **Refresh quota (ready Key and managed accounts).** Official OpenCode usage
   (`/zen/go/v1/usage`) is only a periodic calibration baseline; local forward-log
   costs stay the live estimator. Active ready accounts reconcile about hourly,

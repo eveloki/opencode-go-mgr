@@ -943,7 +943,7 @@ export const ptBRMessages = {
   "使用 {model} 的 {protocol} 协议测试账号 {name}": "Testar a conta {name} com {model} via {protocol}",
   "首选": "Preferencial",
   "{model} · {protocol} 测试成功": "Teste {model} · {protocol} bem-sucedido",
-  "服务商未开放用量查询，显示值由你手工校准。": "O provedor não expõe consulta de uso; os valores exibidos são calibrados manualmente.",
+  "根据 OCG 内已定价请求估算；不含其他客户端用量，可手工校准。": "Estimativa baseada em solicitações tarifadas processadas pelo OCG; não inclui outros clientes e pode ser calibrada manualmente.",
   "加载供应商失败: {error}": "Falha ao carregar fornecedores: {error}",
   "暂无供应商范围": "Nenhum escopo de fornecedor",
   "模型目录": "Catálogo de modelos",

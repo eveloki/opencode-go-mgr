@@ -26,6 +26,9 @@ use crate::http_client::RouteLabel;
 use crate::kernel::pricing::PricingSnapshot;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::{Account, AppConfig, ForwardLog, ForwardMetrics, UsageWindowKind};
+use crate::pricing::{
+    ProviderPricingEvidence, ProviderScopedPricingSnapshot, latest_provider_pricing_snapshot,
+};
 use crate::state::CoreState;
 use anyhow::Result;
 use axum::body::Body;
@@ -178,6 +181,7 @@ struct ForwardOnceOutput {
 async fn forward_once(
     spec: &AttemptSpec,
     snapshot_client: &Client,
+    route: RouteLabel,
     config: &AppConfig,
     timeouts: AttemptTimeouts,
     url: &str,
@@ -192,7 +196,7 @@ async fn forward_once(
             client.request(reqwest::Method::POST, url)
         }
         ProxyRoutingModel::ProcessWideNoRedirect => {
-            let client = crate::http_client::build_no_redirect(config)?;
+            let client = crate::http_client::build_no_redirect_for_route(config, route)?;
             client.post(url)
         }
         ProxyRoutingModel::RequestEntrySnapshot => snapshot_client.post(url),
@@ -240,6 +244,109 @@ pub struct ForwardResult {
     pub response: Response,
     pub(crate) action: ForwardAction,
     pub error_message: Option<String>,
+}
+
+#[derive(Clone)]
+enum RequestPricingSnapshot {
+    OpenCode(Arc<PricingSnapshot>),
+    Provider(Arc<ProviderScopedPricingSnapshot>),
+    Unpriced,
+}
+
+impl From<Arc<PricingSnapshot>> for RequestPricingSnapshot {
+    fn from(snapshot: Arc<PricingSnapshot>) -> Self {
+        Self::OpenCode(snapshot)
+    }
+}
+
+impl RequestPricingSnapshot {
+    fn for_account(state: &CoreState, account: &Account, go: Arc<PricingSnapshot>) -> Self {
+        if account.provider_id == crate::provider::OPENCODE_PROVIDER_ID
+            && account.offering_id == crate::provider::GO_OFFERING_ID
+        {
+            return Self::OpenCode(go);
+        }
+        if !crate::provider::is_command_code_goat(&account.provider_id, &account.offering_id) {
+            return Self::Unpriced;
+        }
+        let loaded = latest_provider_pricing_snapshot(
+            &state.db.lock(),
+            &account.provider_id,
+            &account.offering_id,
+        );
+        match loaded {
+            Ok(Some(snapshot)) if snapshot.evidence() == ProviderPricingEvidence::Verified => {
+                Self::Provider(Arc::new(snapshot))
+            }
+            Ok(_) => Self::Unpriced,
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to load provider pricing for {}/{}: {error}",
+                    account.provider_id, account.offering_id
+                );
+                Self::Unpriced
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn estimate(
+        &self,
+        model: &str,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        cached_tokens: i64,
+        cache_creation_tokens: i64,
+        service_tier: Option<&str>,
+    ) -> crate::kernel::pricing::PricingEstimate {
+        match self {
+            Self::OpenCode(snapshot) => snapshot.estimate(
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cache_creation_tokens,
+                service_tier,
+            ),
+            Self::Provider(snapshot) => snapshot.estimate(
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cache_creation_tokens,
+                Utc::now(),
+            ),
+            Self::Unpriced => crate::kernel::pricing::PricingEstimate {
+                raw_cost_usd: None,
+                quota_debit: None,
+                effective_paid_cost_usd: None,
+                cost: None,
+                pricing_revision_id: None,
+                quota_multiplier: None,
+                local_adjustment_multiplier: None,
+                cost_state: "unpriced",
+            },
+        }
+    }
+
+    fn revision(&self) -> Option<&str> {
+        match self {
+            Self::OpenCode(snapshot) => Some(&snapshot.revision),
+            Self::Provider(snapshot) => Some(snapshot.revision()),
+            Self::Unpriced => None,
+        }
+    }
+
+    fn provider_identity(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::OpenCode(_) => Some((
+                crate::provider::OPENCODE_PROVIDER_ID,
+                crate::provider::GO_OFFERING_ID,
+            )),
+            Self::Provider(snapshot) => Some((snapshot.provider_id(), snapshot.offering_id())),
+            Self::Unpriced => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -457,6 +564,7 @@ async fn forward_request_impl(
 ) -> Result<ForwardResult> {
     let mut attempt_context =
         ForwardAttemptContext::new(trace, client_body.len(), attempt, plan, route);
+    let pricing_snapshot = RequestPricingSnapshot::for_account(state, account, pricing_snapshot);
     attempt_context.set_client_key(client_key_id, state);
     let attempt_spec = match provider_adapter::resolve_route(account, config, plan) {
         Ok(spec) => spec,
@@ -667,6 +775,7 @@ async fn forward_request_impl(
     let sent = forward_once(
         &attempt_spec,
         client,
+        route,
         config,
         AttemptTimeouts::from_secs(
             config.non_stream_timeout_secs,
@@ -1939,7 +2048,7 @@ struct StreamOutcomeGuard {
     log_id: i64,
     stream_state: Arc<Mutex<StreamState>>,
     model: String,
-    pricing: Arc<PricingSnapshot>,
+    pricing: RequestPricingSnapshot,
     service_tier: Option<String>,
     attempt_context: ForwardAttemptContext,
     upstream_status: u16,
@@ -1954,7 +2063,7 @@ impl StreamOutcomeGuard {
         log_id: i64,
         stream_state: Arc<Mutex<StreamState>>,
         model: String,
-        pricing: Arc<PricingSnapshot>,
+        pricing: impl Into<RequestPricingSnapshot>,
         service_tier: Option<String>,
         attempt_context: ForwardAttemptContext,
         upstream_status: u16,
@@ -1965,7 +2074,7 @@ impl StreamOutcomeGuard {
             log_id,
             stream_state,
             model,
-            pricing,
+            pricing: pricing.into(),
             service_tier,
             attempt_context,
             upstream_status,
@@ -2134,7 +2243,7 @@ fn handle_pre_output_stream_failure(
     stream_state: &Arc<Mutex<StreamState>>,
     converter: &Arc<Mutex<StreamConverter>>,
     log_id: i64,
-    pricing: &PricingSnapshot,
+    pricing: &RequestPricingSnapshot,
     attempt: &ForwardAttemptContext,
     plan: &RequestPlan,
     upstream_status: StatusCode,
@@ -2530,7 +2639,7 @@ fn success_status_for_cost(cost_state: &str) -> &'static str {
 }
 
 fn pricing_metrics(
-    snapshot: &PricingSnapshot,
+    snapshot: &RequestPricingSnapshot,
     model: &str,
     prompt_tokens: i64,
     completion_tokens: i64,
@@ -2546,6 +2655,7 @@ fn pricing_metrics(
         cache_creation_tokens,
         service_tier,
     );
+    let provider_identity = snapshot.provider_identity();
     ForwardMetrics {
         prompt_tokens,
         completion_tokens,
@@ -2558,18 +2668,23 @@ fn pricing_metrics(
         pricing_revision_id: estimate.pricing_revision_id,
         quota_multiplier: estimate.quota_multiplier,
         local_adjustment_multiplier: estimate.local_adjustment_multiplier,
+        pricing_provider_id: provider_identity.map(|(provider_id, _)| provider_id.to_string()),
+        pricing_offering_id: provider_identity.map(|(_, offering_id)| offering_id.to_string()),
         service_tier: service_tier.map(str::to_string),
         cost_state: estimate.cost_state,
     }
 }
 
 fn metadata_metrics(
-    snapshot: &PricingSnapshot,
+    snapshot: &RequestPricingSnapshot,
     service_tier: Option<&str>,
     cost_state: &'static str,
 ) -> ForwardMetrics {
+    let provider_identity = snapshot.provider_identity();
     ForwardMetrics {
-        pricing_revision_id: Some(snapshot.revision.clone()),
+        pricing_revision_id: snapshot.revision().map(str::to_string),
+        pricing_provider_id: provider_identity.map(|(provider_id, _)| provider_id.to_string()),
+        pricing_offering_id: provider_identity.map(|(_, offering_id)| offering_id.to_string()),
         service_tier: service_tier.map(str::to_string),
         cost_state,
         ..ForwardMetrics::default()
@@ -3110,7 +3225,7 @@ mod stream_outcome_guard_tests {
         account: &Account,
         context: &ForwardAttemptContext,
     ) -> i64 {
-        let pricing = state.pricing_snapshot();
+        let pricing = RequestPricingSnapshot::from(state.pricing_snapshot());
         DbAttemptSink::new(&state.db.lock())
             .insert(
                 account,
@@ -3123,6 +3238,83 @@ mod stream_outcome_guard_tests {
                 None,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn command_code_requests_use_the_verified_provider_price_and_multiplier() {
+        let (dir, state) = test_state("goat-pricing");
+        let mut goat = account(&state);
+        goat.provider_id = crate::provider::COMMAND_CODE_PROVIDER_ID.into();
+        goat.offering_id = crate::provider::GOAT_OFFERING_ID.into();
+        let missing = RequestPricingSnapshot::for_account(&state, &goat, state.pricing_snapshot());
+        let mut missing_metrics = pricing_metrics(
+            &missing,
+            "deepseek-v4-flash",
+            1_000_000,
+            100_000,
+            0,
+            0,
+            None,
+        );
+        missing_metrics.scope_to_provider(Some(&goat.provider_id), Some(&goat.offering_id), true);
+        assert_eq!(missing_metrics.cost_state, "unpriced");
+        assert_eq!(missing_metrics.raw_cost_usd, None);
+        assert_eq!(missing_metrics.pricing_revision_id, None);
+
+        let snapshot = crate::pricing::ProviderScopedPricingSnapshot::new(
+            crate::provider::COMMAND_CODE_PROVIDER_ID,
+            crate::provider::GOAT_OFFERING_ID,
+            "goat-runtime-test",
+            "2030-01-01T00:00:00Z",
+            None,
+            crate::pricing::GOAT_SOURCE_URL,
+            "goat-runtime-hash",
+            crate::pricing::ProviderPricingEvidence::Verified,
+            vec![
+                crate::pricing::ProviderPricingValue::new(
+                    "deepseek-v4-flash",
+                    "DeepSeek V4 Flash (latest)",
+                    Some(0.22),
+                    Some(0.66),
+                    Some(0.007),
+                    None,
+                    Some(70.0),
+                    Some(60.0),
+                    Some(10.0),
+                    Some("USD".into()),
+                    None,
+                    None,
+                    crate::pricing::PricingTimeWindow::Always,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        crate::pricing::store_provider_pricing_snapshot(&state.db.lock(), &snapshot).unwrap();
+
+        let pricing = RequestPricingSnapshot::for_account(&state, &goat, state.pricing_snapshot());
+        let mut metrics = pricing_metrics(
+            &pricing,
+            "deepseek/deepseek-v4-flash",
+            1_000_000,
+            100_000,
+            0,
+            0,
+            None,
+        );
+        metrics.scope_to_provider(Some(&goat.provider_id), Some(&goat.offering_id), true);
+
+        assert_eq!(metrics.cost_state, "priced");
+        assert!((metrics.raw_cost_usd.unwrap() - 0.286).abs() < 1e-12);
+        assert!((metrics.quota_multiplier.unwrap() - (70.0 / 60.0)).abs() < 1e-12);
+        assert!((metrics.cost - (0.286 * 70.0 / 60.0)).abs() < 1e-12);
+        assert_eq!(
+            metrics.pricing_revision_id.as_deref(),
+            Some("goat-runtime-test")
+        );
+
+        drop(state);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3237,7 +3429,7 @@ mod stream_outcome_guard_tests {
         let account = account(&state);
         state.db.lock().create_account(&account).unwrap();
         let context = attempt_context();
-        let pricing = state.pricing_snapshot();
+        let pricing = RequestPricingSnapshot::from(state.pricing_snapshot());
         let id = {
             let db = state.db.lock();
             let sink = DbAttemptSink::new(&db);

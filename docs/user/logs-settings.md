@@ -33,8 +33,11 @@ changes the quota-debit multiplier; it does not make a model or provider routabl
 
 - Chat streaming requests set `stream_options.include_usage` so OpenAI-compatible
   upstreams emit a usage chunk. Rows with `success_no_usage` mean the stream
-  still finished without one. A usage chunk makes token counts accurate; quota
-  use is still estimated from the active OpenCode Go pricing snapshot. Registered
+  still finished without one. A usage chunk makes token counts accurate; the
+  summary shows total tokens (input + output). Quota use is estimated from the
+  selected offering's verified pricing snapshot: OpenCode Go uses its active
+  snapshot, while Command Code GOAT uses its separately refreshed model prices
+  and multipliers. Existing rows are not retroactively repriced. Registered
   Zen free models (`big-pickle`, `mimo-v2.5-free`, and other ids on the Zen
   allowlist) record tokens with `cost_state=free` and do not enter Go quota
   totals. Go models whose names contain `free` (currently `ox-alpha-free`) stay

@@ -206,6 +206,11 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   assert.match(usage, /额度已从 OpenCode 官方用量刷新/);
   assert.doesNotMatch(usage, /refreshManagedUsage|refreshManagedAccountUsage|额度已从 OpenCode 控制台刷新/);
   assert.match(card, /:aria-label="t\('校准用量'\)"/);
+  assert.match(
+    card,
+    /manualUsageCalibration && accountIsReady\(account\) && edits"[\s\S]*?class="account-action account-action--secondary"/,
+  );
+  assert.doesNotMatch(card, /account-action--edit/);
   assert.doesNotMatch(stripBody, /usage-strip-title|\{\{ t\("用量"\) \}\}/);
   assert.match(stripBody, /class="usage-strip-body" role="group" :aria-label="t\('用量'\)"/);
   assert.match(stripBody, /<n-progress[\s\S]*?:percentage="usageProgressPercentage\(/);

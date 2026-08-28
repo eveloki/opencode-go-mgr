@@ -470,7 +470,13 @@ async fn dashboard_v3_list_proxy_write_validates_then_dedupes_known_ids() {
                 "proxyMode": "list",
                 "proxyUrl": "http://127.0.0.1:7890",
                 "proxyListDirection": "blacklist",
-                "proxyListModels": ["  gpt-5.6-luna ", "grok-4.5", "gpt-5.6-luna"]
+                "proxyListModels": [
+                    "  gpt-5.6-luna ",
+                    "grok-4.5",
+                    "MiniMax-M3",
+                    "kimi-for-coding",
+                    "gpt-5.6-luna"
+                ]
             }),
         ),
     )
@@ -485,7 +491,12 @@ async fn dashboard_v3_list_proxy_write_validates_then_dedupes_known_ids() {
     );
     assert_eq!(
         persisted.proxy_list_models,
-        vec!["gpt-5.6-luna".to_string(), "grok-4.5".to_string()]
+        vec![
+            "gpt-5.6-luna".to_string(),
+            "grok-4.5".to_string(),
+            "MiniMax-M3".to_string(),
+            "kimi-for-coding".to_string(),
+        ]
     );
 
     harness.stop();

@@ -9,11 +9,13 @@ use ocg_core::dashboard_v3::{
 use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::gateway_keys::PRIMARY_KEY_ID;
 use ocg_core::models::{
-    Account, AccountSetupStep, AccountType, ForwardLog, ForwardLogNativeAttribution, SubGatewayKey,
-    UNATTRIBUTED_KEY_FILTER,
+    Account, AccountCustomConfigInput, AccountModelCapabilityInput, AccountSetupStep, AccountType,
+    ForwardLog, ForwardLogNativeAttribution, SubGatewayKey, UNATTRIBUTED_KEY_FILTER,
 };
 use ocg_core::provider::{
-    GO_OFFERING_ID, OPENCODE_PROVIDER_ID, default_credential_kind, default_quota_scope,
+    COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GO_OFFERING_ID,
+    GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, UpstreamProtocolKind, default_credential_kind,
+    default_quota_scope,
 };
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -200,6 +202,61 @@ fn forward_log(account_id: &str, model: &str, cost: Option<f64>, cost_state: &st
         duration_ms: Some(5),
         diagnostic: None,
     }
+}
+
+#[tokio::test]
+async fn dashboard_summary_counts_routable_goat_and_custom_accounts() {
+    let harness = start_loopback("obs-summary-all-plans").await;
+    let (_, before_body) = harness
+        .get_json(&format!("{}/dashboard/summary", harness.v3_base))
+        .await;
+    let before: DashboardSummary = serde_json::from_value(before_body).unwrap();
+
+    let mut goat = go_account(&harness, "acct-goat", "sk-goat");
+    goat.provider_id = COMMAND_CODE_PROVIDER_ID.into();
+    goat.offering_id = GOAT_OFFERING_ID.into();
+    let mut disabled_goat = goat.clone();
+    disabled_goat.id = "acct-goat-disabled".into();
+    disabled_goat.name = disabled_goat.id.clone();
+    disabled_goat.enabled = false;
+    let mut unreadable_goat = goat.clone();
+    unreadable_goat.id = "acct-goat-unreadable".into();
+    unreadable_goat.name = unreadable_goat.id.clone();
+    unreadable_goat.key_cipher = "not-a-valid-ciphertext".into();
+
+    let mut custom = go_account(&harness, "acct-custom", "sk-custom");
+    custom.provider_id = CUSTOM_PROVIDER_ID.into();
+    custom.offering_id = CUSTOM_API_OFFERING_ID.into();
+    {
+        let db = harness.state.db.lock();
+        db.create_account(&goat).unwrap();
+        db.create_account(&disabled_goat).unwrap();
+        db.create_account(&unreadable_goat).unwrap();
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                endpoint_url: "https://example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            }),
+            &[AccountModelCapabilityInput {
+                model_id: "custom-summary-model".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: Some("account_declared".into()),
+            }],
+        )
+        .unwrap();
+    }
+    harness.state.reload_provider_contracts().unwrap();
+
+    let (status, body) = harness
+        .get_json(&format!("{}/dashboard/summary", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let after: DashboardSummary = serde_json::from_value(body).unwrap();
+    assert_eq!(after.total_accounts, before.total_accounts + 4);
+    assert_eq!(after.available_accounts, before.available_accounts + 2);
+
+    harness.stop();
 }
 
 #[test]

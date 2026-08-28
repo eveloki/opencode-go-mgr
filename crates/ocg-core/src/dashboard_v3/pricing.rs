@@ -9,6 +9,7 @@
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
+use axum::response::{IntoResponse, Response};
 #[cfg(debug_assertions)]
 use chrono::Utc;
 
@@ -16,7 +17,9 @@ use crate::kernel::pricing as kernel_pricing;
 use crate::pricing::{
     OfficialPricingRefresh, PricingRefreshConfirmPolicy, evaluate_official_pricing_refresh,
     fetch_goat_pricing_snapshot, fetch_official_snapshot, latest_provider_pricing_snapshot,
-    prepare_multiplier_update, stamp_pricing_activation, store_provider_pricing_snapshot,
+    merge_current_provider_multipliers, prepare_multiplier_update,
+    prepare_provider_multiplier_update, provider_multiplier_deltas,
+    provider_pricing_semantically_equal, stamp_pricing_activation, store_provider_pricing_snapshot,
 };
 use crate::provider::ProviderRegistry;
 use crate::state::CoreState;
@@ -186,10 +189,12 @@ pub(super) async fn put_pricing_multipliers(
     State(state): State<CoreState>,
     Path((provider_id, offering_id)): Path<(String, String)>,
     body: Bytes,
-) -> Result<Json<PricingSnapshot>, V3ApiError> {
-    if provider_id != crate::provider::OPENCODE_PROVIDER_ID
-        || offering_id != crate::provider::GO_OFFERING_ID
-    {
+) -> Result<Response, V3ApiError> {
+    let is_go = provider_id == crate::provider::OPENCODE_PROVIDER_ID
+        && offering_id == crate::provider::GO_OFFERING_ID;
+    let is_goat = provider_id == crate::provider::COMMAND_CODE_PROVIDER_ID
+        && offering_id == crate::provider::GOAT_OFFERING_ID;
+    if !is_go && !is_goat {
         return Err(V3ApiError::invalid_request_at(
             &state,
             "provider offering does not support pricing multipliers",
@@ -203,12 +208,61 @@ pub(super) async fn put_pricing_multipliers(
         ));
     };
     let _settings_update = state.settings_update.lock();
-    check_pricing_expectation(
+    if is_go {
+        check_pricing_expectation(
+            &state,
+            &update.expectation,
+            &update.expected_pricing_revision,
+        )?;
+        return apply_multipliers_locked(&state, update)
+            .map(|snapshot| Json(snapshot).into_response());
+    }
+
+    check_expectation(&state, &update.expectation)?;
+    let current_revision = current_provider_pricing_revision(&state, &provider_id, &offering_id)?;
+    if update.expected_pricing_revision != current_revision {
+        return Err(V3ApiError::conflict_at(
+            &state,
+            "provider pricing revision changed",
+        ));
+    }
+    let active = latest_provider_pricing_snapshot(&state.db.lock(), &provider_id, &offering_id)
+        .map_err(V3ApiError::internal)?
+        .ok_or_else(|| V3ApiError::invalid_request_at(&state, "provider pricing is not loaded"))?;
+    let writes = update
+        .multipliers
+        .into_iter()
+        .map(|write| (write.model_id, write.multiplier))
+        .collect::<Vec<_>>();
+    let active = match prepare_provider_multiplier_update(&active, &writes) {
+        Err(message) => return Err(V3ApiError::invalid_request_at(&state, message)),
+        Ok(None) => active,
+        Ok(Some(snapshot)) => {
+            store_provider_pricing_snapshot(&state.db.lock(), &snapshot)
+                .map_err(V3ApiError::internal)?;
+            state.bump_settings_revision();
+            audit_pricing(
+                &state,
+                "info",
+                &format!(
+                    "updated provider pricing multipliers in {}/{}/{}",
+                    provider_id,
+                    offering_id,
+                    snapshot.revision()
+                ),
+            );
+            snapshot
+        }
+    };
+    Ok(Json(provider_pricing_from_snapshot(
         &state,
-        &update.expectation,
-        &update.expected_pricing_revision,
-    )?;
-    apply_multipliers_locked(&state, update).map(Json)
+        provider_id,
+        offering_id,
+        PricingAvailability::Available,
+        state.pricing_snapshot().as_ref(),
+        Some(&active),
+    ))
+    .into_response())
 }
 
 pub(super) async fn get_provider_pricing(
@@ -318,11 +372,17 @@ async fn refresh_goat_pricing(
         crate::provider::GOAT_OFFERING_ID,
         &update,
     )?;
-    let current = current_provider_pricing_revision(
+    let current_revision = current_provider_pricing_revision(
         state,
         crate::provider::COMMAND_CODE_PROVIDER_ID,
         crate::provider::GOAT_OFFERING_ID,
     )?;
+    let active = latest_provider_pricing_snapshot(
+        &state.db.lock(),
+        crate::provider::COMMAND_CODE_PROVIDER_ID,
+        crate::provider::GOAT_OFFERING_ID,
+    )
+    .map_err(V3ApiError::internal)?;
     match fetched {
         Err(error) => {
             let error = error.to_string();
@@ -339,20 +399,52 @@ async fn refresh_goat_pricing(
                 Vec::new(),
                 None,
                 Some(error),
-                current,
+                current_revision,
             ))
         }
-        Ok(snapshot) if snapshot.revision() == current => Ok(provider_refresh_result(
-            state,
-            crate::provider::COMMAND_CODE_PROVIDER_ID,
-            vec![crate::provider::GOAT_OFFERING_ID.to_string()],
-            PricingRefreshStatus::Unchanged,
-            Vec::new(),
-            None,
-            None,
-            current,
-        )),
-        Ok(snapshot) => {
+        Ok(mut snapshot) => {
+            let multiplier_changes = active
+                .as_ref()
+                .map(|active| provider_multiplier_deltas(active, &snapshot))
+                .unwrap_or_default();
+            let official_content_hash = snapshot.content_hash().to_string();
+            let confirmation_matches = update
+                .expected_official_content_hash
+                .as_deref()
+                .is_some_and(|expected| expected == official_content_hash);
+            if !multiplier_changes.is_empty() && (update.policy.is_none() || !confirmation_matches)
+            {
+                return Ok(provider_refresh_result(
+                    state,
+                    crate::provider::COMMAND_CODE_PROVIDER_ID,
+                    vec![crate::provider::GOAT_OFFERING_ID.to_string()],
+                    PricingRefreshStatus::NeedsConfirmation,
+                    map_changes(multiplier_changes),
+                    Some(official_content_hash),
+                    None,
+                    current_revision,
+                ));
+            }
+            if matches!(update.policy, Some(PricingRefreshPolicy::KeepCurrent))
+                && let Some(active) = active.as_ref()
+            {
+                merge_current_provider_multipliers(active, &mut snapshot);
+            }
+            if active
+                .as_ref()
+                .is_some_and(|active| provider_pricing_semantically_equal(active, &snapshot))
+            {
+                return Ok(provider_refresh_result(
+                    state,
+                    crate::provider::COMMAND_CODE_PROVIDER_ID,
+                    vec![crate::provider::GOAT_OFFERING_ID.to_string()],
+                    PricingRefreshStatus::Unchanged,
+                    map_changes(multiplier_changes),
+                    None,
+                    None,
+                    current_revision,
+                ));
+            }
             store_provider_pricing_snapshot(&state.db.lock(), &snapshot)
                 .map_err(V3ApiError::internal)?;
             state.bump_settings_revision();
@@ -369,7 +461,7 @@ async fn refresh_goat_pricing(
                 crate::provider::COMMAND_CODE_PROVIDER_ID,
                 vec![crate::provider::GOAT_OFFERING_ID.to_string()],
                 PricingRefreshStatus::Success,
-                Vec::new(),
+                map_changes(multiplier_changes),
                 None,
                 None,
                 snapshot.revision().to_string(),

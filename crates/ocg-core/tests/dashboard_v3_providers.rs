@@ -26,8 +26,8 @@ use ocg_core::kernel::zen::ZEN_MODELS_SOURCE_URL;
 use ocg_core::models::ProxyMode;
 use ocg_core::provider::{
     BUILTIN_PLANS, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID,
-    GO_OFFERING_ID, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
-    ZEN_FREE_ACCOUNT_ID,
+    GO_OFFERING_ID, GOAT_OFFERING_ID, KIMI_PROVIDER_ID, MINIMAX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use ocg_core::provider_contracts::{
     CATALOG_SOURCE_OFFICIAL_ZEN, CATALOG_SOURCE_OPENCODE_MODELS, ContractScope,
@@ -539,14 +539,14 @@ async fn dashboard_v3_model_capabilities_are_go_protocol_rows_including_grok_45(
 }
 
 #[tokio::test]
-async fn dashboard_v3_provider_contracts_project_four_scopes_and_custom_endpoints() {
+async fn dashboard_v3_provider_contracts_project_five_scopes_and_custom_endpoints() {
     let harness = start_loopback("providers-contracts").await;
     let (status, body) = get_v3(&harness, "/provider-contracts").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_secret_free(&body, &[]);
     assert_revision_snapshot(&body, &harness);
     let parsed: ProviderContracts = serde_json::from_value(body.clone()).expect("contracts");
-    assert_eq!(parsed.providers.len(), 3);
+    assert_eq!(parsed.providers.len(), 5);
     let ids: Vec<_> = parsed
         .providers
         .iter()
@@ -558,11 +558,30 @@ async fn dashboard_v3_provider_contracts_project_four_scopes_and_custom_endpoint
             OPENCODE_PROVIDER_ID,
             OPENCODE_ZEN_FREE_PROVIDER_ID,
             COMMAND_CODE_PROVIDER_ID,
+            MINIMAX_PROVIDER_ID,
+            KIMI_PROVIDER_ID,
         ]
     );
     assert!(parsed.custom_endpoints.is_empty());
     assert!(body["providers"][0].get("scope_kind").is_none());
     assert_eq!(body["providers"][0]["scopeKind"], "provider");
+    let kimi = parsed
+        .providers
+        .iter()
+        .find(|group| group.provider_id == KIMI_PROVIDER_ID)
+        .expect("Kimi provider contract");
+    let coding = kimi
+        .models
+        .iter()
+        .find(|model| model.model_id == "kimi-for-coding")
+        .expect("Kimi coding fallback model");
+    assert_eq!(coding.alias, "kimi-k2.7-code");
+    let k3 = kimi
+        .models
+        .iter()
+        .find(|model| model.model_id == "kimi-k3")
+        .expect("Kimi K3 fallback model");
+    assert_eq!(k3.alias, "kimi-k3");
 
     let (status, created) = send_json(
         &harness,
@@ -919,7 +938,10 @@ async fn dashboard_v3_zen_refresh_persists_on_success_and_preserves_state_on_fai
             .collect::<Vec<_>>(),
         vec!["refresh-test-free"]
     );
-    assert_eq!(parsed.models[0].alias, "refresh-test");
+    assert_eq!(
+        parsed.models[0].alias, "",
+        "a refreshed Zen row cannot create an Alias outside the static Go table"
+    );
     assert_eq!(parsed.source_url, ZEN_MODELS_SOURCE_URL);
     assert!(parsed.refreshed_at.is_some());
     assert_eq!(parsed.revision, before_revision + 1);
@@ -938,7 +960,7 @@ async fn dashboard_v3_zen_refresh_persists_on_success_and_preserves_state_on_fai
         .find(|entry| entry["providerId"] == OPENCODE_ZEN_FREE_PROVIDER_ID)
         .unwrap();
     let aliases = zen["modelAliases"].as_array().unwrap();
-    assert!(aliases.iter().any(|alias| alias == "refresh-test"));
+    assert!(!aliases.iter().any(|alias| alias == "refresh-test"));
     assert!(!aliases.iter().any(|alias| alias == "mimo-v2.5-free"));
 
     let empty = start_zen_origin(StatusCode::OK, json!({ "data": [{ "id": "paid-only" }] })).await;

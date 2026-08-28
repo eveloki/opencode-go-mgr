@@ -420,6 +420,18 @@ export const dashboardV3 = {
       method: "PUT",
       body: withExpectation(update, expectation),
     }),
+  putProviderPricingMultipliers: (
+    providerId: string,
+    offeringId: string,
+    update: WithoutExpectation<PricingMultipliersUpdate>,
+    expectation: MutationExpectation,
+  ) => requestV3<ProviderPricing>(
+    `/providers/${encode(providerId)}/${encode(offeringId)}/pricing/multipliers`,
+    {
+      method: "PUT",
+      body: withExpectation(update, expectation),
+    },
+  ),
   getProviderPricing: (providerId: string, offeringId: string) =>
     requestV3<ProviderPricing>(`/providers/${encode(providerId)}/${encode(offeringId)}/pricing`),
 
@@ -500,6 +512,11 @@ export const dashboardV3 = {
       body: mutation(expectation),
     }),
   getProviderUsage: (id: string) => requestV3<ProviderUsage>(`/accounts/${encode(id)}/provider-usage`),
+  refreshProviderUsage: (id: string, expectation: MutationExpectation) =>
+    requestV3<ProviderUsage>(`/accounts/${encode(id)}/provider-usage`, {
+      method: "POST",
+      body: mutation(expectation),
+    }),
 
   // --- managed browser ---
   getBrowserCapabilities: () => requestV3<BrowserCapabilities>("/browser/capabilities"),

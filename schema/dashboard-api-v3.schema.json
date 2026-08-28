@@ -1533,7 +1533,7 @@
     },
     "DashboardSummary": {
       "additionalProperties": false,
-      "description": "Dashboard home totals. Custom/GOAT cards are not \"available\".",
+      "description": "Dashboard home totals. `availableAccounts` counts accounts that can\ncontribute at least one currently enabled production route.",
       "properties": {
         "availableAccounts": {
           "format": "uint64",
@@ -2865,7 +2865,7 @@
     },
     "PricingMultipliersUpdate": {
       "additionalProperties": false,
-      "description": "PUT pricing-multipliers body. CAS tokens, `expectedPricingRevision`, and\n`multipliers` are required.",
+      "description": "PUT provider pricing-multipliers body. CAS tokens,\n`expectedPricingRevision` (the selected offering's active revision), and\n`multipliers` are required.",
       "properties": {
         "expectedPricingRevision": {
           "type": "string"
@@ -3853,7 +3853,7 @@
     },
     "ProviderPricingSnapshot": {
       "additionalProperties": false,
-      "description": "Provider-neutral immutable pricing snapshot. GOAT uses this display-only\nshape; it never enters the local Go quota debit calculation.",
+      "description": "Provider-neutral immutable pricing snapshot. GOAT uses this shape both for\ndashboard display and provider-scoped per-request cost attribution.",
       "properties": {
         "activatedAt": {
           "type": "string"

@@ -98,8 +98,8 @@
           :key="account.id"
           :account="account"
           :catalog="providerCatalog"
-          :contract-summary="contractSummaryFor(account)"
           :usage="getUsage(account.id)"
+          :provider-usage="providerUsageMap[account.id] ?? null"
           :limits="usageLimitsFor(account)"
           :edits="usageEdits[account.id]"
           :now="now"
@@ -117,7 +117,6 @@
           @verify="verifyCustomAccount(account.id)"
           @refresh-usage="refreshAccountUsage(account.id)"
           @reload-usage="loadAccountUsage(account.id)"
-          @open-provider="openProvider(account)"
           @open-wizard="openManagedWizard(account.id)"
           @menu-select="handleMenuSelect($event, account.id)"
           @usage-editor-open="focusUsageEditor(account.id)"
@@ -254,10 +253,7 @@ import { PlusOutlined } from "@vicons/antd";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import { useAccountsStore } from "../stores/accounts.ts";
-import type {
-  ProviderCatalogEntry,
-  ProviderContractsResponse,
-} from "../api/providers.ts";
+import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type {
   Account,
   AccountInput,
@@ -268,7 +264,7 @@ import type {
 } from "../api/dashboard";
 import { isCooling } from "../domain/accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "../domain/account-display.ts";
-import { isZenFreeAccount } from "../domain/account-providers.ts";
+import { isCommandCodeGoatAccount, isOfficialCnPlanAccount, isZenFreeAccount } from "../domain/account-providers.ts";
 import {
   executeCustomAccountEdit,
   isCustomApiAccount,
@@ -304,11 +300,6 @@ import AccountAddModal from "../components/AccountAddModal.vue";
 import AccountCard from "../components/AccountCard.vue";
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
-import { accountContractSummary, accountProviderScope } from "../domain/provider-contracts.ts";
-
-const emit = defineEmits<{
-  navigate: [view: string, extras?: { scope_kind: string; scope_id: string }];
-}>();
 
 const dialog = useDialog();
 const message = useMessage();
@@ -343,7 +334,6 @@ const now = ref(Date.now());
 const planFilter = ref<AccountPlanFilter>("all");
 const statusFilter = ref<AccountStatusFilter>("all");
 const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
-const providerContracts = ref<ProviderContractsResponse | null>(null);
 const catalogLoading = ref(false);
 const catalogError = ref("");
 const selectedPlanForCreate = ref<PlanDefinition | null>(null);
@@ -354,6 +344,7 @@ const {
   quotaLimitsError,
   usageLimitsFor,
   usageMap,
+  providerUsageMap,
   usageEdits,
   usageLoading,
   usageLoadErrors,
@@ -707,6 +698,7 @@ function addAccount(account: Account): void {
 function removeAccountState(id: string): void {
   accounts.value = accounts.value.filter((item) => item.id !== id);
   delete usageMap.value[id];
+  delete providerUsageMap.value[id];
   delete usageEdits.value[id];
   delete usageLoading.value[id];
   delete usageLoadErrors.value[id];
@@ -715,7 +707,9 @@ function removeAccountState(id: string): void {
 }
 
 function accountHasUsageDisplay(account: Account): boolean {
-  return account.provider_id === "opencode" && account.offering_id === "go";
+  return isCommandCodeGoatAccount(account)
+    || isOfficialCnPlanAccount(account)
+    || (account.provider_id === "opencode" && account.offering_id === "go");
 }
 
 async function refreshAccountState(id: string): Promise<Account | null> {
@@ -732,6 +726,7 @@ async function refreshAccountState(id: string): Promise<Account | null> {
     await loadAccountUsage(id);
   } else {
     delete usageMap.value[id];
+    delete providerUsageMap.value[id];
     delete usageEdits.value[id];
   }
   return account;
@@ -758,12 +753,24 @@ async function loadAccounts() {
     accounts.value = loaded;
     settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
     // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
-    if (quotaLimits.value) {
+    // GOAT 的本地估算不依赖 OpenCode Go 定价快照是否加载成功。
+    if (
+      quotaLimits.value
+      || loaded.some(isCommandCodeGoatAccount)
+      || loaded.some(isOfficialCnPlanAccount)
+    ) {
       await mapWithConcurrency(
         loaded.filter((account) => (
           accountIsReady(account)
-          && account.provider_id === "opencode"
-          && account.offering_id === "go"
+          && (
+            isCommandCodeGoatAccount(account)
+            || isOfficialCnPlanAccount(account)
+            || (
+              quotaLimits.value
+              && account.provider_id === "opencode"
+              && account.offering_id === "go"
+            )
+          )
         )),
         4,
         (account) => loadAccountUsage(account.id),
@@ -814,30 +821,12 @@ async function loadProviderCatalog(): Promise<void> {
   }
 }
 
-async function loadProviderContracts(): Promise<void> {
-  try {
-    providerContracts.value = await providerApi.getProviderContracts();
-  } catch {
-    // Keep the last good snapshot; account cards still render without a summary.
-  }
-}
-
 async function initializeAccounts() {
   const registrationOptions = loadRegistrationOptions();
   const catalogPromise = loadProviderCatalog();
   await loadQuotaLimits();
   await loadAccounts();
-  await Promise.allSettled([registrationOptions, catalogPromise, loadProviderContracts()]);
-}
-
-function contractSummaryFor(account: Account) {
-  if (!providerContracts.value) return null;
-  return accountContractSummary(account, providerContracts.value, providerCatalog.value);
-}
-
-function openProvider(account: Account) {
-  const scope = accountProviderScope(account);
-  emit("navigate", "providers", scope);
+  await Promise.allSettled([registrationOptions, catalogPromise]);
 }
 
 async function onFormSave(payload: AccountInput | AccountFormPayload) {
@@ -887,7 +876,7 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       message.success(t("账号已添加"));
       addAccount(created);
       settingsRevision.value = created.revision ?? settingsRevision.value;
-      // Only OpenCode Go has an authoritative quota display.
+      // Go uses official usage; GOAT projects locally priced OCG request logs.
       if (accountHasUsageDisplay(created) && accountIsReady(created)) {
         await loadAccountUsage(created.id);
       }

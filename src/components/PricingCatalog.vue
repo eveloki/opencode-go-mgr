@@ -116,6 +116,9 @@
           v-else-if="group.content.kind === 'goat-reference'"
           kind="goat"
           :snapshot="group.content.snapshot"
+          :saving-model-id="savingModelId"
+          :disabled="refreshing"
+          @save-multiplier="(modelId, multiplier) => saveProviderMultiplier(group, modelId, multiplier)"
         />
         <n-alert
           v-if="group.content.kind === 'goat-reference' && refreshError"
@@ -463,6 +466,44 @@ async function saveMultiplier(modelId: string) {
       if (reloadError) {
         message.error(t("保存官方倍率失败: {error}", { error: reloadError }));
       }
+    } else {
+      message.error(t("保存官方倍率失败: {error}", { error: detail }));
+    }
+  } finally {
+    savingModelId.value = null;
+  }
+}
+
+async function saveProviderMultiplier(
+  group: PlanPricingGroup,
+  modelId: string,
+  multiplier: number,
+) {
+  if (group.content.kind !== "goat-reference" || !group.content.snapshot || savingModelId.value) return;
+  savingModelId.value = modelId;
+  try {
+    const result = await providerApi.updateProviderPricingMultipliers(
+      group.plan.provider_id,
+      group.plan.offering_ids[0]!,
+      group.content.snapshot.revision,
+      [{ model_id: modelId, multiplier }],
+    );
+    const updated = result.snapshot;
+    if (updated && "values" in updated) {
+      providerSnapshots.value = { ...providerSnapshots.value, [group.plan.id]: updated };
+    } else if (catalog.value) {
+      await loadProviderSnapshots(catalog.value);
+    }
+    message.success(t("官方倍率已保存"));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (
+      error instanceof DashboardRequestError
+      && error.status === 409
+      && detail.includes("provider pricing revision changed")
+    ) {
+      const reloadError = await reloadPricingAfterRevisionChange();
+      if (reloadError) message.error(t("保存官方倍率失败: {error}", { error: reloadError }));
     } else {
       message.error(t("保存官方倍率失败: {error}", { error: detail }));
     }

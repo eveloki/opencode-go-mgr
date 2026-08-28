@@ -97,7 +97,7 @@
           </n-tooltip>
         </div>
 
-        <div v-if="isGo && accountIsReady(account)" class="account-action account-action--secondary">
+        <div v-if="(isGo || isOfficialCn) && accountIsReady(account)" class="account-action account-action--secondary">
           <n-tooltip trigger="hover">
             <template #trigger>
               <n-button
@@ -112,13 +112,13 @@
                 <template #icon><n-icon :component="ReloadOutlined" /></template>
               </n-button>
             </template>
-            {{ usageRefreshTooltip(account, now) }}
+            {{ isOfficialCn ? t("刷新额度") : usageRefreshTooltip(account, now) }}
           </n-tooltip>
         </div>
 
         <div
           v-if="manualUsageCalibration && accountIsReady(account) && edits"
-          class="account-action account-action--edit"
+          class="account-action account-action--secondary"
         >
           <n-popover
             trigger="click"
@@ -216,30 +216,30 @@
     </div>
     <div v-else-if="isDraft" class="provider-unconfigured" role="status">
       <p>{{ draftDescription }}</p>
-      <div v-if="manualUsageCalibration" class="manual-usage-block">
-        <div v-if="usageLoadError" class="usage-load-error" role="alert">
-          <span>{{ t("用量加载失败") }}</span>
-          <n-button
-            text
-            size="tiny"
-            type="primary"
-            :loading="usageLoading"
-            @click="emit('reload-usage')"
-          >
-            {{ t("重试") }}
-          </n-button>
-        </div>
-        <UsageStrip
-          v-else
-          :account="account"
-          :usage="usage"
-          :limits="limits"
-          :editing="!!edits"
-        />
-        <p v-if="!usageLoadError" class="usage-sync-meta">
-          {{ t("服务商未开放用量查询，显示值由你手工校准。") }}
-        </p>
+    </div>
+    <div v-else-if="manualUsageCalibration" class="manual-usage-block">
+      <div v-if="usageLoadError" class="usage-load-error" role="alert">
+        <span>{{ t("用量加载失败") }}</span>
+        <n-button
+          text
+          size="tiny"
+          type="primary"
+          :loading="usageLoading"
+          @click="emit('reload-usage')"
+        >
+          {{ t("重试") }}
+        </n-button>
       </div>
+      <UsageStrip
+        v-else
+        :account="account"
+        :usage="usage"
+        :limits="limits"
+        :editing="!!edits"
+      />
+      <p v-if="!usageLoadError" class="usage-sync-meta">
+        {{ t("根据 OCG 内已定价请求估算；不含其他客户端用量，可手工校准。") }}
+      </p>
     </div>
     <div v-else-if="isCustom" class="custom-endpoint">
       <div class="custom-endpoint__meta">
@@ -294,30 +294,16 @@
         {{ usageSyncCaption(account, now) }}
       </p>
     </div>
-
-    <div v-if="contractSummary" class="account-contract">
-      <p class="account-contract__label">{{ contractSummary.label }}</p>
-      <p>
-        {{ contractSummary.enabledProtocols.length
-          ? t("有效协议：{protocols}", {
-            protocols: contractSummary.enabledProtocols.map(protocolDisplayName).join(" / "),
-          })
-          : t("无有效协议") }}
-      </p>
-      <p v-if="contractSummary.allProtocolsDisabled">{{ t("全部供应商协议已关闭") }}</p>
-      <p v-else-if="contractSummary.unroutable">
-        {{ contractSummary.disabledReasons[0] || t("该供应商范围当前不可路由") }}
-      </p>
-      <n-button
-        text
-        type="primary"
-        size="small"
-        :aria-label="t('前往供应商')"
-        @click="emit('open-provider')"
-      >
-        {{ t("前往供应商") }}
-      </n-button>
+    <div v-else-if="isOfficialCn" class="official-plan-usage">
+      <div v-if="usageLoadError" class="usage-load-error" role="alert">
+        <span>{{ t("用量加载失败") }}</span>
+        <n-button text size="tiny" type="primary" :loading="usageLoading" @click="emit('reload-usage')">
+          {{ t("重试") }}
+        </n-button>
+      </div>
+      <ProviderQuotaSummary v-else :usage="providerUsage" />
     </div>
+
   </n-card>
 </template>
 
@@ -341,11 +327,7 @@ import {
   ReloadOutlined,
 } from "@vicons/antd";
 import type { Account, UsageWindow } from "../api/dashboard";
-import type { ProviderCatalogEntry } from "../api/providers.ts";
-import {
-  protocolDisplayName,
-  type AccountContractSummary,
-} from "../domain/provider-contracts.ts";
+import type { ProviderCatalogEntry, ProviderUsageResponse } from "../api/providers.ts";
 import { isCooling, isUsageLimitReached } from "../domain/accounts-usage.ts";
 import type { UsageKey } from "../domain/accounts-usage.ts";
 import {
@@ -362,7 +344,7 @@ import {
   usageSyncCaption,
 } from "../domain/account-display.ts";
 import type { AccountMenuOption } from "../domain/account-display.ts";
-import { isZenFreeAccount } from "../domain/account-providers.ts";
+import { isOfficialCnPlanAccount, isZenFreeAccount } from "../domain/account-providers.ts";
 import {
   customAccountNeedsVerification,
   isCustomApiAccount,
@@ -372,12 +354,13 @@ import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsag
 import { t } from "../i18n/index.ts";
 import AccountUsageEditor from "./AccountUsageEditor.vue";
 import UsageStrip from "./UsageStrip.vue";
+import ProviderQuotaSummary from "./ProviderQuotaSummary.vue";
 
 const props = defineProps<{
   account: Account;
   catalog: readonly ProviderCatalogEntry[] | null;
-  contractSummary: AccountContractSummary | null;
   usage: UsageWindow;
+  providerUsage: ProviderUsageResponse | null;
   limits: UsageLimitView[];
   edits: AccountUsageEdits | undefined;
   now: number;
@@ -398,7 +381,6 @@ const emit = defineEmits<{
   toggle: [];
   verify: [];
   "refresh-usage": [];
-  "open-provider": [];
   "reload-usage": [];
   "open-wizard": [];
   "menu-select": [key: string | number];
@@ -414,6 +396,7 @@ const isGo = computed(() => (
   props.account.provider_id === "opencode" && props.account.offering_id === "go"
 ));
 const isCustom = computed(() => isCustomApiAccount(props.account));
+const isOfficialCn = computed(() => isOfficialCnPlanAccount(props.account));
 const plan = computed(() => props.catalog?.find((entry) => (
   entry.provider_id === props.account.provider_id
   && entry.offering_id === props.account.offering_id
@@ -471,6 +454,13 @@ const planWarning = computed(() => {
       message: t("目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；验证连接会发送一次最小真实请求，可能产生服务商费用。"),
     };
   }
+  if (warning === "subscription-risk") {
+    return {
+      type: "warning" as const,
+      title: t("订阅制"),
+      message: t("订阅制方案：额度、计费与续费由服务商订阅条款管理。"),
+    };
+  }
   return null;
 });
 
@@ -517,6 +507,10 @@ const usageEditorAvailable = computed(() => {
   margin-top: 10px;
 }
 
+.official-plan-usage {
+  margin-top: 10px;
+}
+
 .account-actions {
   display: grid;
   grid-template-columns: repeat(4, 40px);
@@ -540,47 +534,14 @@ const usageEditorAvailable = computed(() => {
   grid-column: 2;
 }
 
-.account-action--edit {
-  grid-column: 3;
-}
-
 .account-action--menu {
   grid-column: 4;
-}
-
-.account-contract {
-  display: grid;
-  justify-items: start;
-  gap: 4px;
-  margin-top: 10px;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-sm);
-}
-.account-contract__label {
-  margin: 0;
-  color: var(--ocg-ink);
-  font-weight: 600;
-}
-.account-contract p {
-  margin: 0;
 }
 
 .custom-endpoint {
   display: grid;
   justify-items: start;
   gap: 8px;
-}
-
-.goat-connection {
-  display: grid;
-  justify-items: start;
-  gap: 8px;
-}
-
-.goat-connection__status {
-  margin: 0;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-sm);
 }
 
 .custom-endpoint__meta {

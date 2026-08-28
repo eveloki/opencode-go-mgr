@@ -11,11 +11,15 @@ pub const OPENCODE_PROVIDER_ID: &str = "opencode";
 pub const COMMAND_CODE_PROVIDER_ID: &str = "command-code";
 pub const OPENCODE_ZEN_FREE_PROVIDER_ID: &str = "opencode-zen-free";
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
+pub const MINIMAX_PROVIDER_ID: &str = "minimax";
+pub const KIMI_PROVIDER_ID: &str = "kimi";
 
 pub const GO_OFFERING_ID: &str = "go";
 pub const GOAT_OFFERING_ID: &str = "goat";
 pub const ANONYMOUS_FREE_OFFERING_ID: &str = "anonymous-free";
 pub const CUSTOM_API_OFFERING_ID: &str = "api";
+pub const MINIMAX_CN_OFFERING_ID: &str = "cn";
+pub const KIMI_CN_OFFERING_ID: &str = "cn";
 
 /// Client-facing Alias. Go still owns the published kebab alias; GOAT maps it
 /// internally to the slash raw ID and stays non-routeable.

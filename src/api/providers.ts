@@ -605,6 +605,24 @@ export const providerApi = {
     })),
   getProviderPricing: async (providerId: string, offeringId: string) =>
     presentProviderPricing(await dashboardV3.getProviderPricing(providerId, offeringId)),
+  updateProviderPricingMultipliers: async (
+    providerId: string,
+    offeringId: string,
+    expectedPricingRevision: string,
+    multipliers: Array<{ model_id: string; multiplier: number }>,
+  ) => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    return presentProviderPricing(await control.runMutation((expectation) => (
+      dashboardV3.putProviderPricingMultipliers(providerId, offeringId, {
+        expectedPricingRevision,
+        multipliers: multipliers.map((multiplier) => ({
+          modelId: multiplier.model_id,
+          multiplier: multiplier.multiplier,
+        })),
+      }, expectation)
+    )));
+  },
   getGoPricing: async (): Promise<PricingSnapshot> => {
     const result = await dashboardV3.getProviderPricing("opencode", "go");
     if (!result.snapshot) throw new Error("OpenCode Go pricing is not available");
@@ -634,6 +652,13 @@ export const providerApi = {
   },
   getProviderUsage: async (accountId: string) =>
     presentProviderUsage(await dashboardV3.getProviderUsage(accountId)),
+  refreshProviderUsage: async (accountId: string) => {
+    const control = useControlPlaneStore();
+    if (!control.hasTokens()) await control.refresh();
+    return presentProviderUsage(await control.runMutation((expectation) =>
+      dashboardV3.refreshProviderUsage(accountId, expectation)
+    ));
+  },
   updateProviderSettings: async (accountId: string, update: ProviderSettingsUpdate) => {
     const control = useControlPlaneStore();
     if (!control.hasTokens()) await control.refresh();

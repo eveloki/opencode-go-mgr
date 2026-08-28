@@ -191,6 +191,65 @@ impl ProviderScopedPricingSnapshot {
         &self.content_hash
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate(
+        &self,
+        model: &str,
+        prompt: i64,
+        completion: i64,
+        cached: i64,
+        cache_creation: i64,
+        at: DateTime<Utc>,
+    ) -> PricingEstimate {
+        let prompt = prompt.max(0) as f64;
+        let completion = completion.max(0) as f64;
+        let cached = (cached.max(0) as f64).min(prompt);
+        let cache_creation = (cache_creation.max(0) as f64).min(prompt - cached);
+        let uncached = prompt - cached - cache_creation;
+        let Some(value) = select_provider_pricing_value(&self.values, model, prompt as i64, at)
+        else {
+            return PricingEstimate::unpriced(&self.revision);
+        };
+
+        let rates = (
+            value.input_per_million(),
+            value.output_per_million(),
+            value.cache_read_per_million(),
+        );
+        if matches!(rates, (None, None, None)) && value.cache_write_per_million().is_none() {
+            return PricingEstimate::free(&self.revision);
+        }
+        let (Some(input), Some(output), Some(cache_read)) = rates else {
+            return PricingEstimate::unpriced(&self.revision);
+        };
+        let cache_write = value.cache_write_per_million().unwrap_or(input);
+        let raw_cost = (uncached * input
+            + completion * output
+            + cached * cache_read
+            + cache_creation * cache_write)
+            / 1_000_000.0;
+        let estimate = ProviderCostEstimate::from_raw_with_multiplier(
+            raw_cost,
+            value.quota_multiplier(),
+            value.paid_plan_price(),
+            value.plan_limit(),
+        )
+        .expect("validated provider pricing must remain calculable");
+        if estimate.cost_state != ProviderCostState::Priced {
+            return PricingEstimate::unpriced(&self.revision);
+        }
+        PricingEstimate {
+            raw_cost_usd: estimate.raw_cost,
+            quota_debit: estimate.quota_debit,
+            effective_paid_cost_usd: estimate.paid_cost,
+            cost: estimate.quota_debit,
+            pricing_revision_id: Some(self.revision.clone()),
+            quota_multiplier: value.quota_multiplier(),
+            local_adjustment_multiplier: Some(1.0),
+            cost_state: "priced",
+        }
+    }
+
     pub fn to_storage_record(&self) -> Result<ProviderPricingSnapshot> {
         Ok(ProviderPricingSnapshot {
             provider_id: self.provider_id.clone(),
@@ -633,6 +692,141 @@ pub fn latest_provider_pricing_snapshot(
         .as_ref()
         .map(ProviderScopedPricingSnapshot::from_storage_record)
         .transpose()
+}
+
+/// Validate and apply provider-local multiplier overrides. The returned
+/// snapshot is append-only and keeps the verified official rates/evidence;
+/// only the applied quota multiplier and activation identity change.
+pub(crate) fn prepare_provider_multiplier_update(
+    active: &ProviderScopedPricingSnapshot,
+    writes: &[(String, f64)],
+) -> std::result::Result<Option<ProviderScopedPricingSnapshot>, String> {
+    if writes.is_empty() {
+        return Err("at least one multiplier is required".to_string());
+    }
+    let editable_models = active
+        .values
+        .iter()
+        .filter(|value| value.quota_multiplier.is_some())
+        .map(|value| value.model_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut requested = BTreeMap::new();
+    for (model_id, multiplier) in writes {
+        let model_id = model_id.trim();
+        if model_id.is_empty() || !editable_models.contains(model_id) {
+            return Err(format!(
+                "unknown or unpriced provider pricing model `{model_id}`"
+            ));
+        }
+        if !multiplier.is_finite() || *multiplier <= 0.0 || *multiplier > MAX_PRICING_MULTIPLIER {
+            return Err(format!(
+                "multiplier for `{model_id}` must be greater than 0 and at most {MAX_PRICING_MULTIPLIER}"
+            ));
+        }
+        if requested
+            .insert(model_id.to_string(), *multiplier)
+            .is_some()
+        {
+            return Err(format!("duplicate multiplier for `{model_id}`"));
+        }
+    }
+
+    let mut snapshot = active.clone();
+    let mut changed = false;
+    for value in &mut snapshot.values {
+        if let Some(multiplier) = requested.get(&value.model_id)
+            && value.quota_multiplier != Some(*multiplier)
+        {
+            value.quota_multiplier = Some(*multiplier);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+
+    let mut revision_input = active.revision.clone();
+    for (model_id, multiplier) in requested {
+        revision_input.push('|');
+        revision_input.push_str(&model_id);
+        revision_input.push('=');
+        revision_input.push_str(&multiplier.to_string());
+    }
+    let digest = format!("{:x}", Sha256::digest(revision_input.as_bytes()));
+    snapshot.revision = format!("local-{}", &digest[..16]);
+    snapshot.activated_at = Utc::now().to_rfc3339();
+    Ok(Some(snapshot))
+}
+
+pub(crate) fn provider_multiplier_deltas(
+    current: &ProviderScopedPricingSnapshot,
+    official: &ProviderScopedPricingSnapshot,
+) -> Vec<PricingMultiplierDelta> {
+    let current = current
+        .values
+        .iter()
+        .filter_map(|value| Some((value.model_id.clone(), value.quota_multiplier?)))
+        .collect::<BTreeMap<_, _>>();
+    official
+        .values
+        .iter()
+        .filter_map(|value| {
+            let official_multiplier = value.quota_multiplier?;
+            let current_multiplier = *current.get(&value.model_id)?;
+            (current_multiplier != official_multiplier).then(|| PricingMultiplierDelta {
+                model_id: value.model_id.clone(),
+                current_multiplier,
+                official_multiplier,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn merge_current_provider_multipliers(
+    current: &ProviderScopedPricingSnapshot,
+    candidate: &mut ProviderScopedPricingSnapshot,
+) {
+    let current = current
+        .values
+        .iter()
+        .filter_map(|value| Some((value.model_id.as_str(), value.quota_multiplier?)))
+        .collect::<HashMap<_, _>>();
+    let mut changed = false;
+    for value in &mut candidate.values {
+        if let Some(multiplier) = current.get(value.model_id.as_str())
+            && value.quota_multiplier != Some(*multiplier)
+        {
+            value.quota_multiplier = Some(*multiplier);
+            changed = true;
+        }
+    }
+    if changed {
+        let mut revision_input = candidate.revision.clone();
+        for value in &candidate.values {
+            if let Some(multiplier) = value.quota_multiplier {
+                revision_input.push('|');
+                revision_input.push_str(&value.model_id);
+                revision_input.push('=');
+                revision_input.push_str(&multiplier.to_string());
+            }
+        }
+        let digest = format!("{:x}", Sha256::digest(revision_input.as_bytes()));
+        candidate.revision = format!("local-{}", &digest[..16]);
+        candidate.activated_at = Utc::now().to_rfc3339();
+    }
+}
+
+pub(crate) fn provider_pricing_semantically_equal(
+    left: &ProviderScopedPricingSnapshot,
+    right: &ProviderScopedPricingSnapshot,
+) -> bool {
+    left.provider_id == right.provider_id
+        && left.offering_id == right.offering_id
+        && left.document_updated_at == right.document_updated_at
+        && left.source_url == right.source_url
+        && left.content_hash == right.content_hash
+        && left.evidence == right.evidence
+        && left.values == right.values
 }
 
 // Audit reference only; the runtime never fetches supplier pricing pages:
@@ -1330,6 +1524,104 @@ fn select_priced_model<'a>(
         .max_by_key(|entry| entry.model_id.len())
 }
 
+fn select_provider_pricing_value<'a>(
+    values: &'a [ProviderPricingValue],
+    model: &str,
+    prompt_tokens: i64,
+    at: DateTime<Utc>,
+) -> Option<&'a ProviderPricingValue> {
+    let requested = provider_model_identities(model);
+    let exact = values
+        .iter()
+        .filter(|value| {
+            provider_value_identities(value)
+                .iter()
+                .any(|id| requested.contains(id))
+        })
+        .collect::<Vec<_>>();
+    let matched = if exact.is_empty() {
+        let suffix = values
+            .iter()
+            .filter(|value| {
+                provider_value_identities(value).iter().any(|value_id| {
+                    requested.iter().any(|requested_id| {
+                        value_id.len() >= 3
+                            && requested_id.len() >= 3
+                            && (value_id.ends_with(requested_id)
+                                || requested_id.ends_with(value_id))
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let model_groups = suffix
+            .iter()
+            .map(|value| canonical_display_name(value.display_name()))
+            .collect::<HashSet<_>>();
+        if model_groups.len() != 1 {
+            return None;
+        }
+        suffix
+    } else {
+        exact
+    };
+    let candidates = matched
+        .into_iter()
+        .filter(|value| {
+            value
+                .min_input_tokens()
+                .is_none_or(|minimum| prompt_tokens >= minimum)
+                && value
+                    .max_input_tokens()
+                    .is_none_or(|maximum| prompt_tokens <= maximum)
+        })
+        .collect::<Vec<_>>();
+    select_provider_time_window(&candidates, at)
+}
+
+fn provider_model_identities(model: &str) -> HashSet<String> {
+    let mut identities = HashSet::new();
+    identities.insert(canonical_display_name(model));
+    if let Some(leaf) = model.trim().rsplit('/').next() {
+        identities.insert(canonical_display_name(leaf));
+    }
+    identities.retain(|identity| !identity.is_empty());
+    identities
+}
+
+fn provider_value_identities(value: &ProviderPricingValue) -> HashSet<String> {
+    let mut identities = provider_model_identities(value.model_id());
+    identities.insert(canonical_display_name(value.display_name()));
+    identities.retain(|identity| !identity.is_empty());
+    identities
+}
+
+fn select_provider_time_window<'a>(
+    candidates: &[&'a ProviderPricingValue],
+    at: DateTime<Utc>,
+) -> Option<&'a ProviderPricingValue> {
+    let scheduled = candidates
+        .iter()
+        .any(|entry| entry.time_window() != PricingTimeWindow::Always);
+    if scheduled {
+        let preferred = if is_official_peak_utc(at) {
+            PricingTimeWindow::Peak
+        } else {
+            PricingTimeWindow::OffPeak
+        };
+        return candidates
+            .iter()
+            .copied()
+            .find(|entry| entry.time_window() == preferred)
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .copied()
+                    .find(|entry| entry.time_window() == PricingTimeWindow::Always)
+            });
+    }
+    candidates.first().copied()
+}
+
 fn is_official_peak_utc(at: DateTime<Utc>) -> bool {
     // Official Go docs: DeepSeek Peak hours are 01:00-04:00 and 06:00-10:00 UTC.
     let minutes = at.hour() * 60 + at.minute();
@@ -1607,7 +1899,8 @@ mod tests {
         embedded_seed, ensure_current_adjustment_policy, ensure_seed_model_coverage,
         fetch_official_snapshot, latest_provider_pricing_snapshot,
         legacy_policy_needs_multiplier_repair, parse_goat_html, parse_official_html,
-        provider_pricing_capability, quota_multiplier, store_provider_pricing_snapshot,
+        prepare_provider_multiplier_update, provider_pricing_capability, quota_multiplier,
+        store_provider_pricing_snapshot,
     };
     use chrono::{DateTime, Utc};
 
@@ -1822,6 +2115,64 @@ mod tests {
     }
 
     #[test]
+    fn provider_multiplier_override_round_trips_and_drives_estimates() {
+        let value = ProviderPricingValue::new(
+            "captured-model",
+            "Captured Model",
+            Some(1.0),
+            Some(2.0),
+            Some(0.5),
+            None,
+            Some(60.0),
+            Some(15.0),
+            Some(10.0),
+            Some("USD".to_string()),
+            None,
+            None,
+            super::PricingTimeWindow::Always,
+        )
+        .unwrap();
+        let active = ProviderScopedPricingSnapshot::new(
+            COMMAND_CODE_PROVIDER_ID,
+            GOAT_OFFERING_ID,
+            "official-1",
+            "2030-01-01T00:00:00Z",
+            None,
+            GOAT_SOURCE_URL,
+            "content-1",
+            ProviderPricingEvidence::Verified,
+            vec![value],
+        )
+        .unwrap();
+        assert_eq!(active.values()[0].quota_multiplier(), Some(4.0));
+
+        let overridden =
+            prepare_provider_multiplier_update(&active, &[("captured-model".to_string(), 2.0)])
+                .unwrap()
+                .unwrap();
+        assert_ne!(overridden.revision(), active.revision());
+        assert_eq!(overridden.values()[0].quota_multiplier(), Some(2.0));
+
+        let record = overridden.to_storage_record().unwrap();
+        let loaded = ProviderScopedPricingSnapshot::from_storage_record(&record).unwrap();
+        assert_eq!(loaded.values()[0].quota_multiplier(), Some(2.0));
+        let estimate = loaded.estimate(
+            "captured-model",
+            1_000_000,
+            0,
+            0,
+            0,
+            DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        assert_eq!(estimate.raw_cost_usd, Some(1.0));
+        assert_eq!(estimate.quota_multiplier, Some(2.0));
+        assert_eq!(estimate.quota_debit, Some(2.0));
+        assert!((estimate.effective_paid_cost_usd.unwrap() - (1.0 / 3.0)).abs() < 1e-12);
+    }
+
+    #[test]
     fn goat_manual_pricing_refresh_uses_the_verified_official_source() {
         let capability =
             provider_pricing_capability(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
@@ -1874,6 +2225,57 @@ mod tests {
                 .iter()
                 .any(|value| value.model_id() == "laguna-s-2-1-free")
         );
+
+        let estimate = snapshot.estimate("vendor/minimax-m3", 1_000_000, 100_000, 0, 0, Utc::now());
+        assert_eq!(estimate.cost_state, "priced");
+        assert!((estimate.raw_cost_usd.unwrap() - 0.42).abs() < 1e-12);
+        assert!((estimate.quota_multiplier.unwrap() - (70.0 / 47.0)).abs() < 1e-12);
+        assert!((estimate.cost.unwrap() - (0.42 * 70.0 / 47.0)).abs() < 1e-12);
+        assert!((estimate.effective_paid_cost_usd.unwrap() - (0.42 * 10.0 / 47.0)).abs() < 1e-12);
+
+        let free = snapshot.estimate("laguna-s-2-1-free", 1_000, 100, 0, 0, Utc::now());
+        assert_eq!(free.cost_state, "free");
+        assert_eq!(free.raw_cost_usd, Some(0.0));
+        let unknown = snapshot.estimate("not-in-the-price-table", 1_000, 100, 0, 0, Utc::now());
+        assert_eq!(unknown.cost_state, "unpriced");
+    }
+
+    #[test]
+    fn provider_pricing_matches_vendor_prefixed_catalog_ids_to_unique_display_names() {
+        let snapshot = ProviderScopedPricingSnapshot::new(
+            COMMAND_CODE_PROVIDER_ID,
+            GOAT_OFFERING_ID,
+            "goat-test",
+            "2030-01-01T00:00:00Z",
+            None,
+            GOAT_SOURCE_URL,
+            "hash",
+            ProviderPricingEvidence::Verified,
+            vec![
+                ProviderPricingValue::new(
+                    "tencent-hy3",
+                    "Tencent Hy3",
+                    Some(0.14),
+                    Some(0.58),
+                    Some(0.035),
+                    None,
+                    Some(70.0),
+                    Some(70.0),
+                    Some(10.0),
+                    Some("USD".into()),
+                    None,
+                    None,
+                    super::PricingTimeWindow::Always,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let estimate = snapshot.estimate("provider/hy3", 1_000_000, 0, 0, 0, Utc::now());
+        assert_eq!(estimate.cost_state, "priced");
+        assert_eq!(estimate.raw_cost_usd, Some(0.14));
+        assert_eq!(estimate.quota_multiplier, Some(1.0));
+        assert_eq!(estimate.cost, Some(0.14));
     }
 
     #[test]

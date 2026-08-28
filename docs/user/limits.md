@@ -59,7 +59,11 @@ Every gateway draws a line somewhere. This page is that line — a running list 
 - Command Code GOAT is a live fixed-origin route. Its public `/models` catalog
   is refreshed explicitly on **Providers**; GOAT preset rows default on and
   additional rows default off. It has no official usage API and does not use
-  catalog refresh as Key verification. Custom API is live under the trusted-administrator boundary in
+  catalog refresh as Key verification. Its verified price snapshot estimates
+  new request costs, with a saved editable multiplier per priced model. The
+  account card projects those priced OCG logs into local `$14 / $35 / $70`
+  windows and allows manual baseline correction. This is not official usage:
+  traffic outside OCG and unpriced requests are omitted. Custom API is live under the trusted-administrator boundary in
   [Accounts](accounts.md); it is unpriced, has no official usage path, and its
   catalog, protocol, and pricing controls live on **Providers** as isolated
   `CustomEndpoint` scopes.

@@ -13,7 +13,7 @@ Gateway 监听 `http://<bind>:<port>`，暴露以下端点：
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET`  | `/v1/models` | 带鉴权的本地列表：当前有有效启用协议的 Go 别名、已保存 Zen Free 目录与合格 Custom ID；GET 本身不访问上游 |
+| `GET`  | `/v1/models` | 带鉴权的本地列表：最早 OpenCode Go 静态表授权且当前可路由的 Alias，以及合格 Custom ID；GET 本身不访问上游 |
 | `POST` | `/v1beta/models/{model}:generateContent` | Gemini 非流式生成；`/v1/...` 同样可用 |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini SSE 生成；`/v1/...` 同样可用 |
 | `POST` | `/v1beta/models/{model}:countTokens` | 返回 `501`，Gemini CLI 可回退到本地估算 |
@@ -37,15 +37,15 @@ Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api
 
 ## 别名
 
-客户端发送 **别名**：本地注册表中的稳定小写 kebab-case 名称。现有 OpenCode Go 模型 ID 就是首选别名；大小写折叠的拼写如 `GLM-5.2` 也可接受。
+客户端发送 **别名**：本地注册表中的稳定小写 kebab-case 名称。最早的 OpenCode Go 静态协议表是内置 Alias 的唯一权威；大小写折叠的拼写如 `GLM-5.2` 也可接受。
 
-带鉴权的 `GET /v1/models` 先按注册表顺序列出当前可路由且有有效启用协议的已公布别名（OpenCode Go 与 Zen Free），再并入不与这些别名冲突、同样有有效启用协议的合格 Custom 能力 ID（`owned_by` 为 `custom`）。该端点不会发现、代理或缓存上游目录，也不会写转发日志或改路由状态。Zen 目录只在管理员于 **供应商** 页显式刷新时更新，本端点读取那份已保存快照。已公布的 Go 与 Zen Free 别名不依赖是否存在 Go 账号。合格 Custom ID 来自 enabled + ready 且有 Key 的 Custom 账号（验证为可选）。动态或探测确认的模型不会自动获得新的稳定别名。
+带鉴权的 `GET /v1/models` 先按注册表顺序列出该静态 Go 表授权且当前可路由的 Alias，再并入不与这些 Alias 冲突、同样有有效启用协议的合格 Custom 能力 ID（`owned_by` 为 `custom`）。该端点不会访问上游，也不会写转发日志或改路由状态；显式目录刷新只更新已保存的供应商映射与合约。已保存的 Zen、Command、MiniMax 或 Kimi 模型可以加入已有静态 Alias，但动态目录或探测结果不能创建新的内置 Alias。合格 Custom ID 来自 enabled + ready 且有 Key 的 Custom 账号（验证为可选）。
 
 受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：当前可路由的 OpenCode Go 别名与当前 OpenCode Go 价格快照求交。highspeed 变体继承基价行。空交集返回 `[]`。它不含 Custom ID，也不选账号、不调用上游。
 
-`/v1/models` 可以通过与 OpenCode Go 相同的 canonical Alias 公布 Command Code 模型；只有至少一个供应商 mapping 仍有已启用协议时才公布该 Alias。合格 Custom 声明 ID 即使含 `/` 也可以出现；它们不会折成 kebab 别名。`application-models` 仍是更窄的 Go 与价格交集列表。
+`/v1/models` 可以让 Zen、Command Code、MiniMax 或 Kimi 映射通过静态 Go 表已经授权的同一 canonical Alias 对外供应；只有至少一个供应商 mapping 仍有已启用协议时才公布该 Alias。无法匹配静态 Alias 的内置目录 ID 只能按精确原始 ID 使用，不会作为新 Alias 出现在列表里。合格 Custom 声明 ID 即使含 `/` 也可以出现；它们不会折成 kebab 别名。`application-models` 仍是更窄的 Go 与价格交集列表。
 
-原始上游 ID 在注册表中恰好对应一个 mapping 时，会钉在该 mapping 上——不跨 Plan 回退，也不做 Zen prefer 覆盖——然后才检查可路由性。名称里含 `/`、`_` 或空白时一律视为原始 ID，不会折叠成 kebab 别名（`glm/5.2` 不是 `glm-5.2`）。映射到多个 Plan 的原始 ID（含合格 Custom 能力与另一 Plan）返回 `400`，错误码 `ambiguous_model_id`，且不会调用上游。未知名称——既非已公布别名也非合格 Custom ID——在所有受支持的客户端格式上返回 `400`：Chat Completions、Responses、Messages，以及 Gemini `generateContent` / `streamGenerateContent`。canonical kebab 别名 `deepseek-v4-flash` 可以在已启用的 Go、Zen 与 Command Code mapping 中选择；唯一原始 ID `deepseek/deepseek-v4-flash` 只钉在 Command Code。Zen 的 `foo-free` 同样保留为精确 raw pin，对外公布 Alias 则是 `foo`。
+原始上游 ID 在注册表中恰好对应一个 mapping 时，会钉在该 mapping 上——不跨 Plan 回退，也不做 Zen prefer 覆盖——然后才检查可路由性。内置 raw ID 严格区分大小写；名称里含 `/`、`_` 或空白时同样不会折叠成 kebab 别名（`glm/5.2` 不是 `glm-5.2`）。Custom 能力 ID 保持原有的大小写折叠匹配。精确 raw ID 映射到多个 Plan 时（含合格 Custom 能力与另一 Plan）返回 `400`，错误码 `ambiguous_model_id`，且不会调用上游。未知名称——既非静态授权 Alias、精确保存的内置 raw ID，也非合格 Custom ID——在所有受支持的客户端格式上返回 `400`：Chat Completions、Responses、Messages，以及 Gemini `generateContent` / `streamGenerateContent`。canonical kebab 别名 `deepseek-v4-flash` 只有因为存在于静态 Go 表，才可以在已启用的 Go、Zen 与 Command Code mapping 中选择；唯一原始 ID `deepseek/deepseek-v4-flash` 只钉在 Command Code。Zen 的 `foo-free` 只有当 `foo` 已被静态表授权时才能加入该 Alias，否则只保留精确 `foo-free` raw pin。
 
 转发日志把请求身份与上游身份分开记录，没有 `requested_alias` 字段：
 

@@ -6,10 +6,11 @@
 需要时再绑定一份凭据。额度权威随 Plan 而异：OpenCode Go 按账号 / Key 统计，Zen
 Free 按出口 IP 共享额度与冷却，Custom API 不做供应商额度核算——总得有个人不记账。所有卡片共享一份可手动持久化的全局顺序；请求先经过能力过滤，严格优先级、全局粘性和轮询再复用这份顺序。不存在按模型划分的额度池。
 
-**账号** 负责身份、账号 **Key**、验证、启用状态、卡片顺序、托管注册，以及账号用量
-/ 校准 / 冷却。每张卡展示只读的合约摘要（有效协议，或已关闭 / 不可路由提示），以及指向 **供应商** 对应范围的 **前往供应商**
-深链。本地目录、协议探测、按模型协议覆盖和范围内价格都在
-**供应商** 页，不在账号卡上。
+**账号** 负责身份、账号 **Key**、验证、启用状态、卡片顺序、托管注册，以及可用的账号用量
+/ 冷却状态。账号卡刻意不展示供应商合约与协议细节；本地目录、协议探测、按模型协议覆盖和范围内价格都在
+**供应商** 页。Command Code 没有可机读的账号用量端点，因此 GOAT 卡片显示的是明确标注的本地估算：
+OCG 内已定价请求日志按公开的 `$14 / $35 / $70` 三个窗口累计。其他客户端流量与未定价日志不会计入，
+可通过手工校准修正显示基线。
 
 注册表是密封的。内置 Plan 家族如下：
 
@@ -18,6 +19,8 @@ Free 按出口 IP 共享额度与冷却，Custom API 不做供应商额度核算
 | OpenCode Go | `opencode` / `go` | 是 | 每张卡一份官方分发的 API Key；托管注册仍是 Beta |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 一张不带鉴权头、无需凭据的匿名单例卡；可排序、可启停，不可删除；额度按出口 IP 共享 |
 | Command Code GOAT | `command-code` / `goat` | 是 | 使用公开的供应商目录；GOAT 预设模型默认开启，额外模型在供应商矩阵中默认关闭；没有账号级 GOAT/全部或 Max 模式 |
+| MiniMax CN Token Plan | `minimax` / `cn` | 是 | 使用独立 `sk-cp` Key；固定官方 Chat 路由、鉴权模型目录与手工官方 Token Plan 用量刷新 |
+| Kimi Code CN | `kimi` / `cn` | 是 | 使用独立 Kimi Code Key；固定官方 Chat 路由、鉴权模型目录与手工官方周额度/限频窗口刷新 |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地；每张账号卡保存一个完整推理 Endpoint 和一个上游协议；验证为可选，未验证时显示提示；合格声明 ID 会出现在 `/v1/models`；费用 unpriced/unknown，不扣额度 |
 
 所有持久化变更路径（数据库闸口，以及 dashboard / CLI 共用服务）都会在改动行、revision
@@ -26,10 +29,14 @@ Command Code GOAT 不把目录获取当作 Key 验证；enabled、ready 且 Key 
 也可启用；编辑 Endpoint、能力、Key 或协议会把验证状态重置为 `pending`，但保持启用状态。禁用草稿仍可保存。桌面 UI 只经 Dashboard V3 HTTP 变更，没有独立的
 Tauri invoke 变更路径。
 
-OpenCode Go 与 Command Code GOAT 只接受各自官方 Provider API **Key**；浏览器 Cookie 与反向代理凭据不是账号
+OpenCode Go、Command Code GOAT、MiniMax Token Plan 与 Kimi Code 只接受各自官方 Provider API **Key**；浏览器 Cookie 与反向代理凭据不是账号
 Key。GOAT 是独立的供应商映射，其 Key 只会发送到固定的 Command Code Provider
 API，绝不发往 OpenCode。Custom API
 是独立的受信管理员目的地，不能把 Key 发往 OpenCode endpoint。
+
+MiniMax 与 Kimi 的 Key 同样绑定固定来源：MiniMax CN 使用
+`https://api.minimaxi.com/v1`，Kimi Code CN 使用
+`https://api.kimi.com/coding/v1`。模型和用量只在用户点击面板动作时访问；OCG 不自动轮询订阅接口，显示的用量也不改变推理资格。
 
 Command Code 官方 `GET /models` 是公开的供应商级目录刷新，不能证明已保存 Key 有效。供应商矩阵是唯一模型供应控制面：GOAT 预设默认开启，新发现模型默认关闭，推理返回的 401/403 才是真实 Key 鉴权信号。
 
@@ -91,12 +98,13 @@ Profile，用户登录一次后 Cookie 会长期保留。Google / GitHub 与 Ope
 Cookie/Profile，确认框会明确提示这一点。之后这些登录状态无法从 OCG Manager
 恢复，只能从备份恢复或重新登录。
 
-每张已完成的 OpenCode Go 账号卡显示账号名、冷却状态，以及由本地估算驱动的 5 小时、本周、本月用量条。Zen
-Free 使用独立的匿名、按出口 IP 共享的 free 冷却，不使用某个 Key 的额度。
+每张 ready 的 OpenCode Go 或 GOAT 账号卡都显示账号名、冷却状态，以及 5 小时、本周、本月用量条。
+OpenCode Go 会通过官方端点定期校准本地核算；GOAT 没有该端点，因此显示 OCG 内已定价日志的本地投影。
+Zen Free 使用独立的匿名、按出口 IP 共享的 free 冷却，不使用某个 Key 的额度。
 
 - **用量校准**：每个窗口都可以输入百分比或拖动进度条，将其保存为当前实际用量基线；保存后，OCG
   Manager 记录的成功请求成本会继续累加到该基线上。达到 100% 仍只是提示，不会阻止 Gateway
-  选择这个账号。手工校准对所有已完成账号都可用。
+  选择这个账号。只有 Plan 明确声明该能力时才显示手工校准；GOAT 用它修正 OCG 无法观察到的其他流量。
 - **刷新额度（已完成的 Key / 托管账号）**：官方用量（`/zen/go/v1/usage`）只是周期性校准基线；本节点转发日志成本仍是实时估算。活跃的
   ready 账号约每小时自动对账，不活跃的约每天一次；禁用、未完成或空 Key
   账号不会自动刷新，打开账号页不会触发请求。Gateway 启动时不会立即请求；尚无已保存调度的合格账号会分散到最初

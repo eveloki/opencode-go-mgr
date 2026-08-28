@@ -7,14 +7,15 @@
 use crate::alias::ProviderMapping;
 use crate::custom::CustomAccountRuntime;
 use crate::kernel::ids::{
-    COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, custom_model_id_matches, normalize_model_name,
+    COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, KIMI_PROVIDER_ID,
+    MINIMAX_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    custom_model_id_matches, normalize_model_name,
 };
 use crate::kernel::protocol::{ApiFormat, is_known_model, supported_model_protocol_profiles};
 use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::Account;
 use crate::provider::{
-    BUILTIN_PLANS, COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
+    COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
     OPENCODE_CONSTRUCTABLE_PROTOCOLS, ProviderAdapterKind, ProviderRegistry,
     StructuralProbeCeiling, UpstreamProtocolKind, command_code_goat_includes_model,
 };
@@ -33,6 +34,8 @@ pub const CATALOG_SOURCE_CUSTOM_DISCOVERY: &str = "custom_discovery";
 pub const CATALOG_SOURCE_DECLARED: &str = "account_declared";
 pub const CATALOG_SOURCE_COMMAND_CODE_MODELS: &str = "command_code_get_models";
 pub const CATALOG_SOURCE_OPENCODE_MODELS: &str = "opencode_get_models";
+pub const CATALOG_SOURCE_MINIMAX_CN_MODELS: &str = "minimax_cn_get_models";
+pub const CATALOG_SOURCE_KIMI_CN_MODELS: &str = "kimi_cn_get_models";
 
 pub const NO_ENABLED_UPSTREAM_PROTOCOL: &str =
     "no enabled upstream protocol is available for this model";
@@ -50,6 +53,7 @@ pub fn static_protocol_snapshot_date(provider_id: &str) -> Option<&'static str> 
         COMMAND_CODE_PROVIDER_ID => {
             Some(crate::kernel::protocol::COMMAND_CODE_GOAT_STATIC_PROTOCOL_SNAPSHOT_DATE)
         }
+        MINIMAX_PROVIDER_ID | KIMI_PROVIDER_ID => Some("2026-08-27"),
         _ => None,
     }
 }
@@ -152,22 +156,38 @@ impl ContractScope {
     }
 }
 
-pub fn builtin_provider_scope_ids() -> [&'static str; 3] {
-    [
-        OPENCODE_PROVIDER_ID,
-        OPENCODE_ZEN_FREE_PROVIDER_ID,
-        COMMAND_CODE_PROVIDER_ID,
-    ]
+pub fn builtin_provider_scope_ids() -> Vec<&'static str> {
+    let mut ids = Vec::new();
+    for descriptor in ProviderRegistry::iter() {
+        if descriptor.kind.provider_scope_id().is_some() && !ids.contains(&descriptor.provider_id) {
+            ids.push(descriptor.provider_id);
+        }
+    }
+    ids
 }
 
 pub fn adapter_kind_for_provider_scope(provider_id: &str) -> Option<ProviderAdapterKind> {
-    match provider_id {
-        OPENCODE_PROVIDER_ID => Some(ProviderAdapterKind::OpenCodeGo),
-        OPENCODE_ZEN_FREE_PROVIDER_ID => Some(ProviderAdapterKind::ZenFree),
-        COMMAND_CODE_PROVIDER_ID => Some(ProviderAdapterKind::CommandCodeGoat),
-        CUSTOM_PROVIDER_ID => Some(ProviderAdapterKind::ConfigurableHttp),
-        _ => None,
+    if provider_id == CUSTOM_PROVIDER_ID {
+        // Custom has no provider-level contract, but callers use this lookup
+        // to return the more precise account-owned scope error.
+        return Some(ProviderAdapterKind::ConfigurableHttp);
     }
+    provider_scope_descriptor(provider_id).map(|descriptor| descriptor.kind)
+}
+
+/// Resolve one provider-scoped descriptor without silently choosing a
+/// representative Offering. Provider scopes intentionally support exactly one
+/// non-Custom Offering today; a second Offering fails closed until persistence
+/// and the V3 contract become Offering-aware.
+fn provider_scope_descriptor(provider_id: &str) -> Option<crate::provider::ProviderDescriptor> {
+    let mut matches = ProviderRegistry::iter().filter(|descriptor| {
+        descriptor.provider_id == provider_id && descriptor.kind.provider_scope_id().is_some()
+    });
+    let descriptor = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(descriptor)
 }
 
 pub fn parse_upstream_protocol(value: &str) -> Result<UpstreamProtocolKind, String> {
@@ -409,6 +429,7 @@ impl EffectiveModelContract {
 pub struct EffectiveScopeContract {
     pub scope: ContractScope,
     pub provider_id: String,
+    pub offering_id: String,
     pub adapter_kind: ProviderAdapterKind,
     pub catalog_routable: bool,
     pub production_inference: bool,
@@ -620,6 +641,9 @@ pub fn static_verified_protocols(
         ProviderAdapterKind::CommandCodeGoat => {
             crate::kernel::protocol::snapshot_protocols(COMMAND_CODE_PROVIDER_ID, model_id)
         }
+        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
+            return vec![UpstreamProtocolKind::ChatCompletions];
+        }
         ProviderAdapterKind::ConfigurableHttp => unreachable!("handled above"),
     }
     .into_iter()
@@ -792,15 +816,12 @@ pub fn build_effective_contracts(
 fn representative_descriptor(
     adapter: ProviderAdapterKind,
 ) -> Option<crate::provider::ProviderDescriptor> {
-    BUILTIN_PLANS.iter().find_map(|plan| {
-        let kind = ProviderAdapterKind::from_offering(
-            plan.offering.provider_id,
-            plan.offering.offering_id,
-        )?;
-        (kind == adapter)
-            .then(|| ProviderRegistry::get(plan.offering.provider_id, plan.offering.offering_id))
-            .flatten()
-    })
+    let mut matches = ProviderRegistry::iter().filter(|descriptor| descriptor.kind == adapter);
+    let descriptor = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(descriptor)
 }
 
 fn merge_provider_scope(
@@ -811,7 +832,9 @@ fn merge_provider_scope(
     evidence: &[PersistedModelProtocol],
     overrides: &[PersistedModelProtocolOverride],
 ) -> EffectiveScopeContract {
-    let descriptor = representative_descriptor(adapter).expect("adapter has a catalog offering");
+    let descriptor = provider_scope_descriptor(provider_id)
+        .filter(|descriptor| descriptor.kind == adapter)
+        .expect("provider scope must identify exactly one registered offering");
     let revision = persisted.map(|row| row.revision).unwrap_or(1);
     let (catalog, static_models) = match adapter {
         ProviderAdapterKind::OpenCodeGo => {
@@ -903,6 +926,42 @@ fn merge_provider_scope(
                 models,
             )
         }
+        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
+            let (fallback, source, source_url): (&[&str], _, _) =
+                if adapter == ProviderAdapterKind::MiniMaxCn {
+                    (
+                        &["MiniMax-M3"],
+                        CATALOG_SOURCE_MINIMAX_CN_MODELS,
+                        crate::provider::MINIMAX_CN_BASE_URL,
+                    )
+                } else {
+                    (
+                        &["kimi-for-coding", "kimi-k3"],
+                        CATALOG_SOURCE_KIMI_CN_MODELS,
+                        crate::provider::KIMI_CN_BASE_URL,
+                    )
+                };
+            let models = persisted
+                .filter(|row| !row.catalog_models.is_empty())
+                .map(|row| row.catalog_models.clone())
+                .unwrap_or_else(|| fallback.iter().map(|model| (*model).to_string()).collect());
+            (
+                EffectiveCatalog {
+                    source: persisted
+                        .map(|row| row.catalog_source.clone())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| source.to_string()),
+                    source_url: persisted
+                        .map(|row| row.catalog_source_url.clone())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| source_url.to_string()),
+                    refreshed_at: persisted.and_then(|row| row.catalog_refreshed_at),
+                    models: models.clone(),
+                    refresh_supported: true,
+                },
+                models,
+            )
+        }
         ProviderAdapterKind::ConfigurableHttp => unreachable!("custom uses merge_custom_scope"),
     };
 
@@ -939,6 +998,7 @@ fn merge_provider_scope(
     EffectiveScopeContract {
         scope: ContractScope::provider(provider_id),
         provider_id: provider_id.to_string(),
+        offering_id: descriptor.offering_id.to_string(),
         adapter_kind: adapter,
         catalog_routable: descriptor.inference.catalog_routable,
         production_inference: descriptor.inference.production_inference,
@@ -1010,6 +1070,7 @@ fn merge_custom_scope(
     EffectiveScopeContract {
         scope: ContractScope::custom_endpoint(&runtime.account_id),
         provider_id: CUSTOM_PROVIDER_ID.to_string(),
+        offering_id: CUSTOM_API_OFFERING_ID.to_string(),
         adapter_kind: ProviderAdapterKind::ConfigurableHttp,
         catalog_routable: descriptor.inference.catalog_routable,
         production_inference: descriptor.inference.production_inference,
@@ -1036,6 +1097,9 @@ fn preferred_protocol(
             ocg_domain::protocol::command_code_preferred_format(model_id)
                 .and_then(protocol_from_api)
                 .unwrap_or(UpstreamProtocolKind::ChatCompletions)
+        }
+        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
+            UpstreamProtocolKind::ChatCompletions
         }
         ProviderAdapterKind::ConfigurableHttp => {
             // A Custom endpoint binds every declared model to exactly one
@@ -1247,6 +1311,18 @@ mod tests {
             ContractScope::from_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID, Some("two"));
         assert_ne!(left, right);
         assert!(matches!(left, Some(ContractScope::CustomEndpoint(id)) if id == "one"));
+    }
+
+    #[test]
+    fn provider_scopes_identify_one_exact_registered_offering() {
+        let set = build_effective_contracts(&zen_seed(), &[], empty_persisted());
+        assert_eq!(set.providers.len(), builtin_provider_scope_ids().len());
+        for (provider_id, contract) in &set.providers {
+            let descriptor = ProviderRegistry::get(provider_id, &contract.offering_id)
+                .expect("effective provider scope must identify a registered offering");
+            assert_eq!(descriptor.kind, contract.adapter_kind);
+            assert_eq!(descriptor.provider_id, contract.provider_id);
+        }
     }
 
     #[test]

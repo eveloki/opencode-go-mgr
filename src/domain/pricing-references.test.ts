@@ -8,12 +8,7 @@ import {
 
 test("GOAT reference mirrors the official plan summary and 40 included models", () => {
   assert.equal(PRICING_REFERENCE_CHECKED_AT, "2026-08-24");
-  assert.equal(GOAT_PRICING_REFERENCE.monthlyPriceUsd, 10);
   assert.equal(GOAT_PRICING_REFERENCE.includedModelCount, 40);
-  assert.deepEqual(GOAT_PRICING_REFERENCE.rollingLimitsUsd, {
-    window5h: 14,
-    windowWeek: 35,
-  });
   assert.equal(GOAT_PRICING_REFERENCE.models.length, 40);
   assert.deepEqual(
     GOAT_PRICING_REFERENCE.models.find(({ model }) => model === "GPT-5.6 Sol"),
@@ -23,16 +18,16 @@ test("GOAT reference mirrors the official plan summary and 40 included models", 
       output: 30,
       cacheRead: 0.5,
       cacheWrite: 6.25,
-      monthlyCreditsUsd: 70,
+      quotaMultiplier: 1,
     },
   );
   assert.equal(
     GOAT_PRICING_REFERENCE.models.find(({ model }) => model === "Gemini 3.7 Flash")
-      ?.monthlyCreditsUsd,
-    40,
+      ?.quotaMultiplier,
+    1.75,
   );
   assert.equal(
-    GOAT_PRICING_REFERENCE.models.filter(({ monthlyCreditsUsd }) => monthlyCreditsUsd === "free").length,
+    GOAT_PRICING_REFERENCE.models.filter(({ quotaMultiplier }) => quotaMultiplier === null).length,
     2,
   );
   assert.equal(GOAT_PRICING_REFERENCE.models.some(({ model }) => model.startsWith("Claude")), false);
@@ -40,7 +35,7 @@ test("GOAT reference mirrors the official plan summary and 40 included models", 
   assert.match(GOAT_PRICING_REFERENCE.pricingUrl, /commandcode\.ai\/docs\/plans\/goat#models-included$/);
 });
 
-test("GOAT pricing is a display-only official reference", () => {
+test("GOAT pricing keeps a static fallback and exposes editable saved multipliers", () => {
   const files = [
     new URL("./pricing-references.ts", import.meta.url),
     new URL("../components/GoatQuotaReference.vue", import.meta.url),
@@ -58,6 +53,10 @@ test("GOAT pricing is a display-only official reference", () => {
   assert.match(quota, /class="pricing-ledger"/);
   assert.match(quota, /<n-data-table/);
   assert.match(quota, /formatPricingRate/);
+  assert.match(quota, /t\("官方倍率"\)/);
+  assert.match(quota, /NInputNumber/);
+  assert.match(quota, /emit\("save-multiplier"/);
+  assert.doesNotMatch(quota, /5 小时额度|周额度|月额度|月费|monthlyPriceUsd|monthlyCreditsUsd|model_allowance|rollingLimitsUsd/);
   assert.doesNotMatch(quota, /<table|goat-pricing-summary|goat-pricing-table-wrap/);
   assert.doesNotMatch(quota, /provider-usage|used|remaining|percentage/);
 });

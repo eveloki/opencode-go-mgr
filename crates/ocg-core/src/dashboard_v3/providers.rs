@@ -34,9 +34,10 @@ use crate::models::{Account as ModelAccount, AppConfig, ForwardLog, UpstreamChan
 use crate::protocol_probe::{self, ProtocolProbeContext, ProtocolProbeRunError};
 use crate::provider::{
     BUILTIN_PLANS, BuiltinPlan, COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID,
-    ConnectionVerificationStatus, GO_OFFERING_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, ProviderRegistry, ZEN_FREE_ACCOUNT_ID,
-    default_verification_status,
+    ConnectionVerificationStatus, GO_OFFERING_ID, KIMI_CN_BASE_URL, KIMI_CN_OFFERING_ID,
+    KIMI_PROVIDER_ID, MINIMAX_CN_BASE_URL, MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind, ProviderRegistry,
+    ZEN_FREE_ACCOUNT_ID, default_verification_status,
 };
 use crate::provider_contracts::{
     self, ContractScope, EffectiveContractSet, EffectiveModelContract as DomainModelContract,
@@ -438,6 +439,89 @@ pub(super) async fn refresh_contract_catalog(
                 now,
             )
             .map_err(V3ApiError::internal)?;
+            state
+                .reload_provider_contracts_locked(&db)
+                .map_err(V3ApiError::internal)?;
+        }
+        state.routing.reset();
+        let _revision = state.bump_settings_revision();
+        return provider_contracts_response(&state);
+    }
+    if matches!(scope_id.as_str(), MINIMAX_PROVIDER_ID | KIMI_PROVIDER_ID) {
+        let _refresh = state.provider_models_refresh.try_lock().map_err(|_| {
+            V3ApiError::conflict_at(&state, "provider model refresh is already running")
+        })?;
+        let (account, config, key, base_url, source_url, source) = {
+            let _settings_update = state.settings_update.lock();
+            check_expectation(&state, &expectation)?;
+            validate_provider_scope(&state, &scope)?;
+            let now = Utc::now();
+            let account = state
+                .db
+                .lock()
+                .list_accounts()
+                .map_err(V3ApiError::internal)?
+                .into_iter()
+                .find(|account| {
+                    account.provider_id == scope_id
+                        && account.offering_id
+                            == if scope_id == MINIMAX_PROVIDER_ID {
+                                MINIMAX_CN_OFFERING_ID
+                            } else {
+                                KIMI_CN_OFFERING_ID
+                            }
+                        && account_is_available_for_at(account, UpstreamChannel::Go, &[], now)
+                })
+                .ok_or_else(|| {
+                    V3ApiError::invalid_request_at(
+                        &state,
+                        "no eligible account is available for provider catalog refresh",
+                    )
+                })?;
+            let key = state
+                .decrypt_key(&account.key_cipher)
+                .map_err(V3ApiError::internal)?;
+            let config = state.config();
+            let (base_url, source) = if scope_id == MINIMAX_PROVIDER_ID {
+                (
+                    MINIMAX_CN_BASE_URL.to_string(),
+                    provider_contracts::CATALOG_SOURCE_MINIMAX_CN_MODELS,
+                )
+            } else {
+                (
+                    KIMI_CN_BASE_URL.to_string(),
+                    provider_contracts::CATALOG_SOURCE_KIMI_CN_MODELS,
+                )
+            };
+            let source_url = goat::goat_models_url_for_base(&base_url);
+            (account, config, key, base_url, source_url, source)
+        };
+        let models = goat::probe_provider_models(
+            &config,
+            &key,
+            &base_url,
+            if scope_id == MINIMAX_PROVIDER_ID {
+                "MiniMax CN"
+            } else {
+                "Kimi Code CN"
+            },
+        )
+        .await
+        .map_err(|failure| V3ApiError::outbound_failed(&state, failure.message))?;
+        let now = Utc::now();
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &expectation)?;
+        let current = load_model_account(&state, &account.id)?;
+        if current.updated_at != account.updated_at || current.key_cipher != account.key_cipher {
+            return Err(V3ApiError::conflict_at(
+                &state,
+                "the selected account changed while models were refreshing",
+            ));
+        }
+        {
+            let db = state.db.lock();
+            db.set_contract_catalog(&scope, &models, Some(now), source, &source_url, now)
+                .map_err(V3ApiError::internal)?;
             state
                 .reload_provider_contracts_locked(&db)
                 .map_err(V3ApiError::internal)?;
@@ -986,6 +1070,7 @@ fn prepare_protocol_probe(
                 && match adapter {
                     ProviderAdapterKind::OpenCodeGo => account.offering_id == GO_OFFERING_ID,
                     ProviderAdapterKind::ZenFree => account.id == ZEN_FREE_ACCOUNT_ID,
+                    ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => false,
                     ProviderAdapterKind::ConfigurableHttp
                     | ProviderAdapterKind::CommandCodeGoat => false,
                 }

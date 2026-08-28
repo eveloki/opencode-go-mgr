@@ -1,14 +1,15 @@
-//! Dashboard V3 local account usage slice: auth, CAS, projections, and V2 coexistence.
+//! Dashboard V3 account usage slice: auth, CAS, projections, sealed-provider
+//! manual refresh, and V2 coexistence.
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, Local, Utc};
 use ocg_core::dashboard_v3::{
     ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND,
     ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, ProviderUsage, UsageWindow,
     install_official_pricing_fetch_error_for_tests,
 };
 use ocg_core::db::{AccountUsageCalibrationSnapshot, CURRENT_SCHEMA_VERSION};
-use ocg_core::models::CreditBalance;
 use ocg_core::models::UsageWindowKind;
+use ocg_core::models::{CreditBalance, ForwardLog};
 use ocg_core::provider::{
     COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GOAT_OFFERING_ID,
     ZEN_FREE_ACCOUNT_ID,
@@ -187,6 +188,7 @@ async fn create_go(harness: &V3Harness) -> String {
 }
 
 async fn create_goat(harness: &V3Harness) -> String {
+    let purchase_date = Local::now().date_naive().format("%Y-%m-%d").to_string();
     let (status, body) = send_json(
         harness,
         Method::POST,
@@ -198,13 +200,57 @@ async fn create_goat(harness: &V3Harness) -> String {
                 "key": "goat-key",
                 "providerId": COMMAND_CODE_PROVIDER_ID,
                 "offeringId": GOAT_OFFERING_ID,
-                "purchaseDate": "2026-01-31"
+                "purchaseDate": purchase_date
             }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body["account"]["id"].as_str().unwrap().to_string()
+}
+
+fn seed_priced_goat_request(harness: &V3Harness, account_id: &str, cost: f64) {
+    harness
+        .state
+        .db
+        .lock()
+        .log_forward(&ForwardLog {
+            id: 0,
+            timestamp: Utc::now(),
+            model: "deepseek/deepseek-v4-flash".into(),
+            account_id: account_id.into(),
+            account_name: "GOAT".into(),
+            route_account_id: Some(account_id.into()),
+            provider_id: Some(COMMAND_CODE_PROVIDER_ID.into()),
+            offering_id: Some(GOAT_OFFERING_ID.into()),
+            credential_account_id: Some(account_id.into()),
+            client_key_id: None,
+            client_key_name: None,
+            status: "success".into(),
+            http_status: Some(200),
+            route: "proxy".into(),
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: Some(cost),
+            raw_cost_usd: Some(cost),
+            quota_debit: Some(cost),
+            effective_paid_cost_usd: Some(cost),
+            pricing_revision_id: Some("goat-test-pricing".into()),
+            quota_multiplier: Some(1.0),
+            local_adjustment_multiplier: Some(1.0),
+            service_tier: None,
+            cost_state: "priced".into(),
+            error_message: None,
+            request_id: Some("goat-usage-estimate".into()),
+            attempt: Some(1),
+            error_source: None,
+            error_stage: None,
+            duration_ms: Some(5),
+            diagnostic: None,
+        })
+        .unwrap();
 }
 
 fn seed_credit_balance(harness: &V3Harness, account_id: &str) {
@@ -242,7 +288,7 @@ fn dashboard_v3_schema_version_stays_at_v32() {
 }
 
 #[test]
-fn usage_slice_source_has_no_outbound_io_or_plugin_hierarchy() {
+fn usage_slice_keeps_outbound_io_behind_the_sealed_plan_client() {
     let source = include_str!("../src/dashboard_v3/usage.rs");
     for needle in [
         "reqwest",
@@ -260,6 +306,7 @@ fn usage_slice_source_has_no_outbound_io_or_plugin_hierarchy() {
             "usage.rs must not contain `{needle}`"
         );
     }
+    assert!(source.contains("crate::plan_usage::fetch"));
     assert!(
         !source.lines().any(|line| {
             let trimmed = line.trim_start();
@@ -342,6 +389,23 @@ async fn dashboard_v3_usage_missing_account_is_json_404() {
 }
 
 #[tokio::test]
+async fn provider_usage_refresh_rejects_non_cn_plans_before_outbound_io() {
+    let harness = start_loopback("usage-refresh-wrong-plan").await;
+    let go_id = create_go(&harness).await;
+    let (status, body) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/accounts/{go_id}/provider-usage"),
+        &cas(&harness, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_v3_error(&body, ERROR_INVALID_REQUEST);
+    assert_secret_free(&body);
+    harness.stop();
+}
+
+#[tokio::test]
 async fn dashboard_v3_go_usage_uses_live_pricing_limits_for_seeded_windows() {
     let harness = start_loopback("usage-go-seed").await;
     let go_id = create_go(&harness).await;
@@ -417,10 +481,20 @@ async fn dashboard_v3_go_usage_uses_live_pricing_limits_for_seeded_windows() {
 }
 
 #[tokio::test]
-async fn dashboard_v3_goat_usage_calibration_is_unavailable_and_does_not_bump() {
-    let harness = start_loopback("usage-goat-5h").await;
+async fn dashboard_v3_goat_estimates_priced_logs_and_allows_local_calibration() {
+    let harness = start_loopback("usage-goat-local-estimate").await;
     let goat_id = create_goat(&harness).await;
+    seed_priced_goat_request(&harness, &goat_id, 2.8);
     let before = harness.state.settings_revision();
+
+    let (status, estimated) = harness
+        .get_json(&format!("{}/accounts/{goat_id}/usage", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{estimated}");
+    assert_eq!(estimated["window5h"], 2.8);
+    assert_eq!(estimated["windowWeek"], 2.8);
+    assert_eq!(estimated["windowMonth"], 2.8);
+    assert_eq!(estimated["pricingRevision"], Value::Null);
 
     let (status, body) = send_json(
         &harness,
@@ -436,16 +510,45 @@ async fn dashboard_v3_goat_usage_calibration_is_unavailable_and_does_not_bump() 
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_v3_error(&body, ERROR_INVALID_REQUEST);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("manual usage calibration is unavailable")
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["usage"]["window5h"], 7.0);
+    assert_eq!(body["usage"]["windowWeek"], 2.8);
+    assert_eq!(body["usage"]["windowMonth"], 2.8);
     assert_eq!(harness.state.settings_revision(), before);
 
+    let (status, body) = harness
+        .get_json(&format!("{}/accounts/{goat_id}/usage", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["window5h"], 7.0);
+    assert_eq!(body["windowWeek"], 2.8);
+    assert_eq!(body["windowMonth"], 2.8);
+
+    let (status, provider) = harness
+        .get_json(&format!(
+            "{}/accounts/{goat_id}/provider-usage",
+            harness.v3_base
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{provider}");
+    assert_eq!(provider["availability"], "local_state");
+    assert_eq!(provider["pricingRevision"], Value::Null);
+    let provider = parse_provider_usage(&provider);
+    assert_eq!(provider.quota_windows.len(), 3);
+    for (kind, limit, used) in [
+        ("five_hours", 14.0, 7.0),
+        ("week", 35.0, 2.8),
+        ("month", 70.0, 2.8),
+    ] {
+        let window = provider
+            .quota_windows
+            .iter()
+            .find(|window| window.window_kind == kind)
+            .unwrap();
+        assert_eq!(window.limit_value, Some(limit));
+        assert!((window.used - used).abs() < 1e-9);
+        assert_eq!(window.source, "command-code-goat-local");
+    }
     harness.stop();
 }
 
@@ -504,7 +607,6 @@ async fn dashboard_v3_zen_provider_usage_is_the_synthetic_free_window() {
 #[tokio::test]
 async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
     let harness = start_loopback("usage-unavailable").await;
-    let goat_id = create_goat(&harness).await;
 
     let (status, custom) = send_json(
         &harness,
@@ -529,11 +631,9 @@ async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
     assert_eq!(status, StatusCode::OK, "{custom}");
     let custom_id = custom["account"]["id"].as_str().unwrap().to_string();
 
-    for id in [&goat_id, &custom_id] {
-        seed_credit_balance(&harness, id);
-    }
+    seed_credit_balance(&harness, &custom_id);
 
-    for (id, experimental) in [(&goat_id, false), (&custom_id, false)] {
+    for (id, experimental) in [(&custom_id, false)] {
         let (status, body) = harness
             .get_json(&format!("{}/accounts/{id}/provider-usage", harness.v3_base))
             .await;

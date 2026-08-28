@@ -3,6 +3,8 @@ import type { Ref } from "vue";
 import { useMessage } from "naive-ui";
 import { DashboardRequestError, dashboardApi } from "../api/dashboard";
 import type { Account, PricingLimits, UsageWindow } from "../api/dashboard";
+import { providerApi } from "../api/providers.ts";
+import type { ProviderQuotaWindow, ProviderUsageResponse } from "../api/providers.ts";
 import {
   defaultResetsInMinutes,
   isUsageLimitReached,
@@ -18,7 +20,7 @@ import {
 } from "./accounts-usage.ts";
 import type { UsageEditState, UsageKey } from "./accounts-usage.ts";
 import { accountIsReady, isUsageRefreshBlocked } from "./account-display.ts";
-import { isCommandCodeGoatAccount } from "./account-providers.ts";
+import { isCommandCodeGoatAccount, isOfficialCnPlanAccount } from "./account-providers.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
@@ -30,9 +32,9 @@ export type UsageLimitView = { key: UsageKey; label: string; limit: number };
 /**
  * Quota window state for the account list: OpenCode Go pricing limits,
  * per-account usage snapshots, the manual calibration drafts, and the
- * official-usage refresh flow (including 429 throttle handling). GOAT is
- * unpriced and has no machine-readable usage endpoint, so it does not use
- * window quotas or calibration.
+ * official-usage refresh flow (including 429 throttle handling). GOAT has no
+ * machine-readable usage endpoint, so its windows project locally priced OCG
+ * request logs and allow an explicit manual correction.
  */
 export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
   const message = useMessage();
@@ -40,6 +42,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
   const quotaLimits = ref<PricingLimits | null>(null);
   const quotaLimitsLoading = ref(false);
   const quotaLimitsError = ref("");
+  const providerUsageLimits = ref<Record<string, UsageLimitView[]>>({});
   const usageLimits = computed<UsageLimitView[]>(() => {
     const limits = quotaLimits.value;
     if (!limits) return [];
@@ -51,8 +54,11 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
   });
 
   function usageLimitsFor(account: Account): UsageLimitView[] {
-    if (isCommandCodeGoatAccount(account)) return [];
-    const limits = quotaLimits.value;
+    const providerLimits = providerUsageLimits.value[account.id];
+    if (providerLimits?.length) return providerLimits;
+    const limits = account.provider_id === "opencode" && account.offering_id === "go"
+      ? quotaLimits.value
+      : null;
     if (!limits) return [];
     return [
       { key: "window_5h", label: t("5小时"), limit: limits.window_5h },
@@ -61,7 +67,23 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     ];
   }
 
+  function limitsFromProviderWindows(windows: ProviderQuotaWindow[]): UsageLimitView[] {
+    const byKind = new Map(windows.map((window) => [window.window_kind, window]));
+    const definitions: Array<[UsageKey, string, string]> = [
+      ["window_5h", "five_hours", t("5小时")],
+      ["window_week", "week", t("本周")],
+      ["window_month", "month", t("本月")],
+    ];
+    return definitions.flatMap(([key, kind, label]) => {
+      const limit = byKind.get(kind)?.limit_value;
+      return typeof limit === "number" && Number.isFinite(limit) && limit > 0
+        ? [{ key, label, limit }]
+        : [];
+    });
+  }
+
   const usageMap = ref<Record<string, UsageWindow>>({});
+  const providerUsageMap = ref<Record<string, ProviderUsageResponse>>({});
   const usageEdits = ref<Record<string, AccountUsageEdits>>({});
   const usageLoading = ref<Record<string, boolean>>({});
   const usageLoadErrors = ref<Record<string, string | null>>({});
@@ -236,12 +258,18 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     if (
       usageRefreshLoading.value[accountId]
       || usageLoading.value[accountId]
-      || isUsageRefreshBlocked(account)
+      || (!isOfficialCnPlanAccount(account) && isUsageRefreshBlocked(account))
     ) {
       return;
     }
     usageRefreshLoading.value = { ...usageRefreshLoading.value, [accountId]: true };
     try {
+      if (isOfficialCnPlanAccount(account)) {
+        const result = await providerApi.refreshProviderUsage(accountId);
+        providerUsageMap.value = { ...providerUsageMap.value, [accountId]: result };
+        message.success(t("成功"));
+        return;
+      }
       const result = await dashboardApi.refreshAccountUsage(accountId);
       usageMap.value[accountId] = result.usage;
       syncUsageEdits(accountId, result.usage);
@@ -289,7 +317,25 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     usageLoading.value[accountId] = true;
     usageLoadErrors.value[accountId] = null;
     try {
-      const usage = await dashboardApi.getAccountUsage(accountId);
+      const account = accounts.value.find(({ id }) => id === accountId);
+      if (account && isOfficialCnPlanAccount(account)) {
+        const providerUsage = await providerApi.getProviderUsage(accountId);
+        providerUsageMap.value = { ...providerUsageMap.value, [accountId]: providerUsage };
+        usageMap.value[accountId] = blankUsage(accountId);
+        return;
+      }
+      const [usage, providerUsage] = await Promise.all([
+        dashboardApi.getAccountUsage(accountId),
+        account && isCommandCodeGoatAccount(account)
+          ? providerApi.getProviderUsage(accountId)
+          : Promise.resolve(null),
+      ]);
+      if (providerUsage) {
+        providerUsageLimits.value = {
+          ...providerUsageLimits.value,
+          [accountId]: limitsFromProviderWindows(providerUsage.quota_windows),
+        };
+      }
       usageMap.value[accountId] = usage;
       syncUsageEdits(accountId, usage);
     } catch (error) {
@@ -319,6 +365,7 @@ export function useAccountUsage(accounts: Ref<Account[]>, now: Ref<number>) {
     usageLimits,
     usageLimitsFor,
     usageMap,
+    providerUsageMap,
     usageEdits,
     usageLoading,
     usageLoadErrors,

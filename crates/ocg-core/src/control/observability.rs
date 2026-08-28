@@ -14,8 +14,10 @@ use crate::models::{
     Account, DailyModelTokens, DashboardSummary, ForwardLog, ForwardLogClientKey, ForwardLogPage,
     ForwardLogSummary, GatewayLog, UpstreamChannel,
 };
-use crate::provider_contracts::EffectiveContractSet;
+use crate::provider::CredentialKind;
+use crate::provider_contracts::{ContractScope, EffectiveContractSet};
 use crate::redaction::redact_known_secret;
+use crate::routing_runtime::{account_channel, account_is_available_for_at};
 use chrono::{DateTime, SecondsFormat, Utc};
 use std::collections::{BTreeMap, HashSet};
 
@@ -168,6 +170,7 @@ fn application_alias_is_priced(alias: &str, priced: &HashSet<&str>) -> bool {
 pub(crate) fn dashboard_summary(
     db: &Database,
     gateway_running: bool,
+    contracts: &EffectiveContractSet,
     decrypt_key: impl Fn(&str) -> Option<String>,
 ) -> Result<DashboardSummary, ObservabilityError> {
     let accounts = db.list_accounts()?;
@@ -177,7 +180,13 @@ pub(crate) fn dashboard_summary(
     let available_accounts = accounts
         .iter()
         .filter(|account| {
-            dashboard_account_is_available(account, now, free_channel_cooling, &decrypt_key)
+            dashboard_account_is_available(
+                account,
+                now,
+                free_channel_cooling,
+                contracts,
+                &decrypt_key,
+            )
         })
         .count();
     let (today_cost, week_cost, month_cost) = db.total_usage()?;
@@ -195,27 +204,34 @@ fn dashboard_account_is_available(
     account: &Account,
     now: DateTime<Utc>,
     free_channel_cooling: bool,
+    contracts: &EffectiveContractSet,
     decrypt_key: &impl Fn(&str) -> Option<String>,
 ) -> bool {
-    if !account.enabled
-        || !account.setup_step.is_ready()
-        || account.auth_error.is_some()
-        || account.validate_provider_binding().is_err()
+    let Some(channel) = account_channel(account) else {
+        return false;
+    };
+    if !account_is_available_for_at(account, channel, &[], now)
+        || (channel == UpstreamChannel::Free && free_channel_cooling)
     {
         return false;
     }
-    match (account.provider_id.as_str(), account.offering_id.as_str()) {
-        (crate::provider::OPENCODE_PROVIDER_ID, crate::provider::GO_OFFERING_ID) => {
-            !account.is_cooling_for(UpstreamChannel::Go, now)
-                && !account.key_cipher.is_empty()
-                && decrypt_key(&account.key_cipher).is_some_and(|key| !key.trim().is_empty())
+    let credential_available = match account.credential_kind {
+        CredentialKind::ApiKey => {
+            decrypt_key(&account.key_cipher).is_some_and(|key| !key.trim().is_empty())
         }
-        (
-            crate::provider::OPENCODE_ZEN_FREE_PROVIDER_ID,
-            crate::provider::ANONYMOUS_FREE_OFFERING_ID,
-        ) => !free_channel_cooling && !account.is_cooling_for(UpstreamChannel::Free, now),
-        _ => false,
-    }
+        CredentialKind::None => true,
+    };
+    credential_available
+        && ContractScope::from_account(account)
+            .and_then(|scope| contracts.scope(&scope))
+            .is_some_and(|contract| {
+                contract.catalog_routable
+                    && contract.production_inference
+                    && contract
+                        .models
+                        .values()
+                        .any(|model| model.has_enabled_protocol())
+            })
 }
 
 pub(crate) fn daily_tokens_by_model(

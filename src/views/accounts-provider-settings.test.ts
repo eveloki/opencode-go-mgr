@@ -35,16 +35,14 @@ test("Accounts keeps account-owned writes and no longer hosts supplier catalog o
   assert.match(accounts, /providerApi\.updateProviderSettings/);
   assert.match(accounts, /dashboardApi\.toggleAccount/);
   assert.match(card, /emit\('refresh-usage'\)/);
-  assert.match(card, /emit\('open-provider'\)/);
-  assert.match(accounts, /accountProviderScope\(account\)/);
+  assert.doesNotMatch(card, /open-provider|有效协议|前往供应商/);
+  assert.doesNotMatch(accounts, /accountProviderScope|accountContractSummary|providerContracts/);
 });
 
-test("Accounts omits a protocol summary until a contract snapshot exists and keeps last-good on GET failure", () => {
+test("Accounts does not load or render provider contract summaries", () => {
   const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
-  assert.match(accounts, /if \(!providerContracts\.value\) return null;/);
-  assert.match(accounts, /Keep the last good snapshot/);
-  assert.match(card, /v-if="contractSummary"/);
-  assert.match(card, /t\("无有效协议"\)/);
+  assert.doesNotMatch(accounts, /getProviderContracts|providerContracts|contractSummaryFor/);
+  assert.doesNotMatch(card, /contractSummary|protocolDisplayName|account-contract/);
 });
 
 test("the generic account patch no longer carries the zen free alias", () => {

@@ -59,6 +59,8 @@ test("add-account chooser omits singleton Zen Free and groups remaining families
   assert.deepEqual(options.map(({ plan }) => plan.id), [
     "opencode-go",
     "command-code-goat",
+    "minimax-cn",
+    "kimi-cn",
     "custom-endpoint",
   ]);
   assert.deepEqual(
@@ -66,6 +68,7 @@ test("add-account chooser omits singleton Zen Free and groups remaining families
     [
       ["available", ["opencode-go", "custom-endpoint"]],
       ["draft", ["command-code-goat"]],
+      ["unavailable", ["minimax-cn", "kimi-cn"]],
     ],
   );
 });

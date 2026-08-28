@@ -31,9 +31,10 @@ use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_HOST,
     COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, CommandCodeGoatAdapter,
-    ConfigurableHttpAdapter, CredentialKind, InferenceAuthDescriptor, OpenCodeGoAdapter,
-    ProviderAdapterKind, ProviderRegistry, QuotaScope, UpstreamAuthScheme, ZEN_FREE_ACCOUNT_ID,
-    ZenFreeAdapter,
+    ConfigurableHttpAdapter, CredentialKind, InferenceAuthDescriptor, KIMI_CN_BASE_URL,
+    KIMI_CN_CHAT_COMPLETIONS_PATH, KimiCnAdapter, MINIMAX_CN_BASE_URL,
+    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MiniMaxCnAdapter, OpenCodeGoAdapter, ProviderAdapterKind,
+    ProviderRegistry, QuotaScope, UpstreamAuthScheme, ZEN_FREE_ACCOUNT_ID, ZenFreeAdapter,
 };
 use crate::provider_contracts::EffectiveContractSet;
 use std::collections::HashMap;
@@ -210,6 +211,10 @@ fn resolve_route_with_policy(
         Some(ProviderAdapterKind::CommandCodeGoat) => {
             CommandCodeGoatAdapter.resolve(account, config, plan, policy)
         }
+        Some(ProviderAdapterKind::MiniMaxCn) => {
+            MiniMaxCnAdapter.resolve(account, config, plan, policy)
+        }
+        Some(ProviderAdapterKind::KimiCn) => KimiCnAdapter.resolve(account, config, plan, policy),
         Some(ProviderAdapterKind::ConfigurableHttp) => {
             ConfigurableHttpAdapter.resolve(account, config, plan, policy)
         }
@@ -375,6 +380,82 @@ impl RuntimeRouteAdapter for CommandCodeGoatAdapter {
     }
 }
 
+fn resolve_fixed_chat_plan(
+    account: &Account,
+    plan: &RequestPlan,
+    policy: RoutePolicy<'_>,
+    adapter: ProviderAdapterKind,
+    label: &str,
+    base_url: &str,
+    path: &str,
+) -> Result<AttemptSpec, String> {
+    if matches!(policy, RoutePolicy::Probe) {
+        return Err(format!("protocol probes are not available for {label}"));
+    }
+    let descriptor = registered_descriptor(adapter, account)?;
+    require_binding(
+        account,
+        descriptor.inference.credential_kind,
+        descriptor.inference.quota_scope,
+    )?;
+    if plan.channel != UpstreamChannel::Go {
+        return Err(format!("{label} does not serve the Zen free channel"));
+    }
+    if plan.upstream != ApiFormat::ChatCompletions {
+        return Err(format!("{label} only accepts Chat Completions upstream"));
+    }
+    require_opencode_protocol_policy(adapter, account, plan, policy, label)?;
+    Ok(AttemptSpec {
+        base_url: base_url.to_string(),
+        path: path.to_string(),
+        upstream: ApiFormat::ChatCompletions,
+        auth: descriptor_auth(descriptor.inference.auth)?,
+        follow_redirects: descriptor.inference.follow_redirects,
+        credential: credential_handle(account, descriptor),
+        proxy_routing: ProxyRoutingModel::ProcessWideNoRedirect,
+    })
+}
+
+impl RuntimeRouteAdapter for MiniMaxCnAdapter {
+    fn resolve(
+        self,
+        account: &Account,
+        _config: &AppConfig,
+        plan: &RequestPlan,
+        policy: RoutePolicy<'_>,
+    ) -> Result<AttemptSpec, String> {
+        resolve_fixed_chat_plan(
+            account,
+            plan,
+            policy,
+            ProviderAdapterKind::MiniMaxCn,
+            "MiniMax CN Token Plan",
+            MINIMAX_CN_BASE_URL,
+            MINIMAX_CN_CHAT_COMPLETIONS_PATH,
+        )
+    }
+}
+
+impl RuntimeRouteAdapter for KimiCnAdapter {
+    fn resolve(
+        self,
+        account: &Account,
+        _config: &AppConfig,
+        plan: &RequestPlan,
+        policy: RoutePolicy<'_>,
+    ) -> Result<AttemptSpec, String> {
+        resolve_fixed_chat_plan(
+            account,
+            plan,
+            policy,
+            ProviderAdapterKind::KimiCn,
+            "Kimi Code CN",
+            KIMI_CN_BASE_URL,
+            KIMI_CN_CHAT_COMPLETIONS_PATH,
+        )
+    }
+}
+
 impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
     fn resolve(
         self,
@@ -509,6 +590,8 @@ fn require_opencode_protocol_policy(
         RoutePolicy::Production { contracts: None } => {
             let statically_ok = static_verified.contains(&protocol)
                 || opencode_supports_upstream(&plan.model, plan.upstream)
+                || (adapter == ProviderAdapterKind::CommandCodeGoat
+                    && command_code_supports_upstream(&plan.model, plan.upstream))
                 || (adapter == ProviderAdapterKind::ZenFree
                     && !crate::gateway::protocol::is_known_model(&plan.model)
                     && plan.model.ends_with("-free")
@@ -946,6 +1029,8 @@ mod tests {
                 ProviderAdapterKind::OpenCodeGo
                 | ProviderAdapterKind::ZenFree
                 | ProviderAdapterKind::CommandCodeGoat
+                | ProviderAdapterKind::MiniMaxCn
+                | ProviderAdapterKind::KimiCn
                 | ProviderAdapterKind::ConfigurableHttp => {}
             }
             let descriptor = ProviderRegistry::iter()
@@ -968,6 +1053,10 @@ mod tests {
                     assert!(!descriptor.inference.follow_redirects);
                     assert!(descriptor.inference.production_inference);
                     assert!(!descriptor.inference.loopback_test_seam_only);
+                }
+                ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
+                    assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
+                    assert!(!descriptor.inference.follow_redirects);
                 }
                 ProviderAdapterKind::ConfigurableHttp => {
                     assert_eq!(

@@ -943,7 +943,7 @@ export const frFRMessages = {
   "使用 {model} 的 {protocol} 协议测试账号 {name}": "Tester le compte {name} avec {model} via {protocol}",
   "首选": "Préféré",
   "{model} · {protocol} 测试成功": "Test {model} · {protocol} réussi",
-  "服务商未开放用量查询，显示值由你手工校准。": "Le fournisseur n’expose pas la consultation d’usage ; les valeurs affichées sont calibrées manuellement.",
+  "根据 OCG 内已定价请求估算；不含其他客户端用量，可手工校准。": "Estimation issue des requêtes tarifées traitées par OCG ; l’usage des autres clients est exclu et peut être calibré manuellement.",
   "加载供应商失败: {error}": "Échec du chargement des fournisseurs : {error}",
   "暂无供应商范围": "Aucun périmètre fournisseur",
   "模型目录": "Catalogue de modèles",

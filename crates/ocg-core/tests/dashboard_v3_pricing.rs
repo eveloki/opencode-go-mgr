@@ -1191,6 +1191,122 @@ async fn dashboard_v3_provider_refreshes_are_independent_and_keep_separate_lkg()
     harness.stop();
 }
 
+#[tokio::test]
+async fn dashboard_v3_goat_multiplier_write_is_provider_scoped_and_persistent() {
+    let harness = start_loopback("pricing-goat-multiplier").await;
+    let global_pricing_revision = harness.state.pricing_snapshot().revision.clone();
+    let fetched = harness.state.pricing_snapshot().as_ref().clone();
+    let successful_goat =
+        install_official_pricing_fetch_for_tests(harness.state.process_generation(), move |_| {
+            Ok(fetched.clone())
+        });
+    let (status, refreshed) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/providers/{COMMAND_CODE_PROVIDER_ID}/pricing/refresh"),
+        &cas_provider_pricing(&harness, "uninitialized", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refreshed}");
+    let provider_revision = refreshed["providerPricingRevision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    drop(successful_goat);
+
+    let (status, before) = harness
+        .get_json(&format!(
+            "{}/providers/{COMMAND_CODE_PROVIDER_ID}/{GOAT_OFFERING_ID}/pricing",
+            harness.v3_base
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let model_id = before["providerSnapshot"]["values"][0]["modelId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let revision_before_write = harness.state.settings_revision();
+    let (status, written) = send_json(
+        &harness,
+        Method::PUT,
+        &format!("/providers/{COMMAND_CODE_PROVIDER_ID}/{GOAT_OFFERING_ID}/pricing/multipliers"),
+        &json!({
+            "expectedRevision": revision_before_write,
+            "processGeneration": harness.state.process_generation(),
+            "expectedPricingRevision": provider_revision,
+            "multipliers": [{ "modelId": model_id, "multiplier": 2.25 }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(written["providerId"], COMMAND_CODE_PROVIDER_ID);
+    assert_eq!(written["offeringId"], GOAT_OFFERING_ID);
+    assert_eq!(written["revision"], revision_before_write + 1);
+    assert_eq!(written["pricingRevision"], global_pricing_revision);
+    assert_ne!(written["providerPricingRevision"], provider_revision);
+    assert_eq!(
+        written["providerSnapshot"]["values"][0]["quotaMultiplier"],
+        2.25
+    );
+    assert_eq!(
+        harness.state.pricing_snapshot().revision,
+        global_pricing_revision
+    );
+
+    let (status, persisted) = harness
+        .get_json(&format!(
+            "{}/providers/{COMMAND_CODE_PROVIDER_ID}/{GOAT_OFFERING_ID}/pricing",
+            harness.v3_base
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{persisted}");
+    assert_eq!(
+        persisted["providerSnapshot"]["values"][0]["quotaMultiplier"],
+        2.25
+    );
+
+    let local_revision = persisted["providerPricingRevision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fetched = harness.state.pricing_snapshot().as_ref().clone();
+    let refresh_guard =
+        install_official_pricing_fetch_for_tests(harness.state.process_generation(), move |_| {
+            Ok(fetched.clone())
+        });
+    let (status, preview) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/providers/{COMMAND_CODE_PROVIDER_ID}/pricing/refresh"),
+        &cas_provider_pricing(&harness, &local_revision, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["refreshStatus"], "needs_confirmation");
+    assert_eq!(preview["multiplierChanges"][0]["currentMultiplier"], 2.25);
+    let official_hash = preview["officialContentHash"].as_str().unwrap();
+    let (status, kept) = send_json(
+        &harness,
+        Method::POST,
+        &format!("/providers/{COMMAND_CODE_PROVIDER_ID}/pricing/refresh"),
+        &cas_provider_pricing(
+            &harness,
+            &local_revision,
+            json!({
+                "policy": "keep_current",
+                "expectedOfficialContentHash": official_hash
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(kept["refreshStatus"], "unchanged");
+    assert_eq!(kept["providerPricingRevision"], local_revision);
+    drop(refresh_guard);
+
+    harness.stop();
+}
+
 #[test]
 fn dashboard_v3_mod_reexports_official_fetch_installer_only_under_debug_assertions() {
     let source = include_str!("../src/dashboard_v3/mod.rs");

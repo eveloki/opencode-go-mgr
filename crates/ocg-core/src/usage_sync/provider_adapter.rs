@@ -256,6 +256,11 @@ mod tests {
                 ProviderAdapterKind::CommandCodeGoat => {
                     assert!(capability.is_none());
                 }
+                ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
+                    let capability = capability.expect("sealed CN Plan publishes usage");
+                    assert_eq!(capability.evidence, ProviderUsageEvidence::Authoritative);
+                    assert!(!capability.automatic_sync);
+                }
                 ProviderAdapterKind::ZenFree => {
                     let capability = capability.expect("Zen publishes local-state usage");
                     assert!(!capability.experimental);

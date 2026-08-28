@@ -58,7 +58,11 @@ impl ForwardRouteSet {
 /// Stale entries — ids a newer registry removed — are dropped here so they
 /// stay inert even if a client explicitly requests that exact id, matching the
 /// load-path tolerance contract ("removed entries match nothing").
-fn normalized_known_list(models: &[String], zen_catalog: &ZenFreeModelCatalog) -> Vec<String> {
+fn normalized_known_list(
+    models: &[String],
+    zen_catalog: &ZenFreeModelCatalog,
+    provider_models: &[String],
+) -> Vec<String> {
     let known: std::collections::HashSet<String> = supported_model_ids()
         .filter(|id| {
             (*id != "big-pickle" && !is_free_model(id))
@@ -68,6 +72,11 @@ fn normalized_known_list(models: &[String], zen_catalog: &ZenFreeModelCatalog) -
         .chain(
             zen_catalog
                 .models
+                .iter()
+                .map(|model| normalize_model_name(model)),
+        )
+        .chain(
+            provider_models
                 .iter()
                 .map(|model| normalize_model_name(model)),
         )
@@ -84,6 +93,13 @@ fn normalized_known_list(models: &[String], zen_catalog: &ZenFreeModelCatalog) -
 /// Location hop-off.
 pub(crate) fn build_no_redirect(config: &AppConfig) -> crate::Result<reqwest::Client> {
     ocg_infra::http::build_no_redirect(&outbound_proxy_spec(config))
+}
+
+pub(crate) fn build_no_redirect_for_route(
+    config: &AppConfig,
+    route: RouteLabel,
+) -> crate::Result<reqwest::Client> {
+    ocg_infra::http::build_no_redirect_for_label(&outbound_proxy_spec(config), route)
 }
 
 /// Applies the process-wide outbound proxy policy while leaving callers free to
@@ -104,12 +120,23 @@ pub(crate) fn build(config: &AppConfig) -> crate::Result<reqwest::Client> {
 /// exactly the process-wide client. All modes go through
 /// [`ocg_infra::http::build_route_set`] so the reqwest client and audit label
 /// are generated atomically from one [`ocg_infra::http::OutboundProxySpec`].
+#[cfg(test)]
 pub(crate) fn build_route_set(
     config: &AppConfig,
     zen_catalog: &ZenFreeModelCatalog,
 ) -> crate::Result<ForwardRouteSet> {
+    build_route_set_with_provider_models(config, zen_catalog, &[])
+}
+
+pub(crate) fn build_route_set_with_provider_models(
+    config: &AppConfig,
+    zen_catalog: &ZenFreeModelCatalog,
+    provider_models: &[String],
+) -> crate::Result<ForwardRouteSet> {
     let list = match config.proxy_mode {
-        ProxyMode::List => normalized_known_list(&config.proxy_list_models, zen_catalog),
+        ProxyMode::List => {
+            normalized_known_list(&config.proxy_list_models, zen_catalog, provider_models)
+        }
         ProxyMode::Auto | ProxyMode::Manual | ProxyMode::Direct => Vec::new(),
     };
     Ok(ForwardRouteSet(ocg_infra::http::build_route_set(
@@ -290,6 +317,23 @@ mod tests {
             RouteLabel::Proxy
         );
         assert_eq!(routes.client_for("mimo-v2.5-free").1, RouteLabel::Direct);
+    }
+
+    #[test]
+    fn sealed_cn_contract_models_participate_in_list_routing() {
+        let config = AppConfig {
+            proxy_mode: ProxyMode::List,
+            proxy_url: "http://127.0.0.1:7890".to_string(),
+            proxy_list_direction: ProxyListDirection::Whitelist,
+            proxy_list_models: vec!["MiniMax-M3".to_string(), "kimi-for-coding".to_string()],
+            ..AppConfig::default()
+        };
+        let provider_models = ["MiniMax-M3".to_string(), "kimi-for-coding".to_string()];
+        let routes =
+            build_route_set_with_provider_models(&config, &zen_catalog(), &provider_models)
+                .unwrap();
+        assert_eq!(routes.client_for("MiniMax-M3").1, RouteLabel::Proxy);
+        assert_eq!(routes.client_for("kimi-for-coding").1, RouteLabel::Proxy);
     }
 
     #[tokio::test]

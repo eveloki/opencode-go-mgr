@@ -199,7 +199,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         )
         .route(
             "/accounts/{id}/provider-usage",
-            get(usage::get_provider_usage),
+            get(usage::get_provider_usage).post(usage::refresh_provider_usage),
         )
         .route(
             "/accounts/{id}/verify",

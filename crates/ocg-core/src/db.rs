@@ -4879,6 +4879,60 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically replace the authoritative snapshot for one sealed Provider.
+    pub fn replace_quota_windows_by_source(
+        &self,
+        account_id: &str,
+        source: &str,
+        windows: &[QuotaWindow],
+    ) -> Result<()> {
+        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
+        anyhow::ensure!(
+            windows
+                .iter()
+                .all(|window| window.account_id == account_id && window.source == source),
+            "provider quota snapshot contains a mismatched account or source"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM quota_windows WHERE account_id = ?1 AND source = ?2",
+            params![account_id, source],
+        )?;
+        for window in windows {
+            tx.execute(
+                "INSERT INTO quota_windows (
+                    account_id, window_kind, used, limit_value, started_at, resets_at,
+                    calibration_offset, unit, source, observed_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(account_id, window_kind) DO UPDATE SET
+                    used = excluded.used,
+                    limit_value = excluded.limit_value,
+                    started_at = excluded.started_at,
+                    resets_at = excluded.resets_at,
+                    calibration_offset = excluded.calibration_offset,
+                    unit = excluded.unit,
+                    source = excluded.source,
+                    observed_at = excluded.observed_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    window.account_id,
+                    window.window_kind,
+                    window.used,
+                    window.limit_value,
+                    window.started_at.map(|value| value.to_rfc3339()),
+                    window.resets_at.map(|value| value.to_rfc3339()),
+                    window.calibration_offset,
+                    window.unit,
+                    window.source,
+                    window.observed_at.map(|value| value.to_rfc3339()),
+                    window.updated_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_quota_windows(&self, account_id: &str) -> Result<Vec<QuotaWindow>> {
         let mut stmt = self.conn.prepare(
             "SELECT account_id, window_kind, used, limit_value, started_at,
@@ -6447,6 +6501,31 @@ impl Database {
         account_id: &str,
         limits: &PricingLimits,
     ) -> Result<Vec<QuotaWindow>> {
+        let observed_at = self
+            .account_usage_sync_state(account_id)?
+            .and_then(|sync| sync.last_success_at);
+        self.live_fixed_quota_windows(account_id, limits, "opencode-go-live", observed_at)
+    }
+
+    /// Project locally priced request logs plus manual calibration into the
+    /// provider-neutral quota window shape. This is the single read authority
+    /// for plans such as GOAT that have no machine-readable upstream usage API.
+    pub fn live_local_quota_windows(
+        &self,
+        account_id: &str,
+        limits: &PricingLimits,
+        source: &str,
+    ) -> Result<Vec<QuotaWindow>> {
+        self.live_fixed_quota_windows(account_id, limits, source, None)
+    }
+
+    fn live_fixed_quota_windows(
+        &self,
+        account_id: &str,
+        limits: &PricingLimits,
+        source: &str,
+        observed_at: Option<DateTime<Utc>>,
+    ) -> Result<Vec<QuotaWindow>> {
         let now = Utc::now();
         let usage = account_usage_with_limits_on(&self.conn, account_id, limits, now)?;
         let metadata = self
@@ -6470,9 +6549,6 @@ impl Database {
             )
             .optional()?
             .ok_or_else(|| anyhow::anyhow!("account {account_id} not found"))?;
-        let observed_at = self
-            .account_usage_sync_state(account_id)?
-            .and_then(|sync| sync.last_success_at);
         let month_started_at = month_window_start_utc(&metadata.5).ok();
 
         Ok(vec![
@@ -6485,7 +6561,7 @@ impl Database {
                 resets_at: usage.resets_in_5h,
                 calibration_offset: metadata.1,
                 unit: "usd".to_string(),
-                source: "opencode-go-live".to_string(),
+                source: source.to_string(),
                 observed_at,
                 updated_at: now,
             },
@@ -6498,7 +6574,7 @@ impl Database {
                 resets_at: usage.resets_in_week,
                 calibration_offset: metadata.3,
                 unit: "usd".to_string(),
-                source: "opencode-go-live".to_string(),
+                source: source.to_string(),
                 observed_at,
                 updated_at: now,
             },
@@ -6511,7 +6587,7 @@ impl Database {
                 resets_at: usage.resets_in_month,
                 calibration_offset: metadata.4,
                 unit: "usd".to_string(),
-                source: "opencode-go-live".to_string(),
+                source: source.to_string(),
                 observed_at,
                 updated_at: now,
             },
@@ -12378,6 +12454,8 @@ mod tests {
             ForwardMetrics {
                 cost: 1.25,
                 raw_cost_usd: Some(1.25),
+                pricing_provider_id: Some(OPENCODE_PROVIDER_ID.to_string()),
+                pricing_offering_id: Some(GO_OFFERING_ID.to_string()),
                 cost_state: "priced",
                 ..ForwardMetrics::default()
             },

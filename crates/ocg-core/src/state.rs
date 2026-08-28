@@ -83,6 +83,7 @@ pub struct CoreStateInner {
     zen_free_models: RwLock<Arc<crate::kernel::zen::ZenFreeModelCatalog>>,
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
     pub provider_models_refresh: tokio::sync::Mutex<()>,
+    pub provider_usage_refresh: tokio::sync::Mutex<()>,
     provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
     pub routing: RoutingRuntime,
     pub browser: crate::browser::BrowserRuntime,
@@ -98,6 +99,19 @@ pub struct CoreStateInner {
 }
 
 pub type CoreState = Arc<CoreStateInner>;
+
+fn sealed_proxy_model_ids(
+    contracts: &crate::provider_contracts::EffectiveContractSet,
+) -> Vec<String> {
+    [
+        crate::kernel::ids::MINIMAX_PROVIDER_ID,
+        crate::kernel::ids::KIMI_PROVIDER_ID,
+    ]
+    .into_iter()
+    .filter_map(|provider_id| contracts.providers.get(provider_id))
+    .flat_map(|contract| contract.catalog.models.iter().cloned())
+    .collect()
+}
 
 /// Host-effect failures from [`CoreStateInner::apply_host_settings`].
 ///
@@ -240,7 +254,12 @@ impl CoreStateInner {
             &custom_runtimes,
             db.load_persisted_contracts()?,
         );
-        let http_client = crate::http_client::build_route_set(&config, &zen_free_models)?;
+        let provider_models = sealed_proxy_model_ids(&provider_contracts);
+        let http_client = crate::http_client::build_route_set_with_provider_models(
+            &config,
+            &zen_free_models,
+            &provider_models,
+        )?;
         Ok(Self {
             db: Mutex::new(db),
             config: Mutex::new(config),
@@ -268,6 +287,7 @@ impl CoreStateInner {
             zen_free_models: RwLock::new(Arc::new(zen_free_models)),
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
             provider_models_refresh: tokio::sync::Mutex::new(()),
+            provider_usage_refresh: tokio::sync::Mutex::new(()),
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
             routing: RoutingRuntime::new(),
             browser: crate::browser::BrowserRuntime::new(),
@@ -351,7 +371,13 @@ impl CoreStateInner {
             ))
             .map(|contract| contract.catalog.models.clone())
             .unwrap_or_default();
-        let route_set = crate::http_client::build_route_set(&self.config(), &catalog)?;
+        let contracts_snapshot = self.provider_contracts();
+        let provider_models = sealed_proxy_model_ids(&contracts_snapshot);
+        let route_set = crate::http_client::build_route_set_with_provider_models(
+            &self.config(),
+            &catalog,
+            &provider_models,
+        )?;
         {
             let db = self.db.lock();
             let mut http_client = self.http_client.lock();
@@ -386,6 +412,13 @@ impl CoreStateInner {
             &db.list_custom_account_runtimes()?,
             db.load_persisted_contracts()?,
         );
+        let provider_models = sealed_proxy_model_ids(&set);
+        let route_set = crate::http_client::build_route_set_with_provider_models(
+            &self.config(),
+            &zen,
+            &provider_models,
+        )?;
+        *self.http_client.lock() = Arc::new(route_set);
         *self.provider_contracts.write() = Arc::new(set);
         Ok(())
     }
@@ -548,7 +581,13 @@ impl CoreStateInner {
         // validate() enforces the non-blank primary key on every write path.
         config.validate().map_err(anyhow::Error::msg)?;
         let zen_catalog = self.zen_free_model_catalog();
-        let http_client = crate::http_client::build_route_set(&config, &zen_catalog)?;
+        let contracts = self.provider_contracts();
+        let provider_models = sealed_proxy_model_ids(&contracts);
+        let http_client = crate::http_client::build_route_set_with_provider_models(
+            &config,
+            &zen_catalog,
+            &provider_models,
+        )?;
         Ok((config, http_client))
     }
 

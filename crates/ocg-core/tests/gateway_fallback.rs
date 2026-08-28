@@ -3174,6 +3174,17 @@ async fn goat_loopback_adapter_routes_all_client_formats_with_its_own_auth_contr
         .lock()
         .reorder_accounts(&[goat_id.clone(), "acct-1".into(), ZEN_FREE_ACCOUNT_ID.into()])
         .unwrap();
+    let goat_account = state
+        .db
+        .lock()
+        .get_account(&goat_id)
+        .unwrap()
+        .expect("GOAT account");
+    assert!(state.provider_contracts().production_protocol_allowed(
+        &goat_account,
+        "claude-sonnet-4-6",
+        ocg_core::provider::UpstreamProtocolKind::Messages,
+    ));
     let _goat_route = install_goat_loopback_route_for_test(goat_id.clone(), base_url).unwrap();
     let (port, gateway_handle) = start_gateway(state.clone()).await;
 
@@ -3523,7 +3534,7 @@ async fn enabled_goat_without_loopback_is_not_selected() {
 }
 
 #[tokio::test]
-async fn eligible_goat_anthropic_catalog_uses_messages_and_converts_client_responses() {
+async fn goat_only_anthropic_model_stays_raw_and_converts_client_responses() {
     let replies = HashMap::from([(
         "goat-key".to_string(),
         VecDeque::from([
@@ -3565,13 +3576,13 @@ async fn eligible_goat_anthropic_catalog_uses_messages_and_converts_client_respo
         .filter_map(|item| item["id"].as_str().map(str::to_string))
         .collect::<Vec<_>>();
     assert!(
-        ids.iter().any(|id| id == "claude-sonnet-4-6"),
-        "eligible unique GOAT kebab id must be published: {ids:?}"
+        !ids.iter().any(|id| id == "claude-sonnet-4-6"),
+        "a GOAT-only ID must not expand the static Go Alias namespace: {ids:?}"
     );
     assert!(
         !ids.iter()
             .any(|id| id == COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM),
-        "GOAT raw ids must stay unpublished: {ids:?}"
+        "GOAT raw IDs must stay unpublished: {ids:?}"
     );
 
     for path in ["/v1/messages", "/v1/responses"] {
@@ -3615,7 +3626,7 @@ async fn eligible_goat_anthropic_catalog_uses_messages_and_converts_client_respo
         .collect::<Vec<_>>();
     assert!(
         !ids.contains(&"claude-sonnet-4-6"),
-        "GOAT model must leave /v1/models when its only protocol is disabled: {ids:?}"
+        "GOAT-only raw model must remain absent from /v1/models: {ids:?}"
     );
     assert!(
         captured

@@ -148,15 +148,15 @@ Zen Free 只有启用开关；不需要时直接关掉卡片。目录刷新在�
 
 ## 两份本地模型列表
 
-这两条 GET 都不会在请求时做上游发现。唯一的例外是 Zen Free 目录刷新，必须由管理员在供应商页显式触发。
+这两条 GET 都不会在请求时做上游发现。目录刷新必须由管理员在供应商页显式触发，不属于任何一条 GET。
 
 ```text
   GET /v1/models                         （客户端；需要 Key）
-    已公布 Go 别名
-      ∪ 最后一次成功保存的 Zen Free 别名
+    最早 OpenCode Go 静态表授权且当前可路由的 Alias
       ∪ 合格 Custom 声明 ID
+    保存的内置供应商目录可以加入、但不能创建这些 Alias
     合格 Custom = enabled + ready + 非空 Key（验证为可选）
-    Custom ID 不得抢走已公布的 Go/Zen 别名
+    Custom ID 不得抢走已公布的内置 Alias
 
   GET /dashboard/api/v3/application-models   （面板会话）
     Go 可路由别名 ∩ 当前 Go 价格快照

@@ -141,7 +141,7 @@ export const enUSMessages = {
   "使用 {model} 的 {protocol} 协议测试账号 {name}": "Test account {name} with {model} over {protocol}",
   "首选": "Preferred",
   "{model} · {protocol} 测试成功": "{model} · {protocol} test succeeded",
-  "服务商未开放用量查询，显示值由你手工校准。": "The provider does not expose usage queries; the displayed values are manually calibrated.",
+  "根据 OCG 内已定价请求估算；不含其他客户端用量，可手工校准。": "Estimated from priced requests handled by OCG; usage from other clients is excluded. You can calibrate it manually.",
   "禁用账号 {name}": "Disable account {name}",
   "启用账号 {name}": "Enable account {name}",
   "删除账号": "Delete account",

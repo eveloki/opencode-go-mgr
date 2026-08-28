@@ -68,9 +68,9 @@ export const PRICING_PLAN_DEFINITIONS = PLAN_DEFINITIONS.filter(
 );
 
 function defaultPricingAvailability(plan: PlanDefinition): PricingAvailability {
-  if (plan.id === "opencode-go") return "available";
+  if (plan.id === "opencode-go" || plan.id === "command-code-goat") return "available";
   if (plan.id === "zen-free") return "not_applicable";
-  if (plan.id === "custom-endpoint" || plan.id === "command-code-goat") return "unpriced";
+  if (plan.id === "custom-endpoint") return "unpriced";
   return "unavailable";
 }
 

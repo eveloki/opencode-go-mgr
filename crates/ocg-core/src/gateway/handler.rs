@@ -229,11 +229,10 @@ pub async fn gemini_model_action(
 
 /// GET /v1/models — authenticated local Alias registry list.
 ///
-/// Returns OpenAI list JSON for routeable published client aliases union
-/// eligible enabled+verified Custom capability IDs and Provider-enabled
-/// Command Code GOAT catalog IDs, de-duplicated, in deterministic order. It
-/// does not call upstream `/v1/models`. GOAT IDs never steal already-published
-/// Go/Zen aliases.
+/// Returns OpenAI list JSON for routeable aliases authorized by the original
+/// OpenCode Go table, then eligible Custom capability IDs, de-duplicated and in
+/// deterministic order. Refreshed built-in catalogs can join an existing Alias
+/// or add an exact raw pin, but cannot expand this list. It never calls upstream.
 pub async fn models(
     State(state): State<CoreState>,
     headers: HeaderMap,
@@ -255,10 +254,14 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
     let go_ids = provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
     let goat_ids =
         provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
-    let published = crate::alias::published_routeable_aliases_with_all_catalogs(
+    let minimax_ids = provider_catalog_model_ids(&contracts, crate::provider::MINIMAX_PROVIDER_ID);
+    let kimi_ids = provider_catalog_model_ids(&contracts, crate::provider::KIMI_PROVIDER_ID);
+    let published = crate::alias::published_routeable_aliases_with_extended_catalogs(
         &go_ids,
         &zen_catalog.models,
         &goat_ids,
+        &minimax_ids,
+        &kimi_ids,
     );
     let mut data: Vec<serde_json::Value> = published
         .iter()
@@ -268,6 +271,8 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
                 &go_ids,
                 &zen_catalog.models,
                 &goat_ids,
+                &minimax_ids,
+                &kimi_ids,
                 &contracts,
             )
         })
@@ -308,9 +313,19 @@ fn published_alias_has_enabled_protocol(
     go_ids: &[String],
     zen_models: &[String],
     goat_ids: &[String],
+    minimax_ids: &[String],
+    kimi_ids: &[String],
     contracts: &crate::provider_contracts::EffectiveContractSet,
 ) -> bool {
-    model_has_enabled_protocol(&item.alias, go_ids, zen_models, goat_ids, contracts)
+    model_has_enabled_protocol(
+        &item.alias,
+        go_ids,
+        zen_models,
+        goat_ids,
+        minimax_ids,
+        kimi_ids,
+        contracts,
+    )
 }
 
 fn model_has_enabled_protocol(
@@ -318,9 +333,19 @@ fn model_has_enabled_protocol(
     go_ids: &[String],
     zen_models: &[String],
     goat_ids: &[String],
+    minimax_ids: &[String],
+    kimi_ids: &[String],
     contracts: &crate::provider_contracts::EffectiveContractSet,
 ) -> bool {
-    match crate::alias::resolve_with_all_catalogs(model, go_ids, zen_models, &[], goat_ids) {
+    match crate::alias::resolve_with_extended_catalogs(
+        model,
+        go_ids,
+        zen_models,
+        &[],
+        goat_ids,
+        minimax_ids,
+        kimi_ids,
+    ) {
         Ok(alias::ResolvedModel::Alias { mappings, .. }) => mappings
             .iter()
             .any(|mapping| mapping.routeable && contracts.mapping_has_enabled_protocol(mapping)),
@@ -443,13 +468,18 @@ async fn proxy_handler_inner(
     let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
     let goat_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
+    let minimax_model_ids =
+        provider_catalog_model_ids(&contracts, crate::provider::MINIMAX_PROVIDER_ID);
+    let kimi_model_ids = provider_catalog_model_ids(&contracts, crate::provider::KIMI_PROVIDER_ID);
     let zen_catalog = state.zen_free_model_catalog();
-    let resolved = match crate::alias::resolve_with_all_catalogs(
+    let resolved = match crate::alias::resolve_with_extended_catalogs(
         &routing_model,
         &go_model_ids,
         &zen_catalog.models,
         &custom_model_ids,
         &goat_model_ids,
+        &minimax_model_ids,
+        &kimi_model_ids,
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -547,13 +577,18 @@ async fn gemini_proxy_handler(
     let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
     let goat_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
+    let minimax_model_ids =
+        provider_catalog_model_ids(&contracts, crate::provider::MINIMAX_PROVIDER_ID);
+    let kimi_model_ids = provider_catalog_model_ids(&contracts, crate::provider::KIMI_PROVIDER_ID);
     let zen_catalog = state.zen_free_model_catalog();
-    let resolved = match crate::alias::resolve_with_all_catalogs(
+    let resolved = match crate::alias::resolve_with_extended_catalogs(
         &routing_model,
         &go_model_ids,
         &zen_catalog.models,
         &custom_model_ids,
         &goat_model_ids,
+        &minimax_model_ids,
+        &kimi_model_ids,
     ) {
         Ok(resolved) => resolved,
         Err(error) => {

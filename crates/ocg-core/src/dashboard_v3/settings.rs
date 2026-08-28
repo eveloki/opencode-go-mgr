@@ -226,6 +226,25 @@ fn proxy_supported_models(state: &CoreState) -> Vec<ProxySupportedModel> {
             });
         }
     }
+    let contracts = state.provider_contracts();
+    for provider_id in [
+        crate::kernel::ids::MINIMAX_PROVIDER_ID,
+        crate::kernel::ids::KIMI_PROVIDER_ID,
+    ] {
+        let Some(contract) = contracts.providers.get(provider_id) else {
+            continue;
+        };
+        for id in &contract.catalog.models {
+            if known.insert(id.clone()) {
+                models.push(ProxySupportedModel {
+                    id: id.clone(),
+                    preferred_protocol: preferred_protocol_name(ApiFormat::ChatCompletions)
+                        .to_string(),
+                    zen_free: false,
+                });
+            }
+        }
+    }
     models.sort_by(|left, right| left.id.cmp(&right.id));
     models
 }

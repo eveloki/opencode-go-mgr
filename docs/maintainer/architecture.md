@@ -201,17 +201,20 @@ Standard entries are `/v1/chat/completions`, `/v1/responses`,
 accepts `/v1beta/models/{model}:*` and `/v1/models/{model}:*`;
 `generateContent` and `streamGenerateContent` convert, `countTokens` and
 `embedContent` return `501`, unknown actions return `404`. Authenticated
-`GET /v1/models` reads local routeable aliases only: OpenCode Go, the last
-successful Zen Free snapshot, and eligible Custom declared IDs.
+`GET /v1/models` reads local routeable aliases authorized by the original
+static OpenCode Go table, then eligible Custom declared IDs. Saved
+Zen/Command/MiniMax/Kimi catalogs may join an authorized Alias but cannot
+create another one; unmatched built-in catalog IDs remain exact raw pins.
 `GET /dashboard/api/v3/application-models` is a separate local list: Go
 routeable aliases ∩ active Go pricing snapshot (highspeed variants
 inherit the base row). It excludes Custom IDs. Claude Desktop
 `/claude-desktop/v1/models` advertises only the three role aliases.
 
 The Alias registry lives in `ocg-gateway::alias` (facade `ocg_core::alias`).
-Preferred aliases are lowercase kebab-case. Kebab spellings are case-folded;
-names with `/`, `_`, or whitespace are raw IDs and never fold onto a kebab
-alias. A raw ID with exactly one registry mapping pins to that mapping;
+Preferred aliases are lowercase kebab-case and come only from the original Go
+table. Kebab Alias spellings are case-folded; built-in raw IDs are exact and
+case-sensitive, including names with `/`, `_`, or whitespace. A raw ID with
+exactly one registry mapping pins to that mapping;
 routability is checked afterward, so an unroutable mapping is recognized
 but cannot produce a production route. Overlapping raw IDs return `400`
 `ambiguous_model_id` without calling upstream. Unknown names return `400`
@@ -245,8 +248,9 @@ from the protocol.
 Providers-page refresh calls the fixed keyless
 `https://opencode.ai/zen/v1/models` endpoint through the global proxy,
 follows no redirects, keeps only valid IDs ending in `-free`, and persists
-the complete snapshot before swapping runtime state. Each model publishes
-its raw ID and an Alias with the suffix removed. Failed or empty refreshes
+the complete snapshot before swapping runtime state. Each model remains
+available by its exact raw ID; it joins the suffix-stripped Alias only when
+that Alias is authorized by the original Go table. Failed or empty refreshes
 preserve the previous snapshot; `/v1/models` only reads it. Go-owned
 `ox-alpha-free` is reserved and excluded.
 
@@ -272,6 +276,16 @@ and the previewed official content hash. The fetcher is restricted to the
 OpenCode Go HTTPS host, same-host redirects, a 20-second deadline, and a
 2 MiB body. MiniMax context, priority, and high-speed adjustments are
 local policy.
+
+Command Code GOAT request accounting reads only its latest verified
+provider-scoped snapshot. A uniquely matched model row produces raw USD cost,
+quota debit (`raw cost × multiplier`), and paid-plan equivalent; missing,
+ambiguous, or unverified rows remain unpriced and never inherit Go pricing.
+The applied multiplier is editable through the provider-scoped pricing write
+and is persisted as a new snapshot revision. GOAT reuses the provider-agnostic
+account window projector: priced OCG logs accumulate against `$14 / $35 / $70`,
+with an optional manual baseline correction. Unpriced and external requests
+remain absent, and old log rows are not retroactively repriced.
 
 Fallback / retry (executor + classify, **not** `forward_once`):
 

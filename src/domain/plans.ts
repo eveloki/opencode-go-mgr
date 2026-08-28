@@ -1,9 +1,13 @@
-import type { Account } from "../api/dashboard.ts";
+import type {
+  Account,
+  AccountCredentialKind,
+  AccountQuotaScope,
+} from "../api/dashboard.ts";
 import type { ProviderCatalogEntry } from "../api/providers.ts";
 import type { MessageKey } from "../i18n/index.ts";
 
 /**
- * The five hardcoded plan families of the v2 console. A family maps to one or
+ * The hardcoded plan families of the console. A family maps to one or
  * more backend provider/offering entries. The backend owns the DTO fields; this
  * module owns the stable ordering, family ids, and fallback metadata.
  *
@@ -17,6 +21,8 @@ export type PlanId =
   | "opencode-go"
   | "zen-free"
   | "command-code-goat"
+  | "minimax-cn"
+  | "kimi-cn"
   | "custom-endpoint";
 
 export type PlanKind = "quota" | "free" | "api-key" | "custom";
@@ -28,6 +34,8 @@ export interface PlanDefinition {
   /** Brand label; shown only when the catalog is absent. */
   label: string;
   kind: PlanKind;
+  credential_kind: AccountCredentialKind;
+  quota_scope: AccountQuotaScope;
   /** Singleton families (Zen Free) are created and owned by the backend. */
   singleton: boolean;
   /** Managed registration wizard availability (OpenCode Go only). */
@@ -43,6 +51,8 @@ export const PLAN_DEFINITIONS: readonly PlanDefinition[] = [
     offering_ids: ["go"],
     label: "OpenCode Go",
     kind: "quota",
+    credential_kind: "api_key",
+    quota_scope: "key",
     singleton: false,
     managed_registration: true,
     legacy: true,
@@ -53,6 +63,8 @@ export const PLAN_DEFINITIONS: readonly PlanDefinition[] = [
     offering_ids: ["anonymous-free"],
     label: "Zen Free",
     kind: "free",
+    credential_kind: "none",
+    quota_scope: "egress-ip",
     singleton: true,
     managed_registration: false,
     legacy: true,
@@ -63,6 +75,32 @@ export const PLAN_DEFINITIONS: readonly PlanDefinition[] = [
     offering_ids: ["goat"],
     label: "Command Code GOAT",
     kind: "api-key",
+    credential_kind: "api_key",
+    quota_scope: "key",
+    singleton: false,
+    managed_registration: false,
+    legacy: false,
+  },
+  {
+    id: "minimax-cn",
+    provider_id: "minimax",
+    offering_ids: ["cn"],
+    label: "MiniMax CN Token Plan",
+    kind: "api-key",
+    credential_kind: "api_key",
+    quota_scope: "key",
+    singleton: false,
+    managed_registration: false,
+    legacy: false,
+  },
+  {
+    id: "kimi-cn",
+    provider_id: "kimi",
+    offering_ids: ["cn"],
+    label: "Kimi Code CN",
+    kind: "api-key",
+    credential_kind: "api_key",
+    quota_scope: "key",
     singleton: false,
     managed_registration: false,
     legacy: false,
@@ -73,6 +111,8 @@ export const PLAN_DEFINITIONS: readonly PlanDefinition[] = [
     offering_ids: ["api"],
     label: "Custom API",
     kind: "custom",
+    credential_kind: "api_key",
+    quota_scope: "key",
     singleton: false,
     managed_registration: false,
     legacy: false,
@@ -193,7 +233,7 @@ export function planRoutable(
   return entry?.routable ?? false;
 }
 
-export type PlanUseWarning = "endpoint-risk" | null;
+export type PlanUseWarning = "endpoint-risk" | "subscription-risk" | null;
 
 /**
  * Persistent risk semantics per plan kind: custom endpoints keep an
@@ -201,6 +241,7 @@ export type PlanUseWarning = "endpoint-risk" | null;
  */
 export function planUseWarning(plan: PlanDefinition): PlanUseWarning {
   if (plan.kind === "custom") return "endpoint-risk";
+  if (plan.id === "minimax-cn" || plan.id === "kimi-cn") return "subscription-risk";
   return null;
 }
 

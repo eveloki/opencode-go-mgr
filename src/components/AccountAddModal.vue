@@ -241,6 +241,8 @@ function onRailKeydown(event: KeyboardEvent): void {
 const ICONS: Record<string, Component> = {
   "opencode-go": CloudOutlined,
   "command-code-goat": ApiOutlined,
+  "minimax-cn": ApiOutlined,
+  "kimi-cn": ApiOutlined,
   "custom-endpoint": SwapOutlined,
 };
 
@@ -257,6 +259,10 @@ function planDescription(plan: PlanDefinition): string {
   switch (plan.id) {
     case "opencode-go":
       return t("已有 OpenCode Go Key，直接添加并参与账号路由。");
+    case "minimax-cn":
+      return `${t("API Key")} · ${t("刷新模型目录")}`;
+    case "kimi-cn":
+      return `${t("API Key")} · ${t("刷新模型目录")}`;
     case "custom-endpoint":
       return t("自定义端点由你自行维护，Gateway 无法验证其价格、额度与协议兼容性。");
     default:

@@ -116,13 +116,15 @@ its routing priority.
 
 **Refresh model catalog** on **Providers** calls the official keyless Zen
 model directory only on user request. The backend keeps only IDs ending in
-`-free`, saves the successful snapshot, and derives one additional Alias by
-removing that suffix. For example, `mimo-v2.5-free` is accepted both as
-itself and as `mimo-v2.5`; requests for the shared Alias follow account-card
-order across Go and Zen. **Providers** shows the saved catalog and each
-model contract. A failed or empty refresh leaves the last saved snapshot
-active. The reserved Go model `ox-alpha-free` is excluded from Zen discovery
-so it remains Go-only and unpriced.
+`-free` and saves the successful snapshot. The original ID is always available
+as an exact raw pin. Removing the suffix joins an Alias only when that name is
+already authorized by the original OpenCode Go static table; otherwise the
+refresh does not create a new Alias. For an authorized `mimo-v2.5` Alias,
+`mimo-v2.5-free` is accepted both as itself and as `mimo-v2.5`, and requests for
+the shared Alias follow account-card order across Go and Zen. **Providers**
+shows the saved catalog and each model contract. A failed or empty refresh
+leaves the last saved snapshot active. The reserved Go model `ox-alpha-free`
+is excluded from Zen discovery so it remains Go-only and unpriced.
 
 Free and Go cooldowns are **independent**. Zen Free sends no authentication
 headers. Its promo quota is shared per egress IP, so a Free `429` cools the

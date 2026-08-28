@@ -103,7 +103,6 @@ pub(crate) struct ProviderPricingValueWire {
     cache_write_per_million: Option<f64>,
     plan_limit: Option<f64>,
     model_allowance: Option<f64>,
-    #[allow(dead_code)]
     quota_multiplier: Option<f64>,
     paid_plan_price: Option<f64>,
     currency: Option<String>,
@@ -233,10 +232,8 @@ impl ProviderPricingValue {
     }
 
     pub(crate) fn from_wire(wire: ProviderPricingValueWire) -> Result<Self> {
-        // Deliberately ignore the serialized derived value and recompute it.
-        // This prevents an imported snapshot from violating the only valid
-        // multiplier formula.
-        Self::new(
+        let applied_multiplier = wire.quota_multiplier;
+        let mut value = Self::new(
             wire.model_id,
             wire.display_name,
             wire.input_per_million,
@@ -250,7 +247,12 @@ impl ProviderPricingValue {
             wire.min_input_tokens,
             wire.max_input_tokens,
             wire.time_window,
-        )
+        )?;
+        if let Some(multiplier) = applied_multiplier {
+            ensure_positive_finite("quota multiplier", multiplier)?;
+            value.quota_multiplier = Some(multiplier);
+        }
+        Ok(value)
     }
 }
 
@@ -284,10 +286,24 @@ impl ProviderCostEstimate {
         ensure_optional_positive_finite("plan limit", plan_limit)?;
         ensure_optional_positive_finite("model allowance", model_allowance)?;
         ensure_optional_non_negative_finite("paid plan price", paid_plan_price)?;
-        let quota_debit = match (plan_limit, model_allowance) {
-            (Some(limit), Some(allowance)) => Some(raw_cost * quota_multiplier(limit, allowance)?),
+        let multiplier = match (plan_limit, model_allowance) {
+            (Some(limit), Some(allowance)) => Some(quota_multiplier(limit, allowance)?),
             _ => None,
         };
+        Self::from_raw_with_multiplier(raw_cost, multiplier, paid_plan_price, plan_limit)
+    }
+
+    pub fn from_raw_with_multiplier(
+        raw_cost: f64,
+        quota_multiplier: Option<f64>,
+        paid_plan_price: Option<f64>,
+        plan_limit: Option<f64>,
+    ) -> Result<Self> {
+        ensure_non_negative_finite("raw cost", raw_cost)?;
+        ensure_optional_positive_finite("quota multiplier", quota_multiplier)?;
+        ensure_optional_non_negative_finite("paid plan price", paid_plan_price)?;
+        ensure_optional_positive_finite("plan limit", plan_limit)?;
+        let quota_debit = quota_multiplier.map(|multiplier| raw_cost * multiplier);
         let paid_cost = match (quota_debit, paid_plan_price, plan_limit) {
             (Some(debit), Some(price), Some(limit)) => Some(debit * price / limit),
             _ => None,
@@ -315,8 +331,9 @@ impl ProviderCostEstimate {
     }
 }
 
-/// The only supported conversion from a model's raw usage value into an
-/// account-level quota debit multiplier.
+/// Converts an official plan limit and model allowance into the initial
+/// account-level quota debit multiplier. A persisted provider snapshot may
+/// later carry a validated local override without changing those source fields.
 pub fn quota_multiplier(plan_limit: f64, model_allowance: f64) -> Result<f64> {
     ensure_positive_finite("plan limit", plan_limit)?;
     ensure_positive_finite("model allowance", model_allowance)?;

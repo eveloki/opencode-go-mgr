@@ -902,7 +902,8 @@ export interface PricingRefreshUpdate {
   processGeneration: number;
 }
 /**
- * PUT pricing-multipliers body. CAS tokens, `expectedPricingRevision`, and
+ * PUT provider pricing-multipliers body. CAS tokens,
+ * `expectedPricingRevision` (the selected offering's active revision), and
  * `multipliers` are required.
  */
 export interface PricingMultipliersUpdate {
@@ -934,8 +935,8 @@ export interface ProviderPricing {
   snapshot: PricingSnapshot | null;
 }
 /**
- * Provider-neutral immutable pricing snapshot. GOAT uses this display-only
- * shape; it never enters the local Go quota debit calculation.
+ * Provider-neutral immutable pricing snapshot. GOAT uses this shape both for
+ * dashboard display and provider-scoped per-request cost attribution.
  */
 export interface ProviderPricingSnapshot {
   activatedAt: string;
@@ -985,7 +986,8 @@ export interface ApplicationModels {
   revision: number;
 }
 /**
- * Dashboard home totals. Custom/GOAT cards are not "available".
+ * Dashboard home totals. `availableAccounts` counts accounts that can
+ * contribute at least one currently enabled production route.
  */
 export interface DashboardSummary {
   availableAccounts: number;

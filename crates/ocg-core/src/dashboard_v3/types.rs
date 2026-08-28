@@ -1755,7 +1755,8 @@ pub enum PricingRefreshPolicy {
     UseOfficial,
 }
 
-/// PUT pricing-multipliers body. CAS tokens, `expectedPricingRevision`, and
+/// PUT provider pricing-multipliers body. CAS tokens,
+/// `expectedPricingRevision` (the selected offering's active revision), and
 /// `multipliers` are required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1830,8 +1831,8 @@ pub struct ProviderPricingRefreshUpdate {
     pub expected_official_content_hash: Option<String>,
 }
 
-/// Provider-neutral immutable pricing snapshot. GOAT uses this display-only
-/// shape; it never enters the local Go quota debit calculation.
+/// Provider-neutral immutable pricing snapshot. GOAT uses this shape both for
+/// dashboard display and provider-scoped per-request cost attribution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -1902,7 +1903,8 @@ pub struct ApplicationModels {
     pub pricing_revision: String,
 }
 
-/// Dashboard home totals. Custom/GOAT cards are not "available".
+/// Dashboard home totals. `availableAccounts` counts accounts that can
+/// contribute at least one currently enabled production route.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]

@@ -675,6 +675,10 @@ pub struct ForwardMetrics {
     pub pricing_revision_id: Option<String>,
     pub quota_multiplier: Option<f64>,
     pub local_adjustment_multiplier: Option<f64>,
+    /// Ephemeral source identity used to prove that token-derived pricing
+    /// belongs to the selected provider before it is persisted.
+    pub pricing_provider_id: Option<String>,
+    pub pricing_offering_id: Option<String>,
     pub service_tier: Option<String>,
     pub cost_state: &'static str,
 }
@@ -693,6 +697,8 @@ impl Default for ForwardMetrics {
             pricing_revision_id: None,
             quota_multiplier: None,
             local_adjustment_multiplier: None,
+            pricing_provider_id: None,
+            pricing_offering_id: None,
             service_tier: None,
             cost_state: "not_applicable",
         }
@@ -713,8 +719,8 @@ impl ForwardMetrics {
         let Some(provider_id) = provider_id else {
             return;
         };
-        if provider_id == crate::kernel::ids::OPENCODE_PROVIDER_ID
-            && offering_id == Some(crate::kernel::ids::GO_OFFERING_ID)
+        if self.pricing_provider_id.as_deref() == Some(provider_id)
+            && self.pricing_offering_id.as_deref() == offering_id
         {
             return;
         }
@@ -724,6 +730,8 @@ impl ForwardMetrics {
         self.pricing_revision_id = None;
         self.quota_multiplier = None;
         self.local_adjustment_multiplier = None;
+        self.pricing_provider_id = None;
+        self.pricing_offering_id = None;
 
         if provider_id == crate::kernel::ids::OPENCODE_ZEN_FREE_PROVIDER_ID
             && offering_id == Some(crate::provider::ANONYMOUS_FREE_OFFERING_ID)

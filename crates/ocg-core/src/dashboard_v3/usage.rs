@@ -1,9 +1,10 @@
 //! Local account usage reads and live-calibration writes.
 //!
 //! GET/PATCH `/accounts/{id}/usage` and GET `/accounts/{id}/provider-usage`
-//! reuse the current V2 Database/provider projections. There is no outbound
-//! I/O, no `/providers/accounts/{id}/usage` alias, and no plugin/trait
-//! hierarchy. Usage calibration does not bump `settings_revision`.
+//! reuse the current Database/provider projections. POST on provider usage is
+//! limited to the two sealed CN Plan clients and replaces their snapshots
+//! under CAS. There is no legacy alias or plugin/trait hierarchy. Usage
+//! calibration does not bump `settings_revision`.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -16,12 +17,15 @@ use crate::models::{
     Account as ModelAccount, CreditBalance as ModelCreditBalance, ProviderUsageSyncState,
     QuotaWindow as ModelQuotaWindow, UsageWindow as ModelUsageWindow, UsageWindowKind,
 };
-use crate::provider::{ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE};
+use crate::provider::{
+    COMMAND_CODE_GOAT_QUOTA_5H, COMMAND_CODE_GOAT_QUOTA_MONTH, COMMAND_CODE_GOAT_QUOTA_WEEK,
+    ProviderAdapterKind, ProviderRegistry, QUOTA_WINDOW_FREE,
+};
 use crate::state::CoreState;
 
 use super::types::{
-    AccountUsageUpdate, CreditBalance, ProviderUsage, QuotaWindow, UsageAvailability,
-    UsageMutation, UsageSyncState, UsageWindow,
+    AccountUsageUpdate, CreditBalance, MutationExpectation, ProviderUsage, QuotaWindow,
+    UsageAvailability, UsageMutation, UsageSyncState, UsageWindow,
 };
 use super::{V3ApiError, check_expectation, parse_mutation_json};
 
@@ -50,6 +54,76 @@ pub(super) async fn get_provider_usage(
     State(state): State<CoreState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProviderUsage>, V3ApiError> {
+    provider_usage_locked(&state, &id).map(Json)
+}
+
+pub(super) async fn refresh_provider_usage(
+    State(state): State<CoreState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<ProviderUsage>, V3ApiError> {
+    let expectation = parse_mutation_json::<MutationExpectation>(&body)?;
+    let _refresh = state.provider_usage_refresh.try_lock().map_err(|_| {
+        V3ApiError::conflict_at(&state, "provider usage refresh is already running")
+    })?;
+    let (account_snapshot, adapter, config, key) = {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &expectation)?;
+        let db = state.db.lock();
+        let account = load_account(&db, &state, &id)?;
+        let adapter =
+            ProviderAdapterKind::from_offering(&account.provider_id, &account.offering_id)
+                .ok_or_else(|| {
+                    V3ApiError::invalid_request_at(&state, "unknown provider offering")
+                })?;
+        if !matches!(
+            adapter,
+            ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn
+        ) {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "this Plan does not expose an official manual usage refresh",
+            ));
+        }
+        if account.key_cipher.trim().is_empty() {
+            return Err(V3ApiError::invalid_request_at(
+                &state,
+                "the selected account has no stored Key",
+            ));
+        }
+        let key = state
+            .decrypt_key(&account.key_cipher)
+            .map_err(V3ApiError::internal)?;
+        (account, adapter, state.config(), key)
+    };
+
+    let windows = crate::plan_usage::fetch(&config, adapter, &id, &key)
+        .await
+        .map_err(|message| V3ApiError::outbound_failed(&state, message))?;
+
+    {
+        let _settings_update = state.settings_update.lock();
+        check_expectation(&state, &expectation)?;
+        let db = state.db.lock();
+        let current = load_account(&db, &state, &id)?;
+        if current.updated_at != account_snapshot.updated_at
+            || current.key_cipher != account_snapshot.key_cipher
+            || current.provider_id != account_snapshot.provider_id
+            || current.offering_id != account_snapshot.offering_id
+        {
+            return Err(V3ApiError::conflict_at(
+                &state,
+                "the account changed while provider usage was being refreshed",
+            ));
+        }
+        let source = match adapter {
+            ProviderAdapterKind::MiniMaxCn => crate::plan_usage::MINIMAX_USAGE_SOURCE,
+            ProviderAdapterKind::KimiCn => crate::plan_usage::KIMI_USAGE_SOURCE,
+            _ => unreachable!("adapter checked above"),
+        };
+        db.replace_quota_windows_by_source(&id, source, &windows)
+            .map_err(V3ApiError::internal)?;
+    }
     provider_usage_locked(&state, &id).map(Json)
 }
 
@@ -127,7 +201,10 @@ fn patch_account_usage_locked(
     })
 }
 
-fn provider_usage_locked(state: &CoreState, id: &str) -> Result<ProviderUsage, V3ApiError> {
+pub(super) fn provider_usage_locked(
+    state: &CoreState,
+    id: &str,
+) -> Result<ProviderUsage, V3ApiError> {
     let _settings_update = state.settings_update.lock();
     let db = state.db.lock();
     let account = load_account(&db, state, id)?;
@@ -184,6 +261,17 @@ fn provider_usage_locked(state: &CoreState, id: &str) -> Result<ProviderUsage, V
             }],
             None,
         )
+    } else if descriptor.kind == ProviderAdapterKind::CommandCodeGoat {
+        let limits = PricingLimits {
+            window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
+            window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
+            window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
+        };
+        (
+            db.live_local_quota_windows(&account.id, &limits, "command-code-goat-local")
+                .map_err(V3ApiError::internal)?,
+            None,
+        )
     } else {
         (
             db.list_quota_windows(&account.id)
@@ -226,10 +314,21 @@ fn account_usage_limits(
     account: &ModelAccount,
     pricing: &CapturedPricing,
 ) -> Result<(PricingLimits, Option<String>), V3ApiError> {
-    if ProviderAdapterKind::from_offering(&account.provider_id, &account.offering_id)
-        == Some(ProviderAdapterKind::OpenCodeGo)
-    {
-        return Ok((pricing.limits.clone(), Some(pricing.revision.clone())));
+    match ProviderAdapterKind::from_offering(&account.provider_id, &account.offering_id) {
+        Some(ProviderAdapterKind::OpenCodeGo) => {
+            return Ok((pricing.limits.clone(), Some(pricing.revision.clone())));
+        }
+        Some(ProviderAdapterKind::CommandCodeGoat) => {
+            return Ok((
+                PricingLimits {
+                    window_5h: COMMAND_CODE_GOAT_QUOTA_5H,
+                    window_week: COMMAND_CODE_GOAT_QUOTA_WEEK,
+                    window_month: COMMAND_CODE_GOAT_QUOTA_MONTH,
+                },
+                None,
+            ));
+        }
+        _ => {}
     }
     Err(V3ApiError::invalid_request_at(
         state,

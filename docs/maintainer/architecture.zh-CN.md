@@ -147,19 +147,21 @@ src-tauri   -> ocg-core
 
 鉴权接受 Bearer、`x-api-key`、`x-goog-api-key`。候选头中首个命中 `CoreStateInner.credential_snapshot`（主 Key 或启用子 Key）者即通过，并作为转发日志名称归因。客户端凭据在出站前剥离，只注入所选账号配置的鉴权方案。Gemini 或 Anthropic 客户端凭据不会透传到上游 offering；Command Code 模型可以与 OpenCode Go 模型共享客户端 Alias，但 mapping 仍保留独立供应商身份，其 Key 也不会发往 OpenCode endpoint。
 
-标准入口为 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`。Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`。Gemini 接受 `/v1beta/models/{model}:*` 与 `/v1/models/{model}:*`；`generateContent` 与 `streamGenerateContent` 进入转换链，`countTokens` 与 `embedContent` 返回 `501`，未知 action 返回 `404`。带鉴权的 `GET /v1/models` 仅本地读取当前可路由别名：OpenCode Go、最后一次成功的 Zen Free 快照，以及合格的 Custom 声明 ID。受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：Go 可路由别名 ∩ 当前 Go 价格快照（highspeed 变体继承基价行），不含 Custom ID。Claude Desktop `/claude-desktop/v1/models` 只公布三个角色别名。
+标准入口为 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`。Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`。Gemini 接受 `/v1beta/models/{model}:*` 与 `/v1/models/{model}:*`；`generateContent` 与 `streamGenerateContent` 进入转换链，`countTokens` 与 `embedContent` 返回 `501`，未知 action 返回 `404`。带鉴权的 `GET /v1/models` 仅本地读取最早 OpenCode Go 静态表授权且当前可路由的 Alias，再追加合格 Custom 声明 ID。保存的 Zen/Command/MiniMax/Kimi 目录只能加入已授权 Alias，不能创建新 Alias；无法匹配的内置目录 ID 保留为精确 raw pin。受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：Go 可路由别名 ∩ 当前 Go 价格快照（highspeed 变体继承基价行），不含 Custom ID。Claude Desktop `/claude-desktop/v1/models` 只公布三个角色别名。
 
-Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选别名是小写 kebab-case，并以 OpenCode Go 名称为基准。kebab 拼写大小写折叠；含 `/`、`_` 或空白的名称视为原始 ID，不会折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个 mapping 时钉在该 mapping，之后再检查可路由性；不可路由的 mapping 会被识别，但不能产出生产路由。重叠的原始 ID 返回 `400` `ambiguous_model_id`，不调用上游。未知名称在 Chat Completions、Responses、Messages 以及 Gemini generate / streamGenerate 上返回 `400`。合格 Custom ID 会 overlay 进解析与 `/v1/models`，但不替换已公布的 Go/Zen/Command 别名。已公布 kebab 别名 `deepseek-v4-flash` 可以同时含 Go、Zen 与 Command Code mapping；原始 ID `deepseek/deepseek-v4-flash` 精确钉在 Command Code。转发日志持久化 `requested_model`、`resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`；没有 `requested_alias` 字段。
+Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选别名是小写 kebab-case，只由最早 OpenCode Go 静态表授权。Alias 拼写大小写折叠；内置 raw ID 则严格区分大小写，含 `/`、`_` 或空白的名称同样不会折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个 mapping 时钉在该 mapping，之后再检查可路由性；不可路由的 mapping 会被识别，但不能产出生产路由。重叠的精确原始 ID 返回 `400` `ambiguous_model_id`，不调用上游。未知名称在 Chat Completions、Responses、Messages 以及 Gemini generate / streamGenerate 上返回 `400`。合格 Custom ID 继续按其既有匹配规则 overlay 进解析与 `/v1/models`，但不替换已公布的内置 Alias。已公布 kebab 别名 `deepseek-v4-flash` 可以同时含 Go、Zen 与 Command Code mapping；原始 ID `deepseek/deepseek-v4-flash` 精确钉在 Command Code。转发日志持久化 `requested_model`、`resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`；没有 `requested_alias` 字段。
 
 JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解析、usage、流式与路由身份类型。Gemini 只是客户端格式。已知模型使用 `ocg-domain` 中硬编码的 `MODEL_PROTOCOLS`：客户端协议在 `supported` 内则透传，否则转到 `preferred`。未知模型在所有受支持的客户端格式上返回 `400`；请求路径不试探协议。非空 `safetySettings` 返回 `400`；空数组可以接受。`topK` 与 `thinkingConfig` 只是兼容提示，不保证与 Gemini 等价。
 
 `materialize.rs` 只解析一次客户端协议与 Alias，再按候选物化 model、protocol、endpoint 与 auth。适配器不会通过可计费推理路径试探协议支持。OpenCode `MODEL_PROTOCOLS` 表只服务 Go。表中未知的动态 Zen `-free` ID 默认按 Chat 物化。Custom 按账号把唯一协议、完整 Endpoint、隔离 origin 与由协议自动决定的鉴权重新物化为该卡声明值。
 
-`zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的供应商页显式刷新通过全局代理请求固定无 Key endpoint `https://opencode.ai/zen/v1/models`，不跟随重定向，只保留合法且以 `-free` 结尾的 ID；完整快照先持久化，再切换运行时。每个模型同时公布原 ID 与去掉 `-free` 的 Alias。失败或过滤结果为空时保留旧快照，`/v1/models` 只读取这份快照。Go 所属的 `ox-alpha-free` 是保留排除项。
+`zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的供应商页显式刷新通过全局代理请求固定无 Key endpoint `https://opencode.ai/zen/v1/models`，不跟随重定向，只保留合法且以 `-free` 结尾的 ID；完整快照先持久化，再切换运行时。每个模型保留精确 raw ID；只有去掉 `-free` 后的名称已获最早 Go 静态表授权时，才加入对应 Alias。失败或过滤结果为空时保留旧快照，`/v1/models` 只读取这份快照。Go 所属的 `ox-alpha-free` 是保留排除项。
 
 选择器：宿主 `gateway/selector.rs` 按能力、enabled/ready、凭据有效性、冷却与本次已失败账号过滤卡片，然后无密钥的 `ocg-gateway::selector` 状态机按剩余顺序行走，使用 `StrictPriority`、`StickyGlobal` 或 `RoundRobin`。没有模型路由页，也没有按模型额度池。Zen free 额度按出口 IP 共享：任一有效 `cooldown_free_until` 即视为整条 free 通道耗尽，不换 Key。
 
 价格快照不可变且按供应商分范围。刷新只在用户点击时发生。Provider 路径只抓取并启用该 Provider 自己有价格的 offering；OpenCode 与 Command Code 使用独立 revision 与最后成功状态，一个来源失败不能否决另一个。对 OpenCode Go，月额度只推导账号额度扣减倍率（`月额度 / Usage`），不是可路由额度池。官方表中 Input/Output/Usage 全是 `-` 的行（目前 Ox Alpha Free / `ox-alpha-free`）按无价格促销跳过。官方倍率与当前值不同时，先返回不激活的差异预览；后续请求同时绑定当前 revision 与刚预览的官方 content hash。抓取器仅允许 OpenCode Go HTTPS 主机和同主机重定向，总时限 20 秒、响应体上限 2 MiB。MiniMax 长上下文、priority 与 high-speed 调整是本地策略。
+
+Command Code GOAT 的请求计费只读取其最新、已验证的 Provider 范围快照。模型唯一匹配后写入原始美元成本、额度扣减（`原始成本 × 倍率`）和套餐实付等价值；缺失、歧义或未验证的行仍为 unpriced，绝不会套用 Go 价格。应用倍率可通过 Provider 范围价格写入修改，并持久化为新的快照 revision。GOAT 复用与 Provider 无关的账号窗口投影器：OCG 内已定价日志按 `$14 / $35 / $70` 累计，并可手工修正基线；未定价与外部请求不会计入，也不会按新价格追溯改写旧日志。
 
 回退 / 重试（executor + classify，**不是** `forward_once`）：
 

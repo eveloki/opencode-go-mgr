@@ -35,12 +35,9 @@ test("legacy pricing URLs migrate to providers with replaceState", () => {
   assert.match(app, /resolveAppViewKey\(raw\)/);
 });
 
-test("account-card provider deep links pass scope query fields through navigation", () => {
+test("account cards stay focused on account state instead of provider contracts", () => {
   const accounts = readFileSync(new URL("./views/Accounts.vue", import.meta.url), "utf8");
-  assert.match(app, /<Accounts v-else-if="activeKey === 'accounts'" @navigate="selectView" \/>/);
-  assert.match(app, /function selectView\(key: string, extras\?: ProviderScopeQuery\)/);
-  assert.match(app, /applyAppViewSearchParams\([\s\S]*view, extras\)/);
-  assert.match(accounts, /emit\("navigate", "providers", scope\)/);
-  assert.match(accounts, /@open-provider="openProvider\(account\)"/);
+  assert.match(app, /<Accounts v-else-if="activeKey === 'accounts'" \/>/);
+  assert.doesNotMatch(accounts, /openProvider|contractSummary|providerContracts/);
   assert.match(app, /<KeepAlive>/);
 });

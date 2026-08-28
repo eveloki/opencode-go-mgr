@@ -93,8 +93,12 @@ test("USER guides describe the Providers control plane and drop stale locations"
   assert.match(userZh, /\?view=pricing/);
   assert.match(userEn, /schema v32/i);
   assert.match(userZh, /schema v32/);
-  assert.match(userEn, /\*\*Open\s+provider\*\*/);
-  assert.match(userZh, /\*\*前往供应商\*\*/);
+  assert.doesNotMatch(userEn, /\*\*Open\s+provider\*\*/);
+  assert.doesNotMatch(userZh, /\*\*前往供应商\*\*/);
+  assert.match(userEn, /GOAT cards show a clearly labelled local estimate/);
+  assert.match(userZh, /GOAT 卡片显示的是明确标注的本地估算/);
+  assert.match(userEn, /priced OCG[\s\S]*\$14 \/ \$35 \/ \$70/);
+  assert.match(userZh, /OCG 内已定价请求日志[\s\S]*\$14 \/ \$35 \/ \$70/);
   assert.doesNotMatch(userEn, /There is no separate provider page/);
   assert.doesNotMatch(userZh, /没有独立的供应商页/);
   assert.doesNotMatch(userEn, /Use the card's \*\*Fetch models\*\* action/);
@@ -112,8 +116,8 @@ test("USER guides keep unified catalog refresh and probes manual-only", () => {
   assert.match(userZh, /所有可刷新的范围使用同一个动作/);
   assert.match(userEn, /static catalog is the initial\s+preset/);
   assert.match(userZh, /内置静态目录只是初始预设/);
-  assert.match(userEn, /newly added by a refresh[\s\S]*all disabled/);
-  assert.match(userZh, /刷新新增的模型[\s\S]*三个协议默认全部关闭/);
+  assert.match(userEn, /newly added by a refresh[\s\S]*MiniMax CN and Kimi Code CN[\s\S]*Chat Completions/);
+  assert.match(userZh, /刷新新增的模型[\s\S]*MiniMax CN 与 Kimi Code CN[\s\S]*Chat Completions/);
   assert.match(userEn, /no refresh-account selector/);
   assert.match(userZh, /没有刷新账号选择器/);
   assert.match(userEn, /Client requests never probe/);

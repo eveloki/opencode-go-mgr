@@ -434,7 +434,10 @@ test("logs view wires filters, race cancellation, debounce, and empty or error s
   assert.match(requestIdWatch, /syncQueryState\(\)/);
   assert.match(source, /onUnmounted\(\(\) => \{[\s\S]*clearTimeout\(requestIdDebounce\)/);
   assert.doesNotMatch(source, /legacy_estimate: \{ label:/);
-  assert.match(template, /额度消耗（估算）/);
+  assert.match(template, /t\("总 Tokens"\)/);
+  assert.match(template, /forwardTotals\.prompt_tokens \+ forwardTotals\.completion_tokens/);
+  const stats = template.slice(template.indexOf('class="stats-row"'), template.indexOf('class="filter-bar"'));
+  assert.doesNotMatch(stats, /额度消耗（估算）|forwardTotals\.cost/);
   const clearFilters = source.slice(source.indexOf("function clearFilters"), source.indexOf("function toggleSortOrder"));
   assert.doesNotMatch(clearFilters, /sortBy\.value|sortOrder\.value/);
 });

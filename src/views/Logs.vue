@@ -58,8 +58,8 @@
             <div class="stat-value">{{ formatNumber(forwardTotals.cached_tokens) }}</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">{{ t("额度消耗（估算）") }}</div>
-            <div class="stat-value">{{ formatCost(forwardTotals.cost, 5) }}</div>
+            <div class="stat-label">{{ t("总 Tokens") }}</div>
+            <div class="stat-value">{{ formatNumber(forwardTotals.prompt_tokens + forwardTotals.completion_tokens) }}</div>
           </div>
         </div>
         <div class="filter-bar">

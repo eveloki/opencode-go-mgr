@@ -9,7 +9,7 @@ use crate::models::AppConfig;
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_MODELS_PATH, COMMAND_CODE_PROVIDER_ID,
     ConnectionVerificationStatus, GOAT_OFFERING_ID, is_command_code_goat,
-    parse_command_code_models_catalog,
+    parse_provider_models_catalog,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -221,13 +221,14 @@ async fn parse_provider_models_response(
     provider_label: &str,
 ) -> Result<Vec<String>, GoatVerifyFailure> {
     let status = response.status();
-    let bytes = read_limited_body(response).await?;
+    let bytes = read_limited_body(response, provider_label).await?;
     if !status.is_success() {
         return Err(GoatVerifyFailure {
             message: format!("{provider_label} GET /models returned {}", status.as_u16()),
         });
     }
-    parse_command_code_models_catalog(&bytes).map_err(|message| GoatVerifyFailure { message })
+    parse_provider_models_catalog(&bytes, provider_label)
+        .map_err(|message| GoatVerifyFailure { message })
 }
 
 pub async fn probe_opencode_go_models(
@@ -285,18 +286,21 @@ async fn probe_provider_models_at_url(
     parse_provider_models_response(response, provider_label).await
 }
 
-async fn read_limited_body(response: reqwest::Response) -> Result<Vec<u8>, GoatVerifyFailure> {
+async fn read_limited_body(
+    response: reqwest::Response,
+    provider_label: &str,
+) -> Result<Vec<u8>, GoatVerifyFailure> {
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     use futures_util::StreamExt;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| GoatVerifyFailure {
-            message: format!("Command Code GOAT GET /models body failed: {error}"),
+            message: format!("{provider_label} GET /models body failed: {error}"),
         })?;
         if bytes.len() + chunk.len() > MAX_GOAT_VERIFICATION_BODY_BYTES {
             return Err(GoatVerifyFailure {
                 message: format!(
-                    "Command Code GOAT GET /models exceeded the {MAX_GOAT_VERIFICATION_BODY_BYTES}-byte limit"
+                    "{provider_label} GET /models exceeded the {MAX_GOAT_VERIFICATION_BODY_BYTES}-byte limit"
                 ),
             });
         }

@@ -197,7 +197,7 @@
             <KeepAlive>
               <Dashboard v-if="activeKey === 'dashboard'" @navigate="selectView" />
               <Keys v-else-if="activeKey === 'keys'" />
-              <Accounts v-else-if="activeKey === 'accounts'" @navigate="selectView" />
+              <Accounts v-else-if="activeKey === 'accounts'" />
               <Providers v-else-if="activeKey === 'providers'" />
               <Applications v-else-if="activeKey === 'apps'" />
               <Logs v-else-if="activeKey === 'logs'" />
