@@ -64,6 +64,18 @@ pub enum UsageSyncTrigger {
     Inference429,
 }
 
+impl UsageSyncTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Scheduled => "scheduled",
+            Self::Expedited => "expedited",
+            Self::Reset => "reset",
+            Self::Inference429 => "inference_429",
+        }
+    }
+}
+
 /// Successful official refresh outcome shared by dashboard and scheduler.
 #[derive(Debug, Clone, Serialize)]
 pub struct OfficialUsageRefreshSuccess {
@@ -589,6 +601,9 @@ impl ControlPlaneWorkers {
         {
             return;
         }
+        host.with_sync_store(|store| {
+            let _ = store.log_gateway("info", "usage_sync", "event=official_usage_worker_started");
+        });
         let weak = host.downgrade();
         tokio::spawn(async move {
             loop {
@@ -859,6 +874,7 @@ pub(crate) async fn refresh_official_usage_with_authorization<H: UsageSyncHost>(
                     &authorization,
                 )
                 .await;
+                audit_official_usage_result(&state_cloned, &account_id_owned, trigger, &result);
                 Arc::new(result)
             }
             .boxed()
@@ -891,6 +907,64 @@ pub(crate) async fn refresh_official_usage_with_authorization<H: UsageSyncHost>(
             Err(error) => Err(error.clone()),
         },
         owner_authorization,
+    }
+}
+
+fn audit_official_usage_result(
+    state: &impl UsageSyncHost,
+    account_id: &str,
+    trigger: UsageSyncTrigger,
+    result: &RefreshResult,
+) {
+    let (level, message) = match result {
+        Ok(success) if trigger == UsageSyncTrigger::Manual => (
+            "info",
+            format!(
+                "event=official_usage_refresh_succeeded account_id={account_id} trigger={} next_allowed_at={}",
+                trigger.as_str(),
+                success.next_allowed_at
+            ),
+        ),
+        Ok(_) => return,
+        Err(error) => {
+            let Some(reason) = official_usage_failure_kind(error) else {
+                return;
+            };
+            (
+                "warn",
+                format!(
+                    "event=official_usage_refresh_failed account_id={account_id} trigger={} reason={reason}",
+                    trigger.as_str()
+                ),
+            )
+        }
+    };
+    state.with_sync_store(|store| {
+        let _ = store.log_gateway(level, "usage_sync", &message);
+    });
+}
+
+fn official_usage_failure_kind(error: &OfficialUsageRefreshError) -> Option<&'static str> {
+    match error {
+        OfficialUsageRefreshError::Upstream(GoUsageError::Unauthorized) => {
+            Some("upstream_unauthorized")
+        }
+        OfficialUsageRefreshError::Upstream(GoUsageError::Forbidden) => Some("upstream_forbidden"),
+        OfficialUsageRefreshError::Upstream(GoUsageError::RateLimited) => {
+            Some("upstream_rate_limited")
+        }
+        OfficialUsageRefreshError::Upstream(GoUsageError::Http(_)) => Some("upstream_http"),
+        OfficialUsageRefreshError::Upstream(GoUsageError::Timeout) => Some("upstream_timeout"),
+        OfficialUsageRefreshError::Upstream(GoUsageError::Network) => Some("upstream_network"),
+        OfficialUsageRefreshError::Upstream(GoUsageError::Oversize) => Some("upstream_oversize"),
+        OfficialUsageRefreshError::Upstream(GoUsageError::Schema) => Some("upstream_schema"),
+        OfficialUsageRefreshError::Upstream(GoUsageError::Window) => Some("upstream_window"),
+        OfficialUsageRefreshError::Internal(_) => Some("internal"),
+        OfficialUsageRefreshError::Conflict(_) => Some("account_conflict"),
+        OfficialUsageRefreshError::CommitAuthorizationRejected => Some("revision_conflict"),
+        OfficialUsageRefreshError::NotFound
+        | OfficialUsageRefreshError::NotEligible(_)
+        | OfficialUsageRefreshError::Throttled { .. } => None,
     }
 }
 
@@ -1592,6 +1666,19 @@ mod tests {
         let rb = b.await.unwrap().unwrap();
         assert_eq!(ra.last_success_at, rb.last_success_at);
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        let success_events: Vec<_> = state
+            .db
+            .lock()
+            .list_gateway_logs(20)
+            .unwrap()
+            .into_iter()
+            .filter(|log| {
+                log.message
+                    .starts_with("event=official_usage_refresh_succeeded account_id=acc-1")
+            })
+            .collect();
+        assert_eq!(success_events.len(), 1, "deduped refresh logs once");
+        assert!(!success_events[0].message.contains("sk-acc-1"));
 
         let throttled = refresh_official_usage(&state, "acc-1", UsageSyncTrigger::Manual).await;
         match throttled {
@@ -1855,6 +1942,19 @@ mod tests {
         assert_eq!(sync.last_success_at, success_at);
         assert_eq!(sync.failure_streak, 1);
         assert_eq!(sync.next_eligible_at, Some(later + failure_backoff(1)));
+        let failure_events: Vec<_> = state
+            .db
+            .lock()
+            .list_gateway_logs(20)
+            .unwrap()
+            .into_iter()
+            .filter(|log| {
+                log.message
+                    == "event=official_usage_refresh_failed account_id=acc-2 trigger=manual reason=upstream_timeout"
+            })
+            .collect();
+        assert_eq!(failure_events.len(), 1);
+        assert!(!failure_events[0].message.contains("sk-acc-2"));
 
         drop(state);
         std::fs::remove_dir_all(dir).unwrap();
