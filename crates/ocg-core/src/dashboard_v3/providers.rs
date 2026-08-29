@@ -166,7 +166,15 @@ pub(super) async fn patch_zen_free_settings(
         db.set_zen_free_enabled(input.enabled)
             .map_err(V3ApiError::internal)?;
     }
-    let _revision = state.bump_settings_revision();
+    let revision = state.bump_settings_revision();
+    state.log_runtime_event(
+        "info",
+        "provider",
+        &format!(
+            "event=zen_free_state_updated enabled={} revision={revision}",
+            input.enabled
+        ),
+    );
     zen_free_settings_from_state(&state).map(Json)
 }
 
@@ -190,18 +198,27 @@ pub(super) async fn refresh_zen_free_models(
     };
     let fetched = fetch_zen_free_catalog(&state, &config).await;
     let _settings_update = state.settings_update.lock();
-    let catalog = fetched.map_err(|message| V3ApiError::outbound_failed(&state, message))?;
+    let catalog = match fetched {
+        Ok(catalog) => catalog,
+        Err(message) => {
+            audit_catalog_failure(&state, OPENCODE_ZEN_FREE_PROVIDER_ID, "fetch");
+            return Err(V3ApiError::outbound_failed(&state, message));
+        }
+    };
     check_expectation(&state, &expectation)?;
     if catalog.models.is_empty() {
+        audit_catalog_failure(&state, OPENCODE_ZEN_FREE_PROVIDER_ID, "empty_catalog");
         return Err(V3ApiError::outbound_failed(
             &state,
             "Zen model catalog contains no model IDs ending in `-free`",
         ));
     }
+    let model_count = catalog.models.len();
     state
         .activate_zen_free_model_catalog(catalog)
         .map_err(V3ApiError::internal)?;
-    let _revision = state.bump_settings_revision();
+    let revision = state.bump_settings_revision();
+    audit_catalog_success(&state, OPENCODE_ZEN_FREE_PROVIDER_ID, model_count, revision);
     Ok(Json(zen_free_models_from_state(&state)))
 }
 
@@ -278,7 +295,7 @@ pub(super) async fn refresh_provider_models(
         (account, config, key, base_url, source_url)
     };
 
-    let models = if provider_id == OPENCODE_PROVIDER_ID {
+    let models_result = if provider_id == OPENCODE_PROVIDER_ID {
         goat::probe_opencode_go_models(
             &config,
             key.as_deref().expect("OpenCode refresh prepared a Key"),
@@ -287,9 +304,16 @@ pub(super) async fn refresh_provider_models(
         .await
     } else {
         goat::refresh_command_code_models(&config, &base_url).await
-    }
-    .map_err(|failure| V3ApiError::outbound_failed(&state, failure.message))?;
+    };
+    let models = match models_result {
+        Ok(models) => models,
+        Err(failure) => {
+            audit_catalog_failure(&state, &provider_id, "fetch");
+            return Err(V3ApiError::outbound_failed(&state, failure.message));
+        }
+    };
     if models.is_empty() {
+        audit_catalog_failure(&state, &provider_id, "empty_catalog");
         return Err(V3ApiError::outbound_failed(
             &state,
             "provider model refresh returned an empty catalog",
@@ -301,6 +325,7 @@ pub(super) async fn refresh_provider_models(
     let models = if provider_id == OPENCODE_PROVIDER_ID {
         let filtered: Vec<String> = models.into_iter().filter(|id| !is_free_model(id)).collect();
         if filtered.is_empty() {
+            audit_catalog_failure(&state, &provider_id, "zen_only_catalog");
             return Err(V3ApiError::outbound_failed(
                 &state,
                 "provider model refresh returned only Zen Free models",
@@ -355,6 +380,7 @@ pub(super) async fn refresh_provider_models(
         .reload_provider_contracts()
         .map_err(V3ApiError::internal)?;
     let revision = state.bump_settings_revision();
+    audit_catalog_success(&state, &provider_id, models.len(), revision);
     Ok(Json(ProviderModels {
         provider_id,
         account_id: account.map(|account| account.id),
@@ -415,10 +441,15 @@ pub(super) async fn refresh_contract_catalog(
                 .unwrap_or_default();
             (config, base_url, source_url, previous_models)
         };
-        let models = goat::refresh_command_code_models(&config, &base_url)
-            .await
-            .map_err(|failure| V3ApiError::outbound_failed(&state, failure.message))?;
+        let models = match goat::refresh_command_code_models(&config, &base_url).await {
+            Ok(models) => models,
+            Err(failure) => {
+                audit_catalog_failure(&state, &scope_id, "fetch");
+                return Err(V3ApiError::outbound_failed(&state, failure.message));
+            }
+        };
         if models.is_empty() {
+            audit_catalog_failure(&state, &scope_id, "empty_catalog");
             return Err(V3ApiError::outbound_failed(
                 &state,
                 "Command Code model refresh returned an empty catalog",
@@ -443,7 +474,8 @@ pub(super) async fn refresh_contract_catalog(
                 .map_err(V3ApiError::internal)?;
         }
         state.routing.reset();
-        let _revision = state.bump_settings_revision();
+        let revision = state.bump_settings_revision();
+        audit_catalog_success(&state, &scope_id, models.len(), revision);
         return provider_contracts_response(&state);
     }
     if matches!(scope_id.as_str(), MINIMAX_PROVIDER_ID | KIMI_PROVIDER_ID) {
@@ -495,7 +527,7 @@ pub(super) async fn refresh_contract_catalog(
             let source_url = goat::goat_models_url_for_base(&base_url);
             (account, config, key, base_url, source_url, source)
         };
-        let models = goat::probe_provider_models(
+        let models_result = goat::probe_provider_models(
             &config,
             &key,
             &base_url,
@@ -505,8 +537,14 @@ pub(super) async fn refresh_contract_catalog(
                 "Kimi Code CN"
             },
         )
-        .await
-        .map_err(|failure| V3ApiError::outbound_failed(&state, failure.message))?;
+        .await;
+        let models = match models_result {
+            Ok(models) => models,
+            Err(failure) => {
+                audit_catalog_failure(&state, &scope_id, "fetch");
+                return Err(V3ApiError::outbound_failed(&state, failure.message));
+            }
+        };
         let now = Utc::now();
         let _settings_update = state.settings_update.lock();
         check_expectation(&state, &expectation)?;
@@ -526,7 +564,8 @@ pub(super) async fn refresh_contract_catalog(
                 .map_err(V3ApiError::internal)?;
         }
         state.routing.reset();
-        let _revision = state.bump_settings_revision();
+        let revision = state.bump_settings_revision();
+        audit_catalog_success(&state, &scope_id, models.len(), revision);
         return provider_contracts_response(&state);
     }
     if scope_id != OPENCODE_PROVIDER_ID {
@@ -572,14 +611,19 @@ pub(super) async fn refresh_contract_catalog(
         (account, config, key, base_url, source_url, previous_models)
     };
 
-    let models = goat::probe_opencode_go_models(&config, &key, &base_url)
-        .await
-        .map_err(|failure| V3ApiError::outbound_failed(&state, failure.message))?;
+    let models = match goat::probe_opencode_go_models(&config, &key, &base_url).await {
+        Ok(models) => models,
+        Err(failure) => {
+            audit_catalog_failure(&state, &scope_id, "fetch");
+            return Err(V3ApiError::outbound_failed(&state, failure.message));
+        }
+    };
     let models: Vec<String> = models
         .into_iter()
         .filter(|model_id| !is_free_model(model_id))
         .collect();
     if models.is_empty() {
+        audit_catalog_failure(&state, &scope_id, "empty_catalog");
         return Err(V3ApiError::outbound_failed(
             &state,
             "provider model refresh returned no OpenCode Go models",
@@ -612,7 +656,8 @@ pub(super) async fn refresh_contract_catalog(
             .map_err(V3ApiError::internal)?;
     }
     state.routing.reset();
-    let _revision = state.bump_settings_revision();
+    let revision = state.bump_settings_revision();
+    audit_catalog_success(&state, &scope_id, models.len(), revision);
     provider_contracts_response(&state)
 }
 
@@ -684,7 +729,15 @@ pub(super) async fn reset_provider_model_protocols_to_static(
             .map_err(V3ApiError::internal)?;
     }
     state.routing.reset();
-    let _revision = state.bump_settings_revision();
+    let revision = state.bump_settings_revision();
+    state.log_runtime_event(
+        "info",
+        "provider",
+        &format!(
+            "event=provider_protocols_reset provider={scope_id} model_count={} revision={revision}",
+            models.len()
+        ),
+    );
     provider_contracts_response(&state)
 }
 
@@ -1128,6 +1181,24 @@ fn validate_provider_scope(state: &CoreState, scope: &ContractScope) -> Result<(
             "protocol switches on this path are limited to provider scopes",
         )),
     }
+}
+
+fn audit_catalog_success(state: &CoreState, provider_id: &str, model_count: usize, revision: u64) {
+    state.log_runtime_event(
+        "info",
+        "provider",
+        &format!(
+            "event=provider_catalog_refresh_succeeded provider={provider_id} model_count={model_count} revision={revision}"
+        ),
+    );
+}
+
+fn audit_catalog_failure(state: &CoreState, provider_id: &str, stage: &str) {
+    state.log_runtime_event(
+        "warn",
+        "provider",
+        &format!("event=provider_catalog_refresh_failed provider={provider_id} stage={stage}"),
+    );
 }
 
 fn validate_custom_endpoint_scope(

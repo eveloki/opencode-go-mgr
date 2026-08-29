@@ -1006,6 +1006,33 @@ async fn dashboard_v3_zen_refresh_persists_on_success_and_preserves_state_on_fai
         harness.state.zen_free_model_catalog().models,
         vec!["refresh-test-free".to_string()]
     );
+    let runtime_logs = harness.state.db.lock().list_gateway_logs(50).unwrap();
+    assert!(runtime_logs.iter().any(|log| {
+        log.message
+            == format!(
+                "event=provider_catalog_refresh_succeeded provider={OPENCODE_ZEN_FREE_PROVIDER_ID} model_count=1 revision={after_success}"
+            )
+    }));
+    assert_eq!(
+        runtime_logs
+            .iter()
+            .filter(|log| {
+                log.message
+                    == format!(
+                        "event=provider_catalog_refresh_failed provider={OPENCODE_ZEN_FREE_PROVIDER_ID} stage=fetch"
+                    )
+            })
+            .count(),
+        2,
+        "empty and HTTP-failed refreshes are both recorded"
+    );
+    assert!(
+        runtime_logs
+            .iter()
+            .all(|log| !log.message.contains(&success.url)
+                && !log.message.contains(&empty.url)
+                && !log.message.contains(&failed.url))
+    );
 
     let _busy = harness.state.zen_free_models_refresh.lock().await;
     let (status, busy) = send_json(

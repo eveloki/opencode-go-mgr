@@ -97,9 +97,21 @@ pub(super) async fn refresh_provider_usage(
         (account, adapter, state.config(), key)
     };
 
-    let windows = crate::plan_usage::fetch(&config, adapter, &id, &key)
-        .await
-        .map_err(|message| V3ApiError::outbound_failed(&state, message))?;
+    let windows = match crate::plan_usage::fetch(&config, adapter, &id, &key).await {
+        Ok(windows) => windows,
+        Err(message) => {
+            state.log_runtime_event(
+                "warn",
+                "usage_sync",
+                &format!(
+                    "event=provider_usage_refresh_failed account_id={id} provider={} stage=fetch",
+                    account_snapshot.provider_id
+                ),
+            );
+            return Err(V3ApiError::outbound_failed(&state, message));
+        }
+    };
+    let window_count = windows.len();
 
     {
         let _settings_update = state.settings_update.lock();
@@ -124,6 +136,14 @@ pub(super) async fn refresh_provider_usage(
         db.replace_quota_windows_by_source(&id, source, &windows)
             .map_err(V3ApiError::internal)?;
     }
+    state.log_runtime_event(
+        "info",
+        "usage_sync",
+        &format!(
+            "event=provider_usage_refresh_succeeded account_id={id} provider={} window_count={window_count}",
+            account_snapshot.provider_id
+        ),
+    );
     provider_usage_locked(&state, &id).map(Json)
 }
 

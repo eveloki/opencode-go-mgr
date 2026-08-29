@@ -53,6 +53,7 @@ async fn update_settings(
     update: SettingsUpdate,
 ) -> Result<MutationAck, V3ApiError> {
     let _effects = state.lock_settings_host_effects().await;
+    let changed_fields = changed_setting_fields(&update).join(",");
     let (previous_config, config, committed_revision) = {
         let _settings_update = state.settings_update.lock();
         if update.expectation.expected_revision != state.settings_revision()
@@ -89,20 +90,101 @@ async fn update_settings(
 
         state
             .apply_host_settings(&previous_config, config.clone())
-            .map_err(|error| map_host_settings_error(state, error))?;
+            .map_err(|error| {
+                state.log_runtime_event(
+                    "error",
+                    "settings",
+                    &format!(
+                        "event=settings_update_failed fields={changed_fields} reason={}",
+                        host_settings_error_kind(&error)
+                    ),
+                );
+                map_host_settings_error(state, error)
+            })?;
         let committed_revision = state.settings_revision();
         (previous_config, config, committed_revision)
     };
 
-    state
+    if let Err(error) = state
         .rebind_listener_after_settings_commit(previous_config, config, committed_revision, false)
         .await
-        .map_err(|error| map_host_settings_error(state, error))?;
+    {
+        state.log_runtime_event(
+            "error",
+            "settings",
+            &format!(
+                "event=settings_update_failed fields={changed_fields} revision={} reason={}",
+                state.settings_revision(),
+                host_settings_error_kind(&error)
+            ),
+        );
+        return Err(map_host_settings_error(state, error));
+    }
+
+    state.log_runtime_event(
+        "info",
+        "settings",
+        &format!(
+            "event=settings_updated fields={changed_fields} revision={}",
+            state.settings_revision()
+        ),
+    );
 
     Ok(MutationAck {
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
     })
+}
+
+fn changed_setting_fields(update: &SettingsUpdate) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    for (present, name) in [
+        (update.gateway_port.is_some(), "gateway_port"),
+        (update.upstream_base_url.is_some(), "upstream_base_url"),
+        (update.proxy_mode.is_some(), "proxy_mode"),
+        (update.proxy_url.is_some(), "proxy_url"),
+        (
+            update.proxy_list_direction.is_some(),
+            "proxy_list_direction",
+        ),
+        (update.proxy_list_models.is_some(), "proxy_list_models"),
+        (update.opencode_invite_url.is_some(), "opencode_invite_url"),
+        (update.client_root_url.is_some(), "client_root_url"),
+        (update.auto_start.is_some(), "auto_start"),
+        (update.show_dock_icon.is_some(), "show_dock_icon"),
+        (
+            update.connect_timeout_secs.is_some(),
+            "connect_timeout_secs",
+        ),
+        (
+            update.non_stream_timeout_secs.is_some(),
+            "non_stream_timeout_secs",
+        ),
+        (
+            update.stream_idle_timeout_secs.is_some(),
+            "stream_idle_timeout_secs",
+        ),
+        (update.routing_mode.is_some(), "routing_mode"),
+        (update.conversation_sticky.is_some(), "conversation_sticky"),
+    ] {
+        if present {
+            fields.push(name);
+        }
+    }
+    if fields.is_empty() {
+        fields.push("none");
+    }
+    fields
+}
+
+fn host_settings_error_kind(error: &HostSettingsError) -> &'static str {
+    match error {
+        HostSettingsError::AutoStartUnsupported => "auto_start_unsupported",
+        HostSettingsError::DockVisibilityUnsupported => "dock_visibility_unsupported",
+        HostSettingsError::Persist(_) => "persist_failed",
+        HostSettingsError::Sync(_) => "host_sync_failed",
+        HostSettingsError::GatewayBind(_) => "gateway_bind_failed",
+    }
 }
 
 fn map_host_settings_error(state: &CoreState, error: HostSettingsError) -> V3ApiError {
