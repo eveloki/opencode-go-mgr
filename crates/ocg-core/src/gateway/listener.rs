@@ -44,6 +44,17 @@ pub enum ListenerStopOutcome {
     TaskPanicked,
 }
 
+impl ListenerStopOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Graceful => "graceful",
+            Self::AbortedAfterTimeout => "aborted_after_timeout",
+            Self::TaskCancelled => "task_cancelled",
+            Self::TaskPanicked => "task_panicked",
+        }
+    }
+}
+
 struct PreparedListener {
     listener: tokio::net::TcpListener,
     local_addr: SocketAddr,
@@ -70,7 +81,17 @@ impl GatewayLifecycle {
     pub async fn bind(state: CoreState, addr: SocketAddr) -> Result<GatewayHandle> {
         let _lifecycle = state.lock_gateway_lifecycle().await;
         Self::repair_active_dashboard_trust(&state);
-        let prepared = Self::prepare(addr).await?;
+        let prepared = match Self::prepare(addr).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                state.log_runtime_event(
+                    "error",
+                    "gateway",
+                    &format!("event=listener_bind_failed address={addr} stage=initial"),
+                );
+                return Err(error);
+            }
+        };
         let dashboard_is_local = prepared.local_addr.ip().is_loopback();
 
         // A directly bound initial listener must have the right trust before
@@ -108,11 +129,12 @@ impl GatewayLifecycle {
         spawn_forward_log_backfill(state.clone());
         // Composed by the host root through the explicit listener boundary so
         // this module does not import dashboard mounts.
-        let app = <CoreState as GatewayRouterHost>::compose_router(state);
+        let app = <CoreState as GatewayRouterHost>::compose_router(state.clone());
         let port = local_addr.port();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
+        let task_state = state.clone();
         let handle = tokio::spawn(async move {
             let _public_registration = public_registration;
             let server = axum::serve(listener, app);
@@ -121,8 +143,21 @@ impl GatewayLifecycle {
             });
             if let Err(e) = server.await {
                 eprintln!("gateway server error: {}", e);
+                task_state.log_runtime_event(
+                    "error",
+                    "gateway",
+                    &format!("event=listener_task_failed address={local_addr}"),
+                );
             }
         });
+
+        state.log_runtime_event(
+            "info",
+            "gateway",
+            &format!(
+                "event=listener_bound address={local_addr} dashboard_local={dashboard_is_local}"
+            ),
+        );
 
         GatewayHandle {
             port,
@@ -231,12 +266,25 @@ impl GatewayLifecycle {
             if !addr.ip().is_loopback() || !old_handle.dashboard_is_local {
                 state.set_dashboard_local_mode(false);
             }
-            let _outcome = Self::stop_and_wait(old_handle).await;
+            let outcome = Self::stop_and_wait(old_handle).await;
 
             // Same-port replacement cannot bind until the old task has
             // definitively terminated. A bind failure is therefore honest:
             // the slot remains empty and no listener is detached.
-            let prepared = Self::prepare(addr).await?;
+            let prepared = match Self::prepare(addr).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    state.log_runtime_event(
+                        "error",
+                        "gateway",
+                        &format!(
+                            "event=listener_rebind_failed previous_port={requested_port} target_port={requested_port} mode=same_port stop_outcome={} stage=bind",
+                            outcome.as_str()
+                        ),
+                    );
+                    return Err(error);
+                }
+            };
             let dashboard_is_local = prepared.local_addr.ip().is_loopback();
             state.set_dashboard_local_mode(
                 dashboard_is_local && !state.has_dashboard_public_listener(),
@@ -245,13 +293,37 @@ impl GatewayLifecycle {
             let port = handle.port;
             let displaced = state.gateway.lock().replace(handle);
             debug_assert!(displaced.is_none());
+            state.log_runtime_event(
+                "info",
+                "gateway",
+                &format!(
+                    "event=listener_rebound previous_port={requested_port} new_port={port} mode=same_port stop_outcome={} wait_for_previous=true",
+                    outcome.as_str()
+                ),
+            );
             return Ok(port);
         }
 
         // Different-port and port-0 transitions bind before touching the live
         // slot. A failed bind therefore preserves both the old listener and
         // its trust mode.
-        let prepared = Self::prepare(addr).await?;
+        let prepared = match Self::prepare(addr).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let previous_port = state.gateway.lock().as_ref().map(|handle| handle.port);
+                state.log_runtime_event(
+                    "error",
+                    "gateway",
+                    &format!(
+                        "event=listener_rebind_failed previous_port={} target_port={requested_port} mode=bind_first stage=bind",
+                        previous_port
+                            .map(|port| port.to_string())
+                            .unwrap_or_else(|| "none".to_string())
+                    ),
+                );
+                return Err(error);
+            }
+        };
         let dashboard_is_local = prepared.local_addr.ip().is_loopback();
         let had_old_listener = state.gateway.lock().is_some();
         if !dashboard_is_local {
@@ -264,9 +336,11 @@ impl GatewayLifecycle {
         let handle = Self::spawn_prepared(state.clone(), prepared);
         let port = handle.port;
         let old_handle = state.gateway.lock().replace(handle);
+        let previous_port = old_handle.as_ref().map(|handle| handle.port);
+        let mut stop_outcome = None;
         if let Some(handle) = old_handle {
             if wait_for_old {
-                let _outcome = Self::stop_and_wait(handle).await;
+                stop_outcome = Some(Self::stop_and_wait(handle).await);
             } else {
                 Self::observe_displaced_listener(state.clone(), handle);
             }
@@ -284,6 +358,19 @@ impl GatewayLifecycle {
         } else if !dashboard_is_local {
             state.set_dashboard_local_mode(false);
         }
+        state.log_runtime_event(
+            "info",
+            "gateway",
+            &format!(
+                "event=listener_rebound previous_port={} new_port={port} mode=bind_first stop_outcome={} wait_for_previous={wait_for_old}",
+                previous_port
+                    .map(|port| port.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                stop_outcome
+                    .map(ListenerStopOutcome::as_str)
+                    .unwrap_or("pending")
+            ),
+        );
         Ok(port)
     }
 
@@ -364,15 +451,24 @@ fn spawn_forward_log_backfill(state: CoreState) {
         )
     };
     match more_chunks {
-        Ok(true) => {}
+        Ok(true) => state.log_runtime_event(
+            "info",
+            "observability",
+            "event=forward_log_key_backfill_started mode=background",
+        ),
         Ok(false) => return,
         Err(error) => {
             eprintln!("warning: forward log key backfill unavailable: {error}");
+            state.log_runtime_event(
+                "warn",
+                "observability",
+                "event=forward_log_key_backfill_failed phase=initial",
+            );
             return;
         }
     }
     let weak = std::sync::Arc::downgrade(&state);
-    std::thread::Builder::new()
+    let spawn_result = std::thread::Builder::new()
         .name("ocg-forward-log-backfill".to_string())
         .spawn(move || {
             while let Some(state) = weak.upgrade() {
@@ -386,13 +482,32 @@ fn spawn_forward_log_backfill(state: CoreState) {
                 };
                 match step {
                     Ok(true) => std::thread::sleep(crate::db::FORWARD_LOG_BACKFILL_CHUNK_PAUSE),
-                    Ok(false) => return,
+                    Ok(false) => {
+                        state.log_runtime_event(
+                            "info",
+                            "observability",
+                            "event=forward_log_key_backfill_completed mode=background",
+                        );
+                        return;
+                    }
                     Err(error) => {
                         eprintln!("warning: forward log key backfill paused: {error}");
+                        state.log_runtime_event(
+                            "warn",
+                            "observability",
+                            "event=forward_log_key_backfill_failed phase=background",
+                        );
                         return;
                     }
                 }
             }
-        })
-        .ok();
+        });
+    if let Err(error) = spawn_result {
+        eprintln!("warning: forward log key backfill thread failed to start: {error}");
+        state.log_runtime_event(
+            "warn",
+            "observability",
+            "event=forward_log_key_backfill_failed phase=thread_spawn",
+        );
+    }
 }

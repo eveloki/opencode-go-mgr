@@ -874,6 +874,16 @@ impl CoreStateInner {
         self.data_dir.clone()
     }
 
+    /// Persist one low-frequency lifecycle/control-plane event without making
+    /// observability a prerequisite for the operation that already succeeded.
+    /// Callers must pass an already-sanitized message: never include Keys,
+    /// request bodies, authorization headers, or credential-bearing URLs.
+    pub fn log_runtime_event(&self, level: &str, category: &str, message: &str) {
+        if let Err(error) = self.db.lock().log_gateway(level, category, message) {
+            eprintln!("warning: failed to persist runtime event category={category}: {error}");
+        }
+    }
+
     pub fn recover_browser_profiles_for_account(
         &self,
         account_id: &str,
