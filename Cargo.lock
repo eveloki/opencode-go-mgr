@@ -2792,6 +2792,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures-util",
+ "getrandom 0.3.4",
  "ocg-domain",
  "ocg-gateway",
  "ocg-infra",
@@ -2810,6 +2811,7 @@ dependencies = [
  "tower-http",
  "uuid",
  "windows",
+ "zeroize",
 ]
 
 [[package]]

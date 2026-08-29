@@ -1229,10 +1229,34 @@ fn validate_custom_endpoint_scope(
 fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
     let revision = ControlRevision::from_state(state);
     let zen_catalog = state.zen_free_model_catalog();
+    let contracts = state.provider_contracts();
+    let goat_models = contracts
+        .providers
+        .get(COMMAND_CODE_PROVIDER_ID)
+        .map(|scope| scope.catalog.models.as_slice())
+        .unwrap_or_default();
+    let minimax_models = contracts
+        .providers
+        .get(MINIMAX_PROVIDER_ID)
+        .map(|scope| scope.catalog.models.as_slice())
+        .unwrap_or_default();
+    let kimi_models = contracts
+        .providers
+        .get(KIMI_PROVIDER_ID)
+        .map(|scope| scope.catalog.models.as_slice())
+        .unwrap_or_default();
     ProviderCatalog {
         entries: BUILTIN_PLANS
             .iter()
-            .map(|plan| catalog_entry(plan, &zen_catalog.models))
+            .map(|plan| {
+                catalog_entry(
+                    plan,
+                    &zen_catalog.models,
+                    goat_models,
+                    minimax_models,
+                    kimi_models,
+                )
+            })
             .collect(),
         revision: revision.revision,
         process_generation: revision.process_generation,
@@ -1240,7 +1264,13 @@ fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
     }
 }
 
-fn catalog_entry(plan: &BuiltinPlan, zen_models: &[String]) -> ProviderCatalogEntry {
+fn catalog_entry(
+    plan: &BuiltinPlan,
+    zen_models: &[String],
+    goat_models: &[String],
+    minimax_models: &[String],
+    kimi_models: &[String],
+) -> ProviderCatalogEntry {
     ProviderCatalogEntry {
         provider_id: plan.offering.provider_id.to_string(),
         offering_id: plan.offering.offering_id.to_string(),
@@ -1283,10 +1313,13 @@ fn catalog_entry(plan: &BuiltinPlan, zen_models: &[String]) -> ProviderCatalogEn
                 immutable_after_create: field.immutable_after_create,
             })
             .collect(),
-        model_aliases: alias::routeable_aliases_for_with_zen(
+        model_aliases: alias::routeable_aliases_for_with_extended_catalogs(
             plan.offering.provider_id,
             plan.offering.offering_id,
             zen_models,
+            goat_models,
+            minimax_models,
+            kimi_models,
         ),
     }
 }

@@ -30,16 +30,38 @@ The registry is sealed. Built-in Plan families are:
 | Command Code GOAT | `command-code` / `goat` | Yes | Public Provider catalog; GOAT preset models default on, additional models default off in the Providers matrix; no account-level GOAT/All or Max mode |
 | MiniMax CN Token Plan | `minimax` / `cn` | Yes | Dedicated `sk-cp` Key; fixed official Chat route, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` / `cn` | Yes | Dedicated Kimi Code Key; fixed official Chat route, authenticated model directory, and manual official weekly/rate-window usage refresh |
-| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; one complete inference Endpoint and one upstream protocol per account; verification is optional but shows an unverified hint; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; one API URL and one upstream protocol per account; common base URLs are completed automatically; new accounts default on; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+
+## Move accounts between nodes
+
+Use **Export** on the Accounts toolbar to create a password-encrypted
+`.ocgbackup` file, then use **Import** on the destination node to preview and
+confirm the batch. The encrypted file includes account Keys, so the export also
+requires the current OCG Manager administrator username and password as a
+step-up check. A loopback installation without an administrator must create one
+before its first export. Choose a separate migration password of at least 12
+characters and transfer it separately from the file; OCG Manager cannot recover
+it. Import never replaces existing accounts: the exact Plan-and-name duplicates
+shown in the preview are skipped, and all other rows are committed together.
+
+The package moves ordinary account configuration, Custom Endpoint/model
+declarations, and ready account Keys. It deliberately excludes Zen Free,
+browser profiles and cookies, third-party login passwords, referral codes,
+usage/cooldown history, verification evidence, logs, access credentials, and
+Settings. Ready managed accounts keep their Key, but their browser login does
+not move. Incomplete managed drafts restart at the first disabled setup step.
+Custom accounts import disabled and pending so their destination and Key can be
+reviewed before enabling them; verification remains optional. V1 transfer is
+available only from the node's loopback dashboard. Remote dashboards cannot
+import or export account migration packages.
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
 `routable=false` offering before it mutates the row, revision, or timestamps.
 Command Code GOAT does not use directory fetch as Key verification; an enabled,
 ready account with a non-empty Key can route models enabled in the Provider
-matrix. Custom API is catalog-routable and can be enabled even while
-verification is `pending`; editing the Endpoint, capabilities, Key, or protocol resets
-verification status to `pending` but keeps the enabled state. Disabled drafts
-remain saveable. The desktop UI uses Dashboard V3 HTTP and has no separate
+matrix. A newly created, routable Custom API account defaults to enabled.
+Editing the Endpoint, capabilities, Key, or protocol preserves its enabled
+state. Disabled drafts remain saveable. The desktop UI uses Dashboard V3 HTTP and has no separate
 Tauri invoke mutation path.
 
 Use only the official provider API **Key** for OpenCode Go, Command Code GOAT,
@@ -60,15 +82,18 @@ the only model-supply control: GOAT preset rows default on, newly discovered
 rows default off, and inference 401/403 is the real Key-auth signal.
 
 Custom API is a live trusted-administrator destination. The card stores one
-complete inference Endpoint, one upstream protocol (Chat Completions,
+API URL, one upstream protocol (Chat Completions,
 Responses, or Messages), and at least one model capability. That protocol is
 uniform across every model on the account and is the effective preferred
 protocol: matching client traffic passes through, while other supported client
-formats, including Gemini, convert to it. **Fetch models** is available only
-when the Endpoint ends in the selected protocol's standard path
-(`/chat/completions`, `/responses`, or `/messages`); the UI then derives the
-sibling `/models` URL. Non-standard paths are never guessed and keep manual
-model entry available. Fetching does not save, verify, or enable the account.
+formats, including Gemini, convert to it. Entering an origin root is recommended:
+OCG appends `/v1` and the selected protocol path. A base already ending in
+`/v1` is used without duplicating that segment. Existing complete standard
+Endpoints remain exact. **Fetch models** derives `/v1/models` from a root or
+versioned base, or the sibling `/models` from a complete standard Endpoint.
+Non-standard complete paths remain exact for inference and retain manual model
+entry instead of guessing a directory URL. Fetching does not save, verify, or
+enable the account.
 
 A trusted administrator may configure any syntactically valid HTTP or HTTPS
 origin, including LAN, loopback, and other self-selected destinations.
@@ -76,18 +101,24 @@ URL-embedded credentials, query strings, and fragments are rejected. The gateway
 never follows redirects and never forwards dashboard or client authentication.
 Chat Completions and Responses use only `Authorization: Bearer <key>`; Messages
 uses only `x-api-key: <key>`. There is no configurable auth scheme, dual-auth
-request, or 401 auth-header retry. The saved inference Endpoint is requested
-verbatim and no protocol suffix is appended.
+request, or 401 auth-header retry. Root and `/v1` bases resolve through the
+same rule for discovery, verification, and production inference; legacy complete
+Endpoints are requested verbatim.
 Custom HTTP uses the same process-wide Direct / Manual / Auto proxy policy;
 connect and request timeouts are bounded from the configured connect timeout
 (clamped 5–60 seconds).
 
-Verification is optional. A Custom account can be created, saved, and enabled
-without verifying; when enabled but unverified the card shows an unverified
-hint. The **Verify** action remains available and sends exactly one
-protocol-correct, non-stream, token-bounded JSON request to the complete
-Endpoint using the first declared model; only a `2xx` JSON object succeeds. Verification does
-not discover or mutate capabilities and never auto-enables the account.
+Every ready account card has the same **Test connection** action. It opens an
+account-scoped, searchable model table with single-model and sequential
+**Test all** controls. Each test sends one minimal real request through that
+exact account and its current effective protocol. It never switches to another
+account, runs gateway fallback, changes enablement or cooldown, or writes
+Provider protocol evidence. Results live only in the open dialog; closing it
+stops dispatching queued tests. A request already sent may finish, and testing
+may consume provider quota. Provider-page tests remain the separate,
+low-frequency control for validating newly added Provider model/protocol
+capabilities and may use eligible-account fallback.
+
 Eligible accounts (enabled + ready + non-empty key) expose their declared model
 IDs on authenticated `GET /v1/models` and can be selected for those IDs.
 Declared capability IDs are both the client-facing names and the upstream model
@@ -96,7 +127,7 @@ whitespace never fold onto a kebab alias. Custom overlay never steals a
 published Go or Zen Free alias. Overlap with another Plan's unique raw ID
 returns `ambiguous_model_id` and does not call upstream. Undeclared names stay
 unknown (`400`). Changing the Endpoint, Key, declared capabilities, or protocol
-re-pends verification but leaves the account enabled. Endpoint and upstream
+leaves the account enabled. Endpoint and upstream
 protocol can be edited after create; the config and complete model-capability
 set are replaced in one CAS transaction. Disabling the declared protocol makes
 the model unroutable; no fixed-priority fallback or override can enable an

@@ -78,12 +78,14 @@ test("ProviderModelMatrix batch actions set whole columns on or off", async () =
   assert.doesNotMatch(source, /\{ key: "auto"/);
 });
 
-test("ProviderModelMatrix renders a probe icon button per model row", async () => {
+test("ProviderModelMatrix renders probe controls only when the Provider supports probes", async () => {
   const source = await readFile(new URL("./ProviderModelMatrix.vue", import.meta.url), "utf8");
   assert.match(source, /ReloadOutlined/);
   assert.match(source, /:aria-label="t\('测试'\)"/);
   assert.match(source, /:loading="rowProbing\(modelId\)"/);
-  assert.match(source, /v-if="scope\.scope_kind !== 'custom_endpoint'"/);
+  assert.match(source, /const probeSupported = computed\(\(\) => props\.scope\.card\.protocol_probe\)/);
+  assert.match(source, /v-if="probeSupported"/);
+  assert.match(source, /if \(!probeSupported\.value\) return/);
   assert.match(source, /n-popconfirm/);
   assert.match(source, /runRowProbe/);
   assert.match(source, /emit\("probe", \{ modelId \}\)/);

@@ -26,6 +26,8 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "AccountModelCapability",
     "AccountCreate",
     "AccountManagedCreate",
+    "AccountModelTestRequest",
+    "AccountModelTestResponse",
     "AccountUpdate",
     "AccountOrder",
     "AccountSetupUpdate",
@@ -318,7 +320,22 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[usage_refresh_end..provider_refresh_end],
         PROVIDER_REFRESH_CATALOG_TYPES
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), provider_refresh_end);
+    const ACCOUNT_TRANSFER_CATALOG_TYPES: &[&str] = &[
+        "AccountExportRequest",
+        "AccountExport",
+        "AccountImportPreviewRequest",
+        "AccountImportPreview",
+        "AccountImportPreviewItem",
+        "AccountImportDisposition",
+        "AccountImportRequest",
+        "AccountImportResult",
+    ];
+    let account_transfer_end = provider_refresh_end + ACCOUNT_TRANSFER_CATALOG_TYPES.len();
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[provider_refresh_end..account_transfer_end],
+        ACCOUNT_TRANSFER_CATALOG_TYPES
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), account_transfer_end);
 }
 
 #[test]

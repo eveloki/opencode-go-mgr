@@ -1,19 +1,19 @@
 //! Hardcoded unified model alias registry.
 //!
 //! Outbound clients should send stable lowercase kebab-case aliases. The
-//! original OpenCode Go protocol table is the only built-in Alias authority;
-//! refreshed Provider catalogs may join those names but never create new ones. Case-folded
+//! original OpenCode Go protocol table plus sealed Provider adapter maps are
+//! the built-in Alias authority. Refreshed Provider catalogs may join only
+//! those code-owned names and never create arbitrary new ones. Case-folded
 //! kebab spellings such as `GLM-5.2` are accepted. Names containing `/`, `_`,
 //! or whitespace are treated as raw IDs and never folded onto a kebab alias
 //! (`glm/5.2` is not `glm-5.2`). A raw upstream model ID is accepted only
 //! when it uniquely selects one provider mapping; ambiguity returns
 //! [`ResolveError::Ambiguous`] with code [`AMBIGUOUS_MODEL_ID`].
 //!
-//! Command Code GOAT has one official mapping:
-//! Alias `deepseek-v4-flash` → raw `deepseek/deepseek-v4-flash`. The kebab
-//! alias stays Go-owned and published; the unique slash raw ID pins to GOAT.
-//! Eligible verified Command Code catalogs join the Go canonical Alias by
-//! leaf name where possible. Statically authorized Zen `*-free` IDs likewise
+//! Command Code GOAT rows join a code-owned Alias by leaf name where possible.
+//! Known plan suffixes are stripped only when the shorter Alias is authorized;
+//! selected verbose implementation IDs use a sealed exact map. The unique
+//! slash raw ID still pins to GOAT. Statically authorized Zen `*-free` IDs likewise
 //! stay exact raw pins while joining only their stripped Go-table Alias. Eligible Custom capabilities
 //! overlay published aliases and resolve otherwise unknown IDs without
 //! stealing Go/Zen mappings.
@@ -37,6 +37,30 @@ use ocg_domain::provider::is_custom_api;
 use ocg_domain::zen::{ZenFreeModelCatalog, stripped_free_alias};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
+
+const MINIMAX_CN_ALIASES: &[(&str, &str)] = &[
+    ("MiniMax-M3", "minimax-m3"),
+    ("MiniMax-M2.7", "minimax-m2.7"),
+    ("MiniMax-M2.7-highspeed", "minimax-m2.7-highspeed"),
+    ("MiniMax-M2.5", "minimax-m2.5"),
+    ("MiniMax-M2.5-highspeed", "minimax-m2.5-highspeed"),
+    ("MiniMax-M2.1", "minimax-m2.1"),
+    ("MiniMax-M2.1-highspeed", "minimax-m2.1-highspeed"),
+    ("MiniMax-M2", "minimax-m2"),
+];
+
+const KIMI_CN_ALIASES: &[(&str, &str)] = &[
+    ("kimi-for-coding", "kimi-k2.7-code"),
+    ("kimi-for-coding-highspeed", "kimi-k2.7-code-highspeed"),
+    ("k3", "kimi-k3"),
+    ("k3-256k", "kimi-k3-256k"),
+];
+
+/// GOAT-only names whose upstream leaf contains an implementation qualifier
+/// that is not part of the stable client model family. The exact upstream ID
+/// keeps working as a pinned raw request.
+const COMMAND_CODE_GOAT_ALIASES: &[(&str, &str)] =
+    &[("nvidia/nemotron-3-ultra-550b-a55b", "nemotron-3-ultra")];
 
 /// Machine-readable error code for a raw ID that matches more than one mapping.
 pub const AMBIGUOUS_MODEL_ID: &str = "ambiguous_model_id";
@@ -220,6 +244,63 @@ fn build_registry(zen_free_models: &[String]) -> Registry {
     registry
 }
 
+fn build_extended_registry(
+    zen_free_models: &[String],
+    goat_model_ids: &[String],
+    minimax_model_ids: &[String],
+    kimi_model_ids: &[String],
+) -> Registry {
+    let mut registry = build_registry(zen_free_models);
+    insert_sealed_catalog(
+        &mut registry,
+        minimax_model_ids,
+        minimax_mapping,
+        minimax_catalog_alias,
+    );
+    insert_sealed_catalog(
+        &mut registry,
+        kimi_model_ids,
+        kimi_mapping,
+        kimi_catalog_alias,
+    );
+    insert_goat_catalog(&mut registry, goat_model_ids);
+    registry
+}
+
+fn insert_goat_catalog(registry: &mut Registry, model_ids: &[String]) {
+    for model_id in model_ids {
+        upsert_mapping(registry, None, goat_mapping(model_id, true));
+    }
+    for model_id in model_ids {
+        let alias = command_alias_for_catalog(model_id, registry);
+        let unique = model_ids
+            .iter()
+            .filter(|candidate| {
+                command_alias_for_catalog(candidate, registry).eq_ignore_ascii_case(&alias)
+            })
+            .count()
+            == 1;
+        if unique && is_code_owned_alias(registry, &alias) {
+            upsert_mapping(registry, Some(&alias), goat_mapping(model_id, true));
+        }
+    }
+}
+
+fn insert_sealed_catalog(
+    registry: &mut Registry,
+    model_ids: &[String],
+    mapping: fn(&str) -> ProviderMapping,
+    alias_for_model: fn(&str) -> Option<&'static str>,
+) {
+    for model_id in model_ids {
+        let provider_mapping = mapping(model_id);
+        insert_raw_mapping(registry, provider_mapping.clone());
+        if let Some(alias) = alias_for_model(model_id) {
+            insert_mapping(registry, alias, provider_mapping);
+        }
+    }
+}
+
 fn go_mapping(upstream_model: &str) -> ProviderMapping {
     ProviderMapping {
         provider_id: OPENCODE_PROVIDER_ID,
@@ -253,7 +334,6 @@ fn goat_catalog_hit_for_resolved(
     goat_model_ids: &[String],
     resolved: &ResolvedModel,
     registry: &Registry,
-    go_model_ids: &[String],
 ) -> Option<String> {
     goat_catalog_hit(goat_model_ids, resolved.requested()).or_else(|| match resolved {
         ResolvedModel::Alias {
@@ -262,9 +342,7 @@ fn goat_catalog_hit_for_resolved(
             .iter()
             .filter(|mapping| mapping.is_command_code_goat())
             .find_map(|mapping| goat_catalog_hit(goat_model_ids, &mapping.upstream_model))
-            .or_else(|| {
-                command_catalog_hit_for_alias(goat_model_ids, alias, registry, go_model_ids)
-            }),
+            .or_else(|| command_catalog_hit_for_alias(goat_model_ids, alias, registry)),
         ResolvedModel::PinnedRaw { mapping, .. } if mapping.is_command_code_goat() => {
             goat_catalog_hit(goat_model_ids, &mapping.upstream_model)
         }
@@ -272,20 +350,17 @@ fn goat_catalog_hit_for_resolved(
     })
 }
 
-const COMMAND_ALIAS_SUFFIX_EXCEPTIONS: &[&str] = &["-paid"];
+const COMMAND_ALIAS_SUFFIX_EXCEPTIONS: &[&str] = &["-paid", "-free"];
 const COMMAND_ALIAS_EXACT_EXCEPTIONS: &[(&str, &str)] = &[("ox-alpha", "ox-alpha-free")];
 
 fn command_catalog_hit_for_alias(
     goat_model_ids: &[String],
     alias: &str,
     registry: &Registry,
-    go_model_ids: &[String],
 ) -> Option<String> {
     let matches = goat_model_ids
         .iter()
-        .filter(|id| {
-            command_alias_with_go_catalog(id, registry, go_model_ids).eq_ignore_ascii_case(alias)
-        })
+        .filter(|id| command_alias_for_catalog(id, registry).eq_ignore_ascii_case(alias))
         .collect::<Vec<_>>();
     (matches.len() == 1).then(|| matches[0].clone())
 }
@@ -373,6 +448,35 @@ fn insert_mapping(registry: &mut Registry, alias: &str, mapping: ProviderMapping
         entry.mappings.push(mapping.clone());
     }
     insert_raw_mapping(registry, mapping);
+}
+
+fn upsert_mapping(registry: &mut Registry, alias: Option<&str>, mapping: ProviderMapping) {
+    let same_identity = |existing: &ProviderMapping| {
+        existing.provider_id == mapping.provider_id
+            && existing.offering_id == mapping.offering_id
+            && existing.upstream_model == mapping.upstream_model
+    };
+    if let Some(alias) = alias {
+        let key = alias.to_ascii_lowercase();
+        let entry = registry.aliases.entry(key).or_insert_with(|| AliasEntry {
+            alias: alias.to_string(),
+            mappings: Vec::new(),
+        });
+        if let Some(existing) = entry.mappings.iter_mut().find(|item| same_identity(item)) {
+            *existing = mapping.clone();
+        } else {
+            entry.mappings.push(mapping.clone());
+        }
+    }
+    let mappings = registry
+        .raw_exact
+        .entry(mapping.upstream_model.clone())
+        .or_default();
+    if let Some(existing) = mappings.iter_mut().find(|item| same_identity(item)) {
+        *existing = mapping;
+    } else {
+        mappings.push(mapping);
+    }
 }
 
 fn insert_raw_mapping(registry: &mut Registry, mapping: ProviderMapping) {
@@ -482,8 +586,8 @@ pub fn resolve_with_catalogs(
 }
 
 /// Resolve against the persisted OpenCode Go and Zen catalogs plus eligible
-/// Custom and GOAT account catalogs. Refreshed catalogs may add exact raw pins,
-/// while the original Go table remains the only built-in Alias authority.
+/// Custom and GOAT account catalogs. Refreshed catalogs may add exact raw pins
+/// or activate only code-owned aliases.
 pub fn resolve_with_all_catalogs(
     requested: &str,
     go_model_ids: &[String],
@@ -504,7 +608,8 @@ pub fn resolve_with_all_catalogs(
 
 /// Extended sealed-provider overlay used by the host. Existing public helpers
 /// keep their stable signatures while MiniMax/Kimi catalogs participate in
-/// raw-ID ambiguity and may join only aliases authorized by the Go table.
+/// raw-ID ambiguity and may join aliases authorized by the Go table or their
+/// own sealed adapter maps.
 pub fn resolve_with_extended_catalogs(
     requested: &str,
     go_model_ids: &[String],
@@ -514,7 +619,12 @@ pub fn resolve_with_extended_catalogs(
     minimax_model_ids: &[String],
     kimi_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
-    let registry = build_registry(zen_free_models);
+    let registry = build_extended_registry(
+        zen_free_models,
+        goat_model_ids,
+        minimax_model_ids,
+        kimi_model_ids,
+    );
     let go_resolved = match resolve_in(&registry, requested) {
         Ok(resolved) => overlay_go_catalog(resolved, go_model_ids),
         Err(ResolveError::Unknown { requested }) => overlay_unknown_go(requested, go_model_ids),
@@ -535,52 +645,13 @@ pub fn resolve_with_extended_catalogs(
         other => other,
     };
     let goat_resolved = match custom_resolved {
-        Ok(resolved) => overlay_goat_catalog(resolved, goat_model_ids, &registry, go_model_ids),
+        Ok(resolved) => overlay_goat_catalog(resolved, goat_model_ids, &registry),
         Err(ResolveError::Unknown { requested }) => {
-            overlay_unknown_goat(requested, goat_model_ids, &registry, go_model_ids)
+            overlay_unknown_goat(requested, goat_model_ids, &registry)
         }
         other => other,
     };
-    let minimax_resolved = overlay_fixed_catalog_result(
-        goat_resolved,
-        minimax_model_ids,
-        ProviderMapping::is_minimax_cn,
-        minimax_mapping,
-        catalog_alias,
-    );
-    overlay_fixed_catalog_result(
-        minimax_resolved,
-        kimi_model_ids,
-        ProviderMapping::is_kimi_cn,
-        kimi_mapping,
-        kimi_catalog_alias,
-    )
-}
-
-fn overlay_fixed_catalog_result(
-    resolved: Result<ResolvedModel, ResolveError>,
-    model_ids: &[String],
-    owns_mapping: fn(&ProviderMapping) -> bool,
-    mapping: fn(&str) -> ProviderMapping,
-    alias_for_model: fn(&str) -> String,
-) -> Result<ResolvedModel, ResolveError> {
-    match resolved {
-        Ok(resolved) => {
-            let Some(canonical) = provider_catalog_hit_for_resolved(
-                model_ids,
-                &resolved,
-                owns_mapping,
-                alias_for_model,
-            ) else {
-                return Ok(resolved);
-            };
-            overlay_known_provider(resolved, canonical, mapping)
-        }
-        Err(ResolveError::Unknown { requested }) => {
-            overlay_unknown_provider(requested, model_ids, mapping)
-        }
-        other => other,
-    }
+    goat_resolved
 }
 
 fn overlay_go_catalog(
@@ -591,7 +662,7 @@ fn overlay_go_catalog(
         go_model_ids,
         &resolved,
         |mapping| mapping.is_opencode_go(),
-        catalog_alias,
+        go_catalog_alias,
     ) else {
         return Ok(resolved);
     };
@@ -746,11 +817,8 @@ fn overlay_goat_catalog(
     resolved: ResolvedModel,
     goat_model_ids: &[String],
     registry: &Registry,
-    go_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
-    let Some(canonical) =
-        goat_catalog_hit_for_resolved(goat_model_ids, &resolved, registry, go_model_ids)
-    else {
+    let Some(canonical) = goat_catalog_hit_for_resolved(goat_model_ids, &resolved, registry) else {
         return Ok(match resolved {
             ResolvedModel::PinnedRaw { requested, mapping }
                 if mapping.is_command_code_goat() && mapping.routeable =>
@@ -770,19 +838,13 @@ fn overlay_unknown_goat(
     requested: String,
     goat_model_ids: &[String],
     registry: &Registry,
-    go_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
     let Some(canonical) = goat_catalog_hit(goat_model_ids, &requested).or_else(|| {
-        command_catalog_hit_for_alias(
-            goat_model_ids,
-            &requested.to_ascii_lowercase(),
-            registry,
-            go_model_ids,
-        )
+        command_catalog_hit_for_alias(goat_model_ids, &requested.to_ascii_lowercase(), registry)
     }) else {
         return Err(ResolveError::Unknown { requested });
     };
-    let alias = command_alias_with_go_catalog(&canonical, registry, go_model_ids);
+    let alias = command_alias_for_catalog(&canonical, registry);
     if looks_raw_shaped(&requested)
         || (canonical.trim() == requested.trim() && !alias.eq_ignore_ascii_case(&requested))
     {
@@ -870,6 +932,15 @@ fn resolve_in(registry: &Registry, requested: &str) -> Result<ResolvedModel, Res
     }
 
     let folded = trimmed.to_lowercase();
+    if registry
+        .aliases
+        .get(&folded)
+        .is_some_and(|entry| entry.alias != trimmed)
+    {
+        if let Some(mappings) = registry.raw_exact.get(trimmed) {
+            return pin_or_ambiguous(original, mappings);
+        }
+    }
     if let Some(entry) = registry.aliases.get(&folded) {
         return Ok(ResolvedModel::Alias {
             requested: original,
@@ -917,8 +988,9 @@ pub fn published_routeable_aliases_with_zen(zen_free_models: &[String]) -> Vec<P
     published_routeable_in(&build_registry(zen_free_models))
 }
 
-/// Routeable aliases authorized by the original OpenCode Go table. Refreshed
-/// built-in catalogs may add mappings and raw pins, but never publish new names.
+/// Routeable aliases authorized by the original OpenCode Go table and sealed
+/// Provider adapter maps. Refreshed catalogs may add mappings and raw pins, but never
+/// publish names outside those code-owned maps.
 pub fn published_routeable_aliases_with_catalogs(
     zen_free_models: &[String],
     goat_model_ids: &[String],
@@ -947,37 +1019,54 @@ pub fn published_routeable_aliases_with_extended_catalogs(
     minimax_model_ids: &[String],
     kimi_model_ids: &[String],
 ) -> Vec<PublishedAlias> {
-    let _ = (
-        go_model_ids,
+    let _ = go_model_ids;
+    published_routeable_in(&build_extended_registry(
+        zen_free_models,
         goat_model_ids,
         minimax_model_ids,
         kimi_model_ids,
-    );
-    published_routeable_aliases_with_zen(zen_free_models)
+    ))
 }
 
-fn catalog_alias(model_id: &str) -> String {
+fn go_catalog_alias(model_id: &str) -> String {
     model_id
         .trim()
         .to_ascii_lowercase()
         .replace(['_', ' '], "-")
 }
 
-fn kimi_catalog_alias(model_id: &str) -> String {
-    match catalog_alias(model_id).as_str() {
-        // Kimi's Coding Plan keeps this stable upstream ID while the model
-        // behind it is K2.7 Code. The client-facing name remains the original
-        // OpenCode Go Alias; forwarding must keep `kimi-for-coding` intact.
-        "kimi-for-coding" => "kimi-k2.7-code".to_string(),
-        alias => alias.to_string(),
-    }
+fn sealed_catalog_alias(
+    model_id: &str,
+    aliases: &'static [(&'static str, &'static str)],
+) -> Option<&'static str> {
+    let trimmed = model_id.trim();
+    aliases
+        .iter()
+        .find_map(|(upstream, alias)| (*upstream == trimmed).then_some(*alias))
 }
 
-fn command_alias_with_go_catalog(
-    upstream_model: &str,
-    registry: &Registry,
-    _go_model_ids: &[String],
-) -> String {
+fn minimax_catalog_alias(model_id: &str) -> Option<&'static str> {
+    sealed_catalog_alias(model_id, MINIMAX_CN_ALIASES)
+}
+
+fn kimi_catalog_alias(model_id: &str) -> Option<&'static str> {
+    sealed_catalog_alias(model_id, KIMI_CN_ALIASES)
+}
+
+fn command_catalog_alias(model_id: &str) -> Option<&'static str> {
+    sealed_catalog_alias(model_id, COMMAND_CODE_GOAT_ALIASES)
+}
+
+fn is_code_owned_alias(registry: &Registry, alias: &str) -> bool {
+    registry.aliases.contains_key(&alias.to_ascii_lowercase())
+        || MINIMAX_CN_ALIASES
+            .iter()
+            .chain(KIMI_CN_ALIASES)
+            .chain(COMMAND_CODE_GOAT_ALIASES)
+            .any(|(_, owned_alias)| owned_alias.eq_ignore_ascii_case(alias))
+}
+
+fn command_alias_for_catalog(upstream_model: &str, registry: &Registry) -> String {
     let leaf = upstream_model
         .trim()
         .rsplit('/')
@@ -985,23 +1074,21 @@ fn command_alias_with_go_catalog(
         .unwrap_or_default()
         .to_ascii_lowercase()
         .replace(['_', ' '], "-");
-    let is_go_alias = |candidate: &str| {
-        registry
-            .aliases
-            .get(candidate)
-            .is_some_and(|entry| entry.mappings.iter().any(ProviderMapping::is_opencode_go))
-    };
-    if is_go_alias(&leaf) {
+    let is_authorized_alias = |candidate: &str| is_code_owned_alias(registry, candidate);
+    if is_authorized_alias(&leaf) {
         return leaf;
     }
+    if let Some(alias) = command_catalog_alias(upstream_model) {
+        return alias.to_string();
+    }
     for (command_leaf, go_alias) in COMMAND_ALIAS_EXACT_EXCEPTIONS {
-        if leaf.eq_ignore_ascii_case(command_leaf) && is_go_alias(go_alias) {
+        if leaf.eq_ignore_ascii_case(command_leaf) && is_authorized_alias(go_alias) {
             return (*go_alias).to_string();
         }
     }
     for suffix in COMMAND_ALIAS_SUFFIX_EXCEPTIONS {
         if let Some(candidate) = leaf.strip_suffix(suffix) {
-            if is_go_alias(candidate) {
+            if is_authorized_alias(candidate) {
                 return candidate.to_string();
             }
         }
@@ -1010,11 +1097,12 @@ fn command_alias_with_go_catalog(
 }
 
 /// Canonical client Alias for one Provider catalog row. The original OpenCode
-/// Go table is authoritative; an empty result means the row is raw-only.
+/// Go table and sealed Provider adapter maps are authoritative; an empty result means
+/// the row is raw-only.
 pub fn canonical_alias_for_provider_model(
     provider_id: &str,
     upstream_model: &str,
-    go_model_ids: &[String],
+    _go_model_ids: &[String],
     zen_free_models: &[String],
 ) -> String {
     let registry = build_registry(zen_free_models);
@@ -1038,27 +1126,19 @@ pub fn canonical_alias_for_provider_model(
             .unwrap_or_default();
     }
     if provider_id == COMMAND_CODE_PROVIDER_ID {
-        let candidate = command_alias_with_go_catalog(upstream_model, &registry, go_model_ids);
-        return registry
-            .aliases
-            .get(&candidate)
-            .map(|entry| entry.alias.clone())
+        let candidate = command_alias_for_catalog(upstream_model, &registry);
+        return is_code_owned_alias(&registry, &candidate)
+            .then_some(candidate)
             .unwrap_or_default();
     }
     if provider_id == MINIMAX_PROVIDER_ID {
-        let candidate = catalog_alias(upstream_model);
-        return registry
-            .aliases
-            .get(&candidate)
-            .map(|entry| entry.alias.clone())
+        return minimax_catalog_alias(upstream_model)
+            .map(str::to_string)
             .unwrap_or_default();
     }
     if provider_id == KIMI_PROVIDER_ID {
-        let candidate = kimi_catalog_alias(upstream_model);
-        return registry
-            .aliases
-            .get(&candidate)
-            .map(|entry| entry.alias.clone())
+        return kimi_catalog_alias(upstream_model)
+            .map(str::to_string)
             .unwrap_or_default();
     }
     if provider_id == CUSTOM_PROVIDER_ID {
@@ -1119,6 +1199,26 @@ pub fn routeable_aliases_for_with_zen(
     routeable_aliases_for_in(&build_registry(zen_free_models), provider_id, offering_id)
 }
 
+pub fn routeable_aliases_for_with_extended_catalogs(
+    provider_id: &str,
+    offering_id: &str,
+    zen_free_models: &[String],
+    goat_model_ids: &[String],
+    minimax_model_ids: &[String],
+    kimi_model_ids: &[String],
+) -> Vec<String> {
+    routeable_aliases_for_in(
+        &build_extended_registry(
+            zen_free_models,
+            goat_model_ids,
+            minimax_model_ids,
+            kimi_model_ids,
+        ),
+        provider_id,
+        offering_id,
+    )
+}
+
 pub fn is_published_alias(name: &str) -> bool {
     matches!(resolve(name), Ok(ResolvedModel::Alias { .. }))
 }
@@ -1129,6 +1229,8 @@ type ResolveProviderModels = fn(&str, &[String], &[String]) -> Result<ResolvedMo
 type ResolveCatalogs =
     fn(&str, &[String], &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
 type RouteableWithZen = fn(&str, &str, &[String]) -> Vec<String>;
+type RouteableProviderExtendedCatalogs =
+    fn(&str, &str, &[String], &[String], &[String], &[String]) -> Vec<String>;
 
 const _: ResolveName = resolve;
 const _: ResolveCustom = resolve_with_custom;
@@ -1141,6 +1243,7 @@ const _: fn(&[String], &[String]) -> Vec<PublishedAlias> =
     published_routeable_aliases_with_catalogs;
 const _: fn(&str, &str) -> Vec<String> = routeable_aliases_for;
 const _: RouteableWithZen = routeable_aliases_for_with_zen;
+const _: RouteableProviderExtendedCatalogs = routeable_aliases_for_with_extended_catalogs;
 const _: fn(&str) -> bool = is_published_alias;
 
 #[cfg(test)]
@@ -1414,6 +1517,109 @@ mod tests {
                 .iter()
                 .any(|item| { item.alias.contains('/') || is_free_model(&item.alias) })
         );
+    }
+
+    #[test]
+    fn command_catalog_shortens_only_code_owned_long_names() {
+        let nemotron_upstream = COMMAND_CODE_GOAT_ALIASES[0].0.to_string();
+        let command = vec![nemotron_upstream.clone()];
+
+        match resolve_with_all_catalogs("nemotron-3-ultra", &[], &[], &[], &command).unwrap() {
+            ResolvedModel::Alias {
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, "nemotron-3-ultra");
+                assert!(mappings.iter().any(|mapping| {
+                    mapping.is_command_code_goat() && mapping.upstream_model == nemotron_upstream
+                }));
+            }
+            other => panic!("expected sealed GOAT short Alias, got {other:?}"),
+        }
+        assert!(matches!(
+            resolve_with_all_catalogs(&nemotron_upstream, &[], &[], &[], &command),
+            Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                if mapping.is_command_code_goat()
+                    && mapping.upstream_model == nemotron_upstream
+        ));
+        assert_eq!(
+            canonical_alias_for_provider_model(
+                COMMAND_CODE_PROVIDER_ID,
+                &nemotron_upstream,
+                &[],
+                &[],
+            ),
+            "nemotron-3-ultra"
+        );
+        assert!(
+            published_routeable_aliases_with_all_catalogs(&[], &[], &command)
+                .iter()
+                .any(|item| item.alias == "nemotron-3-ultra"
+                    && item.owned_by == COMMAND_CODE_PROVIDER_ID)
+        );
+        assert_eq!(
+            routeable_aliases_for_with_extended_catalogs(
+                COMMAND_CODE_PROVIDER_ID,
+                GOAT_OFFERING_ID,
+                &[],
+                &command,
+                &[],
+                &[],
+            ),
+            vec!["nemotron-3-ultra".to_string()]
+        );
+        assert!(
+            !published_routeable_aliases_with_all_catalogs(&[], &[], &[])
+                .iter()
+                .any(|item| item.alias == "nemotron-3-ultra")
+        );
+
+        let future = vec!["vendor/future-model-with-a-very-long-name".to_string()];
+        assert!(matches!(
+            resolve_with_all_catalogs(
+                "future-model-with-a-very-long-name",
+                &[],
+                &[],
+                &[],
+                &future,
+            ),
+            Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                if mapping.is_command_code_goat()
+        ));
+        assert!(
+            !published_routeable_aliases_with_all_catalogs(&[], &[], &future)
+                .iter()
+                .any(|item| item.alias == "future-model-with-a-very-long-name")
+        );
+    }
+
+    #[test]
+    fn command_catalog_reuses_sealed_cn_aliases_and_known_plan_suffixes() {
+        let command = vec![
+            "moonshotai/Kimi-K2.7-Code-Highspeed".to_string(),
+            "poolside/laguna-s-2.1-free".to_string(),
+        ];
+        for (alias, upstream) in [
+            (
+                "kimi-k2.7-code-highspeed",
+                "moonshotai/Kimi-K2.7-Code-Highspeed",
+            ),
+            ("laguna-s-2.1", "poolside/laguna-s-2.1-free"),
+        ] {
+            match resolve_with_all_catalogs(
+                alias,
+                &[],
+                &["laguna-s-2.1-free".into()],
+                &[],
+                &command,
+            )
+            .unwrap()
+            {
+                ResolvedModel::Alias { mappings, .. } => assert!(mappings.iter().any(|mapping| {
+                    mapping.is_command_code_goat() && mapping.upstream_model == upstream
+                })),
+                other => panic!("expected code-owned Command Alias, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -2006,53 +2212,137 @@ mod tests {
 
     #[test]
     fn sealed_cn_catalogs_join_static_aliases_and_preserve_raw_ambiguity() {
-        let minimax = vec!["MiniMax-M3".to_string()];
-        let kimi = vec!["kimi-for-coding".to_string(), "kimi-k3".to_string()];
-        let resolved =
-            resolve_with_extended_catalogs("minimax-m3", &[], &[], &[], &[], &minimax, &kimi)
-                .unwrap();
-        assert!(
-            resolved
-                .routeable_mappings()
-                .iter()
-                .any(|mapping| mapping.is_minimax_cn())
-        );
-        let published =
-            published_routeable_aliases_with_extended_catalogs(&[], &[], &[], &minimax, &kimi);
-        assert!(published.iter().any(|item| item.alias == "minimax-m3"));
-        for (alias, upstream) in [
-            ("kimi-k2.7-code", "kimi-for-coding"),
-            ("kimi-k3", "kimi-k3"),
-        ] {
+        let minimax = MINIMAX_CN_ALIASES
+            .iter()
+            .map(|(upstream, _)| (*upstream).to_string())
+            .collect::<Vec<_>>();
+        let kimi = KIMI_CN_ALIASES
+            .iter()
+            .map(|(upstream, _)| (*upstream).to_string())
+            .collect::<Vec<_>>();
+
+        for (upstream, alias) in MINIMAX_CN_ALIASES {
+            let resolved =
+                resolve_with_extended_catalogs(alias, &[], &[], &[], &[], &minimax, &kimi).unwrap();
+            assert!(
+                resolved.routeable_mappings().iter().any(|mapping| {
+                    mapping.is_minimax_cn() && mapping.upstream_model == *upstream
+                })
+            );
+            assert!(matches!(
+                resolve_with_extended_catalogs(
+                    upstream, &[], &[], &[], &[], &minimax, &kimi,
+                ),
+                Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                    if mapping.is_minimax_cn() && mapping.upstream_model == *upstream
+            ));
+            assert_eq!(
+                canonical_alias_for_provider_model(MINIMAX_PROVIDER_ID, upstream, &[], &[]),
+                *alias
+            );
+        }
+
+        for (upstream, alias) in KIMI_CN_ALIASES {
             let resolved =
                 resolve_with_extended_catalogs(alias, &[], &[], &[], &[], &minimax, &kimi).unwrap();
             assert!(
                 resolved
                     .routeable_mappings()
                     .iter()
-                    .any(|mapping| { mapping.is_kimi_cn() && mapping.upstream_model == upstream })
+                    .any(|mapping| { mapping.is_kimi_cn() && mapping.upstream_model == *upstream })
+            );
+            assert!(matches!(
+                resolve_with_extended_catalogs(
+                    upstream, &[], &[], &[], &[], &minimax, &kimi,
+                ),
+                Ok(ResolvedModel::PinnedRaw { mapping, .. })
+                    if mapping.is_kimi_cn() && mapping.upstream_model == *upstream
+            ));
+            assert_eq!(
+                canonical_alias_for_provider_model(KIMI_PROVIDER_ID, upstream, &[], &[]),
+                *alias
             );
         }
-        assert!(matches!(
-            resolve_with_extended_catalogs(
-                "kimi-for-coding",
-                &[],
-                &[],
+
+        let published =
+            published_routeable_aliases_with_extended_catalogs(&[], &[], &[], &minimax, &kimi);
+        for (_, alias) in MINIMAX_CN_ALIASES.iter().chain(KIMI_CN_ALIASES) {
+            assert!(published.iter().any(|item| item.alias == *alias));
+        }
+        let mut expected_minimax = MINIMAX_CN_ALIASES
+            .iter()
+            .map(|(_, alias)| (*alias).to_string())
+            .collect::<Vec<_>>();
+        expected_minimax.sort();
+        assert_eq!(
+            routeable_aliases_for_with_extended_catalogs(
+                MINIMAX_PROVIDER_ID,
+                MINIMAX_CN_OFFERING_ID,
                 &[],
                 &[],
                 &minimax,
                 &kimi,
             ),
-            Ok(ResolvedModel::PinnedRaw { mapping, .. })
-                if mapping.is_kimi_cn() && mapping.upstream_model == "kimi-for-coding"
+            expected_minimax
+        );
+        let mut expected_kimi = KIMI_CN_ALIASES
+            .iter()
+            .map(|(_, alias)| (*alias).to_string())
+            .collect::<Vec<_>>();
+        expected_kimi.sort();
+        assert_eq!(
+            routeable_aliases_for_with_extended_catalogs(
+                KIMI_PROVIDER_ID,
+                KIMI_CN_OFFERING_ID,
+                &[],
+                &[],
+                &minimax,
+                &kimi,
+            ),
+            expected_kimi
+        );
+
+        let without_m2 = minimax
+            .iter()
+            .filter(|model| model.as_str() != "MiniMax-M2")
+            .cloned()
+            .collect::<Vec<_>>();
+        let published_without_m2 =
+            published_routeable_aliases_with_extended_catalogs(&[], &[], &[], &without_m2, &kimi);
+        assert!(
+            !published_without_m2
+                .iter()
+                .any(|item| item.alias == "minimax-m2")
+        );
+
+        let unknown_minimax = vec!["MiniMax-Future".to_string()];
+        assert!(matches!(
+            resolve_with_extended_catalogs(
+                "MiniMax-Future",
+                &[],
+                &[],
+                &[],
+                &[],
+                &unknown_minimax,
+                &[],
+            ),
+            Ok(ResolvedModel::PinnedRaw { mapping, .. }) if mapping.is_minimax_cn()
+        ));
+        assert!(matches!(
+            resolve_with_extended_catalogs(
+                "minimax-future",
+                &[],
+                &[],
+                &[],
+                &[],
+                &unknown_minimax,
+                &[],
+            ),
+            Err(ResolveError::Unknown { .. })
         ));
         assert_eq!(
-            canonical_alias_for_provider_model(KIMI_PROVIDER_ID, "kimi-for-coding", &[], &[]),
-            "kimi-k2.7-code"
-        );
-        assert_eq!(
-            canonical_alias_for_provider_model(KIMI_PROVIDER_ID, "kimi-k3", &[], &[]),
-            "kimi-k3"
+            canonical_alias_for_provider_model(MINIMAX_PROVIDER_ID, "minimax-m3", &[], &[],),
+            ""
         );
 
         let minimax_case = vec!["provider-case".to_string()];

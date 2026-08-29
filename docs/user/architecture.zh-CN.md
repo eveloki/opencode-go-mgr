@@ -105,14 +105,14 @@ Messages 与 Gemini generate / stream 上均为 `400`。重叠的原始 ID 返�
            |
            v
     用第一个声明模型验证所选协议
-    （向完整 Endpoint 发送一次最小非流式请求；
+    （向解析后的推理 Endpoint 发送一次最小非流式请求；
      须返回一个 2xx JSON object）
            |
            v
     验证状态变为 verified
     （账号可能已在路由中）
 
-  Key、完整 Endpoint、声明能力或协议变更
+  Key、API 地址、声明能力或协议变更
   会使验证状态变为 pending，但保持该卡启用。
 ```
 
@@ -152,9 +152,9 @@ Zen Free 只有启用开关；不需要时直接关掉卡片。目录刷新在�
 
 ```text
   GET /v1/models                         （客户端；需要 Key）
-    最早 OpenCode Go 静态表授权且当前可路由的 Alias
+    Go 表或密封 CN 映射授权且当前可路由的 Alias
       ∪ 合格 Custom 声明 ID
-    保存的内置供应商目录可以加入、但不能创建这些 Alias
+    保存行只激活代码持有的映射；未知行只保留 raw ID
     合格 Custom = enabled + ready + 非空 Key（验证为可选）
     Custom ID 不得抢走已公布的内置 Alias
 

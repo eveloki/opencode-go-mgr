@@ -86,14 +86,10 @@ export function accountStatusLabel(account: Account, now = Date.now()): string {
   if (!accountIsReady(account)) return t("注册中");
   const draftLabel = accountRoutingDraftLabel(account);
   if (draftLabel) return t(draftLabel);
-  // Routable plans with a required verification (Custom API) surface their
-  // verification state instead of a bare enabled/disabled label.
-  if (account.verification_status === "pending") return t("待验证");
-  if (account.verification_status === "failed") return t("验证失败");
   if (account.auth_error) {
     return account.enabled
-      ? t("认证失效（401 熔断）")
-      : `${t("已禁用")} · ${t("认证失效（401 熔断）")}`;
+      ? t("不可用")
+      : `${t("已禁用")} · ${t("不可用")}`;
   }
   if (!account.enabled) return t("已禁用");
   if (isCooling(account, now)) return t("冷却中·剩 {time}", { time: formatCooldownRemaining(account, now) });
@@ -108,8 +104,6 @@ export function accountStatusTagType(account: Account, now = Date.now()): Accoun
   if (!accountIsReady(account)) return "warning";
   const draftLabel = accountRoutingDraftLabel(account);
   if (draftLabel) return draftLabel === "验证失败" ? "error" : "warning";
-  if (account.verification_status === "pending") return "warning";
-  if (account.verification_status === "failed") return "error";
   if (account.auth_error) return "error";
   if (!account.enabled) return "default";
   if (isCooling(account, now)) return "warning";

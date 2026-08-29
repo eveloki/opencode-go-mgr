@@ -173,13 +173,29 @@ test("account form uses the catalog display name and does not invent GOAT availa
   const accountCard = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
   const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
   const chooser = readFileSync(new URL("../components/AccountAddModal.vue", import.meta.url), "utf8");
+  const providerQuota = readFileSync(new URL("../components/ProviderQuotaSummary.vue", import.meta.url), "utf8");
 
   assert.match(accountForm, /label: entry\.display_name/);
   assert.match(accountForm, /t\("添加 \{plan\} 账号"/);
-  assert.match(accountForm, /'aria-label': `\$\{t\('模型 ID'\)\} \$\{index \+ 1\}`/);
+  assert.match(accountForm, /:aria-label="t\('模型能力'\)"/);
   assert.match(accountForm, /v-model:value="form\.upstreamProtocol"/);
   assert.doesNotMatch(accountForm, /<n-checkbox-group/);
-  assert.match(accountForm, /:aria-label="`\$\{t\('删除'\)\} \$\{t\('模型能力'\)\} \$\{index \+ 1\}`"/);
+  assert.doesNotMatch(accountForm, /keyPrefixHint|Key 须以/);
+  assert.match(
+    accountForm,
+    /const values: AccountCreateFormValues = \{[\s\S]*?notes: form\.value\.notes,[\s\S]*?\};[\s\S]*?if \(isCustomPlan\.value\) \{[\s\S]*?values\.upstream_protocol =/,
+  );
+  assert.match(accountForm, /if \(hasField\("purchase_date"\)\) \{[\s\S]*?values\.purchase_date =/);
+  assert.match(accountForm, /class="purchase-date-control"[\s\S]*?v-if="isEdit"[\s\S]*?:disabled="isPurchaseDateToday"[\s\S]*?@click="setPurchaseDateToday"/);
+  assert.match(accountForm, /purchaseDate: timestampFromLocalDate\(account\.purchase_date\),/);
+  assert.match(accountForm, /function setPurchaseDateToday\(\)[\s\S]*?form\.value\.purchaseDate = timestampFromLocalDate\(localDateString\(\)\)/);
+  assert.match(accountForm, /v-model:value="modelCapabilityIds"/);
+  assert.match(accountForm, /multiple[\s\S]*?filterable[\s\S]*?tag[\s\S]*?max-tag-count="responsive"/);
+  assert.doesNotMatch(
+    accountForm,
+    /const values: AccountCreateFormValues = \{[\s\S]*?upstream_protocol: form\.value\.upstreamProtocol[\s\S]*?\};/,
+  );
+  assert.doesNotMatch(accountForm, /removeCapability|addCapability|MinusOutlined/);
   assert.doesNotMatch(accountForm, /fieldImmutableAfterCreate/);
   assert.doesNotMatch(accountForm, /创建后不可修改/);
   assert.match(accountForm, /t\(accountCreatePayloadErrorKey\(error\)\)/);
@@ -188,7 +204,23 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.doesNotMatch(accountForm, /实验性 · 未配置/);
   assert.match(accountCard, /planLabel\(account, catalog\)/);
   assert.doesNotMatch(accountCard, /<AccountTestPopover/);
+  assert.doesNotMatch(accountCard, /subscription-risk|订阅制方案：/);
+  assert.match(accountCard, /warning === "endpoint-risk"/);
   assert.doesNotMatch(accountCard, /有效协议|前往供应商|contractSummary/);
+  assert.match(providerQuota, /v-for="window in displayedWindows"/);
+  assert.match(providerQuota, /kind\.startsWith\("minimax_"\) && kind\.endsWith\(":video"\)/);
+  assert.match(providerQuota, /<strong>\{\{ usedLabel\(window\) \}\}<\/strong>/);
+  assert.match(providerQuota, /:percentage="usedPercent\(window\)"/);
+  assert.match(providerQuota, /usedPercent\(window\) >= 100 \? 'error' : 'default'/);
+  assert.match(providerQuota, /\(window\.used \/ window\.limit_value\) \* 100/);
+  assert.match(providerQuota, /window\.unit === "percent" \|\| window\.window_kind\.startsWith\("kimi_"\)/);
+  assert.doesNotMatch(providerQuota, /remainingPercent|remainingLabel/);
+  assert.match(providerQuota, /:height="8"/);
+  assert.match(providerQuota, /t\("\{time\}后重置"/);
+  assert.match(providerQuota, /`\$\{period\} · \$\{scope\}`/);
+  assert.match(providerQuota, /grid-template-columns: repeat\(auto-fit, minmax\(180px, 1fr\)\)/);
+  assert.match(providerQuota, /@media \(max-width: 640px\)[\s\S]*?grid-template-columns: 1fr/);
+  assert.doesNotMatch(providerQuota, /new Date\(window\.resets_at\)\.toLocaleString/);
   assert.match(accountCard, /plan\.value\?\.manual_usage_calibration \?\? false/);
   assert.match(accountCard, /grid-template-columns: repeat\(4, 40px\)/);
   assert.match(accountCard, /account-action--enabled/);
@@ -222,7 +254,7 @@ test("GOAT has no account Key-verification gate and keeps local quota estimates"
   assert.doesNotMatch(card, /goatVerificationOffered|goatToggleBlocked/);
   assert.doesNotMatch(card, /验证连接成功后才能启用/);
   assert.match(accounts, /isCommandCodeGoatAccount/);
-  assert.match(accounts, /if \(!isCustomApiAccount\(account\)\) return/);
+  assert.match(accounts, /@test-connection="openAccountTest\(account\.id\)"/);
 });
 
 test("GOAT account states are live without a verification phase", () => {

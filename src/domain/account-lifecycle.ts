@@ -1,7 +1,7 @@
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-export type ExpiryTagType = "success" | "warning" | "error";
+export type ExpiryTagType = "default" | "warning" | "error";
 
 function localDayNumber(value: Date): number {
   return Date.UTC(value.getFullYear(), value.getMonth(), value.getDate()) / DAY_MS;
@@ -54,5 +54,5 @@ export function moveItem<T>(items: readonly T[], fromIndex: number, toIndex: num
 
 export function expiryTagType(days: number): ExpiryTagType {
   if (!Number.isFinite(days) || days <= 0) return "error";
-  return days <= 7 ? "warning" : "success";
+  return days <= 7 ? "warning" : "default";
 }

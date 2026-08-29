@@ -235,6 +235,7 @@ async fn dashboard_v3_connection_exposes_primary_key_and_settings_does_not() {
     assert_eq!(settings.show_dock_icon, None);
     assert!(!settings.dock_visibility_supported);
     assert!(!settings.client_root_url_from_env);
+    assert!(!settings.gateway_port_from_env);
 
     for name in json_field_names(&settings_json) {
         assert!(
@@ -249,6 +250,41 @@ async fn dashboard_v3_connection_exposes_primary_key_and_settings_does_not() {
         assert_ne!(value, primary, "GET /settings leaked the primary Key");
         assert_ne!(value, sub_value, "GET /settings leaked a sub Key");
     }
+
+    harness.stop();
+}
+
+#[tokio::test]
+async fn dashboard_v3_gateway_port_override_is_read_only() {
+    let harness = start_loopback("settings-gateway-port-env").await;
+    harness
+        .state
+        .register_gateway_port_override(19042)
+        .expect("test host should register the runtime override");
+
+    let (status, settings) = harness
+        .get_json(&format!("{}/settings", harness.v3_base))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{settings}");
+    assert_eq!(settings["gatewayPort"], 19042);
+    assert_eq!(settings["gatewayPortFromEnv"], true);
+
+    let before = harness.state.settings_revision();
+    let (status, body) = put_json(
+        &harness,
+        &cas_patch(&harness, json!({ "gatewayPort": 19043 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_v3_error(&body, ERROR_INVALID_REQUEST);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("OCG_GATEWAY_PORT")
+    );
+    assert_eq!(harness.state.settings_revision(), before);
+    assert_eq!(harness.state.config().gateway_port, 9042);
 
     harness.stop();
 }

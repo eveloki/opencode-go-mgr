@@ -19,17 +19,17 @@
 
 轻量来源信息、刷新动作与矩阵共用同一块内容区域，不再有独立的目录摘要卡片，也没有刷新账号选择器。所有可刷新的范围使用同一个动作：OpenCode Go 由后端选择符合条件的 Go 账号访问官方鉴权目录；Zen Free 访问固定的官方无鉴权目录 `https://opencode.ai/zen/v1/models`；Command Code 直接访问固定的公开官方 `/models` 目录，不选择账号。刷新始终由用户显式触发。
 
-MiniMax 与 Kimi 需要一个符合条件的账号 Key。MiniMax 刷新 `https://api.minimaxi.com/v1/models`；Kimi 刷新 `https://api.kimi.com/coding/v1/models`。保存的模型只能加入最早 OpenCode Go 静态表已经授权的 Alias；无法匹配的模型保留为精确 raw ID。Kimi 目录中的上游 `kimi-for-coding` 加入 Alias `kimi-k2.7-code`，上游 `kimi-k3` 加入 Alias `kimi-k3`；转发时仍保留这两个准确的上游 ID。请求时不会临时访问上游。
+MiniMax 与 Kimi 需要一个符合条件的账号 Key。MiniMax 刷新 `https://api.minimaxi.com/v1/models`；Kimi 刷新 `https://api.kimi.com/coding/v1/models`。保存的模型只激活代码内的密封映射；无法匹配的模型保留为精确 raw ID。MiniMax 把 M3、M2.7/M2.5/M2.1 的标准与 highspeed 变体，以及 M2 映射到对应的小写 kebab Alias。Kimi 映射为 `kimi-for-coding` → `kimi-k2.7-code`、`kimi-for-coding-highspeed` → `kimi-k2.7-code-highspeed`、`k3` → `kimi-k3`、`k3-256k` → `kimi-k3-256k`。转发始终保留每个准确的上游 ID。请求时不会临时访问上游。
 
 首次成功刷新前，内置静态目录只是初始预设；刷新成功后，保存的官方快照成为权威目录并替代静态预设。刷新新增的模型会出现在矩阵中。OpenCode Go 与 Command Code 的新增协议单元格默认关闭，只有手动打开或测试成功后才会启用；MiniMax CN 与 Kimi Code CN 则直接启用密封合约中的 Chat Completions，Responses 与 Messages 不受支持。仍留在目录中的模型会保留既有覆盖与探测结果；刷新失败或结果为空时继续保留旧快照。
 
 Custom API 继续使用各账号声明的模型 ID，发现结果不会静默替换声明。账号表单里的 **获取模型** 只是未保存表单辅助，把选中的 ID 合并进正在编辑的声明。Command Code 使用官方公开的 `/models` 目录：GOAT 预设默认启用，后续发现的额外模型默认关闭，只有在矩阵中开启其受支持协议后才会供应；不再存在独立的 Max 或账号级 GOAT/全部模式。
 
-本地目录会进入解析，请求时不会再访问上游。最早的 OpenCode Go 静态表是内置 Alias 命名空间的唯一权威：保存的 Zen、Command、MiniMax 与 Kimi 行可以加入已有稳定小写 kebab-case Alias，但不能新增 Alias。无法匹配的内置模型保留为精确 raw ID，不会作为新 Alias 公布；CN 映射仍保留上游 ID 的准确拼写。Zen Free 只有在去掉 `-free` 后的名称已被静态表授权时才加入该 Alias，原始 `-free` ID 始终可作为精确 raw pin 使用，见 [Zen Free 模型](routing.zh-CN.md#zen-free-模型)。
+本地目录会进入解析，请求时不会再访问上游。内置 Alias 权威是静态且由代码持有：最早 OpenCode Go 表提供 Go 名称，密封 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射表提供供应商 Alias，但不会据此新增 Go 路由。Command 会先去掉 Provider 命名空间并复用已有代码持有的 Alias；只有短名已获授权时才去掉已知套餐后缀。例如 `nvidia/nemotron-3-ultra-550b-a55b` 使用 Alias `nemotron-3-ultra`。保存的 CN 行只激活其精确密封映射。无法匹配的内置模型保留为精确 raw ID，不会作为新 Alias 公布；CN 映射仍保留上游 ID 的准确拼写。Zen Free 只有在去掉 `-free` 后的名称已被 Go 表授权时才加入该 Alias，原始 `-free` ID 始终可作为精确 raw pin 使用，见 [Zen Free 模型](routing.zh-CN.md#zen-free-模型)。
 
 当某个供应商的模型/协议单元格全部关闭时，该供应商不再产生路由；当一个 Alias 在所有供应商都没有启用映射时，它会从下游 `GET /v1/models` 供应中移除。
 
-每行都有 **测试** 按钮，不需要指定账号。对于该模型的每个协议，供应商会按已保存的路由顺序自动尝试符合条件的账号，并在首次成功后停止。Popconfirm 会提示这些真实最小请求可能消耗额度。Custom 端点范围不显示测试按钮，因为 Custom 账号级协议探测没有 V3 对应端点。模型必须属于当前供应商目录；通过校验后会真正测试三个协议端点，包括静态表尚未收录的新拉取模型。页面会在矩阵上方逐项展示成功、失败或跳过状态、HTTP 状态、可读的上游错误消息，以及上游给出时的安全帮助/计费链接；每个真实账号尝试都会写入脱敏的请求日志，协议探测内容不会进入运行日志。单个账号失败不会禁用其他符合条件账号可以服务的协议。
+OpenCode Go 与 Zen Free 的每行都有 **测试** 按钮，不需要指定账号。对于该模型的每个协议，供应商会按已保存的路由顺序自动尝试符合条件的账号，并在首次成功后停止。Popconfirm 会提示这些真实最小请求可能消耗额度。Command Code GOAT、MiniMax CN、Kimi Code CN 与 Custom 端点范围不显示测试按钮，因为这些适配器不提供该 V3 协议探测操作。模型必须属于当前供应商目录；通过校验后会真正测试三个协议端点，包括静态表尚未收录的新拉取模型。页面会在矩阵上方逐项展示成功、失败或跳过状态、HTTP 状态、可读的上游错误消息，以及上游给出时的安全帮助/计费链接；每个真实账号尝试都会写入脱敏的请求日志，协议探测内容不会进入运行日志。单个账号失败不会禁用其他符合条件账号可以服务的协议。
 
 **价格** 按所选供应商限定范围。**刷新价格表** 只抓取并校验当前所选 Provider 自己的官方来源。OpenCode 与 Command Code 的 revision 和最后成功快照彼此独立；一个失败不会动另一个。以后某个 Provider 若包含多个有价格的 Plan，一次操作也只刷新该 Provider 内的 Plan。刷新仍只能手动发起：
 

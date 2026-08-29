@@ -1,11 +1,19 @@
 import { t } from "../i18n/index.ts";
 import type {
   Account,
+  AccountExport,
+  AccountExportRequest,
+  AccountImportPreview,
+  AccountImportPreviewRequest,
+  AccountImportRequest,
+  AccountImportResult,
   AccountCreate,
   AccountCustomConfigUpdate,
   AccountList,
   AccountManagedCreate,
   AccountManagedKeyVerify,
+  AccountModelTestRequest,
+  AccountModelTestResponse,
   AccountModelCapabilitiesUpdate,
   AccountMutation,
   AccountOrder,
@@ -498,6 +506,28 @@ export const dashboardV3 = {
       method: "POST",
       body: mutation(expectation),
     }),
+  testAccountModel: (id: string, modelId: string) =>
+    requestV3<AccountModelTestResponse>(`/accounts/${encode(id)}/model-tests`, {
+      method: "POST",
+      body: json({ modelId } satisfies AccountModelTestRequest),
+    }),
+  exportAccountTransfer: (input: AccountExportRequest) =>
+    requestV3<AccountExport>("/accounts/transfer/export", {
+      method: "POST",
+      body: json(input),
+    }),
+  previewAccountTransfer: (input: AccountImportPreviewRequest) =>
+    requestV3<AccountImportPreview>("/accounts/transfer/preview", {
+      method: "POST",
+      body: json(input),
+    }),
+  importAccountTransfer: (
+    input: WithoutExpectation<AccountImportRequest>,
+    expectation: MutationExpectation,
+  ) => requestV3<AccountImportResult>("/accounts/transfer/import", {
+    method: "POST",
+    body: withExpectation(input, expectation),
+  }),
 
   // --- account usage ---
   getAccountUsage: (id: string) => requestV3<UsageWindow>(`/accounts/${encode(id)}/usage`),

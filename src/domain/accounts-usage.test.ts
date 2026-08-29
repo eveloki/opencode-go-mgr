@@ -150,11 +150,11 @@ test("shows a live reset countdown below a quota progress bar during cooldown", 
   assert.doesNotMatch(source, /\.usage-reset-countdown \{[\s\S]*?min-height:/);
 });
 
-test("shows a distinct account authentication breaker instead of disguising it as cooldown", async () => {
+test("shows a distinct upstream account breaker instead of disguising it as cooldown", async () => {
   const card = await readFile(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
   const display = await readFile(new URL("./account-display.ts", import.meta.url), "utf8");
   assert.match(card, /account\.auth_error \|\| isCooling\(account, now\)/);
-  assert.match(display, /account\.enabled[\s\S]*t\("认证失效（401 熔断）"\)[\s\S]*t\("已禁用"\)/);
+  assert.match(display, /account\.enabled[\s\S]*t\("不可用"\)[\s\S]*t\("已禁用"\)/);
   assert.match(display, /if \(account\.auth_error\) return "error"/);
 });
 
@@ -185,10 +185,14 @@ test("keeps account cards compact with metadata tags and popover calibration", a
     strip.indexOf("</template>"),
   );
 
-  assert.ok(header.indexOf("accountStatusLabel(account, now)") < header.indexOf('t("购买于 {date}"'));
-  // Only plans with purchase/expiry metadata show these tags. GOAT and Custom skip them.
-  assert.match(header, /<n-tag v-if="isGo && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("购买于 \{date\}"/);
-  assert.match(header, /<n-tag v-if="isGo && accountIsReady\(account\)" size="small" :bordered="false">\s+\{\{ t\("到期于 \{date\}"/);
+  assert.ok(header.indexOf("accountStatusLabel(account, now)") < header.indexOf('v-if="hasValidityPeriod"'));
+  // Subscription dates collapse into one status tag; exact purchase and expiry
+  // dates remain available in its tooltip and accessible label.
+  assert.match(header, /<n-tooltip v-if="hasValidityPeriod" trigger="hover">/);
+  assert.match(header, /accountExpiryLabel\(account, now\) \}\} ·/);
+  assert.match(header, /t\("到期于 \{date\}"/);
+  assert.match(header, /:aria-label="`\$\{accountExpiryLabel/);
+  assert.doesNotMatch(header, /<n-tag v-if="isGo && accountIsReady\(account\)"/);
   assert.match(card, /<n-popover[\s\S]*?trigger="click"[\s\S]*?placement="bottom-end"[\s\S]*?:width="320"[\s\S]*?@update:show="\(show: boolean\) => show && emit\('usage-editor-open'\)"/);
   assert.match(editor, /class="usage-editor-popover"/);
   assert.doesNotMatch(card, /:flip="false"/);
@@ -196,7 +200,7 @@ test("keeps account cards compact with metadata tags and popover calibration", a
   assert.ok(card.indexOf("<n-popover") < card.indexOf("<n-dropdown"));
   assert.match(editor, /class="usage-editor-popover"[\s\S]*?class="usage-resets-row"/);
   assert.match(usage, /async function focusUsageEditor\(accountId: string\)[\s\S]*?requestAnimationFrame[\s\S]*?\.n-input-number input[\s\S]*?\.focus\(\)/);
-  assert.match(card, /v-if="isGo && accountIsReady\(account\)"[\s\S]*?刷新额度/);
+  assert.match(card, /v-if="\(isGo \|\| isOfficialCn\) && accountIsReady\(account\)"[\s\S]*?刷新额度/);
   assert.doesNotMatch(
     card,
     /accountIsReady\(account\) && account\.account_type === 'managed'/,
@@ -405,7 +409,7 @@ test("accounts render before per-account usage and expose failed loads for retry
 
 test("editing an account refreshes usage after purchase-date window changes", async () => {
   const source = await readFile(new URL("../views/Accounts.vue", import.meta.url), "utf8");
-  const save = source.slice(source.indexOf("async function onFormSave"), source.indexOf("async function verifyCustomAccount"));
+  const save = source.slice(source.indexOf("async function onFormSave"), source.indexOf("function openAccountTest"));
 
   const update = save.indexOf("const saved = await runWithFreshSettingsRevision");
   const replace = save.indexOf("replaceAccount(saved);");

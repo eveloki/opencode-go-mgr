@@ -21,6 +21,14 @@ test("Providers reads and mutates contracts through its store while explicit act
   assert.doesNotMatch(providers, /ProviderModelList/);
 });
 
+test("Providers excludes account-scoped Custom API contracts from its supplier navigation", () => {
+  const scopes = providers.slice(
+    providers.indexOf("const scopes = computed"),
+    providers.indexOf("const activeSelection = computed"),
+  );
+  assert.match(scopes, /filter\(\(scope\) => scope\.scope_kind === "provider"\)/);
+});
+
 test("Providers keeps last-good contracts while actions fail and distinguishes page vs action errors", () => {
   assert.match(providers, /v-else-if="loadError && !contracts"/);
   assert.match(providers, /v-if="loadError && contracts"/);
@@ -148,7 +156,7 @@ test("Providers shows model catalog and model prices in two tabs", () => {
   assert.doesNotMatch(providers, /id="provider-protocol-title"/);
 });
 
-test("ProviderModelMatrix renders a model-by-protocol grid with override switches and row probes", () => {
+test("ProviderModelMatrix renders a model-by-protocol grid with capability-gated row probes", () => {
   assert.match(matrix, /matrixModels/);
   assert.match(matrix, /PROVIDER_PROTOCOLS/);
   assert.match(matrix, /n-switch/);
@@ -164,7 +172,8 @@ test("ProviderModelMatrix renders a model-by-protocol grid with override switche
   assert.match(matrix, /n-popconfirm/);
   assert.match(matrix, /ReloadOutlined/);
   assert.match(matrix, /runRowProbe/);
-  assert.match(matrix, /scope\.scope_kind !== 'custom_endpoint'/);
+  assert.match(matrix, /props\.scope\.card\.protocol_probe/);
+  assert.match(matrix, /v-if="probeSupported"/);
   assert.doesNotMatch(matrix, /scope\.provider_id !== "command-code"/);
 });
 

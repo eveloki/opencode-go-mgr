@@ -91,6 +91,26 @@ test("verify posts to the verify route with CAS tokens", async () => {
   assert.deepEqual(requests[0]?.body, { expectedRevision: 7, processGeneration: 99 });
 });
 
+test("account model tests target one encoded account without CAS tokens", async () => {
+  setupControlPlane(7);
+  const requests = installBrowser(() => ({
+    accountId: "account/1",
+    modelId: "Org/Model-A",
+    protocol: "chat_completions",
+    success: true,
+    httpStatus: 200,
+    durationMs: 12,
+    error: null,
+  }));
+
+  const result = await dashboardApi.testAccountModel("account/1", "Org/Model-A");
+
+  assert.equal(result.success, true);
+  assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/account%2F1/model-tests");
+  assert.equal(requests[0]?.method, "POST");
+  assert.deepEqual(requests[0]?.body, { modelId: "Org/Model-A" });
+});
+
 test("custom config PUT sends one Endpoint, protocol, and capability list with CAS tokens", async () => {
   setupControlPlane(9);
   const requests = installBrowser(() => ({ account: v3Account("custom-1") }));

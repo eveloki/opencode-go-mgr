@@ -19,6 +19,8 @@
 //! atomically, does not bump, and holds no network/DB lock. Custom protocol
 //! probes stay account-owned on V2.
 
+mod account_model_test;
+mod account_transfer;
 mod account_verify;
 mod accounts;
 mod auth;
@@ -38,7 +40,7 @@ mod updater;
 mod usage;
 mod usage_refresh;
 
-use axum::extract::{FromRequestParts, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
@@ -62,15 +64,18 @@ pub use proxy_test::PROXY_TEST_TARGET;
 pub use proxy_test::{ProxyTestTargetGuard, install_proxy_test_target_for_tests};
 pub use types::{
     Account, AccountAuthScheme, AccountCreate, AccountCredentialKind, AccountCustomConfig,
-    AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountList, AccountManagedCreate,
-    AccountManagedKeyVerify, AccountModelCapabilitiesUpdate, AccountModelCapability,
-    AccountModelCapabilityWrite, AccountMutation, AccountOrder, AccountQuotaScope,
-    AccountSetupStep, AccountSetupUpdate, AccountType, AccountUpdate, AccountUpstreamProtocol,
-    AccountUsageUpdate, AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin,
-    AuthLogout, AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen,
-    BrowserOpenRequest, BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary,
-    CardCapabilitySummary, ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo,
-    ConnectionSubKey, ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
+    AccountCustomConfigUpdate, AccountCustomConfigWrite, AccountExport, AccountExportRequest,
+    AccountImportDisposition, AccountImportPreview, AccountImportPreviewItem,
+    AccountImportPreviewRequest, AccountImportRequest, AccountImportResult, AccountList,
+    AccountManagedCreate, AccountManagedKeyVerify, AccountModelCapabilitiesUpdate,
+    AccountModelCapability, AccountModelCapabilityWrite, AccountModelTestRequest,
+    AccountModelTestResponse, AccountMutation, AccountOrder, AccountQuotaScope, AccountSetupStep,
+    AccountSetupUpdate, AccountType, AccountUpdate, AccountUpstreamProtocol, AccountUsageUpdate,
+    AccountVerificationStatus, AccountVerify, ApplicationModels, AuthLogin, AuthLogout,
+    AuthRegister, AuthStatus, BrowserCapabilities, BrowserMode, BrowserOpen, BrowserOpenRequest,
+    BrowserTarget, CATALOG_TYPE_NAMES, CapabilitySummary, CardCapabilitySummary,
+    ClaudeDesktopModels, ClaudeDesktopModelsUpdate, ConnectionInfo, ConnectionSubKey,
+    ContractScopeKind, ControlRevision, CreditBalance, CustomEndpointContract,
     CustomModelDiscoveryRequest, CustomModelDiscoveryResponse, DailyModelTokens,
     DailyTokensByModel, DailyTokensQuery, DashboardSummary, DesktopUpdate, DesktopUpdatePhase,
     ERROR_CONFLICT, ERROR_FORBIDDEN, ERROR_GATEWAY_TIMEOUT, ERROR_GONE, ERROR_INTERNAL,
@@ -110,6 +115,25 @@ pub use pricing::{
 pub use updater::{UpdateCheckUrlGuard, install_update_check_url_for_tests};
 
 pub fn api_router(state: CoreState) -> Router<CoreState> {
+    let account_transfer = Router::new()
+        .route(
+            "/accounts/transfer/export",
+            post(account_transfer::export_accounts),
+        )
+        .route(
+            "/accounts/transfer/preview",
+            post(account_transfer::preview_import),
+        )
+        .route(
+            "/accounts/transfer/import",
+            post(account_transfer::import_accounts),
+        )
+        .layer(DefaultBodyLimit::max(account_transfer::MAX_REQUEST_BYTES))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_v3_session,
+        ))
+        .layer(middleware::map_response(account_transfer::add_no_store));
     let protected = Router::new()
         .route("/contract", get(get_contract))
         .route("/connection", get(connection::get_connection))
@@ -205,6 +229,10 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
             "/accounts/{id}/verify",
             post(account_verify::verify_account),
         )
+        .route(
+            "/accounts/{id}/model-tests",
+            post(account_model_test::test_account_model),
+        )
         .route("/providers", get(providers::get_providers))
         .route(
             "/providers/model-capabilities",
@@ -292,6 +320,7 @@ pub fn api_router(state: CoreState) -> Router<CoreState> {
         .route("/auth/register", post(auth::register_admin))
         .route("/auth/login", post(auth::login_admin))
         .route("/auth/logout", post(auth::logout_admin))
+        .merge(account_transfer)
         .merge(protected)
 }
 

@@ -11,6 +11,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     revision: 1,
     gateway_port: 9042,
+    gateway_port_from_env: false,
     upstream_base_url: "https://opencode.ai/zen/go",
     proxy_mode: "auto",
     proxy_url: "",
@@ -65,6 +66,7 @@ test("settings conflict merge keeps local edits and adopts server capability fla
     revision: 3,
     auto_start_supported: false,
     client_root_url_from_env: true,
+    gateway_port_from_env: true,
   });
 
   const merged = mergeUnsavedSettings(latest, current, saved);
@@ -72,4 +74,5 @@ test("settings conflict merge keeps local edits and adopts server capability fla
   assert.equal(merged.auto_start, true);
   assert.equal(merged.auto_start_supported, false);
   assert.equal(merged.client_root_url_from_env, true);
+  assert.equal(merged.gateway_port_from_env, true);
 });

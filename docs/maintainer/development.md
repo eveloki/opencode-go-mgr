@@ -25,7 +25,21 @@ pnpm run dev
 (`scripts/free-dev-port.mjs`) inspects `127.0.0.1:30001` and stops stale Vite
 processes. Tauri starts Vite, waits for the gateway, then opens
 `http://127.0.0.1:30001/dashboard/`. Vite proxies `/dashboard/api` (including
-WebSockets) to `http://127.0.0.1:9042`.
+WebSockets) to the development Gateway port. `pnpm run dev` defaults that port
+to `19042` so Windows HNS/WSL/Docker excluded ranges around `9042` do not block
+the development stack. Installed builds still default to `9042`.
+
+To use another development port, set one runtime override for both Tauri and
+Vite before starting:
+
+```powershell
+$env:OCG_GATEWAY_PORT = "19042"
+pnpm run dev
+```
+
+The Settings view shows the effective port as read-only while the variable is
+set. Remove it with `Remove-Item Env:OCG_GATEWAY_PORT` before starting a later
+session if you want to return to the saved port.
 
 - Frontend (Vue, CSS, TypeScript) changes use Vite HMR.
 - Rust changes use Tauri's watcher plus Cargo's incremental compiler, then

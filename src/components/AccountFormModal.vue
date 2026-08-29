@@ -23,7 +23,7 @@
         :show-icon="false"
         class="form-error"
       >
-        {{ t("目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；验证连接会发送一次最小真实请求，可能产生服务商费用。") }}
+        {{ t("目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；测试连接会发送最小真实请求，可能产生服务商费用。") }}
       </n-alert>
       <div class="modal-grid">
         <n-form-item v-if="!isEdit && offeringOptions.length > 1" path="offeringId" :label="t('服务套餐')">
@@ -61,15 +61,24 @@
           path="purchaseDate"
           :label="t('购买日期')"
         >
-          <n-date-picker
-            v-model:value="form.purchaseDate"
-            type="date"
-            format="yyyy-MM-dd"
-            :actions="['now']"
-            :clearable="!purchaseDateRequired"
-            :is-date-disabled="isPurchaseDateDisabled"
-            :input-props="{ 'aria-label': t('购买日期') }"
-          />
+          <div class="purchase-date-control">
+            <n-date-picker
+              v-model:value="form.purchaseDate"
+              type="date"
+              format="yyyy-MM-dd"
+              :clearable="!purchaseDateRequired"
+              :is-date-disabled="isPurchaseDateDisabled"
+              :input-props="{ 'aria-label': t('购买日期') }"
+            />
+            <n-button
+              v-if="isEdit"
+              secondary
+              :disabled="isPurchaseDateToday"
+              @click="setPurchaseDateToday"
+            >
+              {{ t("今日") }}
+            </n-button>
+          </div>
         </n-form-item>
 
         <n-form-item
@@ -85,20 +94,24 @@
             show-password-on="click"
             :placeholder="keyPlaceholder"
           />
-          <p v-if="keyPrefixHint" class="field-hint">{{ keyPrefixHint }}</p>
         </n-form-item>
 
         <n-form-item
           v-if="isCustomPlan"
           path="endpointUrl"
-          :label="t('完整 Endpoint')"
+          :label="t('API 地址')"
           class="full-width-field"
         >
-          <n-input
-            v-model:value="form.endpointUrl"
-            :input-props="{ 'aria-label': t('完整 Endpoint') }"
-            :placeholder="endpointPlaceholder"
-          />
+          <div class="endpoint-field">
+            <n-input
+              v-model:value="form.endpointUrl"
+              :input-props="{ 'aria-label': t('API 地址') }"
+              :placeholder="endpointPlaceholder"
+            />
+            <p class="field-hint">
+              {{ t("推荐填写不带 /v1 的 API 根地址；OCG 会自动补全 /v1 和协议路径。已带 /v1 时不会重复添加。") }}
+            </p>
+          </div>
         </n-form-item>
 
         <n-form-item
@@ -136,36 +149,28 @@
               </n-button>
               <span v-if="discoverySuccess" class="field-hint">{{ discoverySuccess }}</span>
             </div>
-            <p v-if="!canInferModelEndpoint" class="field-hint">
-              {{ t("仅标准推理 Endpoint 可自动推导 /models；请手动添加模型 ID。") }}
+            <p v-if="showManualModelHint" class="field-hint">
+              {{ t("非标准完整 Endpoint 无法自动推导 /models；请手动添加模型 ID。") }}
             </p>
             <n-alert v-if="discoveryError" type="error" :show-icon="false">
               {{ discoveryError }}
             </n-alert>
-            <div
-              v-for="(cap, index) in form.modelCapabilities"
-              :key="index"
-              class="capability-row"
-            >
-              <n-input
-                v-model:value="cap.model_id"
-                :input-props="{ 'aria-label': `${t('模型 ID')} ${index + 1}` }"
-                :placeholder="t('模型 ID')"
-              />
-              <n-button
-                circle
-                quaternary
-                size="small"
-                :aria-label="`${t('删除')} ${t('模型能力')} ${index + 1}`"
-                @click="removeCapability(index)"
-              >
-                <template #icon><n-icon :component="MinusCircleOutlined" /></template>
-              </n-button>
-            </div>
-            <n-button size="small" secondary @click="addCapability">
-              <template #icon><n-icon :component="PlusOutlined" /></template>
-              {{ t("添加模型") }}
-            </n-button>
+            <n-select
+              v-model:value="modelCapabilityIds"
+              multiple
+              filterable
+              tag
+              clearable
+              :options="modelCapabilityOptions"
+              max-tag-count="responsive"
+              :placeholder="t('输入模型 ID 后按 Enter 添加')"
+              :aria-label="t('模型能力')"
+              class="capability-select"
+            />
+            <p class="field-hint capability-count">
+              {{ t("{count} 个模型", { count: modelCapabilityIds.length }) }} ·
+              {{ t("输入模型 ID 后按 Enter 添加") }}
+            </p>
           </div>
         </n-form-item>
 
@@ -216,13 +221,11 @@ import {
   NDatePicker,
   NForm,
   NFormItem,
-  NIcon,
   NInput,
   NModal,
   NSelect,
   NSpace,
 } from "naive-ui";
-import { MinusCircleOutlined, PlusOutlined } from "@vicons/antd";
 import { dashboardApi, type Account, type AccountInput, type AccountProtocol } from "../api/dashboard";
 import type { ProviderCatalogEntry, ProviderCatalogFormField } from "../api/providers.ts";
 import { t } from "../i18n/index.ts";
@@ -241,9 +244,10 @@ import {
   CUSTOM_ENDPOINT_URL_ISSUE_KEYS,
   CUSTOM_PROTOCOLS,
   customEndpointUrlIssue,
-  customInferenceEndpointPlaceholder,
+  customApiUrlPlaceholder,
+  customApiUrlNeedsManualModels,
+  customApiUrlSupportsModelDiscovery,
   expandCustomModelCapabilities,
-  isStandardCustomInferenceEndpoint,
 } from "../domain/custom-account.ts";
 import { protocolDisplayName } from "../domain/provider-contracts.ts";
 
@@ -370,12 +374,6 @@ function fieldRequired(id: string): boolean {
   return fieldMap.value.get(id)?.required ?? false;
 }
 
-const keyPrefixHint = computed(() => {
-  const prefix = catalogEntry.value?.key_prefix;
-  if (!prefix) return "";
-  return t("Key 须以 {prefix} 开头", { prefix });
-});
-
 const keyPlaceholder = computed(() => {
   const prefix = catalogEntry.value?.key_prefix;
   if (prefix) return prefix + "...";
@@ -383,6 +381,10 @@ const keyPlaceholder = computed(() => {
 });
 
 const purchaseDateRequired = computed(() => fieldRequired("purchase_date"));
+const isPurchaseDateToday = computed(() => (
+  form.value.purchaseDate !== null
+  && localDateString(form.value.purchaseDate) === localDateString()
+));
 
 const upstreamProtocolOptions = computed(() => {
   return CUSTOM_PROTOCOLS.map((value) => ({
@@ -391,9 +393,11 @@ const upstreamProtocolOptions = computed(() => {
   }));
 });
 
-const endpointPlaceholder = computed(() => customInferenceEndpointPlaceholder(form.value.upstreamProtocol));
+const endpointPlaceholder = computed(() => customApiUrlPlaceholder());
 const canInferModelEndpoint = computed(() => isCustomPlan.value
-  && isStandardCustomInferenceEndpoint(form.value.endpointUrl, form.value.upstreamProtocol));
+  && customApiUrlSupportsModelDiscovery(form.value.endpointUrl, form.value.upstreamProtocol));
+const showManualModelHint = computed(() => isCustomPlan.value
+  && customApiUrlNeedsManualModels(form.value.endpointUrl, form.value.upstreamProtocol));
 const canDiscoverModels = computed(() => canInferModelEndpoint.value
   && (!!form.value.key.trim() || !!props.account?.id));
 
@@ -550,9 +554,7 @@ function formFromAccount(account: Account): FormModel {
     name: account.name,
     username: account.username,
     key: "",
-    purchaseDate: timestampFromLocalDate(account.purchase_date)
-      ?? timestampFromLocalDate(localDateString())
-      ?? Date.now(),
+    purchaseDate: timestampFromLocalDate(account.purchase_date),
     notes: account.notes ?? "",
     offeringId: account.offering_id,
     endpointUrl: account.custom_config?.endpoint_url ?? "",
@@ -572,13 +574,28 @@ function isPurchaseDateDisabled(timestamp: number): boolean {
   return localDateString(timestamp) > localDateString();
 }
 
-function addCapability() {
-  form.value.modelCapabilities.push({ model_id: "" });
+function setPurchaseDateToday() {
+  form.value.purchaseDate = timestampFromLocalDate(localDateString()) ?? Date.now();
 }
 
-function removeCapability(index: number) {
-  form.value.modelCapabilities.splice(index, 1);
-}
+const modelCapabilityIds = computed<string[]>({
+  get: () => form.value.modelCapabilities.map((capability) => capability.model_id),
+  set: (values) => {
+    const seen = new Set<string>();
+    form.value.modelCapabilities = values.flatMap((value) => {
+      const modelId = value.trim();
+      const identity = modelId.toLowerCase();
+      if (!modelId || seen.has(identity)) return [];
+      seen.add(identity);
+      return [{ model_id: modelId }];
+    });
+  },
+});
+
+const modelCapabilityOptions = computed(() => modelCapabilityIds.value.map((modelId) => ({
+  label: modelId,
+  value: modelId,
+})));
 
 async function discoverModels() {
   if (!canDiscoverModels.value || !form.value.upstreamProtocol) return;
@@ -640,9 +657,9 @@ async function handleSave() {
       username: form.value.username.trim(),
       notes: form.value.notes,
     };
-    if (!isCustomPlan.value) {
-      // Custom forms have no purchase-date field; sending today's date would
-      // silently reset the account's monthly window.
+    if (hasField("purchase_date")) {
+      // Only catalog-declared subscription plans own a monthly purchase date.
+      // Hidden form defaults must never reset other account types.
       payload.purchase_date = form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate);
     }
     if (form.value.key.trim()) {
@@ -670,12 +687,23 @@ async function handleSave() {
     name: form.value.name,
     username: form.value.username,
     key: form.value.key,
-    purchase_date: form.value.purchaseDate === null ? undefined : localDateString(form.value.purchaseDate),
     notes: form.value.notes,
-    endpoint_url: form.value.endpointUrl,
-    upstream_protocol: form.value.upstreamProtocol ?? undefined,
-    model_capabilities: form.value.modelCapabilities.length > 0 ? form.value.modelCapabilities : undefined,
   };
+  if (hasField("purchase_date")) {
+    values.purchase_date = form.value.purchaseDate === null
+      ? undefined
+      : localDateString(form.value.purchaseDate);
+  }
+  // The form model keeps a default Custom protocol so that opening the Custom
+  // plan is convenient. Do not leak that hidden field into sealed built-in
+  // plans: the payload builder correctly rejects Custom-only fields there.
+  if (isCustomPlan.value) {
+    values.endpoint_url = form.value.endpointUrl;
+    values.upstream_protocol = form.value.upstreamProtocol ?? undefined;
+    values.model_capabilities = form.value.modelCapabilities.length > 0
+      ? form.value.modelCapabilities
+      : undefined;
+  }
 
   try {
     const payload = buildCreateAccountPayload(plan, form.value.offeringId, values);
@@ -722,19 +750,30 @@ async function handleSave() {
   gap: 8px;
 }
 
-.capability-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px;
-  align-items: center;
+.capability-select {
+  width: 100%;
 }
 
+.capability-count {
+  margin-top: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.endpoint-field,
 .protocol-field {
   display: grid;
   gap: 4px;
+  width: 100%;
 }
 
 .modal-grid :deep(.n-date-picker) {
+  width: 100%;
+}
+
+.purchase-date-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
   width: 100%;
 }
 
@@ -750,8 +789,5 @@ async function handleSave() {
     grid-template-columns: 1fr;
   }
 
-  .capability-row {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

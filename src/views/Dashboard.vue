@@ -408,7 +408,7 @@ function attentionAccount(item: AttentionItem): Account | undefined {
 function attentionLabel(item: AttentionItem): string {
   switch (item.reason) {
     case "auth-error":
-      return t("认证失效（401 熔断）");
+      return t("不可用");
     case "expired": {
       const account = attentionAccount(item);
       return account
@@ -419,8 +419,6 @@ function attentionLabel(item: AttentionItem): string {
       return t("冷却中");
     case "setup-incomplete":
       return t("注册中");
-    case "verification-failed":
-      return t("验证失败");
   }
 }
 
@@ -430,7 +428,6 @@ function attentionTagType(
   switch (reason) {
     case "auth-error":
     case "expired":
-    case "verification-failed":
       return "error";
     case "cooling":
       return "warning";

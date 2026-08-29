@@ -44,6 +44,25 @@ pub(crate) fn classify_http(
     )
 }
 
+/// Host compatibility wrapper for body-aware inference error classification.
+pub(crate) fn classify_http_response(
+    status: u16,
+    provider_id: &str,
+    offering_id: &str,
+    channel: UpstreamChannel,
+    anonymous: bool,
+    response_body: &str,
+) -> ProviderErrorClass {
+    ocg_gateway::classify::classify_http_response(
+        status,
+        provider_id,
+        offering_id,
+        channel == UpstreamChannel::Free,
+        anonymous,
+        response_body,
+    )
+}
+
 pub(crate) fn rate_limit_window_and_cooldown(
     policy: RateLimitPolicy,
     text: &str,

@@ -56,7 +56,7 @@ Add desktop capabilities in `src-tauri/src/host/` and register them into `CoreSt
 | Empty-body `401` on `/dashboard/api/...` | Anonymous retired REST or missing session | Log in; loopback skips only **direct** requests |
 | Gateway `400` `ambiguous_model_id` | Raw ID maps to more than one family (including Custom overlap) | Rename/avoid the colliding Custom ID; do not call upstream |
 | Gateway `400` unknown model | Name is neither a published alias nor an eligible Custom ID | Use `/v1/models`; do not probe protocols |
-| Inference `401` unchanged, no failover | OpenCode Go/Zen `ModelError` or invalid key | Expected; ping/verify still record `auth_error` |
+| Inference `401` unchanged, no failover | Go `ModelError`/unknown body or any Zen 401 | Expected; only exact Go `CreditsError` rotates and records `auth_error` |
 | Zen `429` cools every Free card | Egress-IP shared pool | Wait for `cooldown_free_until`; later non-Free cards may still run |
 | `success_no_usage` | Upstream omitted usage chunks | Chat streams request `include_usage`; without a chunk the row stays missing usage |
 | Open fails: schema newer than 29 | Data directory from a newer binary | Restore a matching backup; do not run an older binary on v29 |

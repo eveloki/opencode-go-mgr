@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
 
+const GATEWAY_PORT_ENV: &str = "OCG_GATEWAY_PORT";
+
 pub fn run() {
     let data_dir = data_dir();
     let cipher = match load_cipher(&data_dir) {
@@ -44,6 +46,20 @@ pub fn run() {
             std::process::exit(1);
         }
     };
+
+    match gateway_port_override_from_env() {
+        Ok(Some(port)) => {
+            if let Err(error) = core_state.register_gateway_port_override(port) {
+                eprintln!("failed to configure Gateway port: {error}");
+                std::process::exit(1);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("failed to configure Gateway port: {error}");
+            std::process::exit(1);
+        }
+    }
 
     host::register_desktop_settings(&core_state);
 
@@ -99,6 +115,29 @@ pub fn run() {
         });
 }
 
+fn gateway_port_override_from_env() -> Result<Option<u16>> {
+    match std::env::var(GATEWAY_PORT_ENV) {
+        Ok(value) => parse_gateway_port_override(&value),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+            "{GATEWAY_PORT_ENV} must contain valid Unicode"
+        )),
+    }
+}
+
+fn parse_gateway_port_override(value: &str) -> Result<Option<u16>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("{GATEWAY_PORT_ENV} must be an integer from 1 to 65535"))
+}
+
 fn load_cipher(data_dir: &std::path::Path) -> Result<Arc<dyn KeyCipher + Send + Sync>> {
     #[cfg(windows)]
     {
@@ -121,6 +160,24 @@ fn data_dir() -> PathBuf {
 
 #[cfg(test)]
 mod host_lifecycle_surface {
+    use super::{gateway_port_override_from_env, parse_gateway_port_override};
+
+    #[test]
+    fn gateway_port_override_parser_is_part_of_desktop_startup() {
+        let _parser: fn() -> crate::Result<Option<u16>> = gateway_port_override_from_env;
+        assert_eq!(parse_gateway_port_override("").unwrap(), None);
+        assert_eq!(parse_gateway_port_override(" 19042 ").unwrap(), Some(19042));
+        assert!(parse_gateway_port_override("0").is_err());
+        assert!(parse_gateway_port_override("65536").is_err());
+        assert!(parse_gateway_port_override("not-a-port").is_err());
+        let production = include_str!("lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production lib.rs precedes this test module");
+        assert!(production.contains("OCG_GATEWAY_PORT"));
+        assert!(production.contains("register_gateway_port_override"));
+    }
+
     #[test]
     fn desktop_capabilities_and_exit_are_separate_from_gateway_and_updater() {
         // Source-text: live tray/AppHandle construction is not available in

@@ -12,7 +12,7 @@ const goPlan = PLAN_DEFINITIONS.find((p) => p.id === "opencode-go")!;
 const goatPlan = PLAN_DEFINITIONS.find((p) => p.id === "command-code-goat")!;
 const customPlan = PLAN_DEFINITIONS.find((p) => p.id === "custom-endpoint")!;
 
-test("Custom payload uses one complete Endpoint and expands every model to its protocol", () => {
+test("Custom payload uses one API URL and expands every model to its protocol", () => {
   const payload = buildCreateAccountPayload(customPlan, undefined, {
     name: "Custom",
     key: "custom-key",
@@ -90,7 +90,7 @@ test("non-Custom plans reject Custom-only fields", () => {
 test("payload error messages remain usable without a legacy config vocabulary", () => {
   assert.equal(
     accountCreatePayloadErrorKey(new AccountCreatePayloadError("missing_endpoint_url")),
-    "请填写完整 Endpoint",
+    "请填写 API 地址",
   );
   assert.equal(accountCreatePayloadErrorKey(new Error("internal")), "账号创建失败，请重试");
 });

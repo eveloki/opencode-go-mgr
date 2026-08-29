@@ -1092,6 +1092,10 @@ test("settings expose the downstream display root and bounded request timeouts",
   const settingsMerge = await readFile(new URL("./settings-merge.ts", import.meta.url), "utf8");
 
   assert.match(settings, /下游访问根地址（可选）/);
+  assert.match(settings, /v-model:value="config\.gateway_port"/);
+  assert.match(settings, /:disabled="!loaded \|\| saving \|\| config\.gateway_port_from_env"/);
+  assert.match(settings, /由环境变量 OCG_GATEWAY_PORT 管理/);
+  assert.match(settings, /gateway_port_from_env: false/);
   assert.ok(settings.indexOf("t('上游地址')") < settings.indexOf('class="downstream-grid"'));
   assert.match(settings, /\.downstream-grid \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(settings, /v-model:value="clientRootInputValue"/);

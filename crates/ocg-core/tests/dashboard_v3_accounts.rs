@@ -684,7 +684,7 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
     .await;
     assert_eq!(status, StatusCode::OK, "{custom}");
     let custom = mutation_account(&custom);
-    assert!(!custom.enabled);
+    assert!(custom.enabled);
     assert_eq!(
         custom.verification_status,
         AccountVerificationStatus::Pending

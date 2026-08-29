@@ -16,11 +16,12 @@ you can drag into shape and persist from the Accounts view. The selector skips:
 
 A `429` with a recognized `Resets in …` phrase writes `cooldown_until` and
 the gateway tries the next account. `403` fails over without writing a
-cooldown. OpenCode Go and Zen Free `401` is returned as-is and does **not**
-rotate accounts or persist `auth_error` — OpenCode Go uses 401 for both
-invalid keys and `ModelError` ("model is not supported"), so treating it as a
-key breaker would interrupt the client and strand a valid account. Custom API
-`401` does rotate to the next eligible card and persists `auth_error`.
+cooldown. Zen Free `401` is returned as-is. OpenCode Go structured
+`CreditsError` 401 rotates to the next eligible card and persists `auth_error`;
+re-saving the same Key clears that breaker after renewal. Its `ModelError`,
+unknown, and malformed 401 responses remain passthrough because OpenCode also
+uses 401 for unsupported models. Custom API `401` also rotates and persists
+`auth_error`.
 Managed-account Key verification and Custom **Verify connection** still
 record `auth_error` when they get a 401. CLI `key ping` prints the real
 upstream status without writing that field. A DNS/TCP/TLS connection

@@ -38,7 +38,7 @@
   "version": "2.0.0",
   "app": {
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:9042; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "csp": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
       "capabilities": ["default"]
     },
     "windows": [

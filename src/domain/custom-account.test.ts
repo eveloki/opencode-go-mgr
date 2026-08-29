@@ -4,9 +4,10 @@ import {
   CUSTOM_ENDPOINT_URL_ISSUE_KEYS,
   customAccountNeedsVerification,
   customEndpointUrlIssue,
-  customInferenceEndpointPlaceholder,
+  customApiUrlPlaceholder,
+  customApiUrlSupportsModelDiscovery,
+  customApiUrlNeedsManualModels,
   expandCustomModelCapabilities,
-  isStandardCustomInferenceEndpoint,
   normalizeCustomCapabilities,
   CustomCapabilityError,
 } from "./custom-account.ts";
@@ -21,16 +22,23 @@ test("trusted Endpoint validation permits LAN, localhost, and HTTP", () => {
   ]) assert.equal(customEndpointUrlIssue(endpoint), null, endpoint);
   assert.equal(customEndpointUrlIssue("ftp://api.example.com"), "not_http");
   assert.equal(customEndpointUrlIssue("https://user:pass@api.example.com"), "with_credentials");
-  assert.equal(CUSTOM_ENDPOINT_URL_ISSUE_KEYS.empty, "请填写完整 Endpoint");
+  assert.equal(CUSTOM_ENDPOINT_URL_ISSUE_KEYS.empty, "请填写 API 地址");
 });
 
-test("standard inference paths alone enable model discovery", () => {
-  assert.equal(customInferenceEndpointPlaceholder("chat_completions"), "https://api.example.com/v1/chat/completions");
-  assert.ok(isStandardCustomInferenceEndpoint("https://api.example.com/v1/chat/completions", "chat_completions"));
-  assert.ok(isStandardCustomInferenceEndpoint("https://api.example.com/v1/responses/", "responses"));
-  assert.ok(isStandardCustomInferenceEndpoint("https://api.example.com/v1/messages", "messages"));
-  assert.ok(!isStandardCustomInferenceEndpoint("https://api.example.com/custom/infer", "messages"));
-  assert.ok(!isStandardCustomInferenceEndpoint("https://api.example.com/v1/messages", "responses"));
+test("common API bases and legacy standard paths enable model discovery", () => {
+  assert.equal(customApiUrlPlaceholder(), "https://api.example.com");
+  assert.ok(customApiUrlSupportsModelDiscovery("https://api.example.com", "chat_completions"));
+  assert.ok(customApiUrlSupportsModelDiscovery("https://api.example.com/v1", "chat_completions"));
+  assert.ok(customApiUrlSupportsModelDiscovery("https://api.example.com/openai/v1/", "responses"));
+  assert.ok(customApiUrlSupportsModelDiscovery("https://api.example.com/v1/chat/completions", "chat_completions"));
+  assert.ok(customApiUrlSupportsModelDiscovery("https://api.example.com/v1/responses/", "responses"));
+  assert.ok(customApiUrlSupportsModelDiscovery("https://api.example.com/v1/messages", "messages"));
+  assert.ok(!customApiUrlSupportsModelDiscovery("https://api.example.com/custom/infer", "messages"));
+  assert.ok(!customApiUrlSupportsModelDiscovery("https://api.example.com/v1/messages", "responses"));
+  assert.ok(!customApiUrlNeedsManualModels("", "messages"));
+  assert.ok(!customApiUrlNeedsManualModels("not a url", "messages"));
+  assert.ok(!customApiUrlNeedsManualModels("https://api.example.com", "messages"));
+  assert.ok(customApiUrlNeedsManualModels("https://api.example.com/custom/infer", "messages"));
 });
 
 test("one protocol expands each model once and rejects mismatched rows", () => {

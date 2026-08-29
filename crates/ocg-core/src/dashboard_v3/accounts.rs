@@ -21,7 +21,7 @@ use crate::models::{
     AccountUpdate as ModelAccountUpdate, normalize_account_notes, normalize_purchase_date,
 };
 use crate::provider::{
-    CreationAvailability, VerificationPolicy, default_offering_id, default_provider_id,
+    CreationAvailability, ProviderRegistry, default_offering_id, default_provider_id,
 };
 use crate::redaction::redact_known_secret;
 use crate::state::CoreState;
@@ -243,10 +243,12 @@ fn create_account_locked(
             ));
         }
     }
-    let requires_verification = plan.verification_policy == VerificationPolicy::Required;
+    let enable_requires_verification =
+        ProviderRegistry::get(offering.provider_id, offering.offering_id)
+            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
     let enabled =
         crate::provider::offering_allows_enablement(offering.provider_id, offering.offering_id)
-            && !requires_verification;
+            && !enable_requires_verification;
     let purchase_date = match input.purchase_date {
         Some(value) if !value.trim().is_empty() => normalize_purchase_date(&value)
             .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?,

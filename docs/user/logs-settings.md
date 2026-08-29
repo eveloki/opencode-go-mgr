@@ -58,7 +58,9 @@ changes the quota-debit multiplier; it does not make a model or provider routabl
 
 The **Settings** view holds the gateway's persistent configuration:
 
-- **Gateway Port** — the port the gateway binds (default `9042`).
+- **Gateway Port** — the port the gateway binds (default `9042`). Desktop builds
+  also accept the read-only `OCG_GATEWAY_PORT` runtime override; while it is set,
+  the Settings field is disabled and the saved value is unchanged.
 - **Upstream URL** — the OpenCode-Go base URL.
 - **Routing mode** — strict priority, global sticky, or round robin. All three
   modes apply the one global card order only after filtering incompatible,

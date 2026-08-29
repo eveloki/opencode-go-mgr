@@ -3,12 +3,16 @@
     <n-space vertical :size="16" class="accounts-content">
       <n-space justify="space-between" align="center" class="accounts-toolbar">
         <n-h3 style="margin: 0">{{ t("账号") }}</n-h3>
-        <n-button type="primary" @click="openAddModal">
-          <template #icon>
-            <n-icon :component="PlusOutlined" />
-          </template>
-          {{ t("新增账号") }}
-        </n-button>
+        <n-space wrap>
+          <n-button @click="openTransfer('import')">{{ t("导入账号") }}</n-button>
+          <n-button @click="openTransfer('export')">{{ t("导出账号") }}</n-button>
+          <n-button type="primary" @click="openAddModal">
+            <template #icon>
+              <n-icon :component="PlusOutlined" />
+            </template>
+            {{ t("新增账号") }}
+          </n-button>
+        </n-space>
       </n-space>
 
       <span id="account-order-instructions" class="sr-only">
@@ -108,13 +112,12 @@
           :usage-loading="!!usageLoading[account.id]"
           :usage-load-error="usageLoadErrors[account.id] ?? null"
           :usage-refresh-loading="!!usageRefreshLoading[account.id]"
-          :verifying="!!verifying[account.id]"
           :quota-limits-failed="!!quotaLimitsError"
           :menu-options="accountMenuOptions(account, now)"
           @order-keydown="handleOrderKeydown($event, account.id)"
           @order-drag-start="startAccountDrag($event, account.id)"
           @toggle="toggleAccount(account.id)"
-          @verify="verifyCustomAccount(account.id)"
+          @test-connection="openAccountTest(account.id)"
           @refresh-usage="refreshAccountUsage(account.id)"
           @reload-usage="loadAccountUsage(account.id)"
           @open-wizard="openManagedWizard(account.id)"
@@ -152,6 +155,13 @@
       :catalog="providerCatalog"
       @save="onFormSave"
       @reset-cooldown="resetCooldown(editingAccount!.id)"
+    />
+
+    <AccountConnectionTestModal
+      :show="!!testingAccount"
+      :account="testingAccount"
+      :catalog="providerCatalog"
+      @update:show="setAccountTestVisible"
     />
 
     <n-modal
@@ -228,6 +238,12 @@
       @advance="advanceManagedSetup(managedWizardAccount.id, $event)"
       @verify-key="verifyManagedKey(managedWizardAccount.id, $event)"
     />
+
+    <AccountTransferModal
+      v-model:show="showTransfer"
+      :mode="transferMode"
+      @imported="handleAccountsImported"
+    />
   </div>
 </template>
 
@@ -298,8 +314,10 @@ import {
 } from "../domain/managed-account.ts";
 import AccountAddModal from "../components/AccountAddModal.vue";
 import AccountCard from "../components/AccountCard.vue";
+import AccountConnectionTestModal from "../components/AccountConnectionTestModal.vue";
 import AccountFormModal, { type AccountFormPayload } from "../components/AccountFormModal.vue";
 import ManagedAccountWizard from "../components/ManagedAccountWizard.vue";
+import AccountTransferModal from "../components/AccountTransferModal.vue";
 
 const dialog = useDialog();
 const message = useMessage();
@@ -307,16 +325,23 @@ const accountsStore = useAccountsStore();
 const accounts = ref<Account[]>([]);
 const accountListLoading = ref(true);
 const accountListError = ref("");
-const verifying = ref<Record<string, boolean>>({});
+const testingAccountId = ref<string | null>(null);
 const providerSettingsSaving = ref<Record<string, boolean>>({});
 /** Settings revision from `GET /settings`, used for conditional Zen writes. */
 const settingsRevision = ref<number | null>(null);
 const showModal = ref(false);
 const showAddModal = ref(false);
+const showTransfer = ref(false);
+const transferMode = ref<"import" | "export">("import");
 const showManagedCreate = ref(false);
 const showManagedWizard = ref(false);
 useLocalizedModalCloseLabel(showManagedCreate, "account-managed-modal");
 const editingAccount = ref<Account | null>(null);
+const testingAccount = computed(() => (
+  testingAccountId.value
+    ? accounts.value.find((account) => account.id === testingAccountId.value) ?? null
+    : null
+));
 const managedWizardAccountId = ref<string | null>(null);
 const managedDraft = ref({
   name: "",
@@ -429,10 +454,8 @@ const planFilterOptions = computed(() => [
 const statusFilterOptions = computed(() => [
   { value: "all", label: t("全部状态") },
   { value: "available", label: t("可用") },
-  { value: "verifying", label: t("待验证") },
-  { value: "verification-failed", label: t("验证失败") },
   { value: "cooling", label: t("冷却中") },
-  { value: "auth-error", label: t("认证失效（401 熔断）") },
+  { value: "auth-error", label: t("不可用") },
   { value: "disabled", label: t("已禁用") },
   { value: "registering", label: t("注册中") },
 ]);
@@ -475,6 +498,16 @@ function handleMenuSelect(key: string | number, accountId: string) {
 
 function openAddModal(): void {
   showAddModal.value = true;
+}
+
+function openTransfer(mode: "import" | "export"): void {
+  transferMode.value = mode;
+  showTransfer.value = true;
+}
+
+async function handleAccountsImported(count: number): Promise<void> {
+  await loadAccounts();
+  message.success(t("已导入 {count} 项账号配置。", { count }));
 }
 
 function openCreateModal(plan?: PlanDefinition): void {
@@ -702,7 +735,7 @@ function removeAccountState(id: string): void {
   delete usageEdits.value[id];
   delete usageLoading.value[id];
   delete usageLoadErrors.value[id];
-  delete verifying.value[id];
+  if (testingAccountId.value === id) testingAccountId.value = null;
   delete providerSettingsSaving.value[id];
 }
 
@@ -890,40 +923,13 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
   }
 }
 
-/**
- * Billable protocol-correct connection check for Custom API accounts.
- * The backend returns the account with a refreshed verification state and never
- * enables it — enabling stays an explicit toggle action after verification.
- */
-async function verifyCustomAccount(id: string) {
-  const account = accounts.value.find((item) => item.id === id);
-  if (!account || verifying.value[id]) return;
-  if (!isCustomApiAccount(account)) return;
-  verifying.value[id] = true;
-  try {
-    const updated = await runWithFreshSettingsRevision((revision) => (
-      dashboardApi.verifyAccountConnection(id, revision)
-    ));
-    replaceAccount(updated);
-    if (updated.verification_status === "failed") {
-      message.error(t("连接验证失败: {error}", {
-        error: updated.verification_error?.trim() || t("验证失败"),
-      }));
-    } else {
-      message.success(t("连接验证成功，账号保持禁用，可手动启用。"));
-    }
-  } catch (e) {
-    if (await recoverAccountMutationConflict(e)) return;
-    message.error(t("连接验证失败: {error}", { error: dashboardErrorDetail(e) }));
-    try {
-      await refreshAccountState(id);
-    } catch {
-      // The verification error already reached the user; the next explicit
-      // refresh can retry the state reconciliation.
-    }
-  } finally {
-    verifying.value[id] = false;
-  }
+function openAccountTest(id: string) {
+  if (!accounts.value.some((account) => account.id === id)) return;
+  testingAccountId.value = id;
+}
+
+function setAccountTestVisible(show: boolean) {
+  if (!show) testingAccountId.value = null;
 }
 
 /**

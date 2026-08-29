@@ -30,7 +30,9 @@ use ocg_core::provider::{
     OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use ocg_core::provider_contracts::{
-    CATALOG_SOURCE_OFFICIAL_ZEN, CATALOG_SOURCE_OPENCODE_MODELS, ContractScope,
+    CATALOG_SOURCE_COMMAND_CODE_MODELS, CATALOG_SOURCE_KIMI_CN_MODELS,
+    CATALOG_SOURCE_MINIMAX_CN_MODELS, CATALOG_SOURCE_OFFICIAL_ZEN, CATALOG_SOURCE_OPENCODE_MODELS,
+    ContractScope,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
@@ -504,6 +506,132 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
         aliases.iter().any(|alias| alias == "mimo-v2.5"),
         "Zen aliases must include the de-suffixed snapshot alias: {aliases:?}"
     );
+
+    harness.stop();
+}
+
+#[tokio::test]
+async fn dashboard_v3_provider_catalog_aliases_follow_saved_builtin_catalogs() {
+    let harness = start_loopback("providers-catalog-cn-aliases").await;
+    let now = chrono::Utc::now();
+    let minimax = [
+        "MiniMax-M3",
+        "MiniMax-M2.7",
+        "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.5",
+        "MiniMax-M2.5-highspeed",
+        "MiniMax-M2.1",
+        "MiniMax-M2.1-highspeed",
+        "MiniMax-M2",
+    ]
+    .map(str::to_string);
+    let kimi = [
+        "kimi-for-coding",
+        "kimi-for-coding-highspeed",
+        "k3",
+        "k3-256k",
+    ]
+    .map(str::to_string);
+    let goat = ["nvidia/nemotron-3-ultra-550b-a55b"].map(str::to_string);
+    {
+        let db = harness.state.db.lock();
+        db.set_contract_catalog(
+            &ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
+            &goat,
+            Some(now),
+            CATALOG_SOURCE_COMMAND_CODE_MODELS,
+            "https://api.commandcode.ai/v1/models",
+            now,
+        )
+        .unwrap();
+        db.set_contract_catalog(
+            &ContractScope::provider(MINIMAX_PROVIDER_ID),
+            &minimax,
+            Some(now),
+            CATALOG_SOURCE_MINIMAX_CN_MODELS,
+            "https://api.minimaxi.com/v1/models",
+            now,
+        )
+        .unwrap();
+        db.set_contract_catalog(
+            &ContractScope::provider(KIMI_PROVIDER_ID),
+            &kimi,
+            Some(now),
+            CATALOG_SOURCE_KIMI_CN_MODELS,
+            "https://api.kimi.com/coding/v1/models",
+            now,
+        )
+        .unwrap();
+    }
+    harness.state.reload_provider_contracts().unwrap();
+
+    let (status, body) = get_v3(&harness, "/providers").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: ProviderCatalog = serde_json::from_value(body).expect("ProviderCatalog");
+    let goat_entry = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.provider_id == COMMAND_CODE_PROVIDER_ID)
+        .expect("Command Code catalog entry");
+    assert_eq!(
+        goat_entry.model_aliases,
+        ["nemotron-3-ultra"],
+        "GOAT should expose only code-owned short Aliases from its saved catalog"
+    );
+    let minimax_entry = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.provider_id == MINIMAX_PROVIDER_ID)
+        .expect("MiniMax catalog entry");
+    assert_eq!(
+        minimax_entry.model_aliases,
+        [
+            "minimax-m2",
+            "minimax-m2.1",
+            "minimax-m2.1-highspeed",
+            "minimax-m2.5",
+            "minimax-m2.5-highspeed",
+            "minimax-m2.7",
+            "minimax-m2.7-highspeed",
+            "minimax-m3",
+        ]
+    );
+    let kimi_entry = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.provider_id == KIMI_PROVIDER_ID)
+        .expect("Kimi catalog entry");
+    assert_eq!(
+        kimi_entry.model_aliases,
+        [
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k3",
+            "kimi-k3-256k",
+        ]
+    );
+
+    let (status, contracts_body) = get_v3(&harness, "/provider-contracts").await;
+    assert_eq!(status, StatusCode::OK, "{contracts_body}");
+    let contracts: ProviderContracts =
+        serde_json::from_value(contracts_body).expect("ProviderContracts");
+    let kimi_contract = contracts
+        .providers
+        .iter()
+        .find(|group| group.provider_id == KIMI_PROVIDER_ID)
+        .expect("Kimi provider contracts");
+    let aliases = kimi_contract
+        .models
+        .iter()
+        .map(|model| (model.model_id.as_str(), model.alias.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(aliases.get("kimi-for-coding"), Some(&"kimi-k2.7-code"));
+    assert_eq!(
+        aliases.get("kimi-for-coding-highspeed"),
+        Some(&"kimi-k2.7-code-highspeed")
+    );
+    assert_eq!(aliases.get("k3"), Some(&"kimi-k3"));
+    assert_eq!(aliases.get("k3-256k"), Some(&"kimi-k3-256k"));
 
     harness.stop();
 }

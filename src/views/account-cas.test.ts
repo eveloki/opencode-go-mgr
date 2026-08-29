@@ -57,7 +57,7 @@ test("conflict reload keeps the edit modal for a surviving account, closes it fo
 test("unroutable cards are fail-closed without provider-specific draft branches", () => {
   assert.match(card, /const isDraft = computed[\s\S]*?!props\.account\.plan_routable/);
   assert.match(card, /v-else-if="isDraft" class="provider-unconfigured"/);
-  assert.match(card, /v-if="isGo && accountIsReady\(account\)"/);
+  assert.match(card, /v-else-if="isGo && !quotaLimitsFailed"/);
   assert.match(card, /accountRoutingDraftDescription\(props\.account\)/);
   assert.doesNotMatch(card, /provider_id === "command-code"|provider_id === "custom"/);
 });

@@ -673,6 +673,135 @@ async fn model_discovery_returns_local_list_with_zero_accounts() {
 }
 
 #[tokio::test]
+async fn model_discovery_publishes_saved_sealed_cn_aliases_without_raw_ids() {
+    let (base_url, calls, stop_mock) = start_mock_upstream(HashMap::new()).await;
+    let (state, dir) = build_state(base_url, &[]);
+    let now = chrono::Utc::now();
+    {
+        let db = state.db.lock();
+        db.set_contract_catalog(
+            &ocg_core::provider_contracts::ContractScope::provider(
+                ocg_core::provider::MINIMAX_PROVIDER_ID,
+            ),
+            &[
+                "MiniMax-M2.1".to_string(),
+                "MiniMax-M2.1-highspeed".to_string(),
+                "MiniMax-M2".to_string(),
+            ],
+            Some(now),
+            ocg_core::provider_contracts::CATALOG_SOURCE_MINIMAX_CN_MODELS,
+            "https://api.minimaxi.com/v1/models",
+            now,
+        )
+        .unwrap();
+        db.set_contract_catalog(
+            &ocg_core::provider_contracts::ContractScope::provider(
+                ocg_core::provider::KIMI_PROVIDER_ID,
+            ),
+            &[
+                "kimi-for-coding-highspeed".to_string(),
+                "k3".to_string(),
+                "k3-256k".to_string(),
+            ],
+            Some(now),
+            ocg_core::provider_contracts::CATALOG_SOURCE_KIMI_CN_MODELS,
+            "https://api.kimi.com/coding/v1/models",
+            now,
+        )
+        .unwrap();
+    }
+    state.reload_provider_contracts().unwrap();
+    let (port, gateway_handle) = start_gateway(state).await;
+
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ids = payload["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect::<HashSet<_>>();
+    for alias in [
+        "minimax-m2",
+        "minimax-m2.1",
+        "minimax-m2.1-highspeed",
+        "kimi-k2.7-code-highspeed",
+        "kimi-k3",
+        "kimi-k3-256k",
+    ] {
+        assert!(ids.contains(alias), "missing {alias}: {body}");
+    }
+    for raw in [
+        "MiniMax-M2",
+        "MiniMax-M2.1",
+        "kimi-for-coding-highspeed",
+        "k3",
+        "k3-256k",
+    ] {
+        assert!(!ids.contains(raw), "raw ID leaked into /v1/models: {body}");
+    }
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "GET /v1/models must stay local: {:?}",
+        calls.lock().unwrap()
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn model_discovery_publishes_enabled_goat_short_alias_without_raw_id() {
+    const RAW: &str = "nvidia/nemotron-3-ultra-550b-a55b";
+    const ALIAS: &str = "nemotron-3-ultra";
+
+    let (base_url, calls, stop_mock) = start_mock_upstream(HashMap::new()).await;
+    let (state, dir) = build_state(base_url, &[]);
+    state
+        .activate_zen_free_model_catalog(ocg_core::kernel::zen::ZenFreeModelCatalog {
+            models: Vec::new(),
+            refreshed_at: Some(Utc::now()),
+            source_url: ocg_core::kernel::zen::ZEN_MODELS_SOURCE_URL.to_string(),
+        })
+        .unwrap();
+    persist_goat_verified_catalog(&state, "unused", &[RAW]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ids = payload["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect::<HashSet<_>>();
+    assert!(ids.contains(ALIAS), "missing GOAT short Alias: {body}");
+    assert!(
+        !ids.contains(RAW),
+        "GOAT raw ID leaked into /v1/models: {body}"
+    );
+
+    disable_command_protocols(&state, RAW);
+    let (status, body) = models(port).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains(&format!("\"{ALIAS}\"")),
+        "disabled GOAT Alias must leave /v1/models: {body}"
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "GET /v1/models must stay local"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn model_discovery_does_not_create_inference_logs() {
     let replies = HashMap::from([(
         "key-1".to_string(),
@@ -2446,13 +2575,13 @@ async fn inference_403_fails_over_without_persisting_an_auth_breaker() {
 }
 
 #[tokio::test]
-async fn inference_401_is_returned_without_failover_or_breaker() {
+async fn opencode_model_error_401_is_returned_without_failover_or_breaker() {
     let replies = HashMap::from([
         (
             "key-1".to_string(),
             VecDeque::from([MockReply {
                 status: 401,
-                body: r#"{"error":{"message":"expired key"}}"#,
+                body: r#"{"type":"error","error":{"type":"ModelError","message":"Model is not supported"}}"#,
             }]),
         ),
         (
@@ -2471,7 +2600,7 @@ async fn inference_401_is_returned_without_failover_or_breaker() {
         let (status, body) = chat(port).await;
         assert_eq!(status, 401, "{body}");
         assert!(
-            body.contains("expired key") || body.contains("401"),
+            body.contains("ModelError") || body.contains("401"),
             "{body}"
         );
     }
@@ -2493,7 +2622,56 @@ async fn inference_401_is_returned_without_failover_or_breaker() {
             .unwrap()
             .auth_error
             .is_none(),
-        "inference 401 must not permanently break an account"
+        "OpenCode ModelError 401 must not permanently break an account"
+    );
+
+    gateway::stop_gateway(gateway_handle);
+    let _ = stop_mock.send(());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn opencode_credits_error_401_breaks_current_account_and_falls_through() {
+    let replies = HashMap::from([
+        (
+            "key-1".to_string(),
+            VecDeque::from([MockReply {
+                status: 401,
+                body: r#"{"type":"error","error":{"type":"CreditsError","message":"No active subscription"}}"#,
+            }]),
+        ),
+        (
+            "key-2".to_string(),
+            VecDeque::from([MockReply {
+                status: 200,
+                body: SUCCESS_BODY,
+            }]),
+        ),
+    ]);
+    let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
+    let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
+    let (port, gateway_handle) = start_gateway(state.clone()).await;
+
+    for _ in 0..2 {
+        let (status, body) = chat(port).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.key.as_str())
+            .collect::<Vec<_>>(),
+        ["key-1", "key-2", "key-2"]
+    );
+    let broken = state.db.lock().get_account("acct-1").unwrap().unwrap();
+    assert!(
+        broken
+            .auth_error
+            .as_deref()
+            .is_some_and(|error| error.contains("account error 401")),
+        "CreditsError must persist an account-level breaker: {broken:?}"
     );
 
     gateway::stop_gateway(gateway_handle);

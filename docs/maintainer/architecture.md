@@ -178,7 +178,8 @@ Split of responsibility:
          pre-send connect fail -> retry same account once
          403 / Go 429          -> next card
          Free 429              -> cool shared free channel
-         OpenCode 401          -> return as-is (no rotate, no auth_error)
+         Go CreditsError 401   -> rotate + persist auth_error
+         other OpenCode 401    -> return as-is
          Custom 401            -> rotate + persist auth_error
          408 / 5xx / body timeout / stream interrupt -> never replay
    12. convert response ; write forward_logs
@@ -201,18 +202,23 @@ Standard entries are `/v1/chat/completions`, `/v1/responses`,
 accepts `/v1beta/models/{model}:*` and `/v1/models/{model}:*`;
 `generateContent` and `streamGenerateContent` convert, `countTokens` and
 `embedContent` return `501`, unknown actions return `404`. Authenticated
-`GET /v1/models` reads local routeable aliases authorized by the original
-static OpenCode Go table, then eligible Custom declared IDs. Saved
-Zen/Command/MiniMax/Kimi catalogs may join an authorized Alias but cannot
-create another one; unmatched built-in catalog IDs remain exact raw pins.
+`GET /v1/models` reads local routeable code-owned Aliases, then eligible
+Custom declared IDs. The original OpenCode Go table authorizes Go names;
+sealed exact MiniMax CN, Kimi CN, and selected GOAT long-name maps authorize
+provider-only names without creating Go routes. Saved Zen catalogs may join Go
+Aliases, Command catalogs may join any code-owned Alias, and CN catalogs
+activate only their sealed mappings; unmatched built-in catalog IDs
+remain exact raw pins.
 `GET /dashboard/api/v3/application-models` is a separate local list: Go
 routeable aliases ∩ active Go pricing snapshot (highspeed variants
 inherit the base row). It excludes Custom IDs. Claude Desktop
 `/claude-desktop/v1/models` advertises only the three role aliases.
 
 The Alias registry lives in `ocg-gateway::alias` (facade `ocg_core::alias`).
-Preferred aliases are lowercase kebab-case and come only from the original Go
-table. Kebab Alias spellings are case-folded; built-in raw IDs are exact and
+Preferred aliases are lowercase kebab-case and come from the original Go table
+or sealed CN/GOAT maps. Command removes Provider namespaces, strips known plan
+suffixes only when the shorter Alias is already code-owned, and maps
+`nvidia/nemotron-3-ultra-550b-a55b` to `nemotron-3-ultra`. Kebab Alias spellings are case-folded; built-in raw IDs are exact and
 case-sensitive, including names with `/`, `_`, or whitespace. A raw ID with
 exactly one registry mapping pins to that mapping;
 routability is checked afterward, so an unroutable mapping is recognized
@@ -241,8 +247,8 @@ materializes model, protocol, endpoint, and auth per candidate. Adapters
 do not probe billable inference paths to discover protocol support. The
 OpenCode `MODEL_PROTOCOLS` table is Go-specific. Dynamic Zen `-free` IDs
 unknown to the table default to Chat. Custom rematerializes per account to
-that card's single declared protocol and complete Endpoint, deriving auth
-from the protocol.
+that card's single declared protocol and resolved inference Endpoint, deriving
+the standard path and auth from the API URL plus protocol.
 
 `zen_models.rs` owns the only Zen Free model-discovery path. A protected
 Providers-page refresh calls the fixed keyless
@@ -293,8 +299,9 @@ Fallback / retry (executor + classify, **not** `forward_once`):
   same account, and only before any downstream bytes.
 - Partial SSE never falls back. Ambiguous stream results log
   `outcome_unknown`. `StreamOutcomeGuard` finalizes on drop.
-- Inference `401` on OpenCode (Go/Zen) is returned as-is: no rotate, no
-  `auth_error` (Go uses 401 for `ModelError` as well as invalid keys).
+- OpenCode Go inference `401` rotates and persists `auth_error` only for an
+  exact structured `CreditsError`; `ModelError` and unknown/malformed 401s,
+  plus every Zen Free 401, are returned as-is.
   Ordinary Custom `401` rotates and persists `auth_error`. Dashboard ping
   / key verification still record `auth_error` on 401.
 - `403` and Go-channel `429` can select another account. Free-channel

@@ -20,7 +20,7 @@
 //! loopback origin only and still uses `/provider/v1/...`.
 //! Configurable HTTP is the Custom API identity, not a base class.
 
-use crate::custom_http::{custom_auth_scheme, join_inference_endpoint, parse_custom_endpoint_url};
+use crate::custom_http::{custom_auth_scheme, join_inference_endpoint, resolve_custom_endpoints};
 use crate::gateway::attempt::{AttemptSpec, CredentialHandle, ProxyRoutingModel};
 use crate::gateway::free_models::resolve_upstream_base;
 use crate::gateway::protocol::{
@@ -157,6 +157,10 @@ enum RoutePolicy<'a> {
     /// Explicit admin probe: validate the structural ceiling and construct
     /// the endpoint/auth path without requiring prior verified support.
     Probe,
+    /// Account-scoped operational test. This keeps the production route shape
+    /// (including GOAT and CN routes) while deliberately bypassing normal
+    /// availability selection: the dashboard has already locked one account.
+    AccountTest,
 }
 
 pub(crate) fn supports_production_plan(
@@ -195,6 +199,14 @@ pub(crate) fn resolve_probe_route(
     plan: &RequestPlan,
 ) -> Result<AttemptSpec, String> {
     resolve_route_with_policy(account, config, plan, RoutePolicy::Probe)
+}
+
+pub(crate) fn resolve_account_test_route(
+    account: &Account,
+    config: &AppConfig,
+    plan: &RequestPlan,
+) -> Result<AttemptSpec, String> {
+    resolve_route_with_policy(account, config, plan, RoutePolicy::AccountTest)
 }
 
 fn resolve_route_with_policy(
@@ -488,8 +500,9 @@ impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
                 plan.model, plan.upstream
             ));
         }
-        let endpoint =
-            parse_custom_endpoint_url(&custom.endpoint_url).map_err(|error| error.to_string())?;
+        let endpoint = resolve_custom_endpoints(&custom.endpoint_url, protocol)
+            .map_err(|error| error.to_string())?
+            .inference;
         let endpoint_path = endpoint.path().to_string();
         let mut base = endpoint;
         base.set_path("");
@@ -587,7 +600,7 @@ fn require_opencode_protocol_policy(
             }
             Ok(())
         }
-        RoutePolicy::Production { contracts: None } => {
+        RoutePolicy::AccountTest | RoutePolicy::Production { contracts: None } => {
             let statically_ok = static_verified.contains(&protocol)
                 || opencode_supports_upstream(&plan.model, plan.upstream)
                 || (adapter == ProviderAdapterKind::CommandCodeGoat
@@ -665,7 +678,8 @@ mod tests {
         ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_BASE_URL,
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID,
         CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID,
-        OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_NAME,
+        MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+        OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_NAME,
     };
     use bytes::Bytes;
     use chrono::Utc;
@@ -973,6 +987,24 @@ mod tests {
             }
         );
 
+        for endpoint_url in ["http://127.0.0.1:9", "http://127.0.0.1:9/v1"] {
+            let resolved = resolve_route(
+                &custom,
+                &config,
+                &chat_plan(
+                    "local-model",
+                    UpstreamChannel::Go,
+                    ApiFormat::ChatCompletions,
+                    Some(CustomRouteSpec {
+                        endpoint_url: endpoint_url.into(),
+                    }),
+                ),
+            )
+            .unwrap();
+            assert_eq!(resolved.base_url, "http://127.0.0.1:9");
+            assert_eq!(resolved.path, "/v1/chat/completions");
+        }
+
         let unknown = account(
             "unknown-1",
             "unknown",
@@ -1165,6 +1197,31 @@ mod tests {
             .unwrap_err()
             .contains("not available")
         );
+    }
+
+    #[test]
+    fn account_test_route_keeps_fixed_chat_plan_available_without_enabling_provider_probes() {
+        let config = AppConfig::default();
+        let minimax = account(
+            "minimax-test",
+            MINIMAX_PROVIDER_ID,
+            MINIMAX_CN_OFFERING_ID,
+            CredentialKind::ApiKey,
+            QuotaScope::Key,
+        );
+        let route = resolve_account_test_route(
+            &minimax,
+            &config,
+            &chat_plan(
+                "MiniMax-M3",
+                UpstreamChannel::Go,
+                ApiFormat::ChatCompletions,
+                None,
+            ),
+        )
+        .expect("account-level tests use the fixed production Chat route");
+        assert_eq!(route.base_url, MINIMAX_CN_BASE_URL);
+        assert_eq!(route.path, MINIMAX_CN_CHAT_COMPLETIONS_PATH);
     }
 
     #[test]

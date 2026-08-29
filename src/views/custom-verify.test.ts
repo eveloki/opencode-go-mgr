@@ -11,6 +11,7 @@ import {
 const accounts = readFileSync(new URL("./Accounts.vue", import.meta.url), "utf8");
 const card = readFileSync(new URL("../components/AccountCard.vue", import.meta.url), "utf8");
 const form = readFileSync(new URL("../components/AccountFormModal.vue", import.meta.url), "utf8");
+const testModal = readFileSync(new URL("../components/AccountConnectionTestModal.vue", import.meta.url), "utf8");
 const usage = readFileSync(new URL("../domain/useAccountUsage.ts", import.meta.url), "utf8");
 
 function customAccount(overrides: Partial<Account> = {}): Account {
@@ -51,14 +52,14 @@ function customAccount(overrides: Partial<Account> = {}): Account {
   };
 }
 
-test("routable Custom accounts surface verification state instead of a bare disabled label", () => {
+test("routable Custom account status follows live enablement rather than legacy verification state", () => {
   const pending = customAccount();
-  assert.equal(accountStatusLabel(pending), "待验证");
-  assert.equal(accountStatusTagType(pending), "warning");
+  assert.equal(accountStatusLabel(pending), "已禁用");
+  assert.equal(accountStatusTagType(pending), "default");
 
   const failed = customAccount({ verification_status: "failed" });
-  assert.equal(accountStatusLabel(failed), "验证失败");
-  assert.equal(accountStatusTagType(failed), "error");
+  assert.equal(accountStatusLabel(failed), "已禁用");
+  assert.equal(accountStatusTagType(failed), "default");
 
   const verified = customAccount({ verification_status: "verified" });
   assert.equal(accountStatusLabel(verified), "已禁用");
@@ -70,19 +71,12 @@ test("Custom cards drop Go-only console/profile actions but keep edit and delete
   assert.deepEqual(keys, ["edit", "delete"]);
 });
 
-test("the verify flow is revision-guarded and never claims enablement", () => {
-  const body = accounts.slice(
-    accounts.indexOf("async function verifyCustomAccount"),
-    accounts.indexOf("async function saveCustomAccountEdit"),
-  );
-  assert.match(body, /runWithFreshSettingsRevision\(\(revision\) => \(\s*dashboardApi\.verifyAccountConnection\(id, revision\)/);
-  assert.match(body, /updated\.verification_status === "failed"/);
-  assert.match(body, /updated\.verification_error\?\.trim\(\) \|\| t\("验证失败"\)/);
-  assert.match(body, /message\.error\(t\("连接验证失败: \{error\}"/);
-  assert.match(body, /message\.success\(t\("连接验证成功，账号保持禁用，可手动启用。"\)\)/);
-  assert.doesNotMatch(body, /toggleAccount|已启用/);
-  // Failures refresh server state so the failed verification status renders.
-  assert.match(body, /catch[\s\S]*?refreshAccountState\(id\)/);
+test("the unified connection test stays account-scoped and avoids control-plane mutation", () => {
+  assert.match(accounts, /@test-connection="openAccountTest\(account\.id\)"/);
+  assert.match(accounts, /<AccountConnectionTestModal[\s\S]*?:account="testingAccount"/);
+  assert.match(testModal, /dashboardApi\.testAccountModel\(account\.id, model\.modelId\)/);
+  assert.match(testModal, /for \(const model of queue\)[\s\S]*?await testOne\(model, generation\)/);
+  assert.doesNotMatch(testModal, /verifyAccountConnection|runWithFreshSettingsRevision|providerApi\.runProtocolProbes/);
 });
 
 test("Custom edits validate before dispatching only their changed sections", () => {
@@ -108,37 +102,41 @@ test("no account usage or official refresh is ever requested for Custom accounts
   assert.match(usage, /async function retryQuotaLimits[\s\S]*?account\.provider_id === "opencode"[\s\S]*?account\.offering_id === "go"/);
 });
 
-test("the card exposes verify for pending/failed Custom accounts without gating the enable switch", () => {
-  assert.match(card, /customAccountNeedsVerification\(props\.account\)/);
-  assert.match(card, /@click="emit\('verify'\)"/);
-  assert.match(card, /:loading="verifying"/);
-  // Custom verification is optional: the enable switch is never blocked, and a
-  // pending/failed account shows an unverified warning hint instead.
+test("every ready account card exposes the same test action without gating the enable switch", () => {
+  assert.match(card, /class="account-action account-action--test"/);
+  assert.match(card, /:disabled="!accountIsReady\(account\)"/);
+  assert.match(card, /@click="emit\('test-connection'\)"/);
+  assert.doesNotMatch(card, /@click="emit\('verify'\)"|:loading="verifying"/);
+  // Testing is independent of the routing switch and remains available for
+  // disabled, cooling, or historically unverified ready accounts.
   assert.doesNotMatch(card, /customAccountToggleBlocked/);
-  assert.match(card, /尚未验证连接：账号可先启用，也可先验证连接。/);
-  assert.match(card, /custom-endpoint__status--unverified/);
   assert.match(card, /:disabled="!!toggleBlockedReason"/);
-  // Go-only controls stay Go-gated, and purchase/expiry tags are limited to plans that carry them.
-  assert.match(card, /v-if="isGo && accountIsReady\(account\)"/);
+  // Subscription dates render only when the account actually carries the
+  // catalog-owned purchase and derived expiry fields.
+  assert.match(card, /<n-tooltip v-if="hasValidityPeriod"/);
+  assert.match(form, /if \(hasField\("purchase_date"\)\)/);
   assert.doesNotMatch(card, /isScnet/);
   // The persistent warning carries the administrator-trust risk copy.
   assert.match(card, /目标端点由管理员自行选择并负责/);
 });
 
-test("the form declares one complete Endpoint and one account-level protocol", () => {
+test("the form declares one API URL and one account-level protocol", () => {
   assert.match(form, /目标端点由管理员自行选择并负责/);
   assert.doesNotMatch(form, /\$emit\('verify'\)/);
   assert.match(form, /v-model:value="form\.endpointUrl"/);
   assert.match(form, /v-model:value="form\.upstreamProtocol"/);
-  assert.match(form, /isStandardCustomInferenceEndpoint/);
-  assert.match(form, /仅标准推理 Endpoint 可自动推导 \/models；请手动添加模型 ID。/);
+  assert.match(form, /customApiUrlSupportsModelDiscovery/);
+  assert.match(form, /customApiUrlNeedsManualModels/);
+  assert.match(form, /v-if="showManualModelHint"/);
+  assert.match(form, /推荐填写不带 \/v1 的 API 根地址/);
+  assert.match(form, /非标准完整 Endpoint 无法自动推导 \/models；请手动添加模型 ID。/);
   assert.doesNotMatch(form, /capabilityProtocol/);
   assert.doesNotMatch(form, /authScheme|auth_scheme/);
-  // Endpoint and protocol stay editable after create; no immutability hints.
+  // API URL and protocol stay editable after create; no immutability hints.
   assert.doesNotMatch(form, /fieldImmutableAfterCreate/);
   assert.doesNotMatch(form, /创建后不可修改/);
   assert.match(form, /customEndpointUrlIssue\(value \?\? ""\)/);
-  // Edit mode forwards the complete Endpoint, protocol, and expanded rows.
+  // Edit mode forwards the API URL, protocol, and expanded rows.
   assert.match(form, /payload\.endpoint_url = form\.value\.endpointUrl\.trim\(\)/);
   assert.match(form, /payload\.upstream_protocol = form\.value\.upstreamProtocol/);
   assert.match(form, /payload\.model_capabilities = expandCustomModelCapabilities\(/);

@@ -1,6 +1,7 @@
 import type {
   Account as V3Account,
   AccountCreate as V3AccountCreate,
+  AccountModelTestResponse as V3AccountModelTestResponse,
   AccountUpdate as V3AccountUpdate,
   BrowserCapabilities as V3BrowserCapabilities,
   BrowserOpen as V3BrowserOpen,
@@ -31,6 +32,7 @@ export type AccountSetupStep =
   | "key_verification"
   | "ready";
 export type AccountProtocol = "chat_completions" | "responses" | "messages";
+export type AccountModelTestResponse = V3AccountModelTestResponse;
 
 export interface AccountCustomConfig {
   account_id: string;
@@ -160,6 +162,7 @@ export interface ProxySupportedModel {
 export interface AppConfig {
   revision: number;
   gateway_port: number;
+  gateway_port_from_env: boolean;
   upstream_base_url: string;
   proxy_mode: ProxyMode;
   proxy_url: string;
@@ -535,6 +538,7 @@ export function presentSettings(value: V3Settings): AppConfig {
   return {
     revision: value.revision,
     gateway_port: value.gatewayPort,
+    gateway_port_from_env: value.gatewayPortFromEnv,
     upstream_base_url: value.upstreamBaseUrl,
     proxy_mode: value.proxyMode,
     proxy_url: value.proxyUrl,
@@ -561,12 +565,11 @@ export function presentSettings(value: V3Settings): AppConfig {
 }
 
 export function settingsUpdateInput(value: AppConfig): Omit<V3SettingsUpdate, "expectedRevision" | "processGeneration"> {
-  return {
+  const input: Omit<V3SettingsUpdate, "expectedRevision" | "processGeneration"> = {
     autoStart: value.auto_start,
     clientRootUrl: value.client_root_url,
     connectTimeoutSecs: value.connect_timeout_secs,
     conversationSticky: value.conversation_sticky,
-    gatewayPort: value.gateway_port,
     nonStreamTimeoutSecs: value.non_stream_timeout_secs,
     opencodeInviteUrl: value.opencode_invite_url,
     proxyListDirection: value.proxy_list_direction,
@@ -578,6 +581,8 @@ export function settingsUpdateInput(value: AppConfig): Omit<V3SettingsUpdate, "e
     streamIdleTimeoutSecs: value.stream_idle_timeout_secs,
     upstreamBaseUrl: value.upstream_base_url,
   };
+  if (!value.gateway_port_from_env) input.gatewayPort = value.gateway_port;
+  return input;
 }
 
 export function presentConnection(value: V3ConnectionInfo): ConnectionInfo {

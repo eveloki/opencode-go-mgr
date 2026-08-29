@@ -60,6 +60,8 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AccountModelCapability",
     "AccountCreate",
     "AccountManagedCreate",
+    "AccountModelTestRequest",
+    "AccountModelTestResponse",
     "AccountUpdate",
     "AccountOrder",
     "AccountSetupUpdate",
@@ -159,6 +161,14 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ProviderPricingValue",
     "ProviderPricingRefresh",
     "ProviderPricingRefreshUpdate",
+    "AccountExportRequest",
+    "AccountExport",
+    "AccountImportPreviewRequest",
+    "AccountImportPreview",
+    "AccountImportPreviewItem",
+    "AccountImportDisposition",
+    "AccountImportRequest",
+    "AccountImportResult",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -494,6 +504,7 @@ pub struct Settings {
     pub revision: u64,
     pub process_generation: u64,
     pub gateway_port: u16,
+    pub gateway_port_from_env: bool,
     pub upstream_base_url: String,
     pub proxy_mode: ProxyMode,
     pub proxy_url: String,
@@ -742,6 +753,105 @@ pub struct AccountMutation {
     pub process_generation: u64,
 }
 
+/// POST `/accounts/transfer/export` body. Both passwords are write-only. The
+/// administrator credential is step-up authorization; `bundle_password` is a
+/// distinct passphrase used only to encrypt the portable file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountExportRequest {
+    pub admin_username: String,
+    pub admin_password: String,
+    pub bundle_password: String,
+}
+
+/// Encrypted account migration package returned by the export endpoint.
+/// `bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no
+/// plaintext upstream credential is returned to the dashboard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountExport {
+    pub filename: String,
+    pub bundle: String,
+    pub exported_accounts: u64,
+    pub skipped_accounts: u64,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// POST `/accounts/transfer/preview` body. `password` is write-only and never
+/// appears in a response or log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountImportPreviewRequest {
+    pub password: String,
+    pub bundle: String,
+}
+
+/// Secret-free preview of one account migration package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountImportPreview {
+    pub exported_at: String,
+    pub items: Vec<AccountImportPreviewItem>,
+    pub importable_accounts: u64,
+    pub duplicate_accounts: u64,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// One secret-free preview/result row. Account Keys, endpoint credentials,
+/// browser identity, and verification evidence never appear.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountImportPreviewItem {
+    pub index: u64,
+    pub name: String,
+    pub provider_id: String,
+    pub offering_id: String,
+    pub account_type: AccountType,
+    pub disposition: AccountImportDisposition,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum AccountImportDisposition {
+    Import,
+    Imported,
+    Duplicate,
+}
+
+/// POST `/accounts/transfer/import` body. CAS tokens are rechecked only after
+/// the expensive authenticated decryption and validation phase finishes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountImportRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub password: String,
+    pub bundle: String,
+}
+
+/// Atomic database import result. `items` is secret-free and preserves bundle
+/// order; duplicates are the only per-row skip in V1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountImportResult {
+    pub items: Vec<AccountImportPreviewItem>,
+    pub imported_accounts: u64,
+    pub duplicate_accounts: u64,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
 /// Nested Custom HTTP destination as returned on an account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -919,6 +1029,30 @@ pub struct AccountModelCapabilityWrite {
 pub struct AccountVerify {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
+}
+
+/// POST `/accounts/{id}/model-tests` body. This is an operational test, so it
+/// intentionally carries no CAS tokens and has no account mutation effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountModelTestRequest {
+    pub model_id: String,
+}
+
+/// Result of one exact-account, one-model operational request. Error text is
+/// transport-sanitized and never includes an upstream response body or key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountModelTestResponse {
+    pub account_id: String,
+    pub model_id: String,
+    pub protocol: AccountUpstreamProtocol,
+    pub success: bool,
+    pub http_status: Option<u16>,
+    pub duration_ms: u64,
+    pub error: Option<String>,
 }
 
 /// Wire identity matching V2 `api_key` / `none`.
@@ -2379,8 +2513,14 @@ pub fn contract_schema() -> Value {
     include_type::<Account>(&mut serialize);
     include_type::<AccountList>(&mut serialize);
     include_type::<AccountMutation>(&mut serialize);
+    include_type::<AccountExport>(&mut serialize);
+    include_type::<AccountImportPreview>(&mut serialize);
+    include_type::<AccountImportPreviewItem>(&mut serialize);
+    include_type::<AccountImportDisposition>(&mut serialize);
+    include_type::<AccountImportResult>(&mut serialize);
     include_type::<AccountCustomConfig>(&mut serialize);
     include_type::<AccountModelCapability>(&mut serialize);
+    include_type::<AccountModelTestResponse>(&mut serialize);
     include_type::<ProviderCatalog>(&mut serialize);
     include_type::<ProviderCatalogEntry>(&mut serialize);
     include_type::<ProviderCatalogFormField>(&mut serialize);
@@ -2454,7 +2594,11 @@ pub fn contract_schema() -> Value {
     include_type::<KeyCreate>(&mut deserialize);
     include_type::<KeyUpdate>(&mut deserialize);
     include_type::<AccountCreate>(&mut deserialize);
+    include_type::<AccountExportRequest>(&mut deserialize);
+    include_type::<AccountImportPreviewRequest>(&mut deserialize);
+    include_type::<AccountImportRequest>(&mut deserialize);
     include_type::<AccountManagedCreate>(&mut deserialize);
+    include_type::<AccountModelTestRequest>(&mut deserialize);
     include_type::<AccountUpdate>(&mut deserialize);
     include_type::<AccountOrder>(&mut deserialize);
     include_type::<AccountSetupUpdate>(&mut deserialize);
@@ -2637,6 +2781,7 @@ mod tests {
             revision: 4,
             process_generation: 9,
             gateway_port: 9042,
+            gateway_port_from_env: false,
             upstream_base_url: "https://opencode.ai/zen/go".into(),
             proxy_mode: ProxyMode::Auto,
             proxy_url: String::new(),
@@ -2676,6 +2821,7 @@ mod tests {
         }
         assert_eq!(value["autoStart"], Value::Null);
         assert_eq!(value["showDockIcon"], Value::Null);
+        assert_eq!(value["gatewayPortFromEnv"], false);
         assert_eq!(value["autoStartSupported"], false);
         assert_eq!(value["proxyMode"], "auto");
         assert_eq!(value["routingMode"], "strict-priority");
@@ -3192,6 +3338,8 @@ mod tests {
         "AccountModelCapability",
         "AccountCreate",
         "AccountManagedCreate",
+        "AccountModelTestRequest",
+        "AccountModelTestResponse",
         "AccountUpdate",
         "AccountOrder",
         "AccountSetupUpdate",
@@ -4247,6 +4395,16 @@ mod tests {
         "ProviderPricingRefresh",
         "ProviderPricingRefreshUpdate",
     ];
+    const ACCOUNT_TRANSFER_CATALOG_TYPES: &[&str] = &[
+        "AccountExportRequest",
+        "AccountExport",
+        "AccountImportPreviewRequest",
+        "AccountImportPreview",
+        "AccountImportPreviewItem",
+        "AccountImportDisposition",
+        "AccountImportRequest",
+        "AccountImportResult",
+    ];
 
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
@@ -4321,7 +4479,12 @@ mod tests {
             &CATALOG_TYPE_NAMES[usage_refresh_end..provider_refresh_end],
             PROVIDER_REFRESH_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), provider_refresh_end);
+        let account_transfer_end = provider_refresh_end + ACCOUNT_TRANSFER_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[provider_refresh_end..account_transfer_end],
+            ACCOUNT_TRANSFER_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), account_transfer_end);
     }
 
     #[test]

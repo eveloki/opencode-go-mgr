@@ -56,6 +56,10 @@ test("add-account chooser omits singleton Zen Free and groups remaining families
     catalogEntry("custom", "api", { routable: true, creation_availability: "available" }),
   ];
   const options = buildPlanOptions(catalog);
+  assert.equal(
+    options.find(({ plan }) => plan.id === "custom-endpoint")?.creationHint,
+    "创建后默认启用；可随时通过账号卡片测试连接。",
+  );
   assert.deepEqual(options.map(({ plan }) => plan.id), [
     "opencode-go",
     "command-code-goat",

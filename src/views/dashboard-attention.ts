@@ -14,8 +14,7 @@ export type AttentionReason =
   | "auth-error"
   | "expired"
   | "cooling"
-  | "setup-incomplete"
-  | "verification-failed";
+  | "setup-incomplete";
 
 export interface AttentionItem {
   accountId: string;
@@ -25,10 +24,9 @@ export interface AttentionItem {
 
 const REASON_PRIORITY: Record<AttentionReason, number> = {
   "auth-error": 0,
-  "verification-failed": 1,
-  expired: 2,
-  cooling: 3,
-  "setup-incomplete": 4,
+  expired: 1,
+  cooling: 2,
+  "setup-incomplete": 3,
 };
 
 function accountCooling(account: Account, now: number): boolean {
@@ -46,10 +44,6 @@ export function buildNeedsAttention(
     const ready = account.setup_step === "ready";
     if (ready && account.auth_error) {
       items.push({ accountId: account.id, accountName: account.name, reason: "auth-error" });
-      continue;
-    }
-    if (ready && account.verification_status === "failed") {
-      items.push({ accountId: account.id, accountName: account.name, reason: "verification-failed" });
       continue;
     }
     if (ready && account.enabled) {

@@ -78,7 +78,7 @@ test("managed account UI isolates pending controls and renders noVNC in a dedica
   assert.match(wizard, /注册新账号：\{name\}/);
   assert.match(wizard, /n-tag[\s\S]*?Beta/);
   assert.doesNotMatch(wizard, /托管注册与独立浏览器 Profile 为 Beta 功能/);
-  assert.match(card, /v-if="isGo && accountIsReady\(account\)"[\s\S]*?@click="emit\('refresh-usage'\)/);
+  assert.match(card, /v-if="\(isGo \|\| isOfficialCn\) && accountIsReady\(account\)"[\s\S]*?@click="emit\('refresh-usage'\)/);
   assert.match(card, /v-if="accountIsReady\(account\)"[\s\S]*?<n-switch/);
   assert.match(accounts, /loaded\.filter\(\(account\) => \([\s\S]*?accountIsReady\(account\)[\s\S]*?account\.provider_id === "opencode"[\s\S]*?account\.offering_id === "go"[\s\S]*?\)\)/);
   assert.match(accounts, /window\.open\("", "_blank"\)[\s\S]*?remoteTab\.location\.replace/);
@@ -137,5 +137,6 @@ test("managed account creation cannot be cancelled while its request is pending"
 
 test("Vite proxies remote browser WebSockets during dashboard development", async () => {
   const source = await readSource(new URL("../../vite.config.ts", import.meta.url));
-  assert.match(source, /"\/dashboard\/api": \{[\s\S]*?target: "http:\/\/127\.0\.0\.1:9042"[\s\S]*?ws: true/);
+  assert.match(source, /OCG_GATEWAY_PORT/);
+  assert.match(source, /"\/dashboard\/api": \{[\s\S]*?target: `http:\/\/127\.0\.0\.1:\$\{gatewayPort\}`[\s\S]*?ws: true/);
 });

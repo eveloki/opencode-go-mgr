@@ -48,9 +48,10 @@ The picker list comes from protected `GET /dashboard/api/v3/application-models`:
 currently routeable OpenCode Go aliases intersected with the active OpenCode Go
 pricing snapshot. Highspeed variants inherit the base model's pricing row. An
 empty intersection is `[]`, not an error. This is **not** authenticated
-`GET /v1/models`, which lists routeable Aliases authorized by the original
-static OpenCode Go table plus eligible Custom declared IDs. Saved built-in
-Provider catalogs may join those Aliases but cannot create new ones. Both
+`GET /v1/models`, which lists routeable code-owned Go and sealed Provider
+Aliases plus eligible Custom declared IDs. Saved Zen catalogs may join Go
+Aliases; Command catalogs may join any code-owned Alias; saved MiniMax/Kimi
+rows activate only exact sealed mappings. Both
 endpoints are local reads: no request-time upstream discovery or account
 selection.
 They publish only currently routable models that have an

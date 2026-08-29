@@ -60,20 +60,21 @@
             <n-tag v-else :type="accountStatusTagType(account, now)" size="small">
               {{ accountStatusLabel(account, now) }}
             </n-tag>
-            <n-tag v-if="isGo && accountIsReady(account)" size="small" :bordered="false">
-              {{ t("购买于 {date}", { date: account.purchase_date }) }}
-            </n-tag>
-            <n-tag v-if="isGo && accountIsReady(account)" size="small" :bordered="false">
-              {{ t("到期于 {date}", { date: account.expires_on }) }}
-            </n-tag>
-            <n-tag
-              v-if="isGo && accountIsReady(account)"
-              :type="accountExpiryTagType(account, now)"
-              size="small"
-              :bordered="false"
-            >
-              {{ accountExpiryLabel(account, now) }}
-            </n-tag>
+            <n-tooltip v-if="hasValidityPeriod" trigger="hover">
+              <template #trigger>
+                <n-tag
+                  :type="accountExpiryTagType(account, now)"
+                  size="small"
+                  :bordered="false"
+                  :aria-label="`${accountExpiryLabel(account, now)}；${t('购买于 {date}', { date: account.purchase_date })}；${t('到期于 {date}', { date: account.expires_on })}`"
+                >
+                  {{ accountExpiryLabel(account, now) }} ·
+                  {{ t("到期于 {date}", { date: account.expires_on }) }}
+                </n-tag>
+              </template>
+              <div>{{ t("购买于 {date}", { date: account.purchase_date }) }}</div>
+              <div>{{ t("到期于 {date}", { date: account.expires_on }) }}</div>
+            </n-tooltip>
           </div>
         </div>
       </div>
@@ -160,6 +161,24 @@
           </n-popover>
         </div>
 
+        <div class="account-action account-action--test">
+          <n-tooltip trigger="hover">
+            <template #trigger>
+              <n-button
+                circle
+                quaternary
+                size="small"
+                :disabled="!accountIsReady(account)"
+                :aria-label="t('测试账号 {name} 的连接', { name: account.name })"
+                @click="emit('test-connection')"
+              >
+                <template #icon><n-icon :component="ApiOutlined" /></template>
+              </n-button>
+            </template>
+            {{ accountIsReady(account) ? t("测试连接") : t("完成注册后可测试连接") }}
+          </n-tooltip>
+        </div>
+
         <div v-if="menuOptions.length > 0" class="account-action account-action--menu">
           <n-dropdown
             :options="menuOptions"
@@ -193,16 +212,6 @@
       :show-icon="false"
     >
       {{ planWarning.message }}
-    </n-alert>
-
-    <n-alert
-      v-if="verificationError"
-      class="account-plan-warning"
-      type="error"
-      :show-icon="false"
-      :title="t('验证失败')"
-    >
-      {{ verificationError }}
     </n-alert>
 
     <div v-if="!accountIsReady(account)" class="managed-pending">
@@ -250,22 +259,6 @@
           {{ t("{count} 个模型", { count: account.model_capabilities.length }) }}
         </span>
       </div>
-      <p
-        v-if="verificationCaption"
-        class="custom-endpoint__status"
-        :class="{ 'custom-endpoint__status--unverified': customNeedsVerification }"
-      >{{ verificationCaption }}</p>
-      <n-button
-        v-if="customNeedsVerification"
-        size="small"
-        type="primary"
-        secondary
-        :loading="verifying"
-        :aria-label="t('验证连接')"
-        @click="emit('verify')"
-      >
-        {{ t("验证连接") }}
-      </n-button>
     </div>
     <div v-else-if="isGo && !quotaLimitsFailed">
       <div v-if="usageLoadError" class="usage-load-error" role="alert">
@@ -301,7 +294,7 @@
           {{ t("重试") }}
         </n-button>
       </div>
-      <ProviderQuotaSummary v-else :usage="providerUsage" />
+      <ProviderQuotaSummary v-else :usage="providerUsage" :now="now" />
     </div>
 
   </n-card>
@@ -321,6 +314,7 @@ import {
   NTooltip,
 } from "naive-ui";
 import {
+  ApiOutlined,
   EditOutlined,
   HolderOutlined,
   MoreOutlined,
@@ -345,10 +339,7 @@ import {
 } from "../domain/account-display.ts";
 import type { AccountMenuOption } from "../domain/account-display.ts";
 import { isOfficialCnPlanAccount, isZenFreeAccount } from "../domain/account-providers.ts";
-import {
-  customAccountNeedsVerification,
-  isCustomApiAccount,
-} from "../domain/custom-account.ts";
+import { isCustomApiAccount } from "../domain/custom-account.ts";
 import { accountPlanWarning, planLabel } from "../domain/plans.ts";
 import type { AccountUsageEdits, UsageLimitView } from "../domain/useAccountUsage.ts";
 import { t } from "../i18n/index.ts";
@@ -369,8 +360,6 @@ const props = defineProps<{
   usageLoading: boolean;
   usageLoadError: string | null;
   usageRefreshLoading: boolean;
-  /** Connection verification in flight for a pending/failed Custom account. */
-  verifying: boolean;
   quotaLimitsFailed: boolean;
   menuOptions: AccountMenuOption[];
 }>();
@@ -379,7 +368,7 @@ const emit = defineEmits<{
   "order-keydown": [event: KeyboardEvent];
   "order-drag-start": [event: PointerEvent];
   toggle: [];
-  verify: [];
+  "test-connection": [];
   "refresh-usage": [];
   "reload-usage": [];
   "open-wizard": [];
@@ -397,6 +386,11 @@ const isGo = computed(() => (
 ));
 const isCustom = computed(() => isCustomApiAccount(props.account));
 const isOfficialCn = computed(() => isOfficialCnPlanAccount(props.account));
+const hasValidityPeriod = computed(() => (
+  accountIsReady(props.account)
+  && !!props.account.purchase_date
+  && !!props.account.expires_on
+));
 const plan = computed(() => props.catalog?.find((entry) => (
   entry.provider_id === props.account.provider_id
   && entry.offering_id === props.account.offering_id
@@ -405,28 +399,8 @@ const plan = computed(() => props.catalog?.find((entry) => (
 const manualUsageCalibration = computed(() => (
   plan.value?.manual_usage_calibration ?? false
 ));
-const customNeedsVerification = computed(() => customAccountNeedsVerification(props.account));
 const toggleBlockedReason = computed(() => {
   if (!props.account.plan_routable) return t("该方案暂不可路由");
-  return "";
-});
-const verificationCaption = computed(() => {
-  const status = props.account.verification_status;
-  if (status === "pending") {
-    // Custom verification is optional: pending accounts may be enabled, so the
-    // card shows an unverified hint instead of a hard gate.
-    return isCustom.value
-      ? t("尚未验证连接：账号可先启用，也可先验证连接。")
-      : t("账号待验证，验证通过前保持禁用。");
-  }
-  if (status === "failed") return t("上次验证失败，请检查 Key 与端点配置后重试。");
-  if (status === "verified") {
-    const at = props.account.connection_verified_at;
-    const ts = at ? Date.parse(at) : NaN;
-    return Number.isFinite(ts)
-      ? t("连接已验证：{time}", { time: new Date(ts).toLocaleString() })
-      : t("连接已验证");
-  }
   return "";
 });
 const isDraft = computed(() => (
@@ -439,26 +413,13 @@ const draftDescription = computed(() => {
   return key ? t(key) : "";
 });
 
-const verificationError = computed(() => {
-  if (!isCustom.value) return null;
-  if (props.account.verification_status !== "failed") return null;
-  return props.account.verification_error?.trim() || t("验证失败");
-});
-
 const planWarning = computed(() => {
   const warning = accountPlanWarning(props.account);
   if (warning === "endpoint-risk") {
     return {
       type: "warning" as const,
       title: t("自定义端点"),
-      message: t("目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；验证连接会发送一次最小真实请求，可能产生服务商费用。"),
-    };
-  }
-  if (warning === "subscription-risk") {
-    return {
-      type: "warning" as const,
-      title: t("订阅制"),
-      message: t("订阅制方案：额度、计费与续费由服务商订阅条款管理。"),
+      message: t("目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；测试连接会发送最小真实请求，可能产生服务商费用。"),
     };
   }
   return null;
@@ -534,6 +495,10 @@ const usageEditorAvailable = computed(() => {
   grid-column: 2;
 }
 
+.account-action--test {
+  grid-column: 3;
+}
+
 .account-action--menu {
   grid-column: 4;
 }
@@ -561,16 +526,6 @@ const usageEditorAvailable = computed(() => {
 .custom-endpoint__models {
   color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
-}
-
-.custom-endpoint__status {
-  margin: 0;
-  color: var(--ocg-muted);
-  font-size: var(--ocg-font-sm);
-}
-
-.custom-endpoint__status--unverified {
-  color: var(--ocg-warning);
 }
 
 .account-plan-warning {

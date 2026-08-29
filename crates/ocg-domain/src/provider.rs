@@ -290,8 +290,10 @@ const GO_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
 const GOAT_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
-const MINIMAX_CN_FORM_FIELDS: [PlanFormField; 3] = [NAME_FIELD, KEY_FIELD, NOTES_FIELD];
-const KIMI_CN_FORM_FIELDS: [PlanFormField; 3] = [NAME_FIELD, KEY_FIELD, NOTES_FIELD];
+const MINIMAX_CN_FORM_FIELDS: [PlanFormField; 4] =
+    [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
+const KIMI_CN_FORM_FIELDS: [PlanFormField; 4] =
+    [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
 const CUSTOM_FORM_FIELDS: [PlanFormField; 6] = [
     NAME_FIELD,
     KEY_FIELD,
@@ -2049,6 +2051,27 @@ mod tests {
         assert_eq!(
             default_verification_status(go),
             ConnectionVerificationStatus::NotRequired
+        );
+
+        for (provider_id, offering_id) in [
+            (OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
+            (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
+            (MINIMAX_PROVIDER_ID, MINIMAX_CN_OFFERING_ID),
+            (KIMI_PROVIDER_ID, KIMI_CN_OFFERING_ID),
+        ] {
+            let plan = builtin_plan(provider_id, offering_id).unwrap();
+            assert!(
+                plan.form_fields
+                    .iter()
+                    .any(|field| field.id == "purchase_date"),
+                "{provider_id}/{offering_id} must collect its subscription purchase date"
+            );
+        }
+        assert!(
+            !custom
+                .form_fields
+                .iter()
+                .any(|field| field.id == "purchase_date")
         );
     }
 

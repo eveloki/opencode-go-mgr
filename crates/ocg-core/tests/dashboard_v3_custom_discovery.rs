@@ -544,6 +544,40 @@ async fn successful_bearer_discovery_is_secret_free_and_does_not_mutate() {
 }
 
 #[tokio::test]
+async fn discovery_resolves_root_and_v1_bases_without_duplicate_version_segments() {
+    let harness = start_loopback("discover-common-base").await;
+    let origin = start_discovery_origin(OriginScript::Fixed {
+        status: StatusCode::OK,
+        body: SUCCESS_BODY.into(),
+    })
+    .await;
+    point_direct(&harness);
+
+    for endpoint_url in [origin.url.clone(), format!("{}/v1", origin.url)] {
+        let (status, body) = send_json(
+            &harness,
+            Method::POST,
+            "/custom/models/discover",
+            &json!({
+                "endpointUrl": endpoint_url,
+                "upstreamProtocol": "chat_completions",
+                "apiKey": CUSTOM_KEY
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            parse_discovery(&body).models,
+            vec!["org/model-a", "org/model-b"]
+        );
+        assert_eq!(origin.last().path, "/v1/models");
+    }
+
+    assert_eq!(origin.call_count(), 2);
+    harness.stop();
+}
+
+#[tokio::test]
 async fn discovery_derives_isolated_auth_from_the_selected_protocol() {
     let harness = start_loopback("discover-auth-scheme").await;
     let origin = start_discovery_origin(OriginScript::Fixed {

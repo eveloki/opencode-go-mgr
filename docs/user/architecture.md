@@ -106,14 +106,14 @@ Every account card is one Plan (`provider_id` + `offering_id`). Live Plans carry
            v
     verify the selected protocol
     with the first declared model
-    (one minimal non-stream request to the complete Endpoint;
+    (one minimal non-stream request to the resolved inference Endpoint;
      one 2xx JSON object)
            |
            v
     verification status becomes verified
     (account may already be routable)
 
-  Key, complete Endpoint, declared capability, or protocol change
+  Key, API URL, declared capability, or protocol change
   re-pends verification but keeps the card enabled.
 ```
 
@@ -153,9 +153,9 @@ Neither GET makes an upstream discovery call. Catalog refreshes are explicit Pro
 
 ```text
   GET /v1/models                         (clients; Key required)
-    routeable aliases authorized by the original static OpenCode Go table
+    routeable aliases authorized by the Go table or sealed CN maps
       union eligible Custom declared IDs
-    saved built-in catalogs may join, but never create, those aliases
+    saved rows activate only code-owned mappings; unknown rows stay raw-only
     eligible Custom = enabled + ready + non-empty key (verification optional)
     Custom IDs must not steal published built-in aliases
 

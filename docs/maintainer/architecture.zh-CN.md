@@ -137,7 +137,8 @@ src-tauri   -> ocg-core
          建连失败     -> 同一账号重试一次
          403 / Go 429 -> 下一张卡
          Free 429     -> 冷却共享 free 通道
-         OpenCode 401 -> 原样返回（不换号、不写 auth_error）
+         Go CreditsError 401 -> 换号并持久化 auth_error
+         其他 OpenCode 401   -> 原样返回
          Custom 401   -> 换号并持久化 auth_error
          408 / 5xx / 响应体超时 / 流中断 -> 不重放
    12. 转换响应；写入 forward_logs
@@ -147,13 +148,13 @@ src-tauri   -> ocg-core
 
 鉴权接受 Bearer、`x-api-key`、`x-goog-api-key`。候选头中首个命中 `CoreStateInner.credential_snapshot`（主 Key 或启用子 Key）者即通过，并作为转发日志名称归因。客户端凭据在出站前剥离，只注入所选账号配置的鉴权方案。Gemini 或 Anthropic 客户端凭据不会透传到上游 offering；Command Code 模型可以与 OpenCode Go 模型共享客户端 Alias，但 mapping 仍保留独立供应商身份，其 Key 也不会发往 OpenCode endpoint。
 
-标准入口为 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`。Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`。Gemini 接受 `/v1beta/models/{model}:*` 与 `/v1/models/{model}:*`；`generateContent` 与 `streamGenerateContent` 进入转换链，`countTokens` 与 `embedContent` 返回 `501`，未知 action 返回 `404`。带鉴权的 `GET /v1/models` 仅本地读取最早 OpenCode Go 静态表授权且当前可路由的 Alias，再追加合格 Custom 声明 ID。保存的 Zen/Command/MiniMax/Kimi 目录只能加入已授权 Alias，不能创建新 Alias；无法匹配的内置目录 ID 保留为精确 raw pin。受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：Go 可路由别名 ∩ 当前 Go 价格快照（highspeed 变体继承基价行），不含 Custom ID。Claude Desktop `/claude-desktop/v1/models` 只公布三个角色别名。
+标准入口为 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models`。Claude Desktop 使用 `/claude-desktop/v1/messages` 与 `/claude-desktop/v1/models`。Gemini 接受 `/v1beta/models/{model}:*` 与 `/v1/models/{model}:*`；`generateContent` 与 `streamGenerateContent` 进入转换链，`countTokens` 与 `embedContent` 返回 `501`，未知 action 返回 `404`。带鉴权的 `GET /v1/models` 仅本地读取代码持有且当前可路由的 Alias，再追加合格 Custom 声明 ID。最早 OpenCode Go 表授权 Go 名称，精确密封 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射表授权供应商专属名称但不新增 Go 路由；保存的 Zen 目录只能加入 Go Alias，Command 目录可以加入任一代码持有的 Alias，CN 目录只激活密封映射，无法匹配的内置目录 ID 保留为精确 raw pin。受保护的 `GET /dashboard/api/v3/application-models` 是另一份本地列表：Go 可路由别名 ∩ 当前 Go 价格快照（highspeed 变体继承基价行），不含 Custom ID。Claude Desktop `/claude-desktop/v1/models` 只公布三个角色别名。
 
-Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选别名是小写 kebab-case，只由最早 OpenCode Go 静态表授权。Alias 拼写大小写折叠；内置 raw ID 则严格区分大小写，含 `/`、`_` 或空白的名称同样不会折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个 mapping 时钉在该 mapping，之后再检查可路由性；不可路由的 mapping 会被识别，但不能产出生产路由。重叠的精确原始 ID 返回 `400` `ambiguous_model_id`，不调用上游。未知名称在 Chat Completions、Responses、Messages 以及 Gemini generate / streamGenerate 上返回 `400`。合格 Custom ID 继续按其既有匹配规则 overlay 进解析与 `/v1/models`，但不替换已公布的内置 Alias。已公布 kebab 别名 `deepseek-v4-flash` 可以同时含 Go、Zen 与 Command Code mapping；原始 ID `deepseek/deepseek-v4-flash` 精确钉在 Command Code。转发日志持久化 `requested_model`、`resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`；没有 `requested_alias` 字段。
+Alias 注册表在 `ocg-gateway::alias`（门面 `ocg_core::alias`）。首选别名是小写 kebab-case，由最早 OpenCode Go 静态表或密封 CN/GOAT 映射表授权。Command 会去掉 Provider 命名空间；已知套餐后缀只有在短 Alias 已获代码授权时才去掉；`nvidia/nemotron-3-ultra-550b-a55b` 映射为 `nemotron-3-ultra`。Alias 拼写大小写折叠；内置 raw ID 则严格区分大小写，含 `/`、`_` 或空白的名称同样不会折叠成 kebab 别名。原始 ID 在注册表中恰好对应一个 mapping 时钉在该 mapping，之后再检查可路由性；不可路由的 mapping 会被识别，但不能产出生产路由。重叠的精确原始 ID 返回 `400` `ambiguous_model_id`，不调用上游。未知名称在 Chat Completions、Responses、Messages 以及 Gemini generate / streamGenerate 上返回 `400`。合格 Custom ID 继续按其既有匹配规则 overlay 进解析与 `/v1/models`，但不替换已公布的内置 Alias。已公布 kebab 别名 `deepseek-v4-flash` 可以同时含 Go、Zen 与 Command Code mapping；原始 ID `deepseek/deepseek-v4-flash` 精确钉在 Command Code。转发日志持久化 `requested_model`、`resolved_alias`、`upstream_model`、`provider_id` 与 `offering_id`；没有 `requested_alias` 字段。
 
 JSON 转换在 `ocg-gateway::protocol`；宿主 `gateway/protocol.rs` 保留解析、usage、流式与路由身份类型。Gemini 只是客户端格式。已知模型使用 `ocg-domain` 中硬编码的 `MODEL_PROTOCOLS`：客户端协议在 `supported` 内则透传，否则转到 `preferred`。未知模型在所有受支持的客户端格式上返回 `400`；请求路径不试探协议。非空 `safetySettings` 返回 `400`；空数组可以接受。`topK` 与 `thinkingConfig` 只是兼容提示，不保证与 Gemini 等价。
 
-`materialize.rs` 只解析一次客户端协议与 Alias，再按候选物化 model、protocol、endpoint 与 auth。适配器不会通过可计费推理路径试探协议支持。OpenCode `MODEL_PROTOCOLS` 表只服务 Go。表中未知的动态 Zen `-free` ID 默认按 Chat 物化。Custom 按账号把唯一协议、完整 Endpoint、隔离 origin 与由协议自动决定的鉴权重新物化为该卡声明值。
+`materialize.rs` 只解析一次客户端协议与 Alias，再按候选物化 model、protocol、endpoint 与 auth。适配器不会通过可计费推理路径试探协议支持。OpenCode `MODEL_PROTOCOLS` 表只服务 Go。表中未知的动态 Zen `-free` ID 默认按 Chat 物化。Custom 按账号把唯一协议、由 API 地址解析出的推理 Endpoint、隔离 origin 与由协议自动决定的鉴权重新物化为该卡声明值。
 
 `zen_models.rs` 是唯一 Zen Free 模型发现路径。受保护的供应商页显式刷新通过全局代理请求固定无 Key endpoint `https://opencode.ai/zen/v1/models`，不跟随重定向，只保留合法且以 `-free` 结尾的 ID；完整快照先持久化，再切换运行时。每个模型保留精确 raw ID；只有去掉 `-free` 后的名称已获最早 Go 静态表授权时，才加入对应 Alias。失败或过滤结果为空时保留旧快照，`/v1/models` 只读取这份快照。Go 所属的 `ox-alpha-free` 是保留排除项。
 
@@ -167,7 +168,7 @@ Command Code GOAT 的请求计费只读取其最新、已验证的 Provider 范�
 
 - 只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败可以在同一账号重试 **一次**，且必须发生在任何下游字节之前。
 - 部分 SSE 不会回退。无法确认的流式结果记为 `outcome_unknown`。 `StreamOutcomeGuard` 在 drop 时收口。
-- OpenCode（Go/Zen）推理 `401` 原样返回：不换号、不写 `auth_error`（Go 会把模型不存在也打成 401）。普通 Custom `401` 换号并持久化 `auth_error`。面板 Ping / Key 验证的 401 仍记录 `auth_error`。
+- OpenCode Go 推理 `401` 仅在结构化错误精确为 `CreditsError` 时换号并持久化 `auth_error`；`ModelError`、未知/畸形 401 以及全部 Zen Free 401 都原样返回。普通 Custom `401` 换号并持久化 `auth_error`。面板 Ping / Key 验证的 401 仍记录 `auth_error`。
 - `403` 与 Go 通道 `429` 可以切换账号。free 通道 `429` 冷却按 IP 共享的 free 池，不换 Key，并按持久化卡片顺序继续尝试后续兼容候选。普通 Custom/GOAT `429` 不解析 Go 窗口。
 - `408`、`5xx`、建连后的失败、响应体超时和流式中断均不会被重放。
 - 共享 reqwest client 只设置 30 秒建连超时；非流式请求使用 900 秒总时限，流式请求按 chunk 执行 300 秒空闲时限。

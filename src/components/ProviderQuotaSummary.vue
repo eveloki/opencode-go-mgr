@@ -1,19 +1,20 @@
 <template>
-  <div v-if="usage?.quota_windows.length" class="provider-quota-summary">
-    <div v-for="window in usage.quota_windows" :key="window.window_kind" class="provider-quota-row">
+  <div v-if="displayedWindows.length" class="provider-quota-summary">
+    <div v-for="window in displayedWindows" :key="window.window_kind" class="provider-quota-row">
       <div class="provider-quota-row__heading">
         <span>{{ windowLabel(window) }}</span>
-        <span>{{ remainingLabel(window) }}</span>
+        <strong>{{ usedLabel(window) }}</strong>
       </div>
       <n-progress
         type="line"
-        :percentage="remainingPercent(window)"
+        :percentage="usedPercent(window)"
+        :status="usedPercent(window) >= 100 ? 'error' : 'default'"
         :show-indicator="false"
-        :height="6"
+        :height="8"
         :border-radius="4"
       />
       <time v-if="window.resets_at" class="provider-quota-row__reset">
-        {{ new Date(window.resets_at).toLocaleString() }}
+        {{ t("{time}后重置", { time: formatCooldownRemainingUntil(window.resets_at, now) }) }}
       </time>
     </div>
   </div>
@@ -21,10 +22,24 @@
 
 <script setup lang="ts">
 import { NProgress } from "naive-ui";
+import { computed } from "vue";
 import type { ProviderQuotaWindow, ProviderUsageResponse } from "../api/providers.ts";
+import { formatCooldownRemainingUntil } from "../domain/account-display.ts";
 import { t } from "../i18n/index.ts";
 
-defineProps<{ usage: ProviderUsageResponse | null }>();
+const props = defineProps<{ usage: ProviderUsageResponse | null; now: number }>();
+
+const displayedWindows = computed(() => (
+  props.usage?.quota_windows.filter((window) => {
+    const kind = window.window_kind.toLowerCase();
+    return !(kind.startsWith("minimax_") && kind.endsWith(":video"));
+  }) ?? []
+));
+
+function scopeLabel(value: string): string {
+  const normalized = value.replaceAll("_", " ").trim();
+  return normalized ? normalized[0].toUpperCase() + normalized.slice(1) : normalized;
+}
 
 function windowLabel(window: ProviderQuotaWindow): string {
   const kind = window.window_kind;
@@ -32,52 +47,68 @@ function windowLabel(window: ProviderQuotaWindow): string {
     const started = window.started_at ? Date.parse(window.started_at) : Number.NaN;
     const ended = window.resets_at ? Date.parse(window.resets_at) : Number.NaN;
     const hours = Math.round((ended - started) / 3_600_000);
-    const period = Number.isFinite(hours) && hours > 0 ? ` · ${hours}${t("小时")}` : "";
-    return `${kind.slice(16)}${period}`;
+    const period = Number.isFinite(hours) && hours > 0 ? `${hours}${t("小时")}` : "";
+    const scope = scopeLabel(kind.slice(16));
+    return period ? `${period} · ${scope}` : scope;
   }
-  if (kind.startsWith("minimax_weekly:")) return `${kind.slice(15)} · ${t("本周")}`;
+  if (kind.startsWith("minimax_weekly:")) return `${t("本周")} · ${scopeLabel(kind.slice(15))}`;
   if (kind === "kimi_usage") return t("本周");
   if (kind === "kimi_5h") return t("5小时");
-  return kind.replaceAll("_", " ");
+  return scopeLabel(kind);
 }
 
-function remainingPercent(window: ProviderQuotaWindow): number {
-  if (window.limit_value === null || window.limit_value <= 0) return 100;
-  if (window.unit === "percent") {
-    return Math.max(0, Math.min(100, window.limit_value - window.used));
-  }
-  return Math.max(0, Math.min(100, ((window.limit_value - window.used) / window.limit_value) * 100));
+function usedPercent(window: ProviderQuotaWindow): number {
+  if (window.limit_value === null || window.limit_value <= 0) return 0;
+  return Math.max(0, Math.min(100, (window.used / window.limit_value) * 100));
 }
 
-function remainingLabel(window: ProviderQuotaWindow): string {
+function usedLabel(window: ProviderQuotaWindow): string {
   if (window.limit_value === null) return "∞";
-  const remaining = Math.max(0, window.limit_value - window.used);
-  if (window.unit === "percent") return `${remaining.toLocaleString()}%`;
-  return `${remaining.toLocaleString()} / ${window.limit_value.toLocaleString()}`;
+  if (window.unit === "percent" || window.window_kind.startsWith("kimi_")) {
+    return `${usedPercent(window).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+  }
+  return `${window.used.toLocaleString()} / ${window.limit_value.toLocaleString()}`;
 }
 </script>
 
 <style scoped>
 .provider-quota-summary {
   display: grid;
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
 }
 
 .provider-quota-row {
   display: grid;
-  gap: 5px;
+  gap: 6px;
+  min-width: 0;
 }
 
 .provider-quota-row__heading {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  color: var(--ocg-ink);
+  color: var(--ocg-muted);
   font-size: var(--ocg-font-sm);
+}
+
+.provider-quota-row__heading strong {
+  color: var(--ocg-ink);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: var(--ocg-font-md);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 .provider-quota-row__reset {
   color: var(--ocg-muted);
   font-size: var(--ocg-font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .provider-quota-summary {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

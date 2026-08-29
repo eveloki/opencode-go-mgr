@@ -14,10 +14,11 @@ get billed for a bad guess.
   source development only, `scripts/free-dev-port.mjs` clears stale Vite
   processes on port `30001`; it does not release `9042` or the desktop
   single-instance lock.
-- **`401 Unauthorized` from the upstream.** OpenCode Go and Zen Free return it
-  to the client without rotating accounts; OpenCode Go also uses 401 for
-  `ModelError` when the model is not on that product. Custom API `401` rotates
-  to the next eligible card and records `auth_error`. To check an OpenCode Go
+- **`401 Unauthorized` from the upstream.** Zen Free returns it unchanged.
+  OpenCode Go rotates and records `auth_error` only for a structured
+  `CreditsError`; re-save the same Key after renewal to clear it. `ModelError`,
+  unknown, and malformed OpenCode 401 responses remain unchanged. Custom API
+  `401` rotates to the next eligible card and records `auth_error`. To check an OpenCode Go
   key directly, use CLI `key ping <id>` or send a real client request.
   Managed-account Key verification and Custom **Verify connection** still
   record `auth_error` on 401 in those flows.
@@ -49,8 +50,8 @@ get billed for a bad guess.
 - **Saving Custom API does not start routing.** The card is created disabled
   `pending`, but you can enable it immediately; an unverified badge is shown
   while verification is `pending`. Verify sends one minimal request in the
-  selected protocol to the complete Endpoint and expects a `2xx` JSON response.
-  Changing the Endpoint, key, declared models, or protocol re-pends verification
+  selected protocol to the resolved inference Endpoint and expects a `2xx` JSON response.
+  Changing the API URL, key, declared models, or protocol re-pends verification
   but leaves the card enabled.
 - **Gemini requests fail with `400` over `safetySettings`.** The gateway
   cannot map Google's safety thresholds to a Chat/Messages upstream, so it

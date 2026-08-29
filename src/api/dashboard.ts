@@ -11,6 +11,12 @@ import { useControlPlaneStore } from "../stores/controlPlane.ts";
 import { isVersionAtLeast } from "../utils/version.ts";
 import type {
   AccountCustomConfigUpdate,
+  AccountExport,
+  AccountExportRequest,
+  AccountImportPreview,
+  AccountImportPreviewRequest,
+  AccountImportRequest,
+  AccountImportResult,
   AccountManagedCreate,
   AccountModelCapabilitiesUpdate,
   AccountSetupStep,
@@ -61,6 +67,7 @@ import {
   type AccountInput,
   type AccountCustomConfigUpdateInput,
   type AccountModelCapabilityInput,
+  type AccountModelTestResponse,
   type AccountUpdate,
   type AppConfig,
   type BrowserTarget,
@@ -164,6 +171,18 @@ export const dashboardApi = {
       notes: input.notes,
     } satisfies WithoutExpectation<AccountManagedCreate>, expectation))),
 
+  exportAccountTransfer: (input: AccountExportRequest): Promise<AccountExport> =>
+    dashboardV3.exportAccountTransfer(input),
+
+  previewAccountTransfer: (input: AccountImportPreviewRequest): Promise<AccountImportPreview> =>
+    dashboardV3.previewAccountTransfer(input),
+
+  importAccountTransfer: (
+    input: WithoutExpectation<AccountImportRequest>,
+  ): Promise<AccountImportResult> => withCas((expectation) => (
+    dashboardV3.importAccountTransfer(input, expectation)
+  )),
+
   updateAccount: (id: string, update: AccountUpdate): Promise<Account> =>
     mutatedAccount(withCas((expectation) => dashboardV3.updateAccount(id, accountUpdateInput(update), expectation))),
 
@@ -188,6 +207,9 @@ export const dashboardApi = {
 
   verifyAccountConnection: (id: string, _ignoredRevision?: number): Promise<Account> =>
     mutatedAccount(withCas((expectation) => dashboardV3.verifyAccount(id, expectation))),
+
+  testAccountModel: (id: string, modelId: string): Promise<AccountModelTestResponse> =>
+    dashboardV3.testAccountModel(id, modelId),
 
   updateAccountCustomConfig: (
     id: string,

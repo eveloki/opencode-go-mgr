@@ -2,6 +2,17 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import path from "path";
 
+const gatewayPort = (() => {
+  const raw = process.env.OCG_GATEWAY_PORT?.trim();
+  if (!raw) return 9042;
+  if (!/^\d+$/.test(raw)) throw new Error("OCG_GATEWAY_PORT must be an integer from 1 to 65535");
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("OCG_GATEWAY_PORT must be an integer from 1 to 65535");
+  }
+  return port;
+})();
+
 export default defineConfig({
   base: "/dashboard/",
   plugins: [vue()],
@@ -17,7 +28,7 @@ export default defineConfig({
     host: "127.0.0.1",
     proxy: {
       "/dashboard/api": {
-        target: "http://127.0.0.1:9042",
+        target: `http://127.0.0.1:${gatewayPort}`,
         ws: true,
       },
     },

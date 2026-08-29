@@ -10,7 +10,7 @@ use crate::custom_http::{
 };
 use crate::gateway::attempt::UpstreamAuth;
 use crate::gateway::protocol::{CustomRouteSpec, RequestPlan};
-use crate::gateway::provider_adapter::resolve_probe_route;
+use crate::gateway::provider_adapter::{resolve_account_test_route, resolve_probe_route};
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::{ProviderAdapterKind, UpstreamAuthScheme, UpstreamProtocolKind};
 use crate::provider_contracts::{self, ContractScope, PersistedModelProtocol, protocol_to_api};
@@ -132,6 +132,42 @@ pub(crate) async fn execute_protocol_probe(
     account: &Account,
     protocol: UpstreamProtocolKind,
 ) -> Result<u16, (Option<u16>, String)> {
+    execute_protocol_request(ctx, account, protocol, false).await
+}
+
+/// Send the same minimal protocol request used by provider probes, but lock
+/// routing to the caller-selected account and retain the production route
+/// family for Plans whose provider probes are intentionally unavailable.
+pub(crate) async fn execute_account_model_test(
+    state: &CoreState,
+    config: &AppConfig,
+    account: &Account,
+    adapter: ProviderAdapterKind,
+    model_id: &str,
+    protocol: UpstreamProtocolKind,
+    custom_endpoint_url: Option<&str>,
+) -> Result<u16, (Option<u16>, String)> {
+    let custom_route = custom_endpoint_url.map(|endpoint_url| CustomRouteSpec {
+        endpoint_url: endpoint_url.to_string(),
+    });
+    let ctx = ProtocolProbeContext {
+        state,
+        config,
+        accounts: std::slice::from_ref(account),
+        adapter,
+        model_id,
+        custom_route,
+        now: chrono::Utc::now(),
+    };
+    execute_protocol_request(&ctx, account, protocol, true).await
+}
+
+async fn execute_protocol_request(
+    ctx: &ProtocolProbeContext<'_>,
+    account: &Account,
+    protocol: UpstreamProtocolKind,
+    account_test: bool,
+) -> Result<u16, (Option<u16>, String)> {
     let format = protocol_to_api(protocol);
     let body = crate::custom::minimal_verification_body(protocol, ctx.model_id)
         .map_err(|error| (None, error.message))?;
@@ -166,7 +202,12 @@ pub(crate) async fn execute_protocol_probe(
                 .to_string(),
         ));
     }
-    let route = resolve_probe_route(account, ctx.config, &plan).map_err(|error| (None, error))?;
+    let route = if account_test {
+        resolve_account_test_route(account, ctx.config, &plan)
+    } else {
+        resolve_probe_route(account, ctx.config, &plan)
+    }
+    .map_err(|error| (None, error))?;
     let secret = if matches!(route.auth, UpstreamAuth::None) {
         None
     } else {
@@ -237,6 +278,12 @@ pub(crate) async fn execute_protocol_probe(
         )
     })?;
     if !status.is_success() {
+        if account_test {
+            return Err((
+                Some(status_code),
+                format!("upstream returned HTTP {status_code}"),
+            ));
+        }
         let raw = String::from_utf8_lossy(&bytes);
         return Err((
             Some(status_code),
@@ -259,6 +306,12 @@ pub(crate) async fn execute_protocol_probe(
         ));
     }
     if let Some(error) = non_null_probe_error(&parsed) {
+        if account_test {
+            return Err((
+                Some(status_code),
+                "upstream returned a protocol error".to_string(),
+            ));
+        }
         return Err((
             Some(status_code),
             provider_contracts::sanitize_probe_error(

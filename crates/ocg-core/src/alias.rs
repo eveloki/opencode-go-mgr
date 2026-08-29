@@ -15,7 +15,7 @@ pub use ocg_gateway::alias::{
     published_routeable_aliases_with_extended_catalogs, published_routeable_aliases_with_zen,
     resolve, resolve_with_all_catalogs, resolve_with_catalogs, resolve_with_custom,
     resolve_with_extended_catalogs, resolve_with_provider_models, routeable_aliases_for,
-    routeable_aliases_for_with_zen,
+    routeable_aliases_for_with_extended_catalogs, routeable_aliases_for_with_zen,
 };
 
 type ResolveName = fn(&str) -> Result<ResolvedModel, ResolveError>;
@@ -26,6 +26,8 @@ type ResolveCatalogs =
 type ResolveAllCatalogs =
     fn(&str, &[String], &[String], &[String], &[String]) -> Result<ResolvedModel, ResolveError>;
 type RouteableWithZen = fn(&str, &str, &[String]) -> Vec<String>;
+type RouteableProviderExtendedCatalogs =
+    fn(&str, &str, &[String], &[String], &[String], &[String]) -> Vec<String>;
 type RouteableAllCatalogs = fn(&[String], &[String], &[String]) -> Vec<PublishedAlias>;
 type ResolveExtendedCatalogs = fn(
     &str,
@@ -53,6 +55,7 @@ const _: RouteableAllCatalogs = published_routeable_aliases_with_all_catalogs;
 const _: RouteableExtendedCatalogs = published_routeable_aliases_with_extended_catalogs;
 const _: fn(&str, &str) -> Vec<String> = routeable_aliases_for;
 const _: RouteableWithZen = routeable_aliases_for_with_zen;
+const _: RouteableProviderExtendedCatalogs = routeable_aliases_for_with_extended_catalogs;
 const _: fn(&str) -> bool = is_published_alias;
 
 #[cfg(test)]
@@ -117,6 +120,8 @@ mod tests {
             ocg_gateway::alias::published_routeable_aliases_with_zen;
         let _: fn(&str, &str) -> Vec<String> = ocg_gateway::alias::routeable_aliases_for;
         let _: RouteableWithZen = ocg_gateway::alias::routeable_aliases_for_with_zen;
+        let _: RouteableProviderExtendedCatalogs =
+            ocg_gateway::alias::routeable_aliases_for_with_extended_catalogs;
         let _: fn(&str) -> bool = ocg_gateway::alias::is_published_alias;
     }
 

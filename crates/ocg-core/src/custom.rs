@@ -6,12 +6,12 @@
 //! one protocol-correct non-stream request against the first declared model.
 //! Discovery never mutates the declared list.
 //! The adapter identity is Configurable HTTP, not a base class other providers
-//! inherit from. Custom keeps a configurable full endpoint and explicit enablement;
+//! inherit from. Custom keeps a configurable API URL and explicit enablement;
 //! connection verification is an optional tool, not an enablement gate.
 
 use crate::custom_http::{
     self, CustomHttpClient, HttpInferenceTransport, InferenceHttpError, custom_auth_scheme,
-    json_content_headers, parse_custom_endpoint_url,
+    json_content_headers, resolve_custom_endpoints,
 };
 use crate::kernel::ids::{CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID};
 use crate::kernel::protocol::ApiFormat;
@@ -177,9 +177,9 @@ impl fmt::Display for CustomModelDiscoveryFailure {
 
 impl std::error::Error for CustomModelDiscoveryFailure {}
 
-/// Fetch declared model IDs from the standard `/models` endpoint derived from
-/// the configured inference endpoint. This never probes completion endpoints or writes account
-/// state. OpenAI- and Anthropic-compatible list envelopes both use `data`.
+/// Fetch declared model IDs from the standard `/models` endpoint resolved from
+/// the configured API URL. This never probes completion endpoints or writes
+/// account state. OpenAI- and Anthropic-compatible list envelopes both use `data`.
 pub async fn discover_custom_models(
     config: &AppConfig,
     input: &AccountCustomConfigInput,
@@ -285,29 +285,22 @@ pub fn derive_custom_models_endpoint(
     endpoint_url: &str,
     protocol: UpstreamProtocolKind,
 ) -> Result<reqwest::Url, CustomModelDiscoveryFailure> {
-    let mut url =
-        parse_custom_endpoint_url(endpoint_url).map_err(|error| CustomModelDiscoveryFailure {
-            message: format!("invalid Custom inference endpoint: {error}"),
-        })?;
+    let resolved = resolve_custom_endpoints(endpoint_url, protocol).map_err(|error| {
+        CustomModelDiscoveryFailure {
+            message: format!("invalid Custom API URL: {error}"),
+        }
+    })?;
     let suffix = match protocol {
         UpstreamProtocolKind::ChatCompletions => "/chat/completions",
         UpstreamProtocolKind::Responses => "/responses",
         UpstreamProtocolKind::Messages => "/messages",
     };
-    let path = url.path().trim_end_matches('/');
-    let prefix = path.strip_suffix(suffix).ok_or_else(|| CustomModelDiscoveryFailure {
+    resolved.models.ok_or_else(|| CustomModelDiscoveryFailure {
         message: format!(
-            "cannot derive Custom /models endpoint: the configured {:?} endpoint must end with `{suffix}`; add model IDs manually",
+            "cannot derive Custom /models endpoint: use an API root, a base ending in `/v1`, or a {:?} endpoint ending with `{suffix}`; add model IDs manually for non-standard paths",
             protocol
         ),
-    })?;
-    let models_path = if prefix.is_empty() {
-        "/models".to_string()
-    } else {
-        format!("{}/models", prefix.trim_end_matches('/'))
-    };
-    url.set_path(&models_path);
-    Ok(url)
+    })
 }
 
 fn model_discovery_headers(protocol: UpstreamProtocolKind) -> reqwest::header::HeaderMap {
@@ -544,7 +537,7 @@ pub fn minimal_verification_body(
     })
 }
 
-/// POST one protocol-correct non-stream request to the configured full endpoint.
+/// POST one protocol-correct non-stream request to the resolved inference endpoint.
 /// Only a 2xx JSON object proves verified. Never uses GET /models or mutates capabilities.
 pub async fn probe_custom_connection(
     config: &AppConfig,
@@ -572,11 +565,11 @@ async fn probe_custom_protocol(
     api_key: &str,
     client: &CustomHttpClient,
 ) -> Result<(), CustomVerifyFailure> {
-    let url = parse_custom_endpoint_url(&custom_config.endpoint_url).map_err(|error| {
-        CustomVerifyFailure {
+    let url = resolve_custom_endpoints(&custom_config.endpoint_url, protocol)
+        .map_err(|error| CustomVerifyFailure {
             message: format!("invalid Custom verification endpoint: {error}"),
-        }
-    })?;
+        })?
+        .inference;
     let body = minimal_verification_body(protocol, model_id)?;
     let extra =
         json_content_headers(protocol == UpstreamProtocolKind::Messages).map_err(|error| {
@@ -691,12 +684,80 @@ mod tests {
             .as_str(),
             "https://api.example.com/v1/models"
         );
+        for base in ["https://api.example.com", "https://api.example.com/v1"] {
+            assert_eq!(
+                derive_custom_models_endpoint(base, UpstreamProtocolKind::ChatCompletions)
+                    .unwrap()
+                    .as_str(),
+                "https://api.example.com/v1/models"
+            );
+        }
         assert!(
             derive_custom_models_endpoint(
                 "https://api.example.com/v1/custom-chat",
                 UpstreamProtocolKind::ChatCompletions,
             )
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_resolves_root_base_to_the_selected_protocol_path() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let addr = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0_u8; 8192];
+            let read = stream.read(&mut buf).await.unwrap_or(0);
+            let _ = request_tx.send(String::from_utf8_lossy(&buf[..read]).to_string());
+            let body = r#"{"id":"ok"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let app_config = AppConfig {
+            proxy_mode: crate::models::ProxyMode::Direct,
+            connect_timeout_secs: 5,
+            non_stream_timeout_secs: 5,
+            ..AppConfig::default()
+        };
+        let custom_config = AccountCustomConfig {
+            account_id: "acc".into(),
+            endpoint_url: format!("http://{addr}"),
+            upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let capability = AccountModelCapability {
+            account_id: "acc".into(),
+            model_id: "local".into(),
+            protocol: UpstreamProtocolKind::ChatCompletions,
+            verified_at: None,
+            source: "manual".into(),
+        };
+        probe_custom_connection(&app_config, &custom_config, &capability, "sk-test")
+            .await
+            .expect("root base verification");
+        let request = request_rx.await.expect("captured request");
+        assert!(
+            request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-test"),
+            "{request}"
         );
     }
 

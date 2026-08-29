@@ -33,7 +33,7 @@ test("moves items in either direction without mutating the source", () => {
 });
 
 test("uses warning for imminent expiry and error after expiry", () => {
-  assert.equal(expiryTagType(8), "success");
+  assert.equal(expiryTagType(8), "default");
   assert.equal(expiryTagType(7), "warning");
   assert.equal(expiryTagType(1), "warning");
   assert.equal(expiryTagType(0), "error");

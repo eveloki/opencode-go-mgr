@@ -24,6 +24,8 @@ const ACCOUNTS_CATALOG_PREFIX: &[&str] = &[
     "AccountModelCapability",
     "AccountCreate",
     "AccountManagedCreate",
+    "AccountModelTestRequest",
+    "AccountModelTestResponse",
     "AccountUpdate",
     "AccountOrder",
     "AccountSetupUpdate",

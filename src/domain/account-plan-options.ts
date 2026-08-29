@@ -44,14 +44,14 @@ const GROUP_LABEL: Record<PlanChooserGroupId, MessageKey> = {
 
 /**
  * Human-readable hint shown for selectable families whose post-create state
- * needs honest copy. GOAT is live without a Key-verification gate; Custom may
- * still be verified explicitly after creation.
+ * needs honest copy. GOAT is live without a Key-verification gate; Custom is
+ * enabled by default and exposes account-scoped connection tests afterwards.
  */
 function planCreationHint(
   plan: PlanDefinition,
   _catalog: readonly ProviderCatalogEntry[] | null | undefined,
 ): MessageKey | "" {
-  if (plan.id === "custom-endpoint") return "创建为禁用账号，验证连接成功后手动启用。";
+  if (plan.id === "custom-endpoint") return "创建后默认启用；可随时通过账号卡片测试连接。";
   return "";
 }
 

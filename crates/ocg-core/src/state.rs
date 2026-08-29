@@ -13,7 +13,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -48,6 +48,7 @@ pub struct CoreStateInner {
     pub db: Mutex<Database>,
     pub config: Mutex<AppConfig>,
     client_root_url_override: Option<String>,
+    gateway_port_override: OnceLock<u16>,
     pub settings_update: Mutex<()>,
     /// Serializes settings persist → listener rebind → compensation. This async
     /// gate may span listener bind awaits; the synchronous `settings_update`
@@ -264,6 +265,7 @@ impl CoreStateInner {
             db: Mutex::new(db),
             config: Mutex::new(config),
             client_root_url_override,
+            gateway_port_override: OnceLock::new(),
             settings_update: Mutex::new(()),
             settings_host_effects: tokio::sync::Mutex::new(()),
             // Use a per-runtime random epoch so a browser tab left open across a
@@ -316,6 +318,9 @@ impl CoreStateInner {
         if let Some(client_root_url) = &self.client_root_url_override {
             config.client_root_url.clone_from(client_root_url);
         }
+        if let Some(gateway_port) = self.gateway_port_override.get() {
+            config.gateway_port = *gateway_port;
+        }
         config
     }
 
@@ -336,6 +341,21 @@ impl CoreStateInner {
 
     pub fn client_root_url_from_env(&self) -> bool {
         self.client_root_url_override.is_some()
+    }
+
+    /// Registers the desktop Host's immutable runtime port override before the
+    /// listener starts. CLI and other hosts keep using the persisted port.
+    pub fn register_gateway_port_override(&self, port: u16) -> crate::Result<()> {
+        if port == 0 {
+            return Err(anyhow::anyhow!("Gateway port must be between 1 and 65535"));
+        }
+        self.gateway_port_override
+            .set(port)
+            .map_err(|_| anyhow::anyhow!("Gateway port override is already registered"))
+    }
+
+    pub fn gateway_port_from_env(&self) -> bool {
+        self.gateway_port_override.get().is_some()
     }
 
     pub fn upstream_context(&self) -> (AppConfig, reqwest::Client) {
@@ -454,7 +474,7 @@ impl CoreStateInner {
     }
 
     pub fn active_gateway_port(&self) -> u16 {
-        let configured = self.config().gateway_port;
+        let configured = self.settings_config().gateway_port;
         self.gateway
             .lock()
             .as_ref()
@@ -570,8 +590,16 @@ impl CoreStateInner {
         &self,
         mut config: AppConfig,
     ) -> crate::Result<(AppConfig, crate::http_client::ForwardRouteSet)> {
-        if self.client_root_url_override.is_some() {
-            config.client_root_url = self.config.lock().client_root_url.clone();
+        if self.client_root_url_override.is_some() || self.gateway_port_override.get().is_some() {
+            let persisted = self.config.lock();
+            if self.client_root_url_override.is_some() {
+                config
+                    .client_root_url
+                    .clone_from(&persisted.client_root_url);
+            }
+            if self.gateway_port_override.get().is_some() {
+                config.gateway_port = persisted.gateway_port;
+            }
         }
         config.claude_desktop_models.normalize();
         config.opencode_invite_url = normalize_opencode_invite_url(&config.opencode_invite_url)
@@ -1460,6 +1488,34 @@ mod tests {
             serde_json::from_str(&stored).expect("stored config should deserialize");
         assert_eq!(stored.client_root_url, "https://saved.example.com");
         assert_eq!(stored.connect_timeout_secs, 45);
+
+        drop(state);
+        fs::remove_dir_all(dir).expect("test data directory should be removed");
+    }
+
+    #[test]
+    fn gateway_port_override_is_effective_but_never_persisted() {
+        let dir = temp_data_dir("gateway-port-override");
+        let db = Database::open(dir.clone()).expect("test database should open");
+        let cipher: Arc<dyn KeyCipher + Send + Sync> = Arc::new(StaticKeyCipher::new("state-test"));
+        let state = CoreStateInner::new(db, dir.clone(), cipher).expect("state should initialize");
+
+        state
+            .register_gateway_port_override(19042)
+            .expect("desktop host should register the override once");
+        assert!(state.gateway_port_from_env());
+        assert_eq!(state.settings_config().gateway_port, 19042);
+        assert_eq!(state.active_gateway_port(), 19042);
+        assert_eq!(state.config().gateway_port, 9042);
+
+        let mut submitted = state.settings_config();
+        submitted.connect_timeout_secs = 45;
+        state
+            .set_config(submitted)
+            .expect("other settings should save while the override is active");
+        assert_eq!(state.config().gateway_port, 9042);
+        assert_eq!(state.config().connect_timeout_secs, 45);
+        assert!(state.register_gateway_port_override(19043).is_err());
 
         drop(state);
         fs::remove_dir_all(dir).expect("test data directory should be removed");

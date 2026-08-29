@@ -36,7 +36,7 @@ Provider 注册表是静态密封的。不提供插件加载器、动态库或�
 | `/dashboard/api/...` 上空 body `401` | 匿名已退役 REST 或缺少会话 | 登录；回环只对 **直接** 请求跳过登录 |
 | Gateway `400` `ambiguous_model_id` | 原始 ID 映射到多个家族（含 Custom 重叠） | 改名/避开冲突的 Custom ID；系统不会调用上游 |
 | Gateway `400` 未知模型 | 名称既非已公布别名也非合格 Custom ID | 使用 `/v1/models`；协议探测不在请求路径进行 |
-| 推理 `401` 原样返回、不换号 | OpenCode Go/Zen 的 `ModelError` 或无效 Key | 预期行为；Ping/验证仍会记 `auth_error` |
+| 推理 `401` 原样返回、不换号 | Go `ModelError`/未知错误体或任意 Zen 401 | 预期行为；只有精确的 Go `CreditsError` 会换号并记录 `auth_error` |
 | Zen `429` 冷却所有 Free 卡 | 出口 IP 共享池 | 等待 `cooldown_free_until`；后续非 Free 卡仍可能运行 |
 | `success_no_usage` | 上游未发出 usage chunk | Chat 流式会请求 `include_usage`；没有 chunk 时该行用量缺失 |
 | 打开失败：schema 新于 29 | 数据目录来自更新的二进制 | 恢复匹配备份；旧二进制无法打开 v29 |

@@ -19,7 +19,19 @@ pnpm run dev
 （`scripts/free-dev-port.mjs`）检查 `127.0.0.1:30001` 并清理残留 Vite
 进程。Tauri 启动 Vite，等 Gateway 就绪后打开
 `http://127.0.0.1:30001/dashboard/`。Vite 把 `/dashboard/api`（含
-WebSocket）代理到 `http://127.0.0.1:9042`。
+WebSocket）代理到开发 Gateway 端口。`pnpm run dev` 默认使用 `19042`，避免
+Windows HNS/WSL/Docker 在 `9042` 附近的排除端口范围阻塞开发栈；安装版仍默认
+使用 `9042`。
+
+如需改用其他开发端口，可在启动前用同一个运行时变量同时覆盖 Tauri 与 Vite：
+
+```powershell
+$env:OCG_GATEWAY_PORT = "19042"
+pnpm run dev
+```
+
+变量生效时，设置页会以只读方式显示实际端口。以后要恢复保存的端口，可在启动前
+执行 `Remove-Item Env:OCG_GATEWAY_PORT`。
 
 - 前端（Vue、CSS、TypeScript）改动走 Vite HMR。
 - Rust 改动走 Tauri watcher + Cargo 增量编译，然后重启进程。Rust 代码 **不会** 在进程内热替换，需要重启。

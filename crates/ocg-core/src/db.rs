@@ -35,6 +35,16 @@ pub struct Database {
     conn: Connection,
 }
 
+/// One fully validated account definition ready for an atomic migration import.
+/// Plaintext credentials never enter this type; callers must encrypt them with
+/// the destination `CoreState` cipher before acquiring the database mutex.
+#[derive(Debug, Clone)]
+pub struct AccountImportRecord {
+    pub account: Account,
+    pub custom_config: Option<AccountCustomConfigInput>,
+    pub capabilities: Vec<AccountModelCapabilityInput>,
+}
+
 /// Settings key holding the forward-log client-key backfill watermark
 /// (max processed rowid), or `BACKFILL_DONE` once complete.
 pub const BACKFILL_SETTING_KEY: &str = "backfill_forward_logs_client_key";
@@ -4005,6 +4015,66 @@ impl Database {
         }
         if !capabilities.is_empty() {
             persist_account_model_capabilities_on(&tx, &account.id, capabilities)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Insert every migrated account and its Custom contract in one SQLite
+    /// transaction. Rows append in the supplied order. Any validation,
+    /// constraint, or child-table failure rolls the entire batch back.
+    pub fn import_accounts_with_contracts(&self, records: &[AccountImportRecord]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for record in records {
+            let account = &record.account;
+            anyhow::ensure!(
+                account.id != ZEN_FREE_ACCOUNT_ID,
+                "Zen Free is database-owned and cannot be imported"
+            );
+            account.validate_provider_binding()?;
+            ensure_enabled_offering_is_routable(
+                &account.provider_id,
+                &account.offering_id,
+                account.enabled,
+            )?;
+            let plan = builtin_plan(&account.provider_id, &account.offering_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+            if plan_requires_custom_config(plan) {
+                anyhow::ensure!(
+                    record.custom_config.is_some(),
+                    "Custom API accounts require a complete endpoint"
+                );
+                anyhow::ensure!(
+                    !record.capabilities.is_empty(),
+                    "Custom API accounts require at least one model capability"
+                );
+            } else {
+                anyhow::ensure!(
+                    record.custom_config.is_none(),
+                    "custom config is only available for Custom API accounts"
+                );
+                anyhow::ensure!(
+                    record.capabilities.is_empty(),
+                    "model capabilities are only available for Custom API accounts"
+                );
+            }
+            let purchase_date = if account.purchase_date.trim().is_empty() {
+                local_today()
+            } else {
+                normalize_purchase_date(&account.purchase_date)?
+            };
+            insert_account_row(
+                &tx,
+                account,
+                &purchase_date,
+                default_verification_status(plan),
+            )?;
+            if let Some(config) = &record.custom_config {
+                persist_account_custom_config_on(&tx, &account.id, config, true)?;
+            }
+            if !record.capabilities.is_empty() {
+                persist_account_model_capabilities_on(&tx, &account.id, &record.capabilities)?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -12587,6 +12657,71 @@ mod tests {
             "Custom create must require at least one model capability"
         );
         assert!(db.get_account("custom-empty-caps").unwrap().is_none());
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn account_migration_batch_is_atomic_and_preserves_order() {
+        let dir = temp_data_dir("account-migration-batch");
+        let db = Database::open(dir.clone()).unwrap();
+        let go = account("migration-go");
+        let mut custom = account("migration-custom");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.credential_kind = CredentialKind::ApiKey;
+        custom.quota_scope = QuotaScope::Key;
+        custom.enabled = false;
+        let records = vec![
+            AccountImportRecord {
+                account: go,
+                custom_config: None,
+                capabilities: Vec::new(),
+            },
+            AccountImportRecord {
+                account: custom,
+                custom_config: Some(AccountCustomConfigInput {
+                    endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                    upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+                }),
+                capabilities: vec![AccountModelCapabilityInput {
+                    model_id: "org/model".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: Some("import".into()),
+                }],
+            },
+        ];
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_migration_custom_config
+                 BEFORE INSERT ON account_custom_configs
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced migration failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(db.import_accounts_with_contracts(&records).is_err());
+        assert!(db.get_account("migration-go").unwrap().is_none());
+        assert!(db.get_account("migration-custom").unwrap().is_none());
+
+        db.conn
+            .execute_batch("DROP TRIGGER fail_migration_custom_config;")
+            .unwrap();
+        db.import_accounts_with_contracts(&records).unwrap();
+        let imported = db
+            .list_accounts()
+            .unwrap()
+            .into_iter()
+            .filter(|account| account.id.starts_with("migration-"))
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        assert_eq!(imported, ["migration-go", "migration-custom"]);
+        assert!(
+            db.account_custom_config("migration-custom")
+                .unwrap()
+                .is_some()
+        );
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();

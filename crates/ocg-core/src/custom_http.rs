@@ -69,6 +69,72 @@ pub fn parse_custom_endpoint_url(value: &str) -> Result<reqwest::Url, CustomHttp
         .map_err(|error| CustomHttpError::InvalidUrl(format!("invalid endpoint URL: {error}")))
 }
 
+/// Runtime interpretation of one persisted Custom URL.
+///
+/// Root URLs and bases ending in `/v1` use the common OpenAI-compatible base
+/// convention. Existing complete standard endpoints and opaque non-standard
+/// endpoints remain callable verbatim, so this policy needs no data migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCustomEndpoints {
+    pub inference: reqwest::Url,
+    pub models: Option<reqwest::Url>,
+}
+
+pub fn resolve_custom_endpoints(
+    value: &str,
+    protocol: UpstreamProtocolKind,
+) -> Result<ResolvedCustomEndpoints, CustomHttpError> {
+    let endpoint = parse_custom_endpoint_url(value)?;
+    let protocol_path = match protocol {
+        UpstreamProtocolKind::ChatCompletions => "chat/completions",
+        UpstreamProtocolKind::Responses => "responses",
+        UpstreamProtocolKind::Messages => "messages",
+    };
+    let protocol_suffix = format!("/{protocol_path}");
+    let path = endpoint.path().trim_end_matches('/');
+
+    if path.is_empty() {
+        return Ok(ResolvedCustomEndpoints {
+            inference: join_inference_endpoint(endpoint.as_str(), &format!("v1/{protocol_path}"))
+                .map_err(CustomHttpError::from)?,
+            models: Some(
+                join_inference_endpoint(endpoint.as_str(), "v1/models")
+                    .map_err(CustomHttpError::from)?,
+            ),
+        });
+    }
+
+    if path.ends_with("/v1") {
+        return Ok(ResolvedCustomEndpoints {
+            inference: join_inference_endpoint(endpoint.as_str(), protocol_path)
+                .map_err(CustomHttpError::from)?,
+            models: Some(
+                join_inference_endpoint(endpoint.as_str(), "models")
+                    .map_err(CustomHttpError::from)?,
+            ),
+        });
+    }
+
+    if let Some(prefix) = path.strip_suffix(&protocol_suffix) {
+        let mut models = endpoint.clone();
+        let models_path = if prefix.is_empty() {
+            "/models".to_string()
+        } else {
+            format!("{}/models", prefix.trim_end_matches('/'))
+        };
+        models.set_path(&models_path);
+        return Ok(ResolvedCustomEndpoints {
+            inference: endpoint,
+            models: Some(models),
+        });
+    }
+
+    Ok(ResolvedCustomEndpoints {
+        inference: endpoint,
+        models: None,
+    })
+}
+
 /// Custom authentication is a protocol invariant, not user configuration.
 pub const fn custom_auth_scheme(protocol: UpstreamProtocolKind) -> UpstreamAuthScheme {
     match protocol {
@@ -674,6 +740,94 @@ mod tests {
             inference_connect_timeout(&test_config(ProxyMode::Direct, "")),
             Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    fn custom_endpoint_resolution_supports_common_bases_and_legacy_endpoints() {
+        let root = resolve_custom_endpoints(
+            "https://newapi.klarkxy.xyz",
+            UpstreamProtocolKind::ChatCompletions,
+        )
+        .unwrap();
+        assert_eq!(
+            root.inference.as_str(),
+            "https://newapi.klarkxy.xyz/v1/chat/completions"
+        );
+        assert_eq!(
+            root.models.unwrap().as_str(),
+            "https://newapi.klarkxy.xyz/v1/models"
+        );
+
+        for base in [
+            "https://api.example.com/v1",
+            "https://api.example.com/v1/",
+            "https://api.example.com/openai/v1",
+        ] {
+            let resolved = resolve_custom_endpoints(base, UpstreamProtocolKind::Responses).unwrap();
+            assert_eq!(
+                resolved.inference.as_str(),
+                format!("{}/responses", base.trim_end_matches('/'))
+            );
+            assert_eq!(
+                resolved.models.unwrap().as_str(),
+                format!("{}/models", base.trim_end_matches('/'))
+            );
+        }
+
+        for (endpoint, protocol, models) in [
+            (
+                "https://api.example.com/v1/chat/completions",
+                UpstreamProtocolKind::ChatCompletions,
+                "https://api.example.com/v1/models",
+            ),
+            (
+                "https://api.example.com/openai/v1/responses",
+                UpstreamProtocolKind::Responses,
+                "https://api.example.com/openai/v1/models",
+            ),
+            (
+                "https://api.example.com/v1/messages",
+                UpstreamProtocolKind::Messages,
+                "https://api.example.com/v1/models",
+            ),
+        ] {
+            let resolved = resolve_custom_endpoints(endpoint, protocol).unwrap();
+            assert_eq!(resolved.inference.as_str(), endpoint);
+            assert_eq!(resolved.models.unwrap().as_str(), models);
+        }
+
+        let opaque = resolve_custom_endpoints(
+            "https://api.example.com/custom/infer",
+            UpstreamProtocolKind::ChatCompletions,
+        )
+        .unwrap();
+        assert_eq!(
+            opaque.inference.as_str(),
+            "https://api.example.com/custom/infer"
+        );
+        assert!(opaque.models.is_none());
+
+        let mismatch = resolve_custom_endpoints(
+            "https://api.example.com/v1/messages",
+            UpstreamProtocolKind::Responses,
+        )
+        .unwrap();
+        assert_eq!(
+            mismatch.inference.as_str(),
+            "https://api.example.com/v1/messages"
+        );
+        assert!(mismatch.models.is_none());
+
+        for rejected in [
+            "https://user:pass@api.example.com",
+            "https://api.example.com?v=1",
+            "https://api.example.com#fragment",
+        ] {
+            assert!(
+                resolve_custom_endpoints(rejected, UpstreamProtocolKind::ChatCompletions).is_err(),
+                "{rejected}"
+            );
+        }
     }
 
     #[test]

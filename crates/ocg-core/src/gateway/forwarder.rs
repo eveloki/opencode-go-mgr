@@ -993,12 +993,13 @@ async fn forward_request_impl(
         )
         .await
         .unwrap_or_else(ResponseBodyFailure::into_detail);
-        let class = classify_http(
+        let class = super::classify::classify_http_response(
             status.as_u16(),
             &account.provider_id,
             &account.offering_id,
             plan.channel,
             attempt_spec.auth == UpstreamAuth::None,
+            &text,
         );
 
         match class {
@@ -1151,7 +1152,7 @@ async fn forward_request_impl(
             }
             ProviderErrorClass::UnauthorizedRotate => {
                 let error_message = format!(
-                    "upstream auth error 401: {}",
+                    "upstream account error 401: {}",
                     attempt_context.sanitize_upstream_error(&text)
                 );
                 let sanitized = attempt_context.sanitize_upstream_error(&text);

@@ -202,8 +202,9 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
     );
     assert_eq!(CATALOG_TYPE_NAMES[managed_start], "AccountManagedKeyVerify");
     let usage_refresh_start = managed_start + 1;
+    let account_transfer_start = usage_refresh_start + 9;
     assert_eq!(
-        &CATALOG_TYPE_NAMES[usage_refresh_start..],
+        &CATALOG_TYPE_NAMES[usage_refresh_start..account_transfer_start],
         [
             "UsageRefresh",
             "UsageRefreshUpdate",
@@ -216,7 +217,20 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "ProviderPricingRefreshUpdate",
         ]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), usage_refresh_start + 9);
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[account_transfer_start..],
+        [
+            "AccountExportRequest",
+            "AccountExport",
+            "AccountImportPreviewRequest",
+            "AccountImportPreview",
+            "AccountImportPreviewItem",
+            "AccountImportDisposition",
+            "AccountImportRequest",
+            "AccountImportResult",
+        ]
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), account_transfer_start + 8);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");

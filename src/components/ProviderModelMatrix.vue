@@ -35,7 +35,9 @@
                 </n-dropdown>
               </div>
             </th>
-            <th class="matrix-cell matrix-cell--actions-header">{{ t("操作") }}</th>
+            <th v-if="probeSupported" class="matrix-cell matrix-cell--actions-header">
+              {{ t("操作") }}
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -62,9 +64,8 @@
                 @update:value="(on) => updateSingle(modelId, protocol, on ? 'force_on' : 'force_off')"
               />
             </td>
-            <td class="matrix-cell matrix-cell--actions">
+            <td v-if="probeSupported" class="matrix-cell matrix-cell--actions">
               <n-popconfirm
-                v-if="scope.scope_kind !== 'custom_endpoint'"
                 @positive-click="runRowProbe(modelId)"
               >
                 <template #trigger>
@@ -150,6 +151,8 @@ const matrixProtocols = computed<ProviderProtocol[]>(() => {
     props.scope.models.some((model) => model.protocols[protocol]?.available === true)
   ));
 });
+
+const probeSupported = computed(() => props.scope.card.protocol_probe);
 
 function modelContract(modelId: string): ProviderScopeView["models"][number] | undefined {
   return props.scope.models.find((model) => model.model_id === modelId);
@@ -237,6 +240,7 @@ function applyColumnBatch(protocol: ProviderProtocol, state: ProtocolOverrideSta
 }
 
 function runRowProbe(modelId: string): void {
+  if (!probeSupported.value) return;
   emit("probe", { modelId });
 }
 

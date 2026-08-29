@@ -8,10 +8,9 @@ use ocg_core::gateway;
 use ocg_core::state::CoreState;
 
 pub fn start_on_configured_port(core: &CoreState) {
-    let config = core.config();
+    let port = core.settings_config().gateway_port;
     let gateway_state = core.clone();
-    match tauri::async_runtime::block_on(gateway::start_gateway(gateway_state, config.gateway_port))
-    {
+    match tauri::async_runtime::block_on(gateway::start_gateway(gateway_state, port)) {
         Ok(handle) => {
             let _ = core.db.lock().log_gateway(
                 "info",
@@ -21,6 +20,7 @@ pub fn start_on_configured_port(core: &CoreState) {
             *core.gateway.lock() = Some(handle);
         }
         Err(error) => {
+            eprintln!("failed to start Gateway on 127.0.0.1:{port}: {error}");
             let _ = core.db.lock().log_gateway(
                 "error",
                 "gateway",

@@ -18,6 +18,7 @@
 use crate::attempt::TransportFailureKind;
 use ocg_domain::ids::{OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID};
 use ocg_domain::provider::ProviderAdapterKind;
+use serde_json::Value;
 
 /// Semantic class of one attempt failure. Side effects stay in the forwarder.
 ///
@@ -162,7 +163,9 @@ pub fn provider_error_policy(provider_id: &str, offering_id: &str) -> ProviderEr
 fn policy_for_kind(kind: ProviderAdapterKind) -> ProviderErrorPolicy {
     match kind {
         ProviderAdapterKind::OpenCodeGo => ProviderErrorPolicy {
-            // Stage 0 passthrough: Go uses 401 for ModelError as well as bad keys.
+            // Status-only default: Go uses 401 for ModelError as well as
+            // account failures. classify_http_response refines only the exact
+            // structured CreditsError case.
             inference_401: Auth401Policy::Passthrough,
             rate_limit_429: RateLimit429Policy::GoWindow,
         },
@@ -267,6 +270,43 @@ pub fn classify_http(
         return ProviderErrorClass::ClientError;
     }
     ProviderErrorClass::ClientError
+}
+
+/// Refines an HTTP classification with a bounded upstream response body.
+///
+/// OpenCode Go uses 401 for both unsupported models and account-level credit
+/// failures. Only its structured `CreditsError` is strong enough evidence to
+/// skip and break the current account; malformed, unknown, and `ModelError`
+/// responses retain the conservative 401 passthrough behavior.
+#[doc(hidden)]
+pub fn classify_http_response(
+    status: u16,
+    provider_id: &str,
+    offering_id: &str,
+    free_channel: bool,
+    anonymous: bool,
+    response_body: &str,
+) -> ProviderErrorClass {
+    let base = classify_http(status, provider_id, offering_id, free_channel, anonymous);
+    if status == 401
+        && ProviderAdapterKind::from_offering(provider_id, offering_id)
+            == Some(ProviderAdapterKind::OpenCodeGo)
+        && response_has_error_type(response_body, "CreditsError")
+    {
+        ProviderErrorClass::UnauthorizedRotate
+    } else {
+        base
+    }
+}
+
+fn response_has_error_type(response_body: &str, expected: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(response_body) else {
+        return false;
+    };
+    value
+        .pointer("/error/type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == expected)
 }
 
 /// Public only as the cross-crate bridge; the host crate's `gateway::classify`
@@ -404,6 +444,75 @@ mod tests {
                 false
             ),
             ProviderErrorClass::UnauthorizedPassthrough
+        );
+    }
+
+    #[test]
+    fn opencode_go_credits_401_rotates_but_model_and_unknown_401_passthrough() {
+        let classify_body = |body| {
+            classify_http_response(
+                401,
+                OPENCODE_PROVIDER_ID,
+                GO_OFFERING_ID,
+                false,
+                false,
+                body,
+            )
+        };
+        assert_eq!(
+            classify_body(
+                r#"{"type":"error","error":{"type":"CreditsError","message":"No active subscription"}}"#
+            ),
+            ProviderErrorClass::UnauthorizedRotate
+        );
+        assert_eq!(
+            classify_body(
+                r#"{"type":"error","error":{"type":"ModelError","message":"not supported"}}"#
+            ),
+            ProviderErrorClass::UnauthorizedPassthrough
+        );
+        assert_eq!(
+            classify_body(r#"{"error":{"message":"expired key"}}"#),
+            ProviderErrorClass::UnauthorizedPassthrough
+        );
+        assert_eq!(
+            classify_body(r#"{"error":{"type":"OtherError"}}"#),
+            ProviderErrorClass::UnauthorizedPassthrough
+        );
+        assert_eq!(
+            classify_body(r#"{"error":{"type":"creditserror"}}"#),
+            ProviderErrorClass::UnauthorizedPassthrough
+        );
+        assert_eq!(
+            classify_body("not json"),
+            ProviderErrorClass::UnauthorizedPassthrough
+        );
+    }
+
+    #[test]
+    fn credits_error_refinement_is_go_only() {
+        let body = r#"{"error":{"type":"CreditsError"}}"#;
+        assert_eq!(
+            classify_http_response(
+                401,
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+                true,
+                true,
+                body,
+            ),
+            ProviderErrorClass::UnauthorizedPassthrough
+        );
+        assert_eq!(
+            classify_http_response(
+                401,
+                CUSTOM_PROVIDER_ID,
+                CUSTOM_API_OFFERING_ID,
+                false,
+                false,
+                body,
+            ),
+            ProviderErrorClass::UnauthorizedRotate
         );
     }
 

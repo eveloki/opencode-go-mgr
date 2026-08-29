@@ -192,6 +192,7 @@ test("settings update writes CAS tokens and reloads the full config", async () =
         processGeneration: 99,
         pricingRevision: null,
         gatewayPort: 9042,
+        gatewayPortFromEnv: true,
         upstreamBaseUrl: "https://opencode.ai/zen/go",
         proxyMode: "auto",
         proxyUrl: "",
@@ -218,6 +219,7 @@ test("settings update writes CAS tokens and reloads the full config", async () =
   const result = await dashboardApi.updateSettings({
     revision: 7,
     gateway_port: 9042,
+    gateway_port_from_env: true,
     upstream_base_url: "https://opencode.ai/zen/go",
     proxy_mode: "auto",
     proxy_url: "",
@@ -241,8 +243,10 @@ test("settings update writes CAS tokens and reloads the full config", async () =
   assert.equal(requests[0]?.body?.expectedRevision, 7);
   assert.equal(requests[0]?.body?.processGeneration, 99);
   assert.equal("revision" in (requests[0]?.body ?? {}), false);
+  assert.equal("gatewayPort" in (requests[0]?.body ?? {}), false);
   assert.equal(result.revision, 8);
   assert.equal(result.gateway_port, 9042);
+  assert.equal(result.gateway_port_from_env, true);
 });
 
 test("primary key regeneration reloads plaintext from the connection endpoint", async () => {

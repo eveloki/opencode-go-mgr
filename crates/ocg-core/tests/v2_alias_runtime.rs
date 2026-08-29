@@ -483,7 +483,7 @@ async fn mixed_case_alias_chat_persists_canonical_alias() {
         .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
         .bearer_auth("gw-test")
         .json(&serde_json::json!({
-            "model": "MiniMax-M3",
+            "model": "MINIMAX-M3",
             "messages": [{"role": "user", "content": "ping"}]
         }))
         .send()
@@ -491,13 +491,13 @@ async fn mixed_case_alias_chat_persists_canonical_alias() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["model"], "MiniMax-M3");
+    assert_eq!(body["model"], "MINIMAX-M3");
 
     let (status, attribution) = latest_log_identity(&state);
     assert_eq!(status, "success");
-    assert_eq!(attribution.requested_model.as_deref(), Some("MiniMax-M3"));
+    assert_eq!(attribution.requested_model.as_deref(), Some("MINIMAX-M3"));
     assert_eq!(attribution.resolved_alias.as_deref(), Some("minimax-m3"));
-    assert_eq!(attribution.upstream_model.as_deref(), Some("MiniMax-M3"));
+    assert_eq!(attribution.upstream_model.as_deref(), Some("MINIMAX-M3"));
 
     stop(state, dir, gateway_handle, stop_mock);
 }

@@ -11,7 +11,7 @@ Gateway 不讲感情：账号按 **列表顺序** 尝试，你可以在账号页
 - 已经在本次请求里失败过的账号（例如拿到 `429`）；
 - 已保存供应商合约对该解析模型没有 effective 启用上游协议的账号。
 
-带有可识别 `Resets in …` 时间短语的 `429` 写入 `cooldown_until`，然后尝试下一个账号。`403` 不写冷却、直接换号。OpenCode Go 与 Zen Free 的 `401` **原样返回给客户端**，不换号、也不写 `auth_error`——OpenCode Go 会把「模型不存在」也打成 401 `ModelError`，若当成 Key 失效会打断 CLI 并误伤好账号。Custom API 的 `401` 会换到下一张合格卡片并写入 `auth_error`。托管账号 Key 验证与 Custom **验证连接** 拿到 401 时仍会记录 `auth_error`。CLI `key ping` 只打印真实上游状态，不写该字段。只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败，才会在同一账号重试一次，流式请求也遵循这一规则。
+带有可识别 `Resets in …` 时间短语的 `429` 写入 `cooldown_until`，然后尝试下一个账号。`403` 不写冷却、直接换号。Zen Free 的 `401` 原样返回。OpenCode Go 的结构化 `CreditsError` 401 会换到下一张合格卡片并写入 `auth_error`；续费后重新保存同一个 Key 即可清除。它的 `ModelError`、未知或畸形 401 仍原样返回，因为 OpenCode 也会用 401 表示模型不支持。Custom API 的 `401` 同样换号并写入 `auth_error`。托管账号 Key 验证与 Custom **验证连接** 拿到 401 时仍会记录 `auth_error`。CLI `key ping` 只打印真实上游状态，不写该字段。只有能证明请求尚未发出的 DNS/TCP/TLS 建连失败，才会在同一账号重试一次，流式请求也遵循这一规则。
 
 开启 **对话粘性** 时，匹配的会话 key 会先于基础路由方案尝试。存在 `X-OCG-Conversation-Id` 请求头时优先使用；否则 Gateway 对 system / tools / 首条 user 做指纹。无法生成可用 key 时，严格优先级、全局粘性或轮询按原样执行。
 

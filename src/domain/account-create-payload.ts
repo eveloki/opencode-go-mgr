@@ -46,7 +46,7 @@ const ACCOUNT_CREATE_PAYLOAD_ERROR_KEYS = {
   missing_offering: "无法确定账号方案，请关闭后重试",
   missing_name: "名称不能为空",
   missing_key: "请填写 API Key",
-  missing_endpoint_url: "请填写完整 Endpoint",
+  missing_endpoint_url: "请填写 API 地址",
   invalid_endpoint_url: "Endpoint 格式无效",
   endpoint_url_not_http: "Endpoint 必须是 http:// 或 https:// URL",
   endpoint_url_with_credentials: "Endpoint 不能包含用户名或密码",

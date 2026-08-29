@@ -383,6 +383,248 @@
       ],
       "type": "object"
     },
+    "AccountExport": {
+      "additionalProperties": false,
+      "description": "Encrypted account migration package returned by the export endpoint.\n`bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no\nplaintext upstream credential is returned to the dashboard.",
+      "properties": {
+        "bundle": {
+          "type": "string"
+        },
+        "exportedAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skippedAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "filename",
+        "bundle",
+        "exportedAccounts",
+        "skippedAccounts",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountExportRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/transfer/export` body. Both passwords are write-only. The\nadministrator credential is step-up authorization; `bundle_password` is a\ndistinct passphrase used only to encrypt the portable file.",
+      "properties": {
+        "adminPassword": {
+          "type": "string"
+        },
+        "adminUsername": {
+          "type": "string"
+        },
+        "bundlePassword": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "adminUsername",
+        "adminPassword",
+        "bundlePassword"
+      ],
+      "type": "object"
+    },
+    "AccountImportDisposition": {
+      "enum": [
+        "import",
+        "imported",
+        "duplicate"
+      ],
+      "type": "string"
+    },
+    "AccountImportPreview": {
+      "additionalProperties": false,
+      "description": "Secret-free preview of one account migration package.",
+      "properties": {
+        "duplicateAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exportedAt": {
+          "type": "string"
+        },
+        "importableAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AccountImportPreviewItem"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "exportedAt",
+        "items",
+        "importableAccounts",
+        "duplicateAccounts",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "AccountImportPreviewItem": {
+      "additionalProperties": false,
+      "description": "One secret-free preview/result row. Account Keys, endpoint credentials,\nbrowser identity, and verification evidence never appear.",
+      "properties": {
+        "accountType": {
+          "$ref": "#/$defs/AccountType"
+        },
+        "disposition": {
+          "$ref": "#/$defs/AccountImportDisposition"
+        },
+        "index": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offeringId": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "index",
+        "name",
+        "providerId",
+        "offeringId",
+        "accountType",
+        "disposition",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "AccountImportPreviewRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/transfer/preview` body. `password` is write-only and never\nappears in a response or log.",
+      "properties": {
+        "bundle": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "password",
+        "bundle"
+      ],
+      "type": "object"
+    },
+    "AccountImportRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/transfer/import` body. CAS tokens are rechecked only after\nthe expensive authenticated decryption and validation phase finishes.",
+      "properties": {
+        "bundle": {
+          "type": "string"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "password": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "password",
+        "bundle"
+      ],
+      "type": "object"
+    },
+    "AccountImportResult": {
+      "additionalProperties": false,
+      "description": "Atomic database import result. `items` is secret-free and preserves bundle\norder; duplicates are the only per-row skip in V1.",
+      "properties": {
+        "duplicateAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "importedAccounts": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AccountImportPreviewItem"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "importedAccounts",
+        "duplicateAccounts",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
     "AccountList": {
       "additionalProperties": false,
       "description": "GET `/accounts` and PUT `/accounts/order` envelope.",
@@ -553,6 +795,67 @@
       "required": [
         "modelId",
         "protocol"
+      ],
+      "type": "object"
+    },
+    "AccountModelTestRequest": {
+      "additionalProperties": false,
+      "description": "POST `/accounts/{id}/model-tests` body. This is an operational test, so it\nintentionally carries no CAS tokens and has no account mutation effect.",
+      "properties": {
+        "modelId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "modelId"
+      ],
+      "type": "object"
+    },
+    "AccountModelTestResponse": {
+      "additionalProperties": false,
+      "description": "Result of one exact-account, one-model operational request. Error text is\ntransport-sanitized and never includes an upstream response body or key.",
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "httpStatus": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "accountId",
+        "modelId",
+        "protocol",
+        "success",
+        "httpStatus",
+        "durationMs",
+        "error"
       ],
       "type": "object"
     },
@@ -4297,6 +4600,9 @@
           "minimum": 0,
           "type": "integer"
         },
+        "gatewayPortFromEnv": {
+          "type": "boolean"
+        },
         "nonStreamTimeoutSecs": {
           "format": "uint64",
           "minimum": 0,
@@ -4358,6 +4664,7 @@
         "revision",
         "processGeneration",
         "gatewayPort",
+        "gatewayPortFromEnv",
         "upstreamBaseUrl",
         "proxyMode",
         "proxyUrl",
@@ -5018,6 +5325,12 @@
       "$ref": "#/$defs/AccountManagedCreate"
     },
     {
+      "$ref": "#/$defs/AccountModelTestRequest"
+    },
+    {
+      "$ref": "#/$defs/AccountModelTestResponse"
+    },
+    {
       "$ref": "#/$defs/AccountUpdate"
     },
     {
@@ -5313,6 +5626,30 @@
     },
     {
       "$ref": "#/$defs/ProviderPricingRefreshUpdate"
+    },
+    {
+      "$ref": "#/$defs/AccountExportRequest"
+    },
+    {
+      "$ref": "#/$defs/AccountExport"
+    },
+    {
+      "$ref": "#/$defs/AccountImportPreviewRequest"
+    },
+    {
+      "$ref": "#/$defs/AccountImportPreview"
+    },
+    {
+      "$ref": "#/$defs/AccountImportPreviewItem"
+    },
+    {
+      "$ref": "#/$defs/AccountImportDisposition"
+    },
+    {
+      "$ref": "#/$defs/AccountImportRequest"
+    },
+    {
+      "$ref": "#/$defs/AccountImportResult"
     }
   ],
   "title": "DashboardApiV3"

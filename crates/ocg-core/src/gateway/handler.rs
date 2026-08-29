@@ -229,10 +229,10 @@ pub async fn gemini_model_action(
 
 /// GET /v1/models — authenticated local Alias registry list.
 ///
-/// Returns OpenAI list JSON for routeable aliases authorized by the original
-/// OpenCode Go table, then eligible Custom capability IDs, de-duplicated and in
-/// deterministic order. Refreshed built-in catalogs can join an existing Alias
-/// or add an exact raw pin, but cannot expand this list. It never calls upstream.
+/// Returns OpenAI list JSON for routeable code-owned aliases, then eligible
+/// Custom capability IDs, de-duplicated and in deterministic order. Refreshed
+/// built-in catalogs can activate sealed names or add an exact raw pin, but
+/// cannot create arbitrary aliases. It never calls upstream.
 pub async fn models(
     State(state): State<CoreState>,
     headers: HeaderMap,

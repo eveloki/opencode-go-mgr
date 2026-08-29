@@ -61,6 +61,12 @@ async fn update_settings(
         {
             return Err(V3ApiError::revision_conflict(state));
         }
+        if state.gateway_port_from_env() && update.gateway_port.is_some() {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "Gateway port is managed by OCG_GATEWAY_PORT",
+            ));
+        }
 
         let previous_config = state.config();
         let mut config = previous_config.clone();
@@ -257,6 +263,7 @@ fn settings_from_state(state: &CoreState) -> Settings {
         revision: state.settings_revision(),
         process_generation: state.process_generation(),
         gateway_port: config.gateway_port,
+        gateway_port_from_env: state.gateway_port_from_env(),
         upstream_base_url: config.upstream_base_url,
         proxy_mode: v3_proxy_mode(config.proxy_mode),
         proxy_url: config.proxy_url,

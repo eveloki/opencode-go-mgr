@@ -24,6 +24,8 @@ export type DashboardApiV3 =
   | AccountModelCapability
   | AccountCreate
   | AccountManagedCreate
+  | AccountModelTestRequest
+  | AccountModelTestResponse
   | AccountUpdate
   | AccountOrder
   | AccountSetupUpdate
@@ -122,7 +124,15 @@ export type DashboardApiV3 =
   | ProviderPricingSnapshot
   | ProviderPricingValue
   | ProviderPricingRefresh
-  | ProviderPricingRefreshUpdate;
+  | ProviderPricingRefreshUpdate
+  | AccountExportRequest
+  | AccountExport
+  | AccountImportPreviewRequest
+  | AccountImportPreview
+  | AccountImportPreviewItem
+  | AccountImportDisposition
+  | AccountImportRequest
+  | AccountImportResult;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -213,6 +223,7 @@ export type BrowserTarget = "google_signup" | "google_login" | "github_signup" |
  * Update-status phase. Wire values stay lowercase, matching V2.
  */
 export type DesktopUpdatePhase = "idle" | "checking" | "downloading" | "installing" | "failed";
+export type AccountImportDisposition = "import" | "imported" | "duplicate";
 
 /**
  * Live CAS token, process generation, and pricing snapshot id.
@@ -290,6 +301,7 @@ export interface Settings {
   conversationSticky: boolean;
   dockVisibilitySupported: boolean;
   gatewayPort: number;
+  gatewayPortFromEnv: boolean;
   nonStreamTimeoutSecs: number;
   opencodeInviteUrl: string;
   processGeneration: number;
@@ -475,6 +487,26 @@ export interface AccountManagedCreate {
   notes?: string | null;
   processGeneration: number;
   username?: string | null;
+}
+/**
+ * POST `/accounts/{id}/model-tests` body. This is an operational test, so it
+ * intentionally carries no CAS tokens and has no account mutation effect.
+ */
+export interface AccountModelTestRequest {
+  modelId: string;
+}
+/**
+ * Result of one exact-account, one-model operational request. Error text is
+ * transport-sanitized and never includes an upstream response body or key.
+ */
+export interface AccountModelTestResponse {
+  accountId: string;
+  durationMs: number;
+  error: string | null;
+  httpStatus: number | null;
+  modelId: string;
+  protocol: AccountUpstreamProtocol;
+  success: boolean;
 }
 /**
  * PATCH `/accounts/{id}` body. CAS tokens are required; other fields may be
@@ -1551,4 +1583,80 @@ export interface ProviderPricingRefreshUpdate {
   expectedRevision: number;
   policy?: PricingRefreshPolicy | null;
   processGeneration: number;
+}
+/**
+ * POST `/accounts/transfer/export` body. Both passwords are write-only. The
+ * administrator credential is step-up authorization; `bundle_password` is a
+ * distinct passphrase used only to encrypt the portable file.
+ */
+export interface AccountExportRequest {
+  adminPassword: string;
+  adminUsername: string;
+  bundlePassword: string;
+}
+/**
+ * Encrypted account migration package returned by the export endpoint.
+ * `bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no
+ * plaintext upstream credential is returned to the dashboard.
+ */
+export interface AccountExport {
+  bundle: string;
+  exportedAccounts: number;
+  filename: string;
+  processGeneration: number;
+  revision: number;
+  skippedAccounts: number;
+}
+/**
+ * POST `/accounts/transfer/preview` body. `password` is write-only and never
+ * appears in a response or log.
+ */
+export interface AccountImportPreviewRequest {
+  bundle: string;
+  password: string;
+}
+/**
+ * Secret-free preview of one account migration package.
+ */
+export interface AccountImportPreview {
+  duplicateAccounts: number;
+  exportedAt: string;
+  importableAccounts: number;
+  items: AccountImportPreviewItem[];
+  processGeneration: number;
+  revision: number;
+}
+/**
+ * One secret-free preview/result row. Account Keys, endpoint credentials,
+ * browser identity, and verification evidence never appear.
+ */
+export interface AccountImportPreviewItem {
+  accountType: AccountType;
+  disposition: AccountImportDisposition;
+  index: number;
+  name: string;
+  offeringId: string;
+  providerId: string;
+  reason: string | null;
+}
+/**
+ * POST `/accounts/transfer/import` body. CAS tokens are rechecked only after
+ * the expensive authenticated decryption and validation phase finishes.
+ */
+export interface AccountImportRequest {
+  bundle: string;
+  expectedRevision: number;
+  password: string;
+  processGeneration: number;
+}
+/**
+ * Atomic database import result. `items` is secret-free and preserves bundle
+ * order; duplicates are the only per-row skip in V1.
+ */
+export interface AccountImportResult {
+  duplicateAccounts: number;
+  importedAccounts: number;
+  items: AccountImportPreviewItem[];
+  processGeneration: number;
+  revision: number;
 }

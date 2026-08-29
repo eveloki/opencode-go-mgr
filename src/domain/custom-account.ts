@@ -9,7 +9,7 @@ import type {
 
 /**
  * Custom API accounts are administrator-trusted endpoints: the UI accepts any
- * backend-valid http:// or https:// inference endpoint, including LAN,
+ * backend-valid http:// or https:// API URL, including LAN,
  * localhost, and metadata addresses. Client-side validation only rejects
  * malformed input, non-http(s) schemes, and URL-embedded credentials.
  */
@@ -26,7 +26,7 @@ export function isCustomApiAccount(
 export type CustomEndpointUrlIssue = "empty" | "malformed" | "not_http" | "with_credentials";
 
 export const CUSTOM_ENDPOINT_URL_ISSUE_KEYS = {
-  empty: "请填写完整 Endpoint",
+  empty: "请填写 API 地址",
   malformed: "Endpoint 格式无效",
   not_http: "Endpoint 必须是 http:// 或 https:// URL",
   with_credentials: "Endpoint 不能包含用户名或密码",
@@ -73,7 +73,7 @@ export function customEndpointUrlIssue(value: string): CustomEndpointUrlIssue | 
   return null;
 }
 
-/** Comparison identity only; the submitted endpoint preserves administrator input. */
+/** Comparison identity only; the submitted API URL preserves administrator input. */
 export function canonicalCustomEndpointUrl(value: string): string {
   const parsed = new URL(value.trim());
   if (parsed.username || parsed.password) {
@@ -93,23 +93,19 @@ export function isCustomProtocol(value: unknown): value is AccountProtocol {
   return typeof value === "string" && CUSTOM_PROTOCOLS.includes(value as AccountProtocol);
 }
 
-export function customInferenceEndpointPlaceholder(protocol: AccountProtocol | null): string {
-  switch (protocol) {
-    case "responses": return "https://api.example.com/v1/responses";
-    case "messages": return "https://api.example.com/v1/messages";
-    case "chat_completions":
-    default: return "https://api.example.com/v1/chat/completions";
-  }
+export function customApiUrlPlaceholder(): string {
+  return "https://api.example.com";
 }
 
-/** Standard paths are the only paths with an unambiguous derived `/models` URL. */
-export function isStandardCustomInferenceEndpoint(
+/** Root, `/v1`, and legacy standard endpoints have an unambiguous models URL. */
+export function customApiUrlSupportsModelDiscovery(
   endpointUrl: string,
   protocol: AccountProtocol | null,
 ): boolean {
   if (!protocol || customEndpointUrlIssue(endpointUrl)) return false;
   try {
     const pathname = new URL(endpointUrl.trim()).pathname.replace(/\/+$/u, "");
+    if (!pathname || pathname.endsWith("/v1")) return true;
     const standardPath = {
       chat_completions: "/chat/completions",
       responses: "/responses",
@@ -119,6 +115,15 @@ export function isStandardCustomInferenceEndpoint(
   } catch {
     return false;
   }
+}
+
+/** Show the manual-model hint only for a valid API URL with no derivable models URL. */
+export function customApiUrlNeedsManualModels(
+  endpointUrl: string,
+  protocol: AccountProtocol | null,
+): boolean {
+  return customEndpointUrlIssue(endpointUrl) === null
+    && !customApiUrlSupportsModelDiscovery(endpointUrl, protocol);
 }
 
 /** Expand each declared model into exactly the selected upstream protocol. */

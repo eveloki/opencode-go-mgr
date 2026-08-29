@@ -247,6 +247,7 @@ const latestOverrideSequence = new Map<string, number>();
 const scopes = computed(() => (
   contracts.value
     ? flattenProviderScopes(contracts.value, catalog.value)
+      .filter((scope) => scope.scope_kind === "provider")
     : []
 ));
 const activeSelection = computed(() => {

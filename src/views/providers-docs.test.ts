@@ -44,7 +44,8 @@ test("DESIGN.md names Providers as the fourth of seven views", () => {
   assert.doesNotMatch(design, /Accounts, Pricing, Applications/);
   assert.match(design, /Providers is the supplier control plane/);
   assert.match(design, /binary switch bound to the effective enabled state/);
-  assert.match(design, /multi-select checkboxes \(Chat Completions, Responses, Messages\)/);
+  assert.match(design, /one protocol selector and one compact searchable\/taggable model selector/);
+  assert.match(design, /locks every single or sequential batch test to that exact account with no fallback/);
   assert.match(design, /may consume quota/);
   assert.match(design, /never automatic on page load/);
   assert.match(design, /Do call the access credential “Key”/);

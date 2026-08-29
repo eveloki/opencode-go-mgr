@@ -52,12 +52,13 @@ explicit.
 
 MiniMax and Kimi require an eligible account Key. MiniMax refreshes
 `https://api.minimaxi.com/v1/models`; Kimi refreshes
-`https://api.kimi.com/coding/v1/models`. Their saved rows can join an Alias
-already authorized by the original OpenCode Go static table; unmatched rows
-remain exact raw model IDs. In the Kimi catalog, upstream `kimi-for-coding`
-joins Alias `kimi-k2.7-code`, while upstream `kimi-k3` joins Alias `kimi-k3`.
-Forwarding retains those exact upstream IDs. No request-time upstream lookup is
-performed.
+`https://api.kimi.com/coding/v1/models`. Their saved rows activate only
+code-owned sealed mappings; unmatched rows remain exact raw model IDs. MiniMax
+maps M3, M2.7/M2.5/M2.1 standard and highspeed variants, and M2 to matching
+lowercase kebab Aliases. Kimi maps `kimi-for-coding` → `kimi-k2.7-code`,
+`kimi-for-coding-highspeed` → `kimi-k2.7-code-highspeed`, `k3` → `kimi-k3`,
+and `k3-256k` → `kimi-k3-256k`. Forwarding retains every exact upstream ID.
+No request-time upstream lookup is performed.
 
 Before the first successful refresh, the built-in static catalog is the initial
 preset. After success, the saved official snapshot is authoritative and
@@ -77,13 +78,18 @@ preset starts enabled, while additional models discovered later start disabled
 until you enable their supported protocol in the matrix. It has no separate
 Max or account-level GOAT/All mode.
 
-Local catalogs feed resolution without another request-time upstream call. The
-original OpenCode Go static table is the sole built-in Alias namespace: saved
-Zen, Command, MiniMax, and Kimi rows may join an existing lowercase kebab-case
-Alias, but never add a new one. Unmatched built-in rows remain exact raw model
-IDs and are not advertised as new Aliases; CN mappings keep the upstream ID's
-exact spelling. A Zen Free row gains its suffix-stripped Alias only when that
-Alias is already authorized; the original `-free` ID remains an exact raw pin,
+Local catalogs feed resolution without another request-time upstream call.
+Built-in Alias authority is static and code-owned: the original OpenCode Go
+table supplies Go names, while sealed MiniMax CN, Kimi CN, and selected GOAT
+long-name maps supply provider aliases without creating Go routes. Command
+removes the Provider namespace and reuses an existing code-owned Alias; known
+plan suffixes are removed only when the shorter name is already authorized.
+For example, `nvidia/nemotron-3-ultra-550b-a55b` uses Alias
+`nemotron-3-ultra`. Saved CN rows activate only their exact sealed map.
+Unmatched built-in rows remain exact raw model IDs and are not advertised as
+new Aliases; CN mappings keep the upstream ID's exact spelling. A Zen Free row
+gains its suffix-stripped Alias only when that Alias is already Go-authorized;
+the original `-free` ID remains an exact raw pin,
 as described under
 [Zen Free models](routing.md#zen-free-models).
 
@@ -91,12 +97,13 @@ If every model/protocol cell for a Provider is off, that Provider contributes
 no route. If an Alias has no enabled mapping from any Provider, it is removed
 from downstream `GET /v1/models` supply.
 
-Each row has a **Test** button. It probes every protocol for that model without
-asking for an account. For each protocol the provider automatically tries its
-eligible accounts in saved routing order and stops at the first success. A
-Popconfirm warns that these real minimal requests may consume quota. Custom
-endpoint scopes do not show the Test button because Custom account-level
-protocol probing has no V3 counterpart. Models must belong to the current
+OpenCode Go and Zen Free rows have a **Test** button. It probes every protocol
+for that model without asking for an account. For each protocol the provider
+automatically tries its eligible accounts in saved routing order and stops at
+the first success. A Popconfirm warns that these real minimal requests may
+consume quota. Command Code GOAT, MiniMax CN, Kimi Code CN, and Custom endpoint
+scopes do not show the Test button because their adapters do not expose this V3
+protocol-probe operation. Models must belong to the current
 provider catalog; all three requested protocol endpoints are then tested,
 including for newly fetched models not yet in the static table. Each protocol
 result is shown above the matrix with its success, failure, or skipped state,

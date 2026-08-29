@@ -124,6 +124,21 @@
           />
         </n-form-item>
         <div class="downstream-grid">
+          <n-form-item :label="t('Gateway 端口')">
+            <div class="gateway-port-field">
+              <n-input-number
+                v-model:value="config.gateway_port"
+                :min="1"
+                :max="65535"
+                :precision="0"
+                :disabled="!loaded || saving || config.gateway_port_from_env"
+                :aria-label="t('Gateway 端口')"
+              />
+              <p v-if="config.gateway_port_from_env">
+                {{ t("由环境变量 OCG_GATEWAY_PORT 管理；修改环境变量并重启后生效。") }}
+              </p>
+            </div>
+          </n-form-item>
           <n-form-item
             :label="t('下游访问根地址（可选）')"
             :show-feedback="true"
@@ -537,6 +552,7 @@ let pendingSettingsMerge: { current: AppConfig; saved: AppConfig } | null = null
 const config = ref<AppConfig>({
   revision: 0,
   gateway_port: 9042,
+  gateway_port_from_env: false,
   upstream_base_url: "https://opencode.ai/zen/go",
   proxy_mode: "auto",
   proxy_url: "",
@@ -837,6 +853,7 @@ async function reloadSettingsAfterConflict(
 
 async function saveSettings() {
   if (!loaded.value) return;
+  if (!validateGatewayPort()) return;
   if (!normalizeClientRootInput()) return;
   if (!normalizeInviteUrlInput()) return;
   if (!normalizeProxyInput()) return;
@@ -862,6 +879,14 @@ async function saveSettings() {
   } finally {
     saving.value = false;
   }
+}
+
+function validateGatewayPort(): boolean {
+  if (config.value.gateway_port_from_env) return true;
+  const port = config.value.gateway_port;
+  if (Number.isInteger(port) && port >= 1 && port <= 65535) return true;
+  message.error(t("Gateway 端口必须为 1–65535 的整数"));
+  return false;
 }
 
 function normalizeProxyInput(): boolean {
@@ -1337,10 +1362,12 @@ onUnmounted(() => {
   margin-right: 6px;
   vertical-align: -0.15em;
 }
-.client-root-field {
+.client-root-field,
+.gateway-port-field {
   width: 100%;
 }
-.client-root-field > p {
+.client-root-field > p,
+.gateway-port-field > p {
   margin: 6px 0 0;
   color: var(--ocg-subtle);
   font-size: var(--ocg-font-xs);
