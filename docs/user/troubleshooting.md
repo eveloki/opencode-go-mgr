@@ -47,12 +47,13 @@ get billed for a bad guess.
   enabled, ready, and has a non-empty Key, then check that the model's supported
   protocol is enabled in the **Providers** matrix. Public `/models` refresh does
   not validate the Key; an invalid Key surfaces as inference 401/403.
-- **Saving Custom API does not start routing.** The card is created disabled
-  `pending`, but you can enable it immediately; an unverified badge is shown
-  while verification is `pending`. Verify sends one minimal request in the
-  selected protocol to the resolved inference Endpoint and expects a `2xx` JSON response.
-  Changing the API URL, key, declared models, or protocol re-pends verification
-  but leaves the card enabled.
+- **A saved Custom API still does not route.** Valid new accounts default to
+  enabled, so check that the account is ready, its Key is non-empty, and the
+  requested model is declared. Verification is optional and its `pending` badge
+  does not block routing. Verify sends one minimal request in the selected
+  protocol to the resolved inference Endpoint and expects a `2xx` JSON response.
+  Changing the API URL, Key, declared models, or protocol re-pends verification
+  while preserving the card's current enabled state.
 - **Gemini requests fail with `400` over `safetySettings`.** The gateway
   cannot map Google's safety thresholds to a Chat/Messages upstream, so it
   rejects non-empty arrays. Remove the field and retry; do not assume the

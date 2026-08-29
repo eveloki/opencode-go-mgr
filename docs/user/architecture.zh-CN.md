@@ -8,7 +8,7 @@
 
 - [同一节点、同一端口](#同一节点同一端口)
 - [一次客户端请求](#一次客户端请求)
-- [Plan：已上线与草稿](#plan已上线与草稿)
+- [Plan](#plan)
 - [面板、Key 与账号卡](#面板key-与账号卡)
 - [两份本地模型列表](#两份本地模型列表)
 - [协议转换](#协议转换)
@@ -82,20 +82,27 @@ Messages 与 Gemini generate / stream 上均为 `400`。重叠的原始 ID 返�
 鉴权、别名、选择与熔断：[Gateway 行为](gateway.zh-CN.md)、
 [路由](routing.zh-CN.md)。
 
-## Plan：已上线与草稿
+## Plan
 
-每张账号卡对应一个 Plan（`provider_id` + `offering_id`）。已上线 Plan 承载生产路由；草稿 Plan 只能作为禁用 `pending` 卡存在——验证返回 `501`，无法启用。
+每张账号卡对应一个 Plan（`provider_id` + `offering_id`）。六个家族均已上线、可路由。
 
 ```text
-  已上线（可路由）                          草稿（不可路由）
-  ----------------                        ------------------
-  OpenCode Go                             Command Code GOAT
-    官方 Key，/zen/go                     验证 501
+  已上线（可路由）
+  ----------------
+  OpenCode Go
+    官方 Key，/zen/go
   Zen Free
     无上游 Key
     在供应商页刷新目录
+  Command Code GOAT
+    官方 Provider API；在供应商页刷新目录
+    GOAT 预置行默认开启；额外发现行默认关闭
+  MiniMax CN Token Plan
+    固定官方 Chat 路由；需认证的目录刷新
+  Kimi Code CN
+    固定官方 Chat 路由；需认证的目录刷新
   Custom API
-    一个受信管理员完整 HTTP/HTTPS Endpoint
+    一个受信管理员 HTTP/HTTPS API URL：根地址、/v1 基址或兼容的完整 Endpoint
     一个上游协议；鉴权自动推导
 
 

@@ -833,7 +833,7 @@ fn validate_payload(
             name: account.name.clone(),
             username: account.username.clone().and_then(trim_optional),
             key,
-            enabled: requires_custom.then_some(false).unwrap_or(enabled),
+            enabled: if requires_custom { false } else { enabled },
             account_type,
             setup_step,
             purchase_date,

@@ -644,14 +644,13 @@ pub fn resolve_with_extended_catalogs(
         }
         other => other,
     };
-    let goat_resolved = match custom_resolved {
+    match custom_resolved {
         Ok(resolved) => overlay_goat_catalog(resolved, goat_model_ids, &registry),
         Err(ResolveError::Unknown { requested }) => {
             overlay_unknown_goat(requested, goat_model_ids, &registry)
         }
         other => other,
-    };
-    goat_resolved
+    }
 }
 
 fn overlay_go_catalog(
@@ -1127,9 +1126,11 @@ pub fn canonical_alias_for_provider_model(
     }
     if provider_id == COMMAND_CODE_PROVIDER_ID {
         let candidate = command_alias_for_catalog(upstream_model, &registry);
-        return is_code_owned_alias(&registry, &candidate)
-            .then_some(candidate)
-            .unwrap_or_default();
+        return if is_code_owned_alias(&registry, &candidate) {
+            candidate
+        } else {
+            String::new()
+        };
     }
     if provider_id == MINIMAX_PROVIDER_ID {
         return minimax_catalog_alias(upstream_model)

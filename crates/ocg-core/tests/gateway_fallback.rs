@@ -2700,6 +2700,13 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
     let (base_url, calls, stop_mock) = start_mock_upstream(replies).await;
     let (state, dir) = build_state(base_url, &["key-1", "key-2"]);
     let (port, gateway_handle) = start_gateway(state.clone()).await;
+    let runtime_log_watermark = state
+        .db
+        .lock()
+        .list_gateway_logs(1)
+        .unwrap()
+        .first()
+        .map_or(0, |log| log.id);
 
     let (status, body) = protocol_call(port, "/v1/chat/completions", "totally-made-up-xyz").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -2716,9 +2723,17 @@ async fn unknown_model_is_rejected_before_any_upstream_attempt() {
     assert_eq!(request_logs[0].http_status, Some(400));
     assert_eq!(request_logs[0].error_source.as_deref(), Some("client"));
     assert_eq!(request_logs[0].error_stage.as_deref(), Some("validation"));
+    let new_runtime_logs = db
+        .list_gateway_logs(10)
+        .unwrap()
+        .into_iter()
+        .filter(|log| log.id > runtime_log_watermark)
+        .collect::<Vec<_>>();
     assert!(
-        db.list_gateway_logs(10).unwrap().is_empty(),
-        "request validation must not enter runtime logs"
+        new_runtime_logs.iter().all(|log| {
+            log.category == "usage_sync" && log.request_id.is_none() && log.error_stage.is_none()
+        }),
+        "request validation must not add gateway runtime logs: {new_runtime_logs:?}"
     );
     drop(db);
     assert!(

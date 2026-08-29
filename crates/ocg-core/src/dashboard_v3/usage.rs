@@ -247,7 +247,7 @@ pub(super) fn provider_usage_locked(
             None,
         ));
     }
-    let free_cooldown_until = if descriptor.error_cooldown.egress_ip_shared_free_cooldown {
+    let free_cooldown_until = if descriptor.usage.egress_ip_shared_cooldown_window {
         db.free_channel_cooldown_until()
             .map_err(V3ApiError::internal)?
     } else {
@@ -260,7 +260,7 @@ pub(super) fn provider_usage_locked(
                 .map_err(V3ApiError::internal)?,
             Some(pricing.revision),
         )
-    } else if descriptor.error_cooldown.egress_ip_shared_free_cooldown {
+    } else if descriptor.usage.egress_ip_shared_cooldown_window {
         (
             vec![ModelQuotaWindow {
                 account_id: account.id.clone(),

@@ -470,7 +470,7 @@ async fn create_custom_account(
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     let account = mutation_account(&created);
-    assert!(!account.enabled);
+    assert!(account.enabled);
     assert_eq!(
         account.verification_status,
         AccountVerificationStatus::Pending
@@ -1049,7 +1049,10 @@ async fn custom_verify_success_persists_verified_without_enabling_and_bumps_once
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let account = mutation_account(&body);
-    assert!(!account.enabled);
+    assert!(
+        account.enabled,
+        "verify must not change default-enabled Custom cards"
+    );
     assert_eq!(
         account.verification_status,
         AccountVerificationStatus::Verified
@@ -1212,7 +1215,10 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_ne!(status, StatusCode::UNAUTHORIZED);
     let account = mutation_account(&body);
-    assert!(!account.enabled);
+    assert!(
+        account.enabled,
+        "failed verify must not disable a default-enabled Custom card"
+    );
     assert_eq!(
         account.verification_status,
         AccountVerificationStatus::Failed
@@ -1311,7 +1317,10 @@ async fn custom_verify_failure_401_429_redirect_and_oversize_persist_failed_with
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let account = mutation_account(&body);
-    assert!(!account.enabled);
+    assert!(
+        account.enabled,
+        "failed verify must not disable a default-enabled Custom card"
+    );
     assert_eq!(
         account.verification_status,
         AccountVerificationStatus::Failed
@@ -1374,7 +1383,7 @@ async fn stale_after_network_does_not_commit_or_bump() {
         .account_verification_state(&id)
         .unwrap()
         .unwrap();
-    assert!(!stored.enabled);
+    assert!(stored.enabled);
     assert_eq!(
         verification.status,
         ocg_core::provider::ConnectionVerificationStatus::Pending
@@ -1492,7 +1501,7 @@ async fn v2_account_verify_coexists_and_keeps_its_shape() {
         mutation_account(&v3_custom).verification_status,
         ocg_core::dashboard_v3::AccountVerificationStatus::Verified
     );
-    assert!(!mutation_account(&v3_custom).enabled);
+    assert!(mutation_account(&v3_custom).enabled);
     harness.stop();
 }
 

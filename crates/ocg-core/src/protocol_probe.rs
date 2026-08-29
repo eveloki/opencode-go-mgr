@@ -198,8 +198,7 @@ async fn execute_protocol_request(
     if ctx.adapter == ProviderAdapterKind::ConfigurableHttp && plan.custom_route.is_none() {
         return Err((
             None,
-            "Custom API accounts require a persisted base URL, protocol set, and auth scheme"
-                .to_string(),
+            "Custom API accounts require a persisted API URL and upstream protocol".to_string(),
         ));
     }
     let route = if account_test {

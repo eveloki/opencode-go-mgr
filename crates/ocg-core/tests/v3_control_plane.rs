@@ -164,7 +164,7 @@ async fn dashboard_cas_is_not_shared_with_cli_or_tauri_shaped_db_writes() {
 }
 
 #[test]
-fn tauri_and_cli_shaped_creates_differ_from_dashboard_enablement() {
+fn direct_db_creates_respect_catalog_enablement_without_dashboard_cas() {
     let state = state("mutation-shapes");
     let dir = state.data_dir();
 
@@ -264,7 +264,7 @@ fn tauri_and_cli_shaped_creates_differ_from_dashboard_enablement() {
 }
 
 #[tokio::test]
-async fn dashboard_custom_create_stays_disabled_pending_unlike_tauri_shaped_db_create() {
+async fn dashboard_custom_create_defaults_enabled_while_verification_is_pending() {
     let state = state("dashboard-custom");
     let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
@@ -296,7 +296,7 @@ async fn dashboard_custom_create_stays_disabled_pending_unlike_tauri_shaped_db_c
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(body["account"]["enabled"], false, "{body}");
+    assert_eq!(body["account"]["enabled"], true, "{body}");
     assert_eq!(
         body["account"]["verificationStatus"].as_str(),
         Some("pending")

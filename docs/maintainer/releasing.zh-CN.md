@@ -18,7 +18,7 @@
 - [ ] 可复用质量门中的三个 job 全绿（含 `contract:v3:check`）；tag-only 签名
       `release:check` 通过；选中的每个 `pnpm run build` 与平台冒烟全绿。
 - [ ] `git diff --check` 干净；相对上一个 tag 的 diff 只含预期范围；四份代码
-      版本清单、`compose.example.yaml` 与 Cargo.lock 四个本地包条目一致。
+      版本清单、`compose.example.yaml` 与 `Cargo.lock` 中全部 workspace 包条目一致。
 - [ ] 每个 runner 的 `release/SHA256SUMS` 与目录内全部 payload 一致；
       `verify-release` 接受与组装产物逐名一致的附件集合、升级 manifest、四份
       签名、checksum 和 GitHub 服务端 digest。
@@ -56,10 +56,11 @@
       预设行默认开启，额外发现行默认关闭，供应商全关后会从 `/v1/models` 撤下。
       这些本地列表检查不需要真实供应商 Key；发版冒烟不得执行可能计费的推理。
 - [ ] 有界假上游 Custom API 冒烟（不需要真实供应商 Key）：拒绝 URL 内嵌凭据；
-      `2xx` JSON object 验证成功；账号仍保持禁用；必须显式启用；声明的模型/协议
-      可转发；拒绝重定向；不转发 dashboard/client 鉴权，只发送由协议自动决定的 Bearer 或
-      `x-api-key`；成功日志为 unpriced/`cost_state=unknown` 且不扣额度；编辑 URL、
-      Key 或能力会使验证失效并禁用账号。确认 Direct/Manual/Auto 继承进程级代理。
+      合法新账号默认启用且验证保持可选；`2xx` JSON object 会把验证标记为成功，
+      但不会改变启用状态；声明的模型/协议可转发；拒绝重定向；不转发
+      dashboard/client 鉴权，只发送由协议自动决定的 Bearer 或 `x-api-key`；成功日志为
+      unpriced/`cost_state=unknown` 且不扣额度；编辑 URL、Key、能力或协议会使验证回到
+      pending，同时保持启用状态。确认 Direct/Manual/Auto 继承进程级代理。
 - [ ] 在 Windows 验证 Edge/Chrome 优先级，在 macOS/Linux 验证浏览器发现；用两个
       账号确认 Profile 隔离和重启后 Cookie 保留。确认重置会退出控制台但保留完成
       账号 Key，删除会同时清理新旧 Profile，旧 WebView Profile 不会被导入。

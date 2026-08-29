@@ -171,9 +171,37 @@ async fn providers_catalog_is_the_only_plan_source() {
             }
         }
         let published_list = alias_name_list(entry);
+        let contracts = harness.state.provider_contracts();
+        let zen_models = contracts
+            .providers
+            .get(ocg_core::provider::OPENCODE_ZEN_FREE_PROVIDER_ID)
+            .map(|scope| scope.catalog.models.as_slice())
+            .unwrap_or_default();
+        let goat_models = contracts
+            .providers
+            .get(COMMAND_CODE_PROVIDER_ID)
+            .map(|scope| scope.catalog.models.as_slice())
+            .unwrap_or_default();
+        let minimax_models = contracts
+            .providers
+            .get(ocg_core::provider::MINIMAX_PROVIDER_ID)
+            .map(|scope| scope.catalog.models.as_slice())
+            .unwrap_or_default();
+        let kimi_models = contracts
+            .providers
+            .get(ocg_core::provider::KIMI_PROVIDER_ID)
+            .map(|scope| scope.catalog.models.as_slice())
+            .unwrap_or_default();
         assert_eq!(
             published_list,
-            ocg_core::alias::routeable_aliases_for(provider_id, offering_id),
+            ocg_core::alias::routeable_aliases_for_with_extended_catalogs(
+                provider_id,
+                offering_id,
+                zen_models,
+                goat_models,
+                minimax_models,
+                kimi_models,
+            ),
             "{provider_id}/{offering_id} catalog aliases must match the routeable Alias registry"
         );
         assert!(
@@ -640,8 +668,8 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        body["enabled"], false,
-        "Custom must save as a disabled draft: {body}"
+        body["enabled"], true,
+        "Custom creates enabled while verification stays pending: {body}"
     );
     assert_eq!(
         body["verification_status"].as_str(),
@@ -650,7 +678,7 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
     );
     assert_eq!(
         body["plan_routable"], true,
-        "Custom is catalog-routable but create stays a disabled pending draft: {body}"
+        "Custom is catalog-routable: {body}"
     );
     assert_eq!(
         body["custom_config"]["endpoint_url"]

@@ -16,8 +16,8 @@
 //! `GET /settings/check-update` and `GET /settings/update-status` are reads
 //! that capture revision/generation and never bump them.
 //! `POST /settings/install-update` requires CAS under `settings_update`, starts
-//! atomically, does not bump, and holds no network/DB lock. Custom protocol
-//! probes stay account-owned on V2.
+//! atomically, does not bump, and holds no network/DB lock. Account-page
+//! operational tests use V3 `POST /accounts/{id}/model-tests`.
 
 mod account_model_test;
 mod account_transfer;

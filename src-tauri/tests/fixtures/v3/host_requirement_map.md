@@ -19,11 +19,11 @@ The same matrix is copied at `crates/ocg-cli/tests/fixtures/v3/host_requirement_
 | Requirement | Status | Tests |
 | --- | --- | --- |
 | Surface is `serve` / `key` / `status` only (no settings, sub keys, Custom create flags) | Existing | Behavioral: `cli_command_surface_is_serve_key_status_only` |
-| `key add` persists enabled ready OpenCode Go through `account_control::create_go_api_key` and bumps that process's `settings_revision` | Implemented | Behavioral: `key_lifecycle_and_status_cover_cli_account_commands`, `go_create_and_toggle_bump_revision_and_reject_pending_custom`. Source-text: `cli_production_source_has_no_cas_custom_create_or_usage_loop_control` |
+| `key add` persists enabled ready OpenCode Go through `account_control::create_go_api_key` and bumps that process's `settings_revision` | Implemented | Behavioral: `key_lifecycle_and_status_cover_cli_account_commands`, `go_create_and_toggle_bump_revision_and_allow_pending_custom`. Source-text: `cli_production_source_has_no_cas_custom_create_or_usage_loop_control` |
 | `key list` / `status` are credential-oriented and exclude Zen Free | Existing | Behavioral: `key_lifecycle_and_status_cover_cli_account_commands`, `cli_key_operations_reject_the_provider_owned_zen_singleton` |
 | `key enable/disable/remove` reject Zen Free without mutation | Existing | Behavioral: `cli_key_operations_reject_the_provider_owned_zen_singleton` |
 | Unroutable catalog plans fail closed on enable (no `updated_at` change) | Existing | Behavioral: `cli_enable_rejects_unroutable_catalog_plans_without_mutation` |
-| CLI enablement consults Custom verification; pending Custom cannot be enabled | Implemented | Behavioral: `cli_enable_rejects_pending_custom_until_verified` |
+| CLI enablement leaves Custom verification optional; pending Custom may be enabled | Implemented | Behavioral: `cli_enable_allows_pending_custom_without_verification` |
 | In-process account mutations bump `settings_revision` via the shared control-plane service (no `expectedRevision` on the CLI argv) | Implemented | Behavioral: `cli_key_mutations_share_control_plane_revision_in_process`. Out-of-process `key_command` against a live `start_serve` CoreState still cannot bump that other process's in-memory token |
 | Legacy direct `Database::update_account` writes do not bump revision | Existing | Behavioral: `cli_update_shaped_writes_skip_revision_unlike_dashboard`; current CLI mutations use `account_control` |
 | `serve --port` persists via `set_config` (this **does** bump that process's revision); no port skips `set_config` | Existing + source-text | Behavioral: `start_serve_binds_port_persists_override_and_stops_cleanly`. Source-text: `if let Some(port)` + `set_config` |
@@ -51,8 +51,8 @@ The same matrix is copied at `crates/ocg-cli/tests/fixtures/v3/host_requirement_
 | Behavior | Dashboard HTTP | CLI | Tauri host |
 | --- | --- | --- | --- |
 | Account writes bump `settings_revision` | Yes (CAS) | Yes, via `account_control` (no argv CAS) | N/A (HTTP only) |
-| Custom create | Disabled + pending + contract | Cannot create (Go-only `key add`) | N/A (HTTP only) |
-| Enable Custom while pending | `409` verify-first | Same verify-first conflict | N/A (HTTP only) |
+| Custom create | Enabled + pending + contract | Cannot create (Go-only `key add`) | N/A (HTTP only) |
+| Enable Custom while pending | Allowed; verification remains pending | Allowed; verification remains pending | N/A (HTTP only) |
 | Settings port change | Rebind through GatewayLifecycle | `serve --port` persists then binds | HTTP settings rebind; host start/stop listener-only |
 | Primary and sub Keys | V3 lifecycle API; schema-v27 `access_keys` rows | None | None |
 | Account ping | Upstream | Upstream (`key ping`) | N/A |

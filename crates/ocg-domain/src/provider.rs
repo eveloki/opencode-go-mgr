@@ -704,7 +704,6 @@ pub struct ProviderCapabilities {
     pub verification: VerificationDescriptor,
     pub usage: UsageDescriptor,
     pub pricing: PricingDescriptor,
-    pub error_cooldown: ErrorCooldownDescriptor,
     pub card_actions: CardActionsDescriptor,
 }
 
@@ -721,7 +720,6 @@ pub struct ProviderDescriptor {
     pub verification: VerificationDescriptor,
     pub usage: UsageDescriptor,
     pub pricing: PricingDescriptor,
-    pub error_cooldown: ErrorCooldownDescriptor,
     pub card_actions: CardActionsDescriptor,
 }
 
@@ -745,7 +743,6 @@ impl ProviderDescriptor {
             verification: capabilities.verification,
             usage: capabilities.usage,
             pricing: capabilities.pricing,
-            error_cooldown: capabilities.error_cooldown,
             card_actions: capabilities.card_actions,
         }
     }
@@ -758,7 +755,6 @@ impl ProviderDescriptor {
             verification: self.verification,
             usage: self.usage,
             pricing: self.pricing,
-            error_cooldown: self.error_cooldown,
             card_actions: self.card_actions,
         }
     }
@@ -885,6 +881,9 @@ pub struct UsageDescriptor {
     pub affects_inference_eligibility: bool,
     pub publishes_capability: bool,
     pub manual_calibration: bool,
+    /// When true, dashboard usage projects the process-wide Zen Free
+    /// egress-IP cooldown window. Only Zen Free sets this.
+    pub egress_ip_shared_cooldown_window: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -893,21 +892,10 @@ pub struct PricingDescriptor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ErrorCooldownDescriptor {
-    pub parse_opencode_go_windows_on_429: bool,
-    pub schedule_official_go_usage_after_429: bool,
-    pub generic_provider_key_cooldown: bool,
-    pub egress_ip_shared_free_cooldown: bool,
-    pub inference_401_passthrough: bool,
-    pub success_cost_state_free: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardVerifyAction {
     NotApplicable,
     Optional,
     UnavailableNotImplemented,
-    AvailableThenExplicitEnable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -968,18 +956,13 @@ pub trait PricingAdapter: sealed::Sealed {
     fn pricing(plan: BuiltinPlan) -> PricingDescriptor;
 }
 
-/// Static error/cooldown policy contract.
-pub trait ErrorPolicyAdapter: sealed::Sealed {
-    fn error_policy(plan: BuiltinPlan) -> ErrorCooldownDescriptor;
-}
-
 /// Static account-card capability contract.
 pub trait CardCapabilities: sealed::Sealed {
     fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor;
 }
 
 impl ProviderCapabilities {
-    /// Compose the eight sealed contracts from one concrete adapter. This is
+    /// Compose the seven sealed contracts from one concrete adapter. This is
     /// the only construction helper; callers must not re-match adapter kind
     /// per capability.
     pub fn compose<A>(_adapter: A, plan: BuiltinPlan) -> Self
@@ -990,7 +973,6 @@ impl ProviderCapabilities {
             + VerificationAdapter
             + UsageAdapter
             + PricingAdapter
-            + ErrorPolicyAdapter
             + CardCapabilities,
     {
         Self {
@@ -1000,7 +982,6 @@ impl ProviderCapabilities {
             verification: A::verification(plan),
             usage: A::usage(plan),
             pricing: A::pricing(plan),
-            error_cooldown: A::error_policy(plan),
             card_actions: A::card_capabilities(plan),
         }
     }
@@ -1008,7 +989,7 @@ impl ProviderCapabilities {
 
 impl ProviderAdapterKind {
     /// Single registry-owned construction point. Adding a concrete adapter
-    /// means implementing the eight contracts and one arm here.
+    /// means implementing the seven contracts and one arm here.
     pub fn compose_capabilities(self, plan: BuiltinPlan) -> ProviderCapabilities {
         match self {
             Self::OpenCodeGo => ProviderCapabilities::compose(OpenCodeGoAdapter, plan),
@@ -1093,6 +1074,7 @@ impl UsageAdapter for OpenCodeGoAdapter {
             affects_inference_eligibility: false,
             publishes_capability: true,
             manual_calibration: plan.manual_usage_calibration,
+            egress_ip_shared_cooldown_window: false,
         }
     }
 }
@@ -1100,19 +1082,6 @@ impl UsageAdapter for OpenCodeGoAdapter {
 impl PricingAdapter for OpenCodeGoAdapter {
     fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
         catalog_pricing(plan)
-    }
-}
-
-impl ErrorPolicyAdapter for OpenCodeGoAdapter {
-    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
-        ErrorCooldownDescriptor {
-            parse_opencode_go_windows_on_429: true,
-            schedule_official_go_usage_after_429: true,
-            generic_provider_key_cooldown: false,
-            egress_ip_shared_free_cooldown: false,
-            inference_401_passthrough: false,
-            success_cost_state_free: false,
-        }
     }
 }
 
@@ -1200,6 +1169,7 @@ impl UsageAdapter for ZenFreeAdapter {
             affects_inference_eligibility: false,
             publishes_capability: false,
             manual_calibration: plan.manual_usage_calibration,
+            egress_ip_shared_cooldown_window: true,
         }
     }
 }
@@ -1207,19 +1177,6 @@ impl UsageAdapter for ZenFreeAdapter {
 impl PricingAdapter for ZenFreeAdapter {
     fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
         catalog_pricing(plan)
-    }
-}
-
-impl ErrorPolicyAdapter for ZenFreeAdapter {
-    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
-        ErrorCooldownDescriptor {
-            parse_opencode_go_windows_on_429: false,
-            schedule_official_go_usage_after_429: false,
-            generic_provider_key_cooldown: false,
-            egress_ip_shared_free_cooldown: true,
-            inference_401_passthrough: true,
-            success_cost_state_free: true,
-        }
     }
 }
 
@@ -1307,6 +1264,7 @@ impl UsageAdapter for CommandCodeGoatAdapter {
             affects_inference_eligibility: false,
             publishes_capability: true,
             manual_calibration: plan.manual_usage_calibration,
+            egress_ip_shared_cooldown_window: false,
         }
     }
 }
@@ -1314,19 +1272,6 @@ impl UsageAdapter for CommandCodeGoatAdapter {
 impl PricingAdapter for CommandCodeGoatAdapter {
     fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
         catalog_pricing(plan)
-    }
-}
-
-impl ErrorPolicyAdapter for CommandCodeGoatAdapter {
-    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
-        ErrorCooldownDescriptor {
-            parse_opencode_go_windows_on_429: false,
-            schedule_official_go_usage_after_429: false,
-            generic_provider_key_cooldown: true,
-            egress_ip_shared_free_cooldown: false,
-            inference_401_passthrough: false,
-            success_cost_state_free: false,
-        }
     }
 }
 
@@ -1414,6 +1359,7 @@ impl UsageAdapter for MiniMaxCnAdapter {
             affects_inference_eligibility: false,
             publishes_capability: true,
             manual_calibration: false,
+            egress_ip_shared_cooldown_window: false,
         }
     }
 }
@@ -1421,19 +1367,6 @@ impl UsageAdapter for MiniMaxCnAdapter {
 impl PricingAdapter for MiniMaxCnAdapter {
     fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
         catalog_pricing(plan)
-    }
-}
-
-impl ErrorPolicyAdapter for MiniMaxCnAdapter {
-    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
-        ErrorCooldownDescriptor {
-            parse_opencode_go_windows_on_429: false,
-            schedule_official_go_usage_after_429: false,
-            generic_provider_key_cooldown: true,
-            egress_ip_shared_free_cooldown: false,
-            inference_401_passthrough: false,
-            success_cost_state_free: false,
-        }
     }
 }
 
@@ -1521,6 +1454,7 @@ impl UsageAdapter for KimiCnAdapter {
             affects_inference_eligibility: false,
             publishes_capability: true,
             manual_calibration: false,
+            egress_ip_shared_cooldown_window: false,
         }
     }
 }
@@ -1528,19 +1462,6 @@ impl UsageAdapter for KimiCnAdapter {
 impl PricingAdapter for KimiCnAdapter {
     fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
         catalog_pricing(plan)
-    }
-}
-
-impl ErrorPolicyAdapter for KimiCnAdapter {
-    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
-        ErrorCooldownDescriptor {
-            parse_opencode_go_windows_on_429: false,
-            schedule_official_go_usage_after_429: false,
-            generic_provider_key_cooldown: true,
-            egress_ip_shared_free_cooldown: false,
-            inference_401_passthrough: false,
-            success_cost_state_free: false,
-        }
     }
 }
 
@@ -1628,6 +1549,7 @@ impl UsageAdapter for ConfigurableHttpAdapter {
             affects_inference_eligibility: false,
             publishes_capability: false,
             manual_calibration: plan.manual_usage_calibration,
+            egress_ip_shared_cooldown_window: false,
         }
     }
 }
@@ -1635,19 +1557,6 @@ impl UsageAdapter for ConfigurableHttpAdapter {
 impl PricingAdapter for ConfigurableHttpAdapter {
     fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
         catalog_pricing(plan)
-    }
-}
-
-impl ErrorPolicyAdapter for ConfigurableHttpAdapter {
-    fn error_policy(_plan: BuiltinPlan) -> ErrorCooldownDescriptor {
-        ErrorCooldownDescriptor {
-            parse_opencode_go_windows_on_429: false,
-            schedule_official_go_usage_after_429: false,
-            generic_provider_key_cooldown: true,
-            egress_ip_shared_free_cooldown: false,
-            inference_401_passthrough: false,
-            success_cost_state_free: false,
-        }
     }
 }
 
@@ -1661,7 +1570,7 @@ impl CardCapabilities for ConfigurableHttpAdapter {
             discover_models: true,
             usage_refresh: false,
             manual_usage_calibration: plan.manual_usage_calibration,
-            connection_verify: CardVerifyAction::AvailableThenExplicitEnable,
+            connection_verify: CardVerifyAction::Optional,
             protocol_and_auth_immutable_after_create: false,
             protocol_probe: true,
             catalog_refresh: false,
@@ -2226,6 +2135,10 @@ mod tests {
                 kind.protocol_probe_supported()
             );
             assert!(!descriptor.verification.uses_get_models);
+            assert_eq!(
+                descriptor.usage.egress_ip_shared_cooldown_window,
+                kind == ProviderAdapterKind::ZenFree
+            );
             match kind {
                 ProviderAdapterKind::OpenCodeGo
                 | ProviderAdapterKind::ZenFree
@@ -2266,8 +2179,7 @@ mod tests {
         assert_eq!(OPENCODE_GO_USAGE_URL, "https://opencode.ai/zen/go/v1/usage");
         assert_eq!(go.usage.contract, UsageContractKind::Authoritative);
         assert!(go.usage.publishes_capability);
-        assert!(go.error_cooldown.parse_opencode_go_windows_on_429);
-        assert!(go.error_cooldown.schedule_official_go_usage_after_429);
+        assert!(!go.usage.egress_ip_shared_cooldown_window);
         assert_eq!(
             go.protocol_probe.matrix,
             ProtocolMatrixKind::OpenCodeModelProtocols
@@ -2301,9 +2213,7 @@ mod tests {
             StructuralProbeCeiling::ZenFreeConstructable
         );
         assert!(!zen.usage.experimental);
-        assert!(zen.error_cooldown.egress_ip_shared_free_cooldown);
-        assert!(zen.error_cooldown.inference_401_passthrough);
-        assert!(zen.error_cooldown.success_cost_state_free);
+        assert!(zen.usage.egress_ip_shared_cooldown_window);
         assert!(zen.card_actions.fetch_zen_models);
         assert!(zen.card_actions.protocol_probe);
         assert!(zen.card_actions.catalog_refresh);
@@ -2323,7 +2233,7 @@ mod tests {
         assert!(goat.usage.publishes_capability);
         assert_eq!(goat.usage.contract, UsageContractKind::LocalState);
         assert!(goat.usage.manual_calibration);
-        assert!(goat.error_cooldown.generic_provider_key_cooldown);
+        assert!(!goat.usage.egress_ip_shared_cooldown_window);
         assert_eq!(
             goat.protocol_probe.matrix,
             ProtocolMatrixKind::CommandCodeNative
@@ -2359,7 +2269,7 @@ mod tests {
         assert!(!custom.usage.publishes_capability);
         assert_eq!(
             custom.card_actions.connection_verify,
-            CardVerifyAction::AvailableThenExplicitEnable
+            CardVerifyAction::Optional
         );
         assert!(!custom.card_actions.protocol_and_auth_immutable_after_create);
         assert!(!custom.card_actions.enable_requires_verification);
@@ -2370,7 +2280,7 @@ mod tests {
             custom.protocol_probe.structural_ceiling,
             StructuralProbeCeiling::AccountDeclared
         );
-        assert!(custom.error_cooldown.generic_provider_key_cooldown);
+        assert!(!custom.usage.egress_ip_shared_cooldown_window);
 
         assert_ne!(go.kind, ProviderAdapterKind::ConfigurableHttp);
         assert_ne!(zen.kind, ProviderAdapterKind::ConfigurableHttp);
@@ -2391,7 +2301,6 @@ mod tests {
                 + VerificationAdapter
                 + UsageAdapter
                 + PricingAdapter
-                + ErrorPolicyAdapter
                 + CardCapabilities,
         {
             ProviderCapabilities::compose(adapter, plan)
@@ -2422,7 +2331,6 @@ mod tests {
             assert_eq!(descriptor.verification, from_adapter.verification);
             assert_eq!(descriptor.usage, from_adapter.usage);
             assert_eq!(descriptor.pricing, from_adapter.pricing);
-            assert_eq!(descriptor.error_cooldown, from_adapter.error_cooldown);
             assert_eq!(descriptor.card_actions, from_adapter.card_actions);
         }
 
@@ -2431,7 +2339,7 @@ mod tests {
             OpenCodeGoAdapter::usage(go_plan).contract,
             UsageContractKind::Authoritative
         );
-        assert!(OpenCodeGoAdapter::error_policy(go_plan).parse_opencode_go_windows_on_429);
+        assert!(!OpenCodeGoAdapter::usage(go_plan).egress_ip_shared_cooldown_window);
         let custom_plan = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
         assert!(ConfigurableHttpAdapter::verification(custom_plan).probe_first_declared_model);
         assert!(ConfigurableHttpAdapter::model_catalog(custom_plan).overlays_declared_ids);
@@ -2442,6 +2350,7 @@ mod tests {
         let zen_plan =
             builtin_plan(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID).unwrap();
         assert!(ZenFreeAdapter::protocol_probe(zen_plan).unknown_zen_free_defaults_to_chat);
+        assert!(ZenFreeAdapter::usage(zen_plan).egress_ip_shared_cooldown_window);
         assert!(ZenFreeAdapter::card_capabilities(zen_plan).fetch_zen_models);
     }
 

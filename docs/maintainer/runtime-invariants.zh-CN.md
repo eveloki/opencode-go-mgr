@@ -11,6 +11,16 @@
 - Gemini 客户端使用 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`（`/v1/models/...` 也接受），可以用 `x-goog-api-key` 认证；Gemini 只是一种客户端格式，Gateway 总是把请求转换成目标模型的推荐上游协议。未知模型名在 Chat / Responses / Messages / Gemini 上返回 `400`；禁止探测协议。
 - 模型协议能力硬编码在 `ocg_domain::protocol` 的 `MODEL_PROTOCOLS` 中（`ocg-core` 的 `kernel/protocol.rs` 与 `gateway/protocol.rs` 是 facade/host 转换）：`preferred` 与官方 Go 文档端点表一致，`supported` 来自测试账号探测结论。当客户端协议 ∈ supported 时直接透传，否则路由到 preferred；请求路径不得探测协议（避免重复计费）。`grok-4.5` 的 `supported` 只有 Responses（Chat 入口必须转换）。`gpt-5.6-luna` 的 preferred 仍是 Responses，但 Chat 现在可以透传。`MODEL_PROTOCOLS` 目前仍只服务于 OpenCode Go；Zen Free 刷新得到的新 `-free` ID 若表中未知，默认物化为 Chat，且不会使用计费请求探测协议。整篇 JSON 转换内核在 `ocg-gateway` 中。
 
+一次逻辑客户端请求在入口捕获 `RequestSnapshots`（`crates/ocg-core/src/gateway/executor.rs`）。fallback 迭代重读实时账号状态，不会重新捕获冻结行。没有额外的 snapshot 服务或 trait。
+
+| 入口冻结 | fallback 每轮重读 |
+| --- | --- |
+| `AppConfig` | accounts |
+| 定价快照 | 符合条件的 Custom runtime |
+| `ForwardRouteSet` | Zen Free cooldown |
+| provider contracts | 当前账号可用性 |
+| 已解析 Alias / raw identity | — |
+
 ## Dashboard V3 与 V2 墓碑
 
 - Dashboard V3 挂载在 `/dashboard/api/v3`。控制面变更需要 CAS（`expectedRevision`，以及 `processGeneration`；价格写入还需要 `expectedPricingRevision`）。`ConnectionInfo` 是唯一允许返回明文 Key 的 V3 响应 DTO；Key 变更响应不包含明文，客户端会重新 `GET /connection`。
@@ -49,6 +59,17 @@
 ## 别名
 
 - 客户端别名位于 `ocg_gateway::alias`（`ocg-core` 的 `alias.rs` 是兼容 facade）。内置 Alias 权威完全由代码持有：`ocg_domain::protocol::supported_model_ids()` 提供最早 OpenCode Go 命名空间，密封精确映射表提供 MiniMax CN、Kimi CN 与选定 GOAT 长名称 Alias，但不会借此新增 Go 路由。Command 会先去掉 Provider 命名空间并复用已有代码 Alias；`-paid` / `-free` 只有在短名已获授权时才去掉；`nvidia/nemotron-3-ultra-550b-a55b` 映射为 `nemotron-3-ultra`，`highspeed`、`vision-exp`、`contributor` 等语义变体不会按长度截断。保存的 MiniMax/Kimi 目录只激活其密封映射。未来未知行在代码明确分配 Alias 前只保留精确 raw pin。Alias 拼写可以大小写折叠；内置 raw ID 则严格区分大小写，包括 MiniMax 官方混合大小写 ID，以及含 `/`、`_` 或空格的 ID。Custom 声明 ID 保持原有大小写折叠 matcher。raw ID 若恰好只有一条注册表映射，则在检查可路由性前先固定到该 mapping；不可路由的 mapping 仍被识别，但无法产生生产路由。重叠的精确 raw ID（包括符合条件的 Custom 声明 ID 与另一套餐 mapping 冲突）返回 `ambiguous_model_id`，不会调用上游。Zen Free 的 `foo-free` 只有当 `foo` 已被 Go 表授权时才加入去后缀 Alias，原始 `foo-free` 始终是精确 raw pin；共享的已授权 Alias 按账号卡片持久化顺序在 Go/Zen/Command/MiniMax/Kimi 候选者中选择。符合条件的 Custom 声明 ID 叠加进解析与 `/v1/models`，但不得抢占已发布 Alias。`/v1/models` 只有在精确保存目录行仍存在且至少一个 mapping 有启用的 effective 协议时才发布该 Alias；供应商全关后不产生路由。转发日志区分 `requested_model`、`resolved_alias` 与 `upstream_model`；`native_cost_*` 为可选；不要臆造 `requested_alias` 字段。Claude Desktop 的三个角色别名仍在别名解析前被重写；`/claude-desktop/v1/models` 只发布这三个角色。
+
+| 判定 | 结果 |
+| --- | --- |
+| 代码持有的 kebab Alias | 解析为 Alias；仅在已保存目录行存在且至少一个 mapping 有启用的 effective 协议时发布 |
+| 唯一 raw ID | 在检查可路由性前固定到该 mapping；不可路由 mapping 仍被识别但不发布 |
+| 重叠的精确 raw ID | `400` `ambiguous_model_id`；不上游 |
+| Zen `foo-free` | 始终是精确 raw pin；仅当 `foo` 已被 Go 授权时才加入 Alias `foo` |
+| GOAT 长名 / 后缀 | 去掉 Provider 命名空间；仅在短名已获授权时剥 `-paid`/`-free`；`nvidia/nemotron-3-ultra-550b-a55b` → `nemotron-3-ultra` |
+| MiniMax / Kimi 密封映射 | 保存的目录只激活代码持有映射；未匹配行保持精确 raw pin |
+| 符合条件的 Custom 声明 ID | 叠加进解析与 `/v1/models`；不得抢占已发布 Alias |
+| `/v1/models` 发布门槛 | 精确保存目录行 + 至少一个启用的 effective 协议；全关 scope 不产生路由 |
 
 ## Zen Free
 

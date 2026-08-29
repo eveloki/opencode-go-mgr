@@ -42,7 +42,8 @@ desktop-specific steps need a real machine.
       selected `pnpm run build` and platform smoke is green.
 - [ ] `git diff --check` is clean, the previous-tag diff contains only the
       intended release scope, and all four code version manifests,
-      `compose.example.yaml`, plus the four local Cargo lock entries agree.
+      `compose.example.yaml`, plus all workspace package entries in `Cargo.lock`
+      agree.
 - [ ] Each runner's `release/SHA256SUMS` matches every payload in that
       directory; `verify-release` accepted the exact assembled asset set,
       updater manifest, four signatures, checksums, and GitHub server digests.
@@ -95,13 +96,15 @@ desktop-specific steps need a real machine.
       `/v1/models`. These local-list checks do not require live provider keys;
       do not perform billable inference as part of the release smoke.
 - [ ] Bounded fake-upstream Custom API smoke (no live provider key): URL
-      credentials are rejected; a `2xx` JSON object verifies; the card stays
-      disabled; explicit enable is required; declared model/protocol
+      credentials are rejected; a valid new account defaults enabled while
+      verification remains optional; a `2xx` JSON object marks verification
+      successful without changing enablement; declared model/protocol
       forwarding succeeds; redirects are denied; dashboard/client auth is not
       forwarded and only the protocol-derived Bearer or `x-api-key` is sent;
       successful logs are unpriced/`cost_state=unknown` with no quota debit;
-      editing the URL, key, or capabilities re-pends verification and disables
-      the account. Confirm Direct/Manual/Auto inherit the process-wide proxy.
+      editing the URL, key, capabilities, or protocol re-pends verification
+      while preserving enablement. Confirm Direct/Manual/Auto inherit the
+      process-wide proxy.
 - [ ] Verify Edge/Chrome priority on Windows and browser discovery on
       macOS/Linux. With two accounts, prove profile isolation and cookie
       persistence across restart. Reset must sign out of the console but keep a

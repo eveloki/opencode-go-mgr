@@ -64,8 +64,8 @@ graph guards in `kernel/mod.rs` require a DAG with **no multi-node SCC**.
 
 `ocg-gateway` production dependencies are exactly `anyhow`, `base64`,
 `ocg-domain`, `serde_json`. `ocg-domain` production dependencies are
-exactly `chrono` (serde+std only, no clock feature), `serde`,
-`serde_json`, `sha2`.
+exactly `chrono` (serde+std only, no clock feature), `serde`, and
+`serde_json`.
 
 ## ocg-core as composition / control plane
 
@@ -381,13 +381,15 @@ Custom, and unknown
 pairs are otherwise untouched.
 
 Custom API (`custom.rs` + `custom_http.rs`) accepts one syntactically valid
-complete HTTP/HTTPS inference Endpoint; URL-embedded credentials, query,
-fragment, and redirects are rejected. It does not forward dashboard/client
-auth. Chat/Responses derive Bearer auth and Messages derives `x-api-key`.
+HTTP/HTTPS API URL. A root gains `/v1` plus the selected protocol path, a base
+already ending in `/v1` does not duplicate it, and compatible complete
+Endpoints remain valid. URL-embedded credentials, query, fragment, and
+redirects are rejected. It does not forward dashboard/client auth.
+Chat/Responses derive Bearer auth and Messages derives `x-api-key`.
 The account declares one protocol, uniform across all models and used as the
 effective preferred protocol; other supported client formats convert to it.
 Config and the complete capability list update atomically. Verification is
-optional and sends one minimal request to the saved Endpoint. Standard
+optional and sends one minimal request to the resolved inference URL. Standard
 protocol suffixes alone may derive `/models`; other paths require manual model
 entry. Editing the Key, Endpoint, declared capabilities, or protocol resets
 `verification_status` to `pending` but keeps the account enabled. Custom

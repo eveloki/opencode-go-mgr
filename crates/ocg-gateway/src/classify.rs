@@ -4,10 +4,10 @@
 //! CAS, cooldown writes, usage-sync scheduling, and wire envelopes. This table
 //! exists so `forwarder` does not grow more `provider_id` policy branches.
 //!
-//! Runtime 401/429 rules here freeze Stage 0 `forwarder` behavior, including
-//! cases that differ from unused [`ocg_domain::provider::ErrorCooldownDescriptor`]
-//! flags (`inference_401_passthrough` is false for OpenCode Go; only OpenCode
-//! responses use the provider-specific usage-window parser).
+//! Runtime 401/429 rules here freeze Stage 0 `forwarder` behavior. OpenCode Go
+//! 401 is passthrough at this layer; only exact structured CreditsError rotates
+//! in the host. Only OpenCode responses use the provider-specific usage-window
+//! parser.
 //!
 //! HTTP classification takes `free_channel: bool` rather than a host channel
 //! enum. Window parsing, cooldown durations, and 429 body text stay in the host.

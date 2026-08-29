@@ -71,6 +71,22 @@ async fn toggle_account(harness: &V2Harness, id: &str) -> (StatusCode, Value) {
         .await
 }
 
+async fn ensure_account_enabled(harness: &V2Harness, id: &str) {
+    let enabled = harness
+        .state
+        .db
+        .lock()
+        .get_account(id)
+        .unwrap()
+        .expect("account")
+        .enabled;
+    if !enabled {
+        let (status, body) = toggle_account(harness, id).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["enabled"], true, "{body}");
+    }
+}
+
 async fn create_verified_enabled_custom(
     harness: &V2Harness,
     name: &str,
@@ -99,24 +115,21 @@ async fn create_verified_enabled_custom(
         }))
         .await;
     assert_eq!(status, StatusCode::OK, "{draft}");
-    assert_eq!(draft["enabled"], false, "{draft}");
+    assert_eq!(draft["enabled"], true, "{draft}");
     assert_eq!(draft["verification_status"].as_str(), Some("pending"));
     let id = draft["id"].as_str().unwrap().to_string();
     let (status, verified) = verify_account(harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{verified}");
     assert_eq!(
-        verified["enabled"], false,
-        "verify must not auto-enable: {verified}"
+        verified["enabled"], true,
+        "verify must keep the default-enabled card: {verified}"
     );
     assert_eq!(
         verified["verification_status"].as_str(),
         Some("verified"),
         "{verified}"
     );
-    let (status, enabled) = toggle_account(harness, &id).await;
-    assert_eq!(status, StatusCode::OK, "{enabled}");
-    assert_eq!(enabled["enabled"], true, "{enabled}");
-    enabled
+    verified
 }
 
 #[tokio::test]
@@ -150,7 +163,10 @@ async fn verification_failure_persists_failed_without_enabling() {
     let id = draft["id"].as_str().unwrap().to_string();
     let (status, body) = verify_account(&harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["enabled"], false, "{body}");
+    assert_eq!(
+        body["enabled"], true,
+        "failed verify must not disable a default-enabled Custom card: {body}"
+    );
     assert_eq!(
         body["verification_status"].as_str(),
         Some("failed"),
@@ -161,16 +177,6 @@ async fn verification_failure_persists_failed_without_enabling() {
             .as_str()
             .is_some_and(|error| !error.is_empty()),
         "{body}"
-    );
-    // Verification is an optional tool: even a failed Custom account may be
-    // enabled explicitly; the failed status itself is preserved.
-    let (toggle_status, toggle_body) = toggle_account(&harness, &id).await;
-    assert_eq!(toggle_status, StatusCode::OK, "{toggle_body}");
-    assert_eq!(toggle_body["enabled"], true, "{toggle_body}");
-    assert_eq!(
-        toggle_body["verification_status"].as_str(),
-        Some("failed"),
-        "{toggle_body}"
     );
     harness.shutdown();
 }
@@ -554,8 +560,7 @@ async fn custom_stream_does_not_cross_account_retry_after_output() {
         )
         .unwrap();
     let id = first["id"].as_str().unwrap().to_string();
-    let (status, enabled) = toggle_account(&harness, &id).await;
-    assert_eq!(status, StatusCode::OK, "{enabled}");
+    ensure_account_enabled(&harness, &id).await;
 
     let second_id = {
         let (status, draft) = harness
@@ -588,8 +593,7 @@ async fn custom_stream_does_not_cross_account_retry_after_output() {
                 None,
             )
             .unwrap();
-        let (status, enabled) = toggle_account(&harness, &id).await;
-        assert_eq!(status, StatusCode::OK, "{enabled}");
+        ensure_account_enabled(&harness, &id).await;
         id
     };
     let _ = second_id;
@@ -826,9 +830,7 @@ async fn mark_verified_and_enable(harness: &V2Harness, id: &str) {
             None,
         )
         .unwrap();
-    let (status, enabled) = toggle_account(harness, id).await;
-    assert_eq!(status, StatusCode::OK, "{enabled}");
-    assert_eq!(enabled["enabled"], true, "{enabled}");
+    ensure_account_enabled(harness, id).await;
 }
 
 async fn patch_account_key(harness: &V2Harness, id: &str, key: &str) -> (StatusCode, Value) {
@@ -1351,7 +1353,10 @@ async fn oversized_verification_body_fails_cleanly() {
     let id = draft["id"].as_str().unwrap().to_string();
     let (status, body) = verify_account(&harness, &id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["enabled"], false, "{body}");
+    assert_eq!(
+        body["enabled"], true,
+        "failed verify must not disable a default-enabled Custom card: {body}"
+    );
     assert_eq!(body["verification_status"].as_str(), Some("failed"));
     assert!(
         body["verification_error"]

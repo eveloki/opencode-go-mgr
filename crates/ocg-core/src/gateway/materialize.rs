@@ -403,13 +403,13 @@ fn materialize_custom_account_plan(
 ) -> Result<RequestPlan, ProtocolError> {
     let runtime = runtime.ok_or_else(|| {
         ProtocolError::new(format!(
-            "Custom account `{}` is missing a persisted base URL, protocol set, and auth scheme",
+            "Custom account `{}` is missing a persisted API URL and upstream protocol",
             account.name
         ))
     })?;
     if !runtime.eligible() {
         return Err(ProtocolError::new(format!(
-            "Custom account `{}` is not enabled and verified",
+            "Custom account `{}` is not enabled, ready, and configured with a non-empty Key",
             account.name
         )));
     }

@@ -3,8 +3,8 @@
 //! Catalog, contracts, model capabilities, and saved Zen models are local
 //! reads. Zen enablement and provider-scope protocol switches share the V3
 //! CAS envelope. Zen catalog refresh uses the fixed official keyless directory.
-//! Go/Zen protocol probes share the crate-root transport; Custom probes stay
-//! account-owned on V2.
+//! Go/Zen protocol probes share the crate-root transport. Custom scopes hide
+//! the Provider Test action; account-page tests use V3 model-tests.
 
 use axum::Json;
 use axum::body::Bytes;

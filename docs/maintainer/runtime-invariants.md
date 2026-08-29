@@ -11,6 +11,16 @@ Behavioral invariants of the running system. Read this before changing gateway r
 - Gemini clients use `/v1beta/models/{model}:generateContent` or `:streamGenerateContent` (`/v1/models/...` also accepted), may auth with `x-goog-api-key`; Gemini is only a client format, and Gateway always converts to the known model's recommended upstream protocol. Unknown model names return `400` on Chat / Responses / Messages / Gemini; probing protocols is prohibited.
 - Model protocol capabilities are hard-coded in `ocg_domain::protocol::MODEL_PROTOCOLS` (`ocg-core` `kernel/protocol.rs` and `gateway/protocol.rs` are facade/host conversions): `preferred` matches the official Go docs endpoint table; `supported` comes from test-account probing. When client protocol ∈ supported it passes through, otherwise it routes to preferred; the request path must not probe protocols (prevents double billing). `grok-4.5` only has `supported = Responses` (Chat entry must convert). `gpt-5.6-luna` preferred is Responses, but Chat can pass through. `MODEL_PROTOCOLS` still only serves OpenCode Go; new `-free` IDs from Zen Free refresh that are unknown to the table are materialized as Chat by default, without billed probing. The whole-document JSON conversion kernel is in `ocg-gateway`.
 
+One logical client request captures `RequestSnapshots` at entry (`crates/ocg-core/src/gateway/executor.rs`). Fallback iterations re-read live account state; they do not recapture the frozen row. There is no extra snapshot service or trait.
+
+| Frozen at entry | Re-read each fallback iteration |
+| --- | --- |
+| `AppConfig` | accounts |
+| pricing snapshot | eligible Custom runtimes |
+| `ForwardRouteSet` | Zen Free cooldown |
+| provider contracts | current account availability |
+| resolved Alias / raw identity | — |
+
 ## Dashboard V3 And V2 Tombstones
 
 - Dashboard V3 is mounted at `/dashboard/api/v3`. Control-plane changes require CAS (`expectedRevision`, `processGeneration`; price writes also need `expectedPricingRevision`). `ConnectionInfo` is the only V3 response DTO allowed to return the plaintext Key; Key-mutation responses do not include plaintext, and the client re-fetches `GET /connection`. `GET /contract` returns the current process's live revision / generation token, not a contract-export endpoint.
@@ -49,6 +59,17 @@ Behavioral invariants of the running system. Read this before changing gateway r
 ## Aliases
 
 - Client aliases live in `ocg_gateway::alias` (`ocg-core` `alias.rs` is the compatibility facade). Built-in Alias authority is code-owned: `ocg_domain::protocol::supported_model_ids()` supplies the original OpenCode Go namespace, while sealed exact maps supply MiniMax CN, Kimi CN, and selected GOAT long-name aliases without adding Go routes. Command first removes the Provider namespace and reuses an existing code-owned Alias; known plan suffixes such as `-paid` / `-free` are stripped only when the shorter name is already authorized. The sealed GOAT exception `nvidia/nemotron-3-ultra-550b-a55b` maps to `nemotron-3-ultra`; meaningful qualifiers such as `highspeed`, `vision-exp`, and `contributor` are not length-truncated. Saved MiniMax/Kimi catalogs activate only their sealed mappings. Unknown future rows stay exact raw pins until code assigns them an Alias. Alias spellings are case-folded; built-in raw IDs are exact and case-sensitive, including official mixed-case MiniMax IDs and IDs containing `/`, `_`, or whitespace. Custom declared IDs retain their existing case-folded matcher. A raw ID with exactly one registry mapping is pinned to that mapping before routability is checked; an unroutable mapping is recognized but cannot produce a production route. Overlapping exact raw IDs (including an eligible Custom declared ID conflicting with another Plan mapping) return `ambiguous_model_id` without calling upstream. A Zen Free `foo-free` row joins the suffix-stripped Alias `foo` only if `foo` is Go-authorized; the original `foo-free` remains an exact raw pin. Shared authorized aliases pick among Go/Zen/Command/MiniMax/Kimi candidates in account-card persistence order. Eligible Custom declared IDs overlay into resolution and `/v1/models`, but must not steal already-published aliases. `/v1/models` publishes an Alias only while its exact saved catalog row exists and at least one mapping has an enabled effective protocol; all-off Provider scopes contribute no route. Forward logs distinguish `requested_model`, `resolved_alias`, and `upstream_model`; `native_cost_*` is optional; do not invent a `requested_alias` field. Claude Desktop's three role aliases are still rewritten before alias resolution; `/claude-desktop/v1/models` only publishes those three roles.
+
+| Decision | Result |
+| --- | --- |
+| Code-owned kebab Alias | Resolves as Alias; published while a saved catalog row exists and at least one mapping has an enabled effective protocol |
+| Unique raw ID | Pins to that mapping before routability is checked; unrouteable mappings are recognized but unpublished |
+| Overlapping exact raw IDs | `400` `ambiguous_model_id`; no upstream |
+| Zen `foo-free` | Exact raw pin always; joins Alias `foo` only when `foo` is Go-authorized |
+| GOAT long name / suffix | Namespace stripped; `-paid`/`-free` stripped only if the short name is already authorized; `nvidia/nemotron-3-ultra-550b-a55b` → `nemotron-3-ultra` |
+| MiniMax / Kimi sealed map | Saved catalog activates only code-owned mappings; unmatched rows stay exact raw pins |
+| Eligible Custom declared ID | Overlays resolution and `/v1/models`; must not steal a published Alias |
+| `/v1/models` publish gate | Exact saved catalog row + at least one enabled effective protocol; all-off scopes contribute no route |
 
 ## Zen Free
 

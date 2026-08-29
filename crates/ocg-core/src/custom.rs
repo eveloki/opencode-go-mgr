@@ -89,7 +89,7 @@ pub fn custom_runtimes_by_account(
         .collect()
 }
 
-/// Case-preserving declared IDs from eligible enabled+verified Custom accounts,
+/// Case-preserving declared IDs from eligible enabled+ready Custom accounts,
 /// de-duplicated in account then capability order.
 pub fn eligible_custom_model_ids(runtimes: &[CustomAccountRuntime]) -> Vec<String> {
     let mut ids = Vec::new();

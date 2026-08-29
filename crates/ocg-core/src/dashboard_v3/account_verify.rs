@@ -203,7 +203,7 @@ fn prepare_verify(
     {
         return Err(V3ApiError::invalid_request_at(
             state,
-            "Custom API accounts require a persisted base URL, protocol set, and auth scheme",
+            "Custom API accounts require a persisted API URL and upstream protocol",
         ));
     }
     if plan.verification_runtime_availability != "available"
@@ -261,7 +261,7 @@ fn capture_custom_verification_job(
         .ok_or_else(|| {
             V3ApiError::invalid_request_at(
                 state,
-                "Custom API accounts require a persisted base URL, protocol set, and auth scheme",
+                "Custom API accounts require a persisted API URL and upstream protocol",
             )
         })?;
     let capabilities = db

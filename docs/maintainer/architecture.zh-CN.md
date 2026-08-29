@@ -51,7 +51,7 @@ src-tauri   -> ocg-core
 
 `ocg-core` 用 **显式兼容门面** 保留历史公开路径（`alias.rs`、`provider.rs`、 `crypto.rs`、`http_client.rs`、`kernel/{ids,catalog,protocol,zen}.rs`、 `gateway/{attempt,classify,protocol,selector}.rs`）。应避免通过 glob 再导出 `ocg_domain` / `ocg_gateway` / `ocg_infra`；`kernel/mod.rs` 的生产图守卫要求 DAG，**不存在多节点 SCC**。`redaction.rs` 是 crate 级叶子。`db` 不依赖 `pricing` 或 `gateway_keys`。`dashboard_v3` 不导入 `gateway` 或 `dashboard`。 `account_control`、`gateway_keys` 与 `usage_sync` 不点名 `CoreState`。
 
-`ocg-gateway` 生产依赖恰好是 `anyhow`、`base64`、`ocg-domain`、 `serde_json`。`ocg-domain` 生产依赖恰好是 `chrono`（仅 serde+std，无 clock feature）、`serde`、`serde_json`、`sha2`。
+`ocg-gateway` 生产依赖恰好是 `anyhow`、`base64`、`ocg-domain`、 `serde_json`。`ocg-domain` 生产依赖恰好是 `chrono`（仅 serde+std，无 clock feature）、`serde`、`serde_json`。
 
 ## ocg-core 作为组合 / 控制面
 
@@ -221,7 +221,7 @@ Command Code GOAT 的请求计费只读取其最新、已验证的 Provider 范�
 
 所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会把历史 Command Code 验证状态统一为 `not_required`，因为公开目录不是 Key 验证；enabled 状态保持不变。Go、Zen Free、GOAT、MiniMax、Kimi、Custom 与未知 pair 的其他状态不受影响。
 
-Custom API（`custom.rs` + `custom_http.rs`）接受一个语法合法的完整 HTTP/HTTPS 推理 Endpoint；拒绝 URL 内嵌凭据、query、fragment 与重定向，不转发 dashboard 或客户端鉴权。Chat/Responses 自动使用 Bearer，Messages 自动使用 `x-api-key`。账号声明一个协议，对全部模型统一生效并直接作为 effective preferred protocol；其他受支持客户端格式转换到它。配置与完整能力列表原子更新。验证可选，只向保存的 Endpoint 发送一次最小请求。只有标准协议后缀可推导 `/models`，其他路径必须手工填写模型。修改 Key、Endpoint、声明能力或协议会把 `verification_status` 重置为 `pending`，但账号保持启用。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
+Custom API（`custom.rs` + `custom_http.rs`）接受一个语法合法的 HTTP/HTTPS API URL。根地址会补 `/v1` 与所选协议路径；已经以 `/v1` 结尾的基址不会重复添加，兼容的完整 Endpoint 仍保持有效。URL 内嵌凭据、query、fragment 与重定向会被拒绝；dashboard 或客户端鉴权不会被转发。Chat/Responses 自动使用 Bearer，Messages 自动使用 `x-api-key`。账号声明一个协议，对全部模型统一生效并直接作为 effective preferred protocol；其他受支持客户端格式转换到它。配置与完整能力列表原子更新。验证可选，只向解析后的推理 URL 发送一次最小请求。只有标准协议后缀可推导 `/models`，其他路径必须手工填写模型。修改 Key、Endpoint、声明能力或协议会把 `verification_status` 重置为 `pending`，但账号保持启用。Custom 费用/用量为 unpriced/unknown，不扣供应商额度。
 
 
 ## 控制面

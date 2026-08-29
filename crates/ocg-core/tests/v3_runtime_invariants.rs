@@ -823,18 +823,20 @@ async fn create_verified_custom(
         verified["account"]["verificationStatus"].as_str(),
         Some("verified")
     );
-    let (status, enabled) = dashboard_json(
-        port,
-        reqwest::Method::POST,
-        &format!("/accounts/{id}/toggle"),
-        json!({
-            "expectedRevision": state.settings_revision(),
-            "processGeneration": state.process_generation()
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{enabled}");
-    assert_eq!(enabled["account"]["enabled"], true);
+    if verified["account"]["enabled"] != true {
+        let (status, enabled) = dashboard_json(
+            port,
+            reqwest::Method::POST,
+            &format!("/accounts/{id}/toggle"),
+            json!({
+                "expectedRevision": state.settings_revision(),
+                "processGeneration": state.process_generation()
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{enabled}");
+        assert_eq!(enabled["account"]["enabled"], true);
+    }
     id
 }
 

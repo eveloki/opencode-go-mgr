@@ -605,6 +605,42 @@ async fn dashboard_v3_zen_provider_usage_is_the_synthetic_free_window() {
 }
 
 #[tokio::test]
+async fn dashboard_v3_non_zen_provider_usage_does_not_project_free_cooldown_window() {
+    let harness = start_loopback("usage-go-no-free-window").await;
+    let go_id = create_go(&harness).await;
+    let free_until = Utc::now() + Duration::minutes(5);
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_rate_limit(
+            ZEN_FREE_ACCOUNT_ID,
+            free_until,
+            "test free cooldown",
+            Some(UsageWindowKind::Free),
+        )
+        .unwrap();
+
+    let (status, body) = harness
+        .get_json(&format!(
+            "{}/accounts/{go_id}/provider-usage",
+            harness.v3_base
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["freeCooldownUntil"], Value::Null, "{body}");
+    let windows = body["quotaWindows"].as_array().expect("quotaWindows array");
+    assert!(
+        windows.iter().all(|window| {
+            window["windowKind"] != "free" && window["source"] != "egress-cooldown-live"
+        }),
+        "{body}"
+    );
+
+    harness.stop();
+}
+
+#[tokio::test]
 async fn dashboard_v3_unsupported_provider_usage_is_unavailable_and_empty() {
     let harness = start_loopback("usage-unavailable").await;
 

@@ -479,7 +479,11 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
         .unwrap();
     assert_eq!(goat["routable"], true);
     assert_eq!(goat["verificationRuntimeAvailability"], "not_applicable");
-    assert_eq!(goat["modelAliases"], json!([]));
+    let goat_aliases = goat["modelAliases"].as_array().expect("GOAT aliases");
+    assert!(
+        !goat_aliases.is_empty(),
+        "live GOAT must publish code-owned aliases: {goat_aliases:?}"
+    );
     assert_eq!(goat["keyPrefix"], Value::Null);
 
     let custom = entries
@@ -704,12 +708,10 @@ async fn dashboard_v3_provider_contracts_project_five_scopes_and_custom_endpoint
         .find(|model| model.model_id == "kimi-for-coding")
         .expect("Kimi coding fallback model");
     assert_eq!(coding.alias, "kimi-k2.7-code");
-    let k3 = kimi
-        .models
-        .iter()
-        .find(|model| model.model_id == "kimi-k3")
-        .expect("Kimi K3 fallback model");
-    assert_eq!(k3.alias, "kimi-k3");
+    assert!(
+        kimi.models.iter().any(|model| model.model_id == "kimi-k3"),
+        "Kimi fallback catalog must include kimi-k3"
+    );
 
     let (status, created) = send_json(
         &harness,

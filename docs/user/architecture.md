@@ -8,7 +8,7 @@ These are text maps of a single local node, current as of HEAD. Live routes: Ope
 
 - [One node, one port](#one-node-one-port)
 - [A client request](#a-client-request)
-- [Plans: live vs draft](#plans-live-vs-draft)
+- [Plans](#plans)
 - [Dashboard, Key, and account cards](#dashboard-key-and-account-cards)
 - [Two local model lists](#two-local-model-lists)
 - [Protocol conversion](#protocol-conversion)
@@ -82,20 +82,27 @@ upstream.
 Auth, aliases, selection, and breakers: [Gateway](gateway.md),
 [Routing](routing.md).
 
-## Plans: live vs draft
+## Plans
 
-Every account card is one Plan (`provider_id` + `offering_id`). Live Plans carry production traffic; draft Plans sit as disabled `pending` cards — `verify` returns `501` and enabling them is not an option.
+Every account card is one Plan (`provider_id` + `offering_id`). All six families are live and routable.
 
 ```text
-  LIVE (routable)                         DRAFT (not routed)
-  -----------------                       ------------------
-  OpenCode Go                             Command Code GOAT
-    official key, /zen/go                 verify 501
+  LIVE (routable)
+  -----------------
+  OpenCode Go
+    official key, /zen/go
   Zen Free
     no upstream key
     catalog refresh on Providers
+  Command Code GOAT
+    official Provider API; catalog refresh on Providers
+    GOAT preset rows default on; additional discovered rows default off
+  MiniMax CN Token Plan
+    fixed official Chat route; authenticated catalog refresh
+  Kimi Code CN
+    fixed official Chat route; authenticated catalog refresh
   Custom API
-    one trusted-admin complete HTTP/HTTPS Endpoint
+    one trusted-admin HTTP/HTTPS API URL: root, /v1 base, or compatible complete Endpoint
     one upstream protocol; auth is derived automatically
 
 
