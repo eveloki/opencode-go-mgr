@@ -70,12 +70,24 @@ async fn assert_v2_removed(response: reqwest::Response) {
     );
 }
 
+async fn start_session_protected(state: Arc<CoreStateInner>) -> ocg_core::state::GatewayHandle {
+    #[cfg(windows)]
+    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+    #[cfg(not(windows))]
+    let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+
+    let handle = gateway::start_gateway_on(state.clone(), addr)
+        .await
+        .unwrap();
+    #[cfg(windows)]
+    state.set_dashboard_local_mode(false);
+    handle
+}
+
 #[tokio::test]
 async fn public_dashboard_uses_first_registration_and_session_cookie() {
     let state = state("public");
-    let handle = gateway::start_gateway_on(state.clone(), SocketAddr::from(([0, 0, 0, 0], 0)))
-        .await
-        .unwrap();
+    let handle = start_session_protected(state.clone()).await;
     let base = format!("http://127.0.0.1:{}/dashboard/api", handle.port);
     let v3 = format!("{base}/v3");
     let client = loopback_client();

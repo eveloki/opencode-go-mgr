@@ -53,7 +53,19 @@ pub(crate) async fn start_loopback(label: &str) -> V3Harness {
 }
 
 pub(crate) async fn start_public(label: &str) -> V3Harness {
-    start_on(label, SocketAddr::from(([0, 0, 0, 0], 0))).await
+    #[cfg(windows)]
+    {
+        // Windows Firewall prompts for every hashed integration-test binary
+        // that binds a wildcard socket. Keep the transport loopback-only and
+        // explicitly exercise the same session-protected dashboard mode.
+        let harness = start_on(label, SocketAddr::from(([127, 0, 0, 1], 0))).await;
+        harness.state.set_dashboard_local_mode(false);
+        harness
+    }
+    #[cfg(not(windows))]
+    {
+        start_on(label, SocketAddr::from(([0, 0, 0, 0], 0))).await
+    }
 }
 
 async fn start_on(label: &str, addr: SocketAddr) -> V3Harness {
