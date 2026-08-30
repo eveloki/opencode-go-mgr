@@ -2,6 +2,8 @@
 
 # Application Guides And Model Capabilities
 
+For a client that is not listed here, see [Add an Application](add-application.md) for the manual Gateway interface, guide contribution, and optional Desktop connector paths.
+
 ## Application Guides
 
 The **Applications** view contains copy-ready configuration snippets for 17

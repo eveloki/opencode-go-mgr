@@ -2,6 +2,8 @@
 
 # Providers
 
+Want to connect another upstream or contribute a built-in integration? Start with [Add a Provider](add-provider.md), which includes the upstream HTTP contract and the sealed-registry path.
+
 **Providers** is the supplier control plane — the page you land on when an old
 bookmark still ends in `?view=pricing`.
 

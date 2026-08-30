@@ -9,7 +9,7 @@ OCG Manager documentation is split by audience: open the guide that matches your
 | Audience | English | 简体中文 | Scope |
 | --- | --- | --- | --- |
 | Product overview | [../README.md](../README.md) | [../README.zh-CN.md](../README.zh-CN.md) | What it is, download matrix, 3-step start, pointers into USER |
-| End users | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | 18 chapters in [`user/`](user/): overview, architecture diagrams, install, dashboard, accounts, providers, applications, gateway, protocol conversion, routing, CLI, Docker, limits, troubleshooting |
+| End users | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | 20 chapters in [`user/`](user/), including dedicated [Provider](user/add-provider.md) and [application](user/add-application.md) integration guides |
 | Maintainers | [MAINTAINER.md](MAINTAINER.md) | [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) | 13 chapters in [`maintainer/`](maintainer/): layout, dev loop, architecture, release matrix, CI, validation |
 | Anti-abuse | [OPENCODE_GO_ANTI_ABUSE.md](OPENCODE_GO_ANTI_ABUSE.md) | [OPENCODE_GO_ANTI_ABUSE.zh-CN.md](OPENCODE_GO_ANTI_ABUSE.zh-CN.md) | Allowed use boundary for OpenCode-Go |
 | Contributors | [CONTRIBUTORS.md](CONTRIBUTORS.md) | bilingual / 中英同页 | Community credits |
@@ -52,9 +52,10 @@ Example version in Docker snippets should match the current release line (curren
 
 1. **New user** — README quick start → User guide `overview` → `architecture` → `install` → `first-client` → `accounts` (Key import vs managed Beta) → `providers` (catalogs, per-model overrides, probes, scoped pricing) → `gateway` → `routing` → `applications` → `troubleshooting`.
 2. **Docker / CLI operator** — User guide `overview` → `architecture` → `docker` and `cli` → `accounts` → `providers` → `routing` → `logs-settings`; enable the browser profile when managed onboarding needs noVNC.
-3. **Contributor** — Maintainer guide `layout` → `development` → `architecture` → `state-and-lifecycle` → `http-routes` → `conventions`; keep `AGENTS.md` for project facts (V3 crate split, `/dashboard/api/v3`, current schema v32, `access_keys`, managed wizard, quota refresh, protocol table, Key naming). Do not treat unversioned `/dashboard/api` REST or Tauri `invoke` as the live dashboard path.
-4. **Release owner** — Maintainer guide `release-artifacts` → `ci` → `releasing` → `known-debt`; validation checklist includes managed rewind and refresh-quota paths.
-5. **UI / theme work** — `DESIGN.md` first, then `src/theme.ts` and the Vue surface you are changing.
+3. **Integration author** — User guide [`add-provider`](user/add-provider.md) for an upstream or [`add-application`](user/add-application.md) for a downstream client, then Maintainer guide `extending` for repository mechanics.
+4. **Contributor** — Maintainer guide `layout` → `development` → `architecture` → `state-and-lifecycle` → `http-routes` → `conventions`; keep `AGENTS.md` for project facts (V3 crate split, `/dashboard/api/v3`, current schema v32, `access_keys`, managed wizard, quota refresh, protocol table, Key naming). Do not treat unversioned `/dashboard/api` REST or Tauri `invoke` as the live dashboard path.
+5. **Release owner** — Maintainer guide `release-artifacts` → `ci` → `releasing` → `known-debt`; validation checklist includes managed rewind and refresh-quota paths.
+6. **UI / theme work** — `DESIGN.md` first, then `src/theme.ts` and the Vue surface you are changing.
 
 ## Editing rules
 

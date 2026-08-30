@@ -158,7 +158,7 @@ Script-level tests live in `scripts/*.test.mjs` (release helpers, Dashboard V3
 contract, container publish). Pair them with `pnpm run build:web` and
 `pnpm run contract:v3:check`.
 
-The 16 application guides are driven by
+The 17 application guides are driven by
 `src/views/application-guides.ts`. When changing that registry, check the
 guide count, unique IDs, protocol endpoints, the display/copy masking
 difference, and the Claude Desktop three-role persistence behavior.

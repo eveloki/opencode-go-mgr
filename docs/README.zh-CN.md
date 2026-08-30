@@ -9,7 +9,7 @@ OCG Manager 文档按读者拆分：打开与你角色匹配的那本指南即�
 | 读者 | English | 简体中文 | 范围 |
 | --- | --- | --- | --- |
 | 产品概览 | [../README.md](../README.md) | [../README.zh-CN.md](../README.zh-CN.md) | 定位、下载矩阵、三步上手、指向 USER |
-| 终端用户 | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | [`user/`](user/) 下 18 章：定位、架构图、安装、面板、账号、供应商、应用、Gateway、协议转换、路由、CLI、Docker、限制、排障 |
+| 终端用户 | [USER.md](USER.md) | [USER.zh-CN.md](USER.zh-CN.md) | [`user/`](user/) 下 20 章，包含专门的[供应商](user/add-provider.zh-CN.md)与[应用](user/add-application.zh-CN.md)接入指南 |
 | 维护者 | [MAINTAINER.md](MAINTAINER.md) | [MAINTAINER.zh-CN.md](MAINTAINER.zh-CN.md) | [`maintainer/`](maintainer/) 下 13 章：结构、开发循环、架构、发布矩阵、CI、验证 |
 | 防滥用 | [OPENCODE_GO_ANTI_ABUSE.md](OPENCODE_GO_ANTI_ABUSE.md) | [OPENCODE_GO_ANTI_ABUSE.zh-CN.md](OPENCODE_GO_ANTI_ABUSE.zh-CN.md) | OpenCode-Go 使用边界 |
 | 贡献者 | [CONTRIBUTORS.md](CONTRIBUTORS.md) | 中英同页 / bilingual | 社区贡献者 |
@@ -52,9 +52,10 @@ Docker 示例里的版本钉应与当前发版线一致（现为 **v2.0.0**）�
 
 1. **新用户** — README 快速开始 → 用户指南 `overview` → `architecture` → `install` → `first-client` → `accounts`（导入 Key / 托管 Beta）→ `providers`（目录、按模型覆盖、探测、范围内价格）→ `gateway` → `routing` → `applications` → `troubleshooting`。
 2. **Docker / CLI 运维** — 用户指南 `overview` → `architecture` → `docker` 与 `cli` → `accounts` → `providers` → `routing` → `logs-settings`；托管注册需要时启用 browser profile。
-3. **贡献者** — 维护者指南 `layout` → `development` → `architecture` → `state-and-lifecycle` → `http-routes` → `conventions`；编码时以 `AGENTS.md` 为准（V3 crate 拆分、`/dashboard/api/v3`、当前 schema v32、`access_keys`、托管向导、刷新额度、协议表、Key 命名）。未版本化 `/dashboard/api` REST 与 Tauri `invoke` 均不是当前面板路径。
-4. **发版负责人** — 维护者指南 `release-artifacts` → `ci` → `releasing` → `known-debt`；发版前检查清单含托管回退与刷新额度路径。
-5. **UI / 主题** — 先读 `DESIGN.md`，再改 `src/theme.ts` 与对应 Vue 页面。
+3. **集成作者** — 上游先读用户指南 [`add-provider`](user/add-provider.zh-CN.md)，下游客户端先读 [`add-application`](user/add-application.zh-CN.md)，再读维护者指南 `extending` 了解仓库施工细节。
+4. **贡献者** — 维护者指南 `layout` → `development` → `architecture` → `state-and-lifecycle` → `http-routes` → `conventions`；编码时以 `AGENTS.md` 为准（V3 crate 拆分、`/dashboard/api/v3`、当前 schema v32、`access_keys`、托管向导、刷新额度、协议表、Key 命名）。未版本化 `/dashboard/api` REST 与 Tauri `invoke` 均不是当前面板路径。
+5. **发版负责人** — 维护者指南 `release-artifacts` → `ci` → `releasing` → `known-debt`；发版前检查清单含托管回退与刷新额度路径。
+6. **UI / 主题** — 先读 `DESIGN.md`，再改 `src/theme.ts` 与对应 Vue 页面。
 
 ## 编辑约定
 

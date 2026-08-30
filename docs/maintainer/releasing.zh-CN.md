@@ -37,7 +37,7 @@
       映射，用同一数据目录重启后确认映射仍在；非回环面板上确认无会话时映射 API
       返回 `401`。确认已退役 V2 `PUT /dashboard/api/claude-desktop/models` 在
       已鉴权时为 `410`。
-- [ ] 打开 **应用** 视图，确认 16 个教程完整可选；逐项抽查复制结果不含掩码
+- [ ] 打开 **应用** 视图，确认 17 个教程完整可选；逐项抽查复制结果不含掩码
       Key，并实际启动 Claude Desktop 与 Gemini CLI 各完成一次文本和工具调用。
 - [ ] 覆盖 schema v16 迁移、schema v27（`access_keys`、pre-v3 备份 + SHA-256
       sidecar、删除 `sub_gateway_keys` 与 `accounts.usage_sync_*`、密文只校验

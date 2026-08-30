@@ -125,7 +125,7 @@ bump 该进程的 `settings_revision`。它不能创建 Custom 账号、子 Key 
 `scripts/*.test.mjs`（发版辅助、Dashboard V3 契约、容器发布）。最后跑
 `pnpm run build:web` 与 `pnpm run contract:v3:check`。
 
-16 个应用教程由 `src/views/application-guides.ts` 驱动；改动注册表时检查教程
+17 个应用教程由 `src/views/application-guides.ts` 驱动；改动注册表时检查教程
 数量、唯一 ID、协议端点、display/copy 脱敏差异，以及 Claude Desktop 三个角色
 模型的持久化行为。
 
