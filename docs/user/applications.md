@@ -4,7 +4,7 @@
 
 ## Application Guides
 
-The **Applications** view contains copy-ready configuration snippets for 16
+The **Applications** view contains copy-ready configuration snippets for 17
 tools that all believe they are special. The connection panel shows the current
 client's request URL, a Key selector (the primary Key plus enabled sub keys),
 and model pickers. Node addresses and the upstream URL stay on Dashboard. Each
@@ -16,6 +16,50 @@ remain shareable without producing an unusable configuration.
 Before overwriting any existing configuration file, back up the original file. The code blocks
 in Applications are editable, but keep a recoverable copy before copying or manually merging
 their contents.
+
+### Local Desktop connection
+
+The installed Desktop app exposes eight local connectors. Claude Code, Codex,
+Gemini CLI, OpenCode, OpenClaw, and Hermes use managed field-level configuration;
+Pi uses a client-native plugin, while DeepSeek Harness (DSH) uses a companion
+plugin plus one field-owned `.env` assignment. Claude Desktop is not
+part of this local connector surface. This control is available only through the loopback
+Dashboard served by the same Desktop process. CLI, Docker, public listeners,
+and remote nodes keep the manual guides and cannot write client files.
+
+All connectors support redacted preview and a reversible operation. Managed
+configuration connectors use field-level writes and restore. Codex writes only the OCG-owned provider fields in user-level
+`config.toml`; Hermes writes only four `model` fields in `config.yaml` and one
+dedicated variable in `.env`. Pi and DSH install or remove only OCG's own package
+through the client's package manager; they never store a Key in plugin source.
+DSH additionally stores the selected Key only in the dedicated
+`OCG_MANAGER_API_KEY` assignment in its home `.env`.
+
+The phase-one installed-client acceptance gate covers five clients end to end:
+Codex, Claude Code, OpenCode, Pi, and DSH. Gemini CLI, OpenClaw, and Hermes keep
+their managed connector and manual guide, but are not part of this phase's
+real-machine release gate.
+
+The connector does not switch whole provider profiles. It previews a fixed,
+field-level OCG patch, then rechecks both the Dashboard revision and target
+file fingerprint before committing. A per-client ownership record keeps the
+original values of only the fields OCG changed. Restore removes or restores
+those fields while preserving unrelated edits; an OCG-owned field changed by
+another program is reported as a conflict instead of being overwritten.
+Writes use a cross-process lock, sibling temporary files, replacement and
+read-back verification. A multi-file failure is compensated or reported as a
+recoverable partial state. Preview text, errors, logs and ownership records do
+not expose the selected Key.
+
+Malformed, linked, oversized, non-UTF-8, duplicate-key, or unsupported
+JSON5/YAML configurations fail closed and keep the manual guide available.
+Hermes preserves bytes outside the top-level `model` section; a comment inside
+that managed section is rejected instead of being silently discarded.
+Close the target client before connecting, then reopen it after commit; OCG
+Manager does not terminate applications with active sessions. Hermes manages
+the default native profile only. An explicit `HERMES_HOME` wins; on Windows the
+native default is `%LOCALAPPDATA%/hermes`, with `~/.hermes` recognized only as a
+legacy location. Ambiguous roots are rejected instead of being written twice.
 
 Each client has its own idea of where the API lives:
 
@@ -39,10 +83,28 @@ Each client has its own idea of where the API lives:
   Codex's 272K fallback metadata. Requests always use OCG Manager's Responses
   endpoint.
 
-Codex's `~/.codex/ocg-model-catalog.json`, `~/.codex/ocg.config.toml`, and
-`~/.codex/config.toml` are local configuration files. Back up each file before overwriting
-or merging it. When using CC Switch proxy mode, back up the configuration directory saved by
-CC Switch separately; do not mix the direct OCG configuration with the proxy configuration.
+Codex's connector respects `CODEX_HOME` and otherwise uses
+`~/.codex/config.toml`. It owns only root `model`, root `model_provider`, and
+the `model_providers.ocg_manager` table. It never reads or modifies
+`~/.codex/auth.json`, `openai_base_url`, other provider tables, MCP settings,
+permissions, or model catalogs. The selected Key is stored in OCG's provider
+table as Codex's `experimental_bearer_token`, so the file must remain private to
+the current OS user. Back up separately before mixing this direct connector
+with another configuration switcher.
+
+Hermes stores the selected Key only as `OCG_MANAGER_API_KEY` in its `.env` and
+references it from `model.api_key`; unrelated YAML sections and environment
+variables remain outside connector ownership. Named profiles and container
+volumes are not inferred or modified.
+
+Pi installs `ocg-manager-pi` through Pi's package manager and stores the selected
+Key through Pi's native provider login. DSH installs `ocg-manager-dsh` into the
+`web` profile as an OCG-owned companion plugin. The plugin owns only its fixed
+route; OCG field-manages `OCG_MANAGER_API_KEY` in the DSH home `.env`, preserving
+all unrelated lines and restoring the original assignment on uninstall. This
+leaves base-profile and other bundle providers untouched;
+the first phase does not auto-install into TUI, headless, or custom profiles.
+Uninstall removes only the OCG-owned package.
 
 The picker list comes from protected `GET /dashboard/api/v3/application-models`:
 currently routeable OpenCode Go aliases intersected with the active OpenCode Go

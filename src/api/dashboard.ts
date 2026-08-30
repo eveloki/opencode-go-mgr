@@ -21,6 +21,8 @@ import type {
   AccountModelCapabilitiesUpdate,
   AccountSetupStep,
   AccountUsageUpdate,
+  ApplicationConnectorCommitRequest,
+  ApplicationConnectorPreviewRequest,
   AuthStatus,
   ClaudeDesktopModelsUpdate,
   ForwardLogQuery as V3ForwardLogQuery,
@@ -138,6 +140,13 @@ export const dashboardApi = {
     dashboardV3.logoutAdmin(expectation),
 
   getConnection: async (): Promise<ConnectionInfo> => presentConnection(await dashboardV3.getConnection()),
+  getApplicationConnectors: () => dashboardV3.getApplicationConnectors(),
+  previewApplicationConnector: (id: string, input: ApplicationConnectorPreviewRequest) =>
+    dashboardV3.previewApplicationConnector(id, input),
+  commitApplicationConnector: (
+    id: string,
+    input: WithoutExpectation<ApplicationConnectorCommitRequest>,
+  ) => withCas((expectation) => dashboardV3.commitApplicationConnector(id, input, expectation)),
   createKey: async (name: string, expectation: MutationExpectation): Promise<void> => {
     await dashboardV3.createKey(name, expectation);
   },

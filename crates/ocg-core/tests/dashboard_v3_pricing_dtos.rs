@@ -335,7 +335,24 @@ fn catalog_type_names_keep_the_frozen_prefix_and_pricing_block() {
         &CATALOG_TYPE_NAMES[provider_refresh_end..account_transfer_end],
         ACCOUNT_TRANSFER_CATALOG_TYPES
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), account_transfer_end);
+    const APPLICATION_CONNECTOR_CATALOG_TYPES: &[&str] = &[
+        "ApplicationConnectorAction",
+        "ApplicationConnectorStatus",
+        "ApplicationConnectorChange",
+        "ApplicationConnectorItem",
+        "ApplicationConnectors",
+        "ApplicationConnectorPreviewRequest",
+        "ApplicationConnectorPreview",
+        "ApplicationConnectorCommitRequest",
+        "ApplicationConnectorCommitResult",
+    ];
+    let application_connector_end =
+        account_transfer_end + APPLICATION_CONNECTOR_CATALOG_TYPES.len();
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[account_transfer_end..application_connector_end],
+        APPLICATION_CONNECTOR_CATALOG_TYPES
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), application_connector_end);
 }
 
 #[test]

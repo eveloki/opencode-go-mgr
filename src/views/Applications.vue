@@ -2,7 +2,7 @@
   <div class="applications">
     <header class="page-header">
       <h1>{{ t("应用接入") }}</h1>
-      <p>{{ t("选择客户端，复制接入配置即可使用") }}</p>
+      <p>{{ t("在本机安全接入客户端，或查看可复制的手动配置") }}</p>
     </header>
 
     <div class="application-layout">
@@ -184,6 +184,100 @@
             </n-alert>
           </section>
 
+          <section
+            v-if="connectorEligible"
+            class="native-connector-panel"
+            aria-labelledby="native-connector-title"
+          >
+            <div class="native-connector-head">
+              <div>
+                <div class="native-connector-title-row">
+                  <h2 id="native-connector-title">{{ connectorPanelTitle }}</h2>
+                  <n-tag :type="connectorTagType" :bordered="false">
+                    {{ connectorStatusLabel }}
+                  </n-tag>
+                </div>
+                <p>{{ connectorDetail }}</p>
+              </div>
+              <n-button
+                quaternary
+                size="small"
+                :loading="connectorsLoading"
+                @click="loadConnectors"
+              >
+                {{ t("刷新检测") }}
+              </n-button>
+            </div>
+
+            <div v-if="activeConnector?.targetPaths.length" class="connector-paths">
+              <span>{{ connectorTargetLabel }}</span>
+              <code v-for="path in activeConnector.targetPaths" :key="path">{{ path }}</code>
+            </div>
+
+            <n-alert
+              v-if="connectorError"
+              type="error"
+              :title="t('本机接入失败')"
+            >
+              {{ connectorError }}
+            </n-alert>
+
+            <n-alert
+              v-if="activeConnector && ['conflict', 'partial'].includes(activeConnector.status)"
+              type="warning"
+              :title="t('需要人工处理')"
+            >
+              {{ t("为避免覆盖其他程序的修改，当前不能继续接入或恢复。请关闭目标客户端，检查上方受管文件，并在处理后刷新检测。") }}
+            </n-alert>
+
+            <div v-if="connectorPreview" class="connector-preview">
+              <div class="connector-preview-head">
+                <strong>{{ connectorPreviewTitle }}</strong>
+                <span>{{ t("仅显示字段级变化，Key 始终脱敏。") }}</span>
+              </div>
+              <ul v-if="connectorPreview.changes.length">
+                <li v-for="change in connectorPreview.changes" :key="change.field">
+                  <code>{{ change.field }}</code>
+                  <span>{{ change.before ?? t("未设置") }}</span>
+                  <span aria-hidden="true">→</span>
+                  <span>{{ change.after ?? t("删除") }}</span>
+                </li>
+              </ul>
+              <p v-else>{{ t("当前配置已经符合所选方案，不需要写入。") }}</p>
+            </div>
+
+            <div class="connector-actions">
+              <n-button
+                secondary
+                :disabled="!connectorCanConnect"
+                :loading="connectorPreviewing === 'connect'"
+                @click="previewConnector('connect')"
+              >
+                {{ connectorConnectPreviewLabel }}
+              </n-button>
+              <n-button
+                secondary
+                :disabled="!connectorCanRestore"
+                :loading="connectorPreviewing === 'restore'"
+                @click="previewConnector('restore')"
+              >
+                {{ connectorRestorePreviewLabel }}
+              </n-button>
+              <n-popconfirm
+                v-if="connectorPreview"
+                :negative-text="t('取消')"
+                @positive-click="commitConnector"
+              >
+                <template #trigger>
+                  <n-button type="primary" :loading="connectorCommitting">
+                    {{ connectorCommitLabel }}
+                  </n-button>
+                </template>
+                {{ connectorCommitConfirmation }}
+              </n-popconfirm>
+            </div>
+          </section>
+
           <n-alert v-if="settingsError" type="error" :title="t('节点设置加载失败')">
             <div class="models-error-content">
               <span>{{ t("{error}。教程正文仍可阅读，但为避免复制错误地址，动态配置复制已禁用。", { error: settingsError }) }}</span>
@@ -334,6 +428,12 @@ import type { MenuOption, SelectGroupOption, SelectOption } from "naive-ui";
 import { CheckOutlined, CopyOutlined, ExportOutlined } from "@vicons/antd";
 import logoUrl from "../../assets/logo/ocg_logo_final_transparent.png";
 import { PRIMARY_KEY_ID, dashboardApi, type ClaudeDesktopModels, type ConnectionSubKey } from "../api/dashboard";
+import type {
+  ApplicationConnectorAction,
+  ApplicationConnectorItem,
+  ApplicationConnectorPreview,
+  ApplicationConnectorStatus,
+} from "../api/generated/dashboard-v3.ts";
 import { useConnectionStore } from "../stores/connection.ts";
 import { useSettingsStore } from "../stores/settings.ts";
 import { selectedApplicationAlias } from "./application-alias.ts";
@@ -381,6 +481,7 @@ const selectedModels = computed<string[]>({
     if (sameStringArray(selectedModelsByApplication.value[applicationId], value)) return;
     selectedModelsByApplication.value[applicationId] = [...value];
     clearApplicationDrafts(applicationId);
+    connectorPreview.value = null;
     const primary = selectedModelByApplication.value[applicationId];
     if (!primary || !value.includes(primary)) {
       selectedModelByApplication.value[applicationId] = value[0] ?? null;
@@ -394,10 +495,17 @@ const selectedModel = computed<string | null>({
     if ((selectedModelByApplication.value[applicationId] ?? null) === value) return;
     selectedModelByApplication.value[applicationId] = value;
     clearApplicationDrafts(applicationId);
+    connectorPreview.value = null;
   },
 });
 const modelValues = ref<Record<string, string>>({});
 const snippetDrafts = ref<Record<string, string>>({});
+const connectors = ref<ApplicationConnectorItem[]>([]);
+const connectorsLoading = ref(false);
+const connectorError = ref("");
+const connectorPreview = ref<ApplicationConnectorPreview | null>(null);
+const connectorPreviewing = ref<ApplicationConnectorAction | null>(null);
+const connectorCommitting = ref(false);
 const claudeDesktopModelsDirty = computed(() => (
   claudeDesktopModelsLoaded.value
   && CLAUDE_DESKTOP_FIELDS.some((field) => (
@@ -454,6 +562,7 @@ watch(enabledGatewayKeys, (keys) => {
 });
 watch(selectedKeyId, () => {
   snippetDrafts.value = {};
+  connectorPreview.value = null;
 });
 function selectGatewayKey(value: string | number | null) {
   if (typeof value !== "string" || value === selectedKeyId.value) return;
@@ -464,6 +573,91 @@ const applicationGuides: readonly ApplicationGuide[] = APPLICATION_GUIDES;
 const activeGuide = computed<ApplicationGuide>(() => (
   applicationGuides.find((guide) => guide.id === currentApplication.value)
   ?? applicationGuides[0]
+));
+const CONNECTOR_IDS = new Set<ApplicationId>([
+  "claude-code",
+  "codex",
+  "dsh",
+  "gemini-cli",
+  "opencode",
+  "openclaw",
+  "pi",
+  "hermes",
+]);
+const NATIVE_PLUGIN_CONNECTOR_IDS = new Set<ApplicationId>(["dsh", "pi"]);
+const CLIENT_NATIVE_CREDENTIAL_CONNECTOR_IDS = new Set<ApplicationId>(["pi"]);
+const connectorEligible = computed(() => (
+  isApplicationId(activeGuide.value.id) && CONNECTOR_IDS.has(activeGuide.value.id)
+));
+const nativePluginConnector = computed(() => (
+  isApplicationId(activeGuide.value.id) && NATIVE_PLUGIN_CONNECTOR_IDS.has(activeGuide.value.id)
+));
+const clientNativeCredentialConnector = computed(() => (
+  isApplicationId(activeGuide.value.id)
+  && CLIENT_NATIVE_CREDENTIAL_CONNECTOR_IDS.has(activeGuide.value.id)
+));
+const connectorPanelTitle = computed(() => nativePluginConnector.value
+  ? t("本机插件接入")
+  : t("本机自动接入"));
+const connectorTargetLabel = computed(() => nativePluginConnector.value
+  ? t("插件安装目标")
+  : t("受管配置"));
+const connectorPreviewTitle = computed(() => connectorPreview.value?.action === "restore"
+  ? (nativePluginConnector.value ? t("卸载预览") : t("恢复预览"))
+  : (nativePluginConnector.value ? t("安装预览") : t("连接预览")));
+const connectorConnectPreviewLabel = computed(() => nativePluginConnector.value
+  ? t("预览安装")
+  : t("预览接入"));
+const connectorRestorePreviewLabel = computed(() => nativePluginConnector.value
+  ? t("预览卸载")
+  : t("预览恢复"));
+const connectorCommitLabel = computed(() => connectorPreview.value?.action === "restore"
+  ? (nativePluginConnector.value ? t("确认卸载") : t("确认恢复"))
+  : (nativePluginConnector.value ? t("确认安装") : t("确认接入")));
+const connectorCommitConfirmation = computed(() => {
+  if (!nativePluginConnector.value) {
+    return t("提交前会重新核对配置文件；发生外部修改时会停止，不会覆盖。写入完成后请重新打开客户端。");
+  }
+  if (activeGuide.value.id === "dsh") {
+    return connectorPreview.value?.action === "restore"
+      ? t("提交前会重新核对 DSH 插件和专属 Key 变量；发生外部修改时会停止。卸载后请重新打开 DSH。")
+      : t("提交前会重新核对 DSH 插件和专属 Key 变量；只安装 OCG 插件并管理 DSH .env 中的 OCG_MANAGER_API_KEY。完成后请重新打开 DSH。");
+  }
+  return connectorPreview.value?.action === "restore"
+    ? t("提交前会重新核对客户端、插件包与安装状态；发生外部修改时会停止。卸载完成后请重新打开客户端。")
+    : t("提交前会重新核对客户端、插件包与安装状态；发生外部修改时会停止。安装完成后请重新打开客户端并使用其原生凭据入口保存 Key。");
+});
+const activeConnector = computed(() => (
+  connectors.value.find((connector) => connector.id === activeGuide.value.id) ?? null
+));
+const connectorStatusLabel = computed(() => nativePluginConnector.value
+  ? nativePluginStatusText(activeConnector.value?.status)
+  : connectorStatusText(activeConnector.value?.status));
+const connectorTagType = computed<"default" | "success" | "warning" | "error" | "info">(() => {
+  switch (activeConnector.value?.status) {
+    case "connected": return "success";
+    case "ready": return "info";
+    case "conflict":
+    case "partial": return "error";
+    case "manual_only": return "warning";
+    default: return "default";
+  }
+});
+const connectorDetail = computed(() => {
+  if (connectorsLoading.value && !activeConnector.value) return t("正在检测本机客户端…");
+  return activeConnector.value?.detail
+    ?? (connectorEligible.value
+      ? t("仅安装版 Desktop 可修改本机配置；其他运行方式继续使用下方手动教程。")
+      : "");
+});
+const connectorCanConnect = computed(() => (
+  (clientNativeCredentialConnector.value || Boolean(selectedKey.value?.value))
+  && Boolean(activeConnector.value?.automatic)
+  && ["ready", "connected"].includes(activeConnector.value?.status ?? "")
+));
+const connectorCanRestore = computed(() => (
+  Boolean(activeConnector.value?.automatic)
+  && activeConnector.value?.status === "connected"
 ));
 function groupGuidesByCategory(guides: readonly ApplicationGuide[]) {
   const groups = new Map<string, ApplicationGuide[]>();
@@ -604,6 +798,113 @@ const copyDisabledHint = computed(() => {
   return "";
 });
 
+function connectorStatusText(status: ApplicationConnectorStatus | undefined): string {
+  switch (status) {
+    case "not_detected": return t("未检测到");
+    case "manual_only": return t("仅手动");
+    case "ready": return t("可以接入");
+    case "connected": return t("已接入");
+    case "conflict": return t("配置冲突");
+    case "partial": return t("部分完成");
+    default: return t("当前运行方式不支持");
+  }
+}
+
+function nativePluginStatusText(status: ApplicationConnectorStatus | undefined): string {
+  switch (status) {
+    case "ready": return t("可以安装");
+    case "connected": return t("已安装");
+    default: return connectorStatusText(status);
+  }
+}
+
+function connectorModelValues(): Record<string, string> {
+  const guide = activeGuide.value;
+  if (guide.modelFields?.length) {
+    return Object.fromEntries(
+      guide.modelFields
+        .map((field) => [field, modelValues.value[field]?.trim() ?? ""])
+        .filter(([, value]) => Boolean(value)),
+    );
+  }
+  const values: Record<string, string> = {};
+  if (selectedModel.value?.trim()) values.model = selectedModel.value.trim();
+  if (guide.multipleModels && selectedModels.value.length) {
+    values.models = selectedModels.value.join("\n");
+  }
+  return values;
+}
+
+async function loadConnectors() {
+  if (!connectorEligible.value || connectorsLoading.value) return;
+  connectorsLoading.value = true;
+  connectorError.value = "";
+  try {
+    connectors.value = (await dashboardApi.getApplicationConnectors()).items;
+  } catch (error) {
+    connectorError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    connectorsLoading.value = false;
+  }
+}
+
+async function previewConnector(action: ApplicationConnectorAction) {
+  if (connectorPreviewing.value || connectorCommitting.value) return;
+  connectorPreviewing.value = action;
+  connectorError.value = "";
+  connectorPreview.value = null;
+  try {
+    connectorPreview.value = await dashboardApi.previewApplicationConnector(
+      activeGuide.value.id,
+      {
+        action,
+        keyId: action === "connect" && !clientNativeCredentialConnector.value
+          ? selectedKeyId.value
+          : null,
+        modelValues: connectorModelValues(),
+      },
+    );
+  } catch (error) {
+    connectorError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    connectorPreviewing.value = null;
+  }
+}
+
+async function commitConnector() {
+  const preview = connectorPreview.value;
+  if (!preview || connectorCommitting.value) return;
+  connectorCommitting.value = true;
+  connectorError.value = "";
+  try {
+    const result = await dashboardApi.commitApplicationConnector(activeGuide.value.id, {
+      action: preview.action,
+      keyId: preview.action === "connect" && !clientNativeCredentialConnector.value
+        ? selectedKeyId.value
+        : null,
+      modelValues: connectorModelValues(),
+      previewFingerprint: preview.fingerprint,
+    });
+    connectorPreview.value = null;
+    await loadConnectors();
+    message.success(result.changed
+      ? (nativePluginConnector.value
+        ? (preview.action === "connect"
+          ? (activeGuide.value.id === "dsh"
+            ? t("插件和本机凭据已安装；重新打开 DSH 后生效")
+            : t("插件已安装；重新打开客户端并在其凭据入口保存 Key"))
+          : t("插件已卸载；重新打开客户端后生效"))
+        : (preview.action === "connect"
+          ? t("本机配置已接入；重新打开客户端后生效")
+          : t("本机配置已恢复；重新打开客户端后生效")))
+      : t("当前配置无需更改"));
+  } catch (error) {
+    connectorError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    connectorCommitting.value = false;
+  }
+}
+
 function readApplication(): ApplicationId {
   const value = new URLSearchParams(window.location.search).get("app");
   return isApplicationId(value) ? value : DEFAULT_APPLICATION;
@@ -612,7 +913,10 @@ function readApplication(): ApplicationId {
 function selectApplication(value: string | number | null) {
   if (typeof value !== "string" || !isApplicationId(value) || value === currentApplication.value) return;
   currentApplication.value = value;
+  connectorPreview.value = null;
+  connectorError.value = "";
   writeApplicationUrl(value, "push");
+  void loadConnectors();
 }
 
 function writeApplicationUrl(value: ApplicationId, mode: "push" | "replace") {
@@ -626,6 +930,13 @@ function onPopState() {
   const params = new URLSearchParams(window.location.search);
   if (params.get("view") !== "apps") return;
   currentApplication.value = readApplication();
+  connectorPreview.value = null;
+  connectorError.value = "";
+  void loadConnectors();
+}
+
+function onWindowFocus() {
+  void loadConnectors();
 }
 
 async function loadModels() {
@@ -805,6 +1116,7 @@ function updateModelField(field: string, value: string | number | null) {
   if (modelValues.value[field] === nextModel) return;
   modelValues.value[field] = nextModel;
   clearApplicationDrafts(activeGuide.value.id);
+  connectorPreview.value = null;
 }
 
 function currentClaudeDesktopModels(): ClaudeDesktopModels {
@@ -894,15 +1206,17 @@ onMounted(() => {
   const value = new URLSearchParams(window.location.search).get("app");
   if (!isApplicationId(value)) writeApplicationUrl(currentApplication.value, "replace");
   window.addEventListener("popstate", onPopState);
-  void loadSettings();
+  window.addEventListener("focus", onWindowFocus);
+  void loadSettings().then(() => loadConnectors());
 });
 
 onActivated(() => {
-  if (!settingsLoading.value) void loadSettings();
+  if (!settingsLoading.value) void loadSettings().then(() => loadConnectors());
 });
 
 onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
+  window.removeEventListener("focus", onWindowFocus);
   cleanup();
 });
 </script>
@@ -980,6 +1294,114 @@ onUnmounted(() => {
   margin: 0 0 16px;
   color: var(--ocg-ink);
   font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
+}
+
+.native-connector-panel {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--ocg-primary) 35%, var(--ocg-border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--ocg-primary) 5%, var(--ocg-surface));
+  box-shadow: var(--ocg-shadow-sm);
+}
+
+.native-connector-head,
+.native-connector-title-row,
+.connector-actions,
+.connector-preview-head {
+  display: flex;
+  align-items: center;
+}
+
+.native-connector-head {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.native-connector-title-row {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.native-connector-title-row h2 {
+  margin: 0;
+  color: var(--ocg-ink);
+  font: 700 var(--ocg-font-lg)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
+}
+
+.native-connector-head p,
+.connector-preview p {
+  margin: 6px 0 0;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
+  line-height: 1.55;
+}
+
+.connector-paths {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.connector-paths > span {
+  color: var(--ocg-subtle);
+  font-size: var(--ocg-font-sm);
+  font-weight: 700;
+}
+
+.connector-paths code,
+.connector-preview code {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--ocg-surface);
+  color: var(--ocg-ink);
+  font: var(--ocg-font-sm)/1.5 "Cascadia Mono", Consolas, monospace;
+}
+
+.connector-preview {
+  padding: 12px;
+  border: 1px solid var(--ocg-divider);
+  border-radius: 10px;
+  background: var(--ocg-surface);
+}
+
+.connector-preview-head {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connector-preview-head span {
+  color: var(--ocg-subtle);
+  font-size: var(--ocg-font-xs);
+}
+
+.connector-preview ul {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.connector-preview li {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(80px, 1fr) auto minmax(80px, 1fr);
+  gap: 8px;
+  align-items: center;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
+}
+
+.connector-preview li span {
+  overflow-wrap: anywhere;
+}
+
+.connector-actions {
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .access-fields {

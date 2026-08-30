@@ -1,0 +1,24 @@
+{
+  "name": "ocg-manager-pi",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OCG Manager provider package for Pi",
+  "keywords": [
+    "pi-package",
+    "ocg-manager"
+  ],
+  "files": [
+    "extensions",
+    "models.generated.json",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/ocg-manager.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

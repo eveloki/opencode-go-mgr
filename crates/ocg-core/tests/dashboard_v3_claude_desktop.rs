@@ -217,8 +217,9 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "ProviderPricingRefreshUpdate",
         ]
     );
+    let application_connector_start = account_transfer_start + 8;
     assert_eq!(
-        &CATALOG_TYPE_NAMES[account_transfer_start..],
+        &CATALOG_TYPE_NAMES[account_transfer_start..application_connector_start],
         [
             "AccountExportRequest",
             "AccountExport",
@@ -230,7 +231,21 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "AccountImportResult",
         ]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), account_transfer_start + 8);
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[application_connector_start..],
+        [
+            "ApplicationConnectorAction",
+            "ApplicationConnectorStatus",
+            "ApplicationConnectorChange",
+            "ApplicationConnectorItem",
+            "ApplicationConnectors",
+            "ApplicationConnectorPreviewRequest",
+            "ApplicationConnectorPreview",
+            "ApplicationConnectorCommitRequest",
+            "ApplicationConnectorCommitResult",
+        ]
+    );
+    assert_eq!(CATALOG_TYPE_NAMES.len(), application_connector_start + 9);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");

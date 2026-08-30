@@ -21,6 +21,11 @@ import type {
   AccountUpdate,
   AccountUsageUpdate,
   ApplicationModels,
+  ApplicationConnectorCommitRequest,
+  ApplicationConnectorCommitResult,
+  ApplicationConnectorPreview,
+  ApplicationConnectorPreviewRequest,
+  ApplicationConnectors,
   AuthLogin,
   AuthRegister,
   AuthStatus,
@@ -352,6 +357,22 @@ export const dashboardV3 = {
 
   // --- connection center (the only plaintext Key payload) ---
   getConnection: () => requestV3<ConnectionInfo>("/connection"),
+
+  // --- local Desktop application connectors ---
+  getApplicationConnectors: () => requestV3<ApplicationConnectors>("/applications/connectors"),
+  previewApplicationConnector: (id: string, input: ApplicationConnectorPreviewRequest) =>
+    requestV3<ApplicationConnectorPreview>(`/applications/connectors/${encode(id)}/preview`, {
+      method: "POST",
+      body: json(input),
+    }),
+  commitApplicationConnector: (
+    id: string,
+    input: WithoutExpectation<ApplicationConnectorCommitRequest>,
+    expectation: MutationExpectation,
+  ) => requestV3<ApplicationConnectorCommitResult>(`/applications/connectors/${encode(id)}/commit`, {
+    method: "POST",
+    body: withExpectation(input, expectation),
+  }),
 
   // --- access keys ---
   createKey: (name: string, expectation: MutationExpectation) =>
