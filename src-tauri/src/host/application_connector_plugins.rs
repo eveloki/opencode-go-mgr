@@ -1838,6 +1838,16 @@ mod tests {
     use std::sync::Mutex;
     use uuid::Uuid;
 
+    #[cfg(windows)]
+    static WINDOWS_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(windows)]
+    fn lock_windows_process_tests() -> std::sync::MutexGuard<'static, ()> {
+        WINDOWS_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     const PI_FILES: &[NativePluginTemplateFile] = &[
         NativePluginTemplateFile {
             relative_path: "package.json",
@@ -2518,6 +2528,7 @@ mod tests {
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
 
+        let _process_lock = lock_windows_process_tests();
         let fixture = Fixture::new();
         let batch = fixture.root.join("spawn-child.cmd");
         let pid_file = fixture.root.join("child.pid");
@@ -2533,7 +2544,7 @@ mod tests {
             executable: batch,
             display_executable: "isolated timeout fixture".into(),
             args: Vec::new(),
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(15),
         };
         let error = ProcessNativePluginCommandRunner.run(&command).unwrap_err();
         assert!(error.contains("timed out"));
@@ -2555,6 +2566,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_suspended_batch_launch_preserves_fixed_arguments() {
+        let _process_lock = lock_windows_process_tests();
         let fixture = Fixture::new();
         let batch = fixture.root.join("echo-arguments.cmd");
         fs::write(&batch, "@echo off\r\necho [%~1][%~2]\r\n").unwrap();
@@ -2563,7 +2575,7 @@ mod tests {
                 executable: batch,
                 display_executable: "isolated argument fixture".into(),
                 args: vec![OsString::from("plugin"), OsString::from("path with spaces")],
-                timeout: Duration::from_secs(15),
+                timeout: Duration::from_secs(30),
             })
             .unwrap();
         assert!(output.success);
@@ -2573,6 +2585,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_batch_forwarding_preserves_literal_quotes_for_dsh() {
+        let _process_lock = lock_windows_process_tests();
         let fixture = Fixture::new();
         let batch = fixture.root.join("forward-arguments.cmd");
         fs::write(
@@ -2585,7 +2598,7 @@ mod tests {
                 executable: batch,
                 display_executable: "isolated forwarding fixture".into(),
                 args: vec![OsString::from("\"path with spaces\"")],
-                timeout: Duration::from_secs(15),
+                timeout: Duration::from_secs(30),
             })
             .unwrap();
         assert!(output.success);
