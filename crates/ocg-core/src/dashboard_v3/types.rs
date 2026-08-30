@@ -763,19 +763,16 @@ pub struct AccountMutation {
     pub process_generation: u64,
 }
 
-/// POST `/accounts/transfer/export` body. Both passwords are write-only. The
-/// administrator credential is step-up authorization; `bundle_password` is a
-/// distinct passphrase used only to encrypt the portable file.
+/// POST `/accounts/transfer/export` body. The password is write-only and used
+/// only to encrypt the portable node-state file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountExportRequest {
-    pub admin_username: String,
-    pub admin_password: String,
     pub bundle_password: String,
 }
 
-/// Encrypted account migration package returned by the export endpoint.
+/// Encrypted node migration package returned by the export endpoint.
 /// `bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no
 /// plaintext upstream credential is returned to the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -800,7 +797,7 @@ pub struct AccountImportPreviewRequest {
     pub bundle: String,
 }
 
-/// Secret-free preview of one account migration package.
+/// Secret-free preview of one node migration package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -834,6 +831,8 @@ pub struct AccountImportPreviewItem {
 pub enum AccountImportDisposition {
     Import,
     Imported,
+    Merge,
+    Merged,
     Duplicate,
 }
 

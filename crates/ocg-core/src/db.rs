@@ -43,6 +43,23 @@ pub struct AccountImportRecord {
     pub account: Account,
     pub custom_config: Option<AccountCustomConfigInput>,
     pub capabilities: Vec<AccountModelCapabilityInput>,
+    pub verification_status: ConnectionVerificationStatus,
+    pub connection_verified_at: Option<DateTime<Utc>>,
+}
+
+/// One fully validated, portable node-state snapshot. Stable IDs merge into an
+/// existing destination; destination-only state is retained according to the
+/// node migration rules. All database-owned state is committed in one
+/// transaction.
+#[derive(Debug, Clone)]
+pub struct NodeImportRecord {
+    pub accounts: Vec<AccountImportRecord>,
+    pub account_order: Vec<String>,
+    pub config_json: String,
+    pub sub_keys: Vec<SubGatewayKey>,
+    pub zen_free_enabled: bool,
+    pub zen_catalog: crate::kernel::zen::ZenFreeModelCatalog,
+    pub provider_contracts: PersistedContracts,
 }
 
 /// Settings key holding the forward-log client-key backfill watermark
@@ -1771,6 +1788,199 @@ fn insert_account_row(
          ) VALUES (?1, NULL, NULL, NULL, 0, NULL)",
         [&account.id],
     )?;
+    Ok(())
+}
+
+fn insert_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
+    let account = &record.account;
+    anyhow::ensure!(
+        account.id != ZEN_FREE_ACCOUNT_ID,
+        "Zen Free is database-owned and cannot be imported"
+    );
+    account.validate_provider_binding()?;
+    ensure_enabled_offering_is_routable(
+        &account.provider_id,
+        &account.offering_id,
+        account.enabled,
+    )?;
+    let plan = builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+    let verification_gates_enablement = plan.verification_policy == VerificationPolicy::Required
+        && ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+    anyhow::ensure!(
+        !account.enabled
+            || !verification_gates_enablement
+            || record.verification_status.allows_enablement(),
+        "an enabled imported account must retain an enabling verification state"
+    );
+    if plan_requires_custom_config(plan) {
+        anyhow::ensure!(
+            record.custom_config.is_some(),
+            "Custom API accounts require a complete endpoint"
+        );
+        anyhow::ensure!(
+            !record.capabilities.is_empty(),
+            "Custom API accounts require at least one model capability"
+        );
+    } else {
+        anyhow::ensure!(
+            record.custom_config.is_none(),
+            "custom config is only available for Custom API accounts"
+        );
+        anyhow::ensure!(
+            record.capabilities.is_empty(),
+            "model capabilities are only available for Custom API accounts"
+        );
+    }
+    let purchase_date = if account.purchase_date.trim().is_empty() {
+        local_today()
+    } else {
+        normalize_purchase_date(&account.purchase_date)?
+    };
+    insert_account_row(conn, account, &purchase_date, record.verification_status)?;
+    if let Some(config) = &record.custom_config {
+        persist_account_custom_config_on(conn, &account.id, config, true)?;
+    }
+    if !record.capabilities.is_empty() {
+        persist_account_model_capabilities_on(conn, &account.id, &record.capabilities)?;
+    }
+    restore_import_verification_on(conn, record)?;
+    Ok(())
+}
+
+fn restore_import_verification_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
+    conn.execute(
+        "UPDATE accounts SET verification_status = ?2,
+             connection_verified_at = ?3, verification_error = NULL
+         WHERE id = ?1",
+        params![
+            record.account.id,
+            record.verification_status.as_str(),
+            record
+                .connection_verified_at
+                .map(|value| value.to_rfc3339()),
+        ],
+    )?;
+    Ok(())
+}
+
+fn merge_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
+    if conn
+        .query_row(
+            "SELECT 1 FROM accounts WHERE id = ?1",
+            [&record.account.id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_none()
+    {
+        return insert_import_account_on(conn, record);
+    }
+    let account = &record.account;
+    account.validate_provider_binding()?;
+    ensure_enabled_offering_is_routable(
+        &account.provider_id,
+        &account.offering_id,
+        account.enabled,
+    )?;
+    let plan = builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+    let verification_gates_enablement = plan.verification_policy == VerificationPolicy::Required
+        && ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+    anyhow::ensure!(
+        !account.enabled
+            || !verification_gates_enablement
+            || record.verification_status.allows_enablement(),
+        "an enabled imported account must retain an enabling verification state"
+    );
+    if plan_requires_custom_config(plan) {
+        anyhow::ensure!(
+            record.custom_config.is_some(),
+            "Custom API accounts require a complete endpoint"
+        );
+        anyhow::ensure!(
+            !record.capabilities.is_empty(),
+            "Custom API accounts require at least one model capability"
+        );
+    } else {
+        anyhow::ensure!(
+            record.custom_config.is_none(),
+            "custom config is only available for Custom API accounts"
+        );
+        anyhow::ensure!(
+            record.capabilities.is_empty(),
+            "model capabilities are only available for Custom API accounts"
+        );
+    }
+    let purchase_date = if account.purchase_date.trim().is_empty() {
+        local_today()
+    } else {
+        normalize_purchase_date(&account.purchase_date)?
+    };
+    conn.execute(
+        "UPDATE accounts SET
+             name = ?2, username = ?3, key_cipher = ?4, enabled = ?5,
+             recharge_date = ?6, account_type = ?7, setup_step = ?8, notes = ?9,
+             provider_id = ?10, offering_id = ?11, credential_kind = ?12,
+             quota_scope = ?13, verification_status = ?14,
+             connection_verified_at = ?15, verification_error = NULL,
+             auth_error = NULL, last_error = NULL, updated_at = ?16
+         WHERE id = ?1",
+        params![
+            account.id,
+            account.name,
+            account.username,
+            account.key_cipher,
+            account.enabled as i32,
+            purchase_date,
+            account.account_type.as_str(),
+            account.setup_step.as_str(),
+            account.notes,
+            account.provider_id,
+            account.offering_id,
+            account.credential_kind.as_str(),
+            account.quota_scope.as_str(),
+            record.verification_status.as_str(),
+            record
+                .connection_verified_at
+                .map(|value| value.to_rfc3339()),
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    conn.execute(
+        "DELETE FROM account_model_capabilities WHERE account_id = ?1",
+        [&account.id],
+    )?;
+    conn.execute(
+        "DELETE FROM account_custom_configs WHERE account_id = ?1",
+        [&account.id],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocol_overrides
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocols
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_scopes WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+    )?;
+    if let Some(config) = &record.custom_config {
+        persist_account_custom_config_on(conn, &account.id, config, true)?;
+    }
+    if !record.capabilities.is_empty() {
+        persist_account_model_capabilities_on(conn, &account.id, &record.capabilities)?;
+    }
+    // Child-table writers correctly invalidate verification during ordinary
+    // edits. A validated node snapshot is different: it carries the source
+    // verification state as part of the portable account definition.
+    restore_import_verification_on(conn, record)?;
     Ok(())
 }
 
@@ -4026,58 +4236,194 @@ impl Database {
     pub fn import_accounts_with_contracts(&self, records: &[AccountImportRecord]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for record in records {
-            let account = &record.account;
-            anyhow::ensure!(
-                account.id != ZEN_FREE_ACCOUNT_ID,
-                "Zen Free is database-owned and cannot be imported"
-            );
-            account.validate_provider_binding()?;
-            ensure_enabled_offering_is_routable(
-                &account.provider_id,
-                &account.offering_id,
-                account.enabled,
-            )?;
-            let plan = builtin_plan(&account.provider_id, &account.offering_id)
-                .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
-            if plan_requires_custom_config(plan) {
-                anyhow::ensure!(
-                    record.custom_config.is_some(),
-                    "Custom API accounts require a complete endpoint"
-                );
-                anyhow::ensure!(
-                    !record.capabilities.is_empty(),
-                    "Custom API accounts require at least one model capability"
-                );
-            } else {
-                anyhow::ensure!(
-                    record.custom_config.is_none(),
-                    "custom config is only available for Custom API accounts"
-                );
-                anyhow::ensure!(
-                    record.capabilities.is_empty(),
-                    "model capabilities are only available for Custom API accounts"
-                );
-            }
-            let purchase_date = if account.purchase_date.trim().is_empty() {
-                local_today()
-            } else {
-                normalize_purchase_date(&account.purchase_date)?
-            };
-            insert_account_row(
-                &tx,
-                account,
-                &purchase_date,
-                default_verification_status(plan),
-            )?;
-            if let Some(config) = &record.custom_config {
-                persist_account_custom_config_on(&tx, &account.id, config, true)?;
-            }
-            if !record.capabilities.is_empty() {
-                persist_account_model_capabilities_on(&tx, &account.id, &record.capabilities)?;
-            }
+            insert_import_account_on(&tx, record)?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Merge one V2 node migration package by stable account/Key id. Existing
+    /// destination rows keep their current order; source-only rows append in
+    /// package order. All database-owned state shares one SQLite transaction.
+    pub fn import_node_state<T>(
+        &self,
+        record: &NodeImportRecord,
+        prepare_runtime: impl FnOnce(&Database) -> Result<T>,
+    ) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut ordered_ids = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for id in rows {
+                ordered_ids.push(id?);
+            }
+        }
+        for account in &record.accounts {
+            merge_import_account_on(&tx, account)?;
+        }
+
+        let (sanitized, primary) = sanitize_config_json_primary_key(&record.config_json)?;
+        let primary =
+            primary.ok_or_else(|| anyhow::anyhow!("node migration primary Key is missing"))?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('config', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [sanitized],
+        )?;
+        for key in &record.sub_keys {
+            anyhow::ensure!(key.deleted_at.is_none(), "migrated sub Key must be active");
+            anyhow::ensure!(
+                key.id != PRIMARY_KEY_ID,
+                "sub Key cannot use the primary id"
+            );
+            tx.execute(
+                "DELETE FROM access_keys WHERE id = ?1 AND is_primary = 0",
+                [&key.id],
+            )?;
+        }
+        upsert_primary_access_key_on(&tx, &primary)?;
+        for key in &record.sub_keys {
+            tx.execute(
+                "INSERT INTO access_keys (id, name, key, is_primary, enabled, deleted_at, created_at)
+                 VALUES (?1, ?2, ?3, 0, ?4, NULL, ?5)",
+                params![
+                    key.id,
+                    key.name,
+                    key.key,
+                    key.enabled as i32,
+                    key.created_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        let merged_sub_keys: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM access_keys WHERE is_primary = 0 AND deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            merged_sub_keys <= 64,
+            "merged node would exceed the 64 active sub Key limit"
+        );
+
+        let zen_changed = tx.execute(
+            "UPDATE accounts SET enabled = ?2, free_alias_enabled = 0, updated_at = ?3
+             WHERE id = ?1 AND provider_id = ?4 AND offering_id = ?5",
+            params![
+                ZEN_FREE_ACCOUNT_ID,
+                record.zen_free_enabled as i32,
+                Utc::now().to_rfc3339(),
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+            ],
+        )?;
+        anyhow::ensure!(zen_changed == 1, "Zen Free singleton is missing");
+
+        let mut ordered_set = ordered_ids.iter().cloned().collect::<HashSet<_>>();
+        for id in &record.account_order {
+            if ordered_set.insert(id.clone()) {
+                ordered_ids.push(id.clone());
+            }
+        }
+        let current_ids = {
+            let mut stmt = tx.prepare("SELECT id FROM accounts")?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<HashSet<_>>>()?
+        };
+        anyhow::ensure!(
+            ordered_ids.len() == current_ids.len()
+                && ordered_ids.iter().collect::<HashSet<_>>().len() == ordered_ids.len()
+                && ordered_ids.iter().all(|id| current_ids.contains(id)),
+            "migrated account order does not cover the merged account set"
+        );
+        for (sort_order, id) in ordered_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE accounts SET sort_order = ?1 WHERE id = ?2",
+                params![sort_order as i64, id],
+            )?;
+        }
+        let zen_models_json = serde_json::to_string(&record.zen_catalog.models)?;
+        tx.execute(
+            "INSERT INTO provider_model_catalogs
+             (provider_id, offering_id, models_json, refreshed_at, source_url)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider_id, offering_id) DO UPDATE SET
+                 models_json = excluded.models_json,
+                 refreshed_at = excluded.refreshed_at,
+                 source_url = excluded.source_url",
+            params![
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+                zen_models_json,
+                record
+                    .zen_catalog
+                    .refreshed_at
+                    .map(|value| value.to_rfc3339()),
+                record.zen_catalog.source_url,
+            ],
+        )?;
+
+        for (scope, row) in &record.provider_contracts.scopes {
+            anyhow::ensure!(
+                scope.kind() == crate::provider_contracts::ContractScopeKind::Provider,
+                "node migration only accepts Provider contract scopes"
+            );
+            upsert_contract_catalog_on(
+                &tx,
+                scope,
+                &row.catalog_models,
+                row.catalog_refreshed_at,
+                &row.catalog_source,
+                &row.catalog_source_url,
+                row.updated_at,
+            )?;
+            tx.execute(
+                "DELETE FROM provider_contract_model_protocols
+                 WHERE scope_kind = ?1 AND scope_id = ?2",
+                params![scope.kind_str(), scope.id()],
+            )?;
+            tx.execute(
+                "DELETE FROM provider_contract_model_protocol_overrides
+                 WHERE scope_kind = ?1 AND scope_id = ?2",
+                params![scope.kind_str(), scope.id()],
+            )?;
+            for evidence in record
+                .provider_contracts
+                .evidence
+                .get(scope)
+                .into_iter()
+                .flatten()
+            {
+                upsert_model_protocol_row_on(&tx, evidence)?;
+            }
+            for override_row in record
+                .provider_contracts
+                .overrides
+                .get(scope)
+                .into_iter()
+                .flatten()
+            {
+                set_model_protocol_override_on(
+                    &tx,
+                    scope,
+                    &override_row.model_id,
+                    override_row.protocol,
+                    override_row.state,
+                    override_row.updated_at,
+                )?;
+            }
+        }
+
+        sqlite_foreign_key_check(&tx)?;
+        // The callback reads through this same SQLite connection, so it sees
+        // the uncommitted merged rows. Every fallible runtime construction
+        // step must finish before commit; the caller installs the returned
+        // snapshots only after this transaction succeeds.
+        let runtime = prepare_runtime(self)?;
+        tx.commit()?;
+        Ok(runtime)
     }
 
     pub fn update_account(
@@ -12678,6 +13024,8 @@ mod tests {
                 account: go,
                 custom_config: None,
                 capabilities: Vec::new(),
+                verification_status: ConnectionVerificationStatus::NotRequired,
+                connection_verified_at: None,
             },
             AccountImportRecord {
                 account: custom,
@@ -12690,6 +13038,8 @@ mod tests {
                     protocol: UpstreamProtocolKind::ChatCompletions,
                     source: Some("import".into()),
                 }],
+                verification_status: ConnectionVerificationStatus::Pending,
+                connection_verified_at: None,
             },
         ];
         db.conn

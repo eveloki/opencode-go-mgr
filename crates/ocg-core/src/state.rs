@@ -112,6 +112,14 @@ pub struct CoreStateInner {
 
 pub type CoreState = Arc<CoreStateInner>;
 
+pub(crate) struct ImportedNodeRuntime {
+    config: AppConfig,
+    http_client: crate::http_client::ForwardRouteSet,
+    zen_free_models: crate::kernel::zen::ZenFreeModelCatalog,
+    provider_contracts: crate::provider_contracts::EffectiveContractSet,
+    credentials: crate::gateway_keys::CredentialSnapshot,
+}
+
 fn sealed_proxy_model_ids(
     contracts: &crate::provider_contracts::EffectiveContractSet,
 ) -> Vec<String> {
@@ -469,6 +477,55 @@ impl CoreStateInner {
     pub fn reload_provider_contracts(&self) -> crate::Result<()> {
         let db = self.db.lock();
         self.reload_provider_contracts_locked(&db)
+    }
+
+    /// Build every fallible runtime snapshot from an uncommitted V2 node
+    /// migration. The caller must hold the database transaction open while
+    /// passing the same connection view here.
+    pub(crate) fn prepare_imported_node_runtime(
+        &self,
+        db: &Database,
+    ) -> crate::Result<ImportedNodeRuntime> {
+        let (config, needs_persist) = load_config(&db)?;
+        config.validate().map_err(anyhow::Error::msg)?;
+        // Sanitized config JSON can differ in field order and legacy defaults
+        // can normalize on load. The typed V2 payload was validated before the
+        // transaction, so semantic normalization is enough for this preflight;
+        // startup may rewrite the byte representation later.
+        let _ = needs_persist;
+        let zen = db.zen_free_model_catalog()?.unwrap_or_default();
+        let contracts = crate::provider_contracts::build_effective_contracts(
+            &zen,
+            &db.list_custom_account_runtimes()?,
+            db.load_persisted_contracts()?,
+        );
+        let provider_models = sealed_proxy_model_ids(&contracts);
+        let route_set = crate::http_client::build_route_set_with_provider_models(
+            &config,
+            &zen,
+            &provider_models,
+        )?;
+        let credentials =
+            crate::gateway_keys::build_credential_snapshot(&*db, &config.gateway_key)?;
+        Ok(ImportedNodeRuntime {
+            config,
+            http_client: route_set,
+            zen_free_models: zen,
+            provider_contracts: contracts,
+            credentials,
+        })
+    }
+
+    /// Install a runtime snapshot whose fallible construction completed before
+    /// the matching database transaction committed.
+    pub(crate) fn install_imported_node_runtime(&self, runtime: ImportedNodeRuntime) {
+        *self.config.lock() = runtime.config;
+        *self.http_client.lock() = Arc::new(runtime.http_client);
+        *self.zen_free_models.write() = Arc::new(runtime.zen_free_models);
+        *self.provider_contracts.write() = Arc::new(runtime.provider_contracts);
+        self.routing.reset();
+        *self.credential_snapshot.write() = runtime.credentials;
+        self.settings_revision.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn reload_provider_contracts_locked(&self, db: &Database) -> crate::Result<()> {

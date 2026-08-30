@@ -21,7 +21,7 @@ test("transfer modal bounds files, clears transient secrets, and exposes import 
   assert.match(modal, /accept="\.ocgbackup,application\/json"/);
   assert.match(modal, /bundlePassword\.value = ""/);
   assert.match(modal, /bundlePassword\.value === bundlePasswordConfirmation\.value/);
-  assert.match(modal, /adminPassword\.value === adminPasswordConfirmation\.value/);
+  assert.doesNotMatch(modal, /adminUsername|adminPassword|session\.register/);
   assert.match(modal, /bundle\.value = ""/);
   assert.match(modal, /preview\.value = null/);
   assert.match(modal, /v-if="errorText" type="error"/);
@@ -33,8 +33,9 @@ test("transfer modal bounds files, clears transient secrets, and exposes import 
   assert.match(modal, /epoch !== previewEpoch/);
   assert.match(modal, /bundle\.value === previewBundleSnapshot\.value/);
   assert.match(modal, /bundlePassword\.value === previewPasswordSnapshot\.value/);
-  assert.match(modal, /session\.status \?\? await session\.loadStatus\(\)/);
-  assert.match(modal, /session\.register\(adminUsername\.value\.trim\(\), adminPassword\.value\)/);
+  assert.match(modal, /item\.disposition === "merge"/);
+  assert.match(modal, /preview\.value\?\.items\.length === 0/);
+  assert.match(modal, /同 ID/);
   assert.match(modal, /URL\.createObjectURL\(new Blob\(\[bundleText\]/);
   assert.doesNotMatch(modal, /console\.(?:log|error)/);
 });

@@ -232,7 +232,7 @@ export type BrowserTarget = "google_signup" | "google_login" | "github_signup" |
  * Update-status phase. Wire values stay lowercase, matching V2.
  */
 export type DesktopUpdatePhase = "idle" | "checking" | "downloading" | "installing" | "failed";
-export type AccountImportDisposition = "import" | "imported" | "duplicate";
+export type AccountImportDisposition = "import" | "imported" | "merge" | "merged" | "duplicate";
 /**
  * Operation supported by the local Desktop application-connector Host.
  */
@@ -1604,17 +1604,14 @@ export interface ProviderPricingRefreshUpdate {
   processGeneration: number;
 }
 /**
- * POST `/accounts/transfer/export` body. Both passwords are write-only. The
- * administrator credential is step-up authorization; `bundle_password` is a
- * distinct passphrase used only to encrypt the portable file.
+ * POST `/accounts/transfer/export` body. The password is write-only and used
+ * only to encrypt the portable node-state file.
  */
 export interface AccountExportRequest {
-  adminPassword: string;
-  adminUsername: string;
   bundlePassword: string;
 }
 /**
- * Encrypted account migration package returned by the export endpoint.
+ * Encrypted node migration package returned by the export endpoint.
  * `bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no
  * plaintext upstream credential is returned to the dashboard.
  */
@@ -1635,7 +1632,7 @@ export interface AccountImportPreviewRequest {
   password: string;
 }
 /**
- * Secret-free preview of one account migration package.
+ * Secret-free preview of one node migration package.
  */
 export interface AccountImportPreview {
   duplicateAccounts: number;
