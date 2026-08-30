@@ -1,9 +1,10 @@
 //! Dashboard V3 encrypted node migration: secrecy, preview, stable-ID merge,
-//! atomic import, and target-only account ordering.
+//! atomic import, and destination-first account ordering.
 
 use chrono::Utc;
 use ocg_core::provider::{
-    CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, OPENCODE_PROVIDER_ID,
+    COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID,
+    ConnectionVerificationStatus, GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID,
     OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use reqwest::header::CACHE_CONTROL;
@@ -20,6 +21,7 @@ const BUNDLE_PASSWORD: &str = "migration-password-123";
 const PUBLIC_ADMIN_PASSWORD: &str = "public-admin-password-123";
 const GO_KEY: &str = "sk-transfer-go";
 const CUSTOM_KEY: &str = "custom-transfer-key";
+const GOAT_KEY: &str = "goat-transfer-key";
 
 fn cas(harness: &V3Harness, patch: Value) -> Value {
     let mut body = match patch {
@@ -99,35 +101,48 @@ async fn create_source_accounts(harness: &V3Harness) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-}
 
-async fn make_custom_ready(harness: &V3Harness) -> String {
-    let accounts = harness.state.db.lock().list_accounts().unwrap();
-    let id = accounts
-        .iter()
-        .find(|account| account.provider_id == CUSTOM_PROVIDER_ID)
-        .unwrap()
-        .id
-        .clone();
-    harness
-        .state
-        .db
-        .lock()
-        .set_account_verification(
-            &id,
-            ConnectionVerificationStatus::Verified,
-            Some(Utc::now()),
-            None,
-        )
-        .unwrap();
     let (status, _, body) = send_json(
         harness,
-        Method::PATCH,
-        &format!("/accounts/{id}"),
-        &cas(harness, json!({ "enabled": true })),
+        Method::POST,
+        "/accounts",
+        &cas(
+            harness,
+            json!({
+                "name": "Migrated GOAT",
+                "key": GOAT_KEY,
+                "providerId": COMMAND_CODE_PROVIDER_ID,
+                "offeringId": GOAT_OFFERING_ID
+            }),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+fn custom_pending_but_enabled(harness: &V3Harness) -> String {
+    let (id, enabled) = harness
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.provider_id == CUSTOM_PROVIDER_ID)
+        .map(|account| (account.id, account.enabled))
+        .unwrap();
+    assert!(enabled, "Custom creation should default to enabled");
+    assert_eq!(
+        harness
+            .state
+            .db
+            .lock()
+            .account_verification_state(&id)
+            .unwrap()
+            .unwrap()
+            .status,
+        ConnectionVerificationStatus::Pending
+    );
     id
 }
 
@@ -147,7 +162,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert_no_store(oversized.headers());
 
     create_source_accounts(&source).await;
-    let custom_id = make_custom_ready(&source).await;
+    let custom_id = custom_pending_but_enabled(&source);
     let source_go_id = source
         .state
         .db
@@ -156,6 +171,16 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .unwrap()
         .into_iter()
         .find(|account| account.provider_id == OPENCODE_PROVIDER_ID)
+        .unwrap()
+        .id;
+    let source_goat_id = source
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.provider_id == COMMAND_CODE_PROVIDER_ID)
         .unwrap()
         .id;
     let source_primary = source.state.config().gateway_key;
@@ -175,11 +200,12 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_no_store(&headers);
-    assert_eq!(body["exportedAccounts"], 2);
+    assert_eq!(body["exportedAccounts"], 3);
     assert_eq!(body["skippedAccounts"], 0);
     let encoded = body.to_string();
     assert!(!encoded.contains(GO_KEY));
     assert!(!encoded.contains(CUSTOM_KEY));
+    assert!(!encoded.contains(GOAT_KEY));
     let bundle = body["bundle"].as_str().unwrap().to_string();
 
     let (status, headers, body) = send_json(
@@ -216,9 +242,9 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     .await;
     assert_eq!(status, StatusCode::OK, "{preview}");
     assert_no_store(&headers);
-    assert_eq!(preview["importableAccounts"], 2);
+    assert_eq!(preview["importableAccounts"], 3);
     assert_eq!(preview["duplicateAccounts"], 0);
-    assert_eq!(preview["items"].as_array().unwrap().len(), 2);
+    assert_eq!(preview["items"].as_array().unwrap().len(), 3);
     assert!(!preview.to_string().contains(GO_KEY));
     assert!(!preview.to_string().contains(CUSTOM_KEY));
 
@@ -274,7 +300,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     .await;
     assert_eq!(status, StatusCode::OK, "{imported}");
     assert_no_store(&headers);
-    assert_eq!(imported["importedAccounts"], 2);
+    assert_eq!(imported["importedAccounts"], 3);
     assert_eq!(imported["duplicateAccounts"], 0);
     assert_eq!(target.state.settings_revision(), before + 1);
     assert!(!imported.to_string().contains(GO_KEY));
@@ -285,7 +311,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .iter()
         .filter(|account| account.provider_id != OPENCODE_ZEN_FREE_PROVIDER_ID)
         .collect();
-    assert_eq!(ordinary.len(), 3);
+    assert_eq!(ordinary.len(), 4);
     assert_eq!(
         accounts
             .iter()
@@ -293,9 +319,10 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
             .collect::<Vec<_>>(),
         [
             ZEN_FREE_ACCOUNT_ID,
+            target_extra_id.as_str(),
             source_go_id.as_str(),
             custom_id.as_str(),
-            target_extra_id.as_str(),
+            source_goat_id.as_str(),
         ]
     );
     let go = ordinary
@@ -322,7 +349,15 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     );
     assert!(
         custom.enabled,
-        "verified Custom accounts should remain usable"
+        "pending Custom accounts should remain usable"
+    );
+    let goat = ordinary
+        .iter()
+        .find(|account| account.id == source_goat_id)
+        .unwrap();
+    assert_eq!(
+        target.state.decrypt_key(&goat.key_cipher).unwrap(),
+        GOAT_KEY
     );
     let custom_contract = target
         .state
@@ -340,7 +375,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .iter()
         .find(|account| account["providerId"] == CUSTOM_PROVIDER_ID)
         .unwrap();
-    assert_eq!(custom_view["verificationStatus"], "verified");
+    assert_eq!(custom_view["verificationStatus"], "pending");
 
     assert_eq!(target.state.config().gateway_key, source_primary);
     let target_sub_keys = target
@@ -369,7 +404,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{duplicate}");
-    assert_eq!(duplicate["importedAccounts"], 2);
+    assert_eq!(duplicate["importedAccounts"], 3);
     assert_eq!(duplicate["duplicateAccounts"], 0);
     assert!(
         duplicate["items"]
@@ -391,9 +426,10 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
             .collect::<Vec<_>>(),
         [
             ZEN_FREE_ACCOUNT_ID,
+            target_extra_id.as_str(),
             source_go_id.as_str(),
             custom_id.as_str(),
-            target_extra_id.as_str(),
+            source_goat_id.as_str(),
         ]
     );
 
@@ -408,6 +444,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert_no_store(&headers);
     assert!(!body.to_string().contains(GO_KEY));
     assert!(!body.to_string().contains(CUSTOM_KEY));
+    assert!(!body.to_string().contains(GOAT_KEY));
 
     let public = start_public("account-transfer-public").await;
     let unauthorized = public

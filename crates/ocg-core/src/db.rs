@@ -1803,12 +1803,17 @@ fn insert_import_account_on(conn: &Connection, record: &AccountImportRecord) -> 
         &account.offering_id,
         account.enabled,
     )?;
-    anyhow::ensure!(
-        record.verification_status.allows_enablement() || !account.enabled,
-        "an enabled imported account must retain an enabling verification state"
-    );
     let plan = builtin_plan(&account.provider_id, &account.offering_id)
         .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+    let verification_gates_enablement = plan.verification_policy == VerificationPolicy::Required
+        && ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+    anyhow::ensure!(
+        !account.enabled
+            || !verification_gates_enablement
+            || record.verification_status.allows_enablement(),
+        "an enabled imported account must retain an enabling verification state"
+    );
     if plan_requires_custom_config(plan) {
         anyhow::ensure!(
             record.custom_config.is_some(),
@@ -1879,12 +1884,17 @@ fn merge_import_account_on(conn: &Connection, record: &AccountImportRecord) -> R
         &account.offering_id,
         account.enabled,
     )?;
-    anyhow::ensure!(
-        record.verification_status.allows_enablement() || !account.enabled,
-        "an enabled imported account must retain an enabling verification state"
-    );
     let plan = builtin_plan(&account.provider_id, &account.offering_id)
         .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+    let verification_gates_enablement = plan.verification_policy == VerificationPolicy::Required
+        && ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+    anyhow::ensure!(
+        !account.enabled
+            || !verification_gates_enablement
+            || record.verification_status.allows_enablement(),
+        "an enabled imported account must retain an enabling verification state"
+    );
     if plan_requires_custom_config(plan) {
         anyhow::ensure!(
             record.custom_config.is_some(),
@@ -4232,32 +4242,23 @@ impl Database {
         Ok(())
     }
 
-    /// Merge one V2 node migration package by stable account/Key id. Source
-    /// rows take their package order; destination-only rows retain their
-    /// relative order and append after the migrated rows. All database-owned
-    /// state shares one SQLite transaction.
+    /// Merge one V2 node migration package by stable account/Key id. Existing
+    /// destination rows keep their current order; source-only rows append in
+    /// package order. All database-owned state shares one SQLite transaction.
     pub fn import_node_state<T>(
         &self,
         record: &NodeImportRecord,
         prepare_runtime: impl FnOnce(&Database) -> Result<T>,
     ) -> Result<T> {
         let tx = self.conn.unchecked_transaction()?;
-        let source_account_ids = record
-            .accounts
-            .iter()
-            .map(|row| row.account.id.as_str())
-            .collect::<HashSet<_>>();
-        let mut target_extra_ids = Vec::new();
+        let mut ordered_ids = Vec::new();
         {
             let mut stmt = tx.prepare(
                 "SELECT id FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC",
             )?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             for id in rows {
-                let id = id?;
-                if id != ZEN_FREE_ACCOUNT_ID && !source_account_ids.contains(id.as_str()) {
-                    target_extra_ids.push(id);
-                }
+                ordered_ids.push(id?);
             }
         }
         for account in &record.accounts {
@@ -4320,8 +4321,12 @@ impl Database {
         )?;
         anyhow::ensure!(zen_changed == 1, "Zen Free singleton is missing");
 
-        let mut ordered_ids = record.account_order.clone();
-        ordered_ids.extend(target_extra_ids);
+        let mut ordered_set = ordered_ids.iter().cloned().collect::<HashSet<_>>();
+        for id in &record.account_order {
+            if ordered_set.insert(id.clone()) {
+                ordered_ids.push(id.clone());
+            }
+        }
         let current_ids = {
             let mut stmt = tx.prepare("SELECT id FROM accounts")?;
             stmt.query_map([], |row| row.get::<_, String>(0))?

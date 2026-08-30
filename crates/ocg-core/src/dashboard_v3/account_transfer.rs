@@ -686,6 +686,30 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
         if portable_key_required && key.trim().is_empty() {
             return Err(TransferError::Internal);
         }
+        let plan = builtin_plan(&account.provider_id, &account.offering_id)
+            .ok_or(TransferError::Internal)?;
+        let (custom_config, model_capabilities) =
+            if crate::provider::plan_requires_custom_config(plan) {
+                (
+                    contract.custom_config.map(|config| PortableCustomConfig {
+                        endpoint_url: config.endpoint_url,
+                        upstream_protocol: config.upstream_protocol.as_str().to_string(),
+                    }),
+                    contract
+                        .model_capabilities
+                        .into_iter()
+                        .map(|capability| PortableModelCapability {
+                            model_id: capability.model_id,
+                            protocol: capability.protocol.as_str().to_string(),
+                        })
+                        .collect(),
+                )
+            } else {
+                // Non-Custom account capability rows are runtime/provider
+                // evidence, not portable Custom declarations. Provider-level
+                // catalogs and evidence are carried separately in node V2.
+                (None, Vec::new())
+            };
         accounts.push(PortableAccount {
             id: Some(account.id),
             provider_id: account.provider_id,
@@ -704,18 +728,8 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
                 .verification
                 .connection_verified_at
                 .map(|value| value.to_rfc3339()),
-            custom_config: contract.custom_config.map(|config| PortableCustomConfig {
-                endpoint_url: config.endpoint_url,
-                upstream_protocol: config.upstream_protocol.as_str().to_string(),
-            }),
-            model_capabilities: contract
-                .model_capabilities
-                .into_iter()
-                .map(|capability| PortableModelCapability {
-                    model_id: capability.model_id,
-                    protocol: capability.protocol.as_str().to_string(),
-                })
-                .collect(),
+            custom_config,
+            model_capabilities,
         });
     }
     if accounts.len() > MAX_ACCOUNTS {
@@ -1078,13 +1092,22 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
                 TransferError::Invalid(format!("{} has an invalid verification time", prefix()))
             })?
             .map(|value| value.with_timezone(&Utc));
-        if is_node_migration && enabled && !verification_status.allows_enablement() {
+        let verification_gates_enablement = plan.verification_policy
+            == crate::provider::VerificationPolicy::Required
+            && crate::provider::ProviderRegistry::get(&account.provider_id, &account.offering_id)
+                .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+        if is_node_migration
+            && enabled
+            && verification_gates_enablement
+            && !verification_status.allows_enablement()
+        {
             return Err(TransferError::Invalid(format!(
                 "{} is enabled without a usable verification state",
                 prefix()
             )));
         }
-        let enabled = enabled && verification_status.allows_enablement();
+        let enabled =
+            enabled && (!verification_gates_enablement || verification_status.allows_enablement());
         let requires_custom = crate::provider::plan_requires_custom_config(plan);
         let (custom_config, capabilities) = if requires_custom {
             let config = account.custom_config.as_ref().ok_or_else(|| {

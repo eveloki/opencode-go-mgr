@@ -20,7 +20,7 @@
           <n-input v-model:value="bundlePasswordConfirmation" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
         </n-form-item>
       </n-form>
-      <p class="transfer-lifecycle">{{ t('同 ID 记录会在目标端归并，目标端独有账号按原顺序接在迁入列表后。浏览器 Profile/Cookie、登录密码、邀请码、日志、用量、冷却状态及系统专属设置不会迁移；未完成的托管注册草稿会跳过。') }}</p>
+      <p class="transfer-lifecycle">{{ t('同 ID 记录会在目标端原位置归并；目标端现有顺序保持不变，迁移包中新增的账号按包内顺序接在后面。浏览器 Profile/Cookie、登录密码、邀请码、日志、用量、冷却状态及系统专属设置不会迁移；未完成的托管注册草稿会跳过。') }}</p>
       <n-alert v-if="errorText" type="error" :title="errorText" class="transfer-note" />
       <n-alert v-if="resultText" type="success" :title="resultText" class="transfer-note" />
       <div class="transfer-actions">
@@ -55,7 +55,7 @@
           <n-input v-model:value="bundlePassword" type="password" show-password-on="click" autocomplete="current-password" :disabled="operationLocked" @update:value="clearPreview" />
         </n-form-item>
       </n-form>
-      <p class="transfer-lifecycle">{{ t('同 ID 记录会采用迁移包内容，目标端独有账号保留并接在后面。导入后原有主/子 Key、可用账号、Custom API、Zen Free 与模型路由设置可直接继续使用。') }}</p>
+      <p class="transfer-lifecycle">{{ t('同 ID 记录会采用迁移包内容但保留目标端位置；目标端现有顺序不变，新增账号按迁移包顺序接在后面。导入后原有主/子 Key、可用账号、Custom API、Zen Free 与模型路由设置可直接继续使用。') }}</p>
 
       <n-alert v-if="errorText" type="error" :title="errorText" class="transfer-note" />
       <n-alert v-if="resultText" type="success" :title="resultText" class="transfer-note" />
@@ -73,7 +73,7 @@
           </div>
         </div>
         <n-checkbox v-model:checked="importConfirmed" :disabled="operationLocked" class="transfer-confirmation">
-          {{ t('我确认同 ID 的账号与 Key 将采用迁移包内容，目标端独有账号会保留并接在后面。') }}
+          {{ t('我确认同 ID 的账号与 Key 将采用迁移包内容；目标端账号顺序保持不变，新增账号按迁移包顺序接在后面。') }}
         </n-checkbox>
       </template>
 

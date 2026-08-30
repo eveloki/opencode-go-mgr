@@ -47,9 +47,9 @@ ready account Keys, Custom Endpoint/model declarations and verification state,
 the primary and active sub Access Keys, portable routing/proxy settings, Zen
 Free enablement/catalog, and Provider catalogs, evidence, and protocol
 overrides. Matching stable IDs are merged with package-owned portable fields;
-same-Plan or same-name rows with different IDs coexist. Package account order
-comes first, while destination-only accounts retain their relative order and
-append after it. Destination-only Access Keys and Provider scopes are retained.
+same-Plan or same-name rows with different IDs coexist. Existing destination
+accounts keep their current order and position; source-only accounts append in
+package order. Destination-only Access Keys and Provider scopes are retained.
 
 Browser profiles/cookies, third-party login passwords, referral codes, logs,
 usage history, and source cooldown state do not move. Existing destination
