@@ -34,7 +34,7 @@ pub(super) async fn test_account_model(
         &prepared.config,
         &prepared.account,
         prepared.adapter,
-        &prepared.model_id,
+        &prepared.upstream_model,
         prepared.protocol,
         prepared.custom_endpoint_url.as_deref(),
     )
@@ -45,7 +45,7 @@ pub(super) async fn test_account_model(
     };
     Ok(Json(AccountModelTestResponse {
         account_id: prepared.account.id,
-        model_id: prepared.model_id,
+        model_id: prepared.public_model,
         protocol: AccountUpstreamProtocol::from(prepared.protocol),
         success,
         http_status,
@@ -58,7 +58,8 @@ struct PreparedAccountModelTest {
     account: ModelAccount,
     config: crate::models::AppConfig,
     adapter: ProviderAdapterKind,
-    model_id: String,
+    public_model: String,
+    upstream_model: String,
     protocol: UpstreamProtocolKind,
     custom_endpoint_url: Option<String>,
 }
@@ -84,7 +85,7 @@ fn prepare_account_model_test(
     let adapter = ProviderAdapterKind::from_offering(&account.provider_id, &account.offering_id)
         .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
 
-    let (protocol, custom_endpoint_url) = if plan_requires_custom_config(plan) {
+    let (protocol, custom_endpoint_url, upstream_model) = if plan_requires_custom_config(plan) {
         let contract = state
             .db
             .lock()
@@ -99,7 +100,9 @@ fn prepare_account_model_test(
         let capability = contract
             .model_capabilities
             .iter()
-            .find(|capability| capability.model_id == model_id)
+            .find(|capability| {
+                crate::custom::custom_model_id_matches(&capability.public_model, model_id)
+            })
             .ok_or_else(|| {
                 V3ApiError::invalid_request_at(state, "model is not declared for this account")
             })?;
@@ -109,7 +112,11 @@ fn prepare_account_model_test(
                 "Custom API model capability protocol does not match this account",
             ));
         }
-        (capability.protocol, Some(config.endpoint_url))
+        (
+            capability.protocol,
+            Some(config.endpoint_url),
+            capability.upstream_model.clone(),
+        )
     } else {
         let scope = ContractScope::from_account(&account)
             .ok_or_else(|| V3ApiError::invalid_request_at(state, "unknown provider offering"))?;
@@ -121,14 +128,15 @@ fn prepare_account_model_test(
             .ok_or_else(|| {
                 V3ApiError::invalid_request_at(state, "model is not routable for this provider")
             })?;
-        (protocol.preferred_protocol, None)
+        (protocol.preferred_protocol, None, model_id.to_string())
     };
 
     Ok(PreparedAccountModelTest {
         account,
         config: state.config(),
         adapter,
-        model_id: model_id.to_string(),
+        public_model: model_id.to_string(),
+        upstream_model,
         protocol,
         custom_endpoint_url,
     })

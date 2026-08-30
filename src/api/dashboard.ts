@@ -229,9 +229,10 @@ export const dashboardApi = {
       endpointUrl: config.endpoint_url,
       upstreamProtocol: config.upstream_protocol,
       modelCapabilities: config.model_capabilities.map((capability) => ({
-        modelId: capability.model_id,
+        publicModel: capability.public_model,
         protocol: capability.protocol,
         source: capability.source,
+        upstreamModel: capability.upstream_model,
       })),
     };
     return dashboardV3.putAccountCustomConfig(
@@ -247,9 +248,10 @@ export const dashboardApi = {
     _ignoredRevision?: number,
   ): Promise<Account> => mutatedAccount(withCas((expectation) => dashboardV3.putAccountModelCapabilities(id, {
     capabilities: capabilities.map((capability) => ({
-      modelId: capability.model_id,
+      publicModel: capability.public_model,
       protocol: capability.protocol,
       source: capability.source,
+      upstreamModel: capability.upstream_model,
     })),
   } satisfies WithoutExpectation<AccountModelCapabilitiesUpdate>, expectation))),
 

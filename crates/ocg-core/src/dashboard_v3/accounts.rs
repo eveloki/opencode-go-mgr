@@ -219,7 +219,9 @@ fn create_account_locked(
             ));
         }
         for capability in &model_capabilities {
-            crate::provider::validate_custom_model_id(&capability.model_id)
+            crate::provider::validate_custom_model_id(&capability.public_model)
+                .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
+            crate::provider::validate_custom_model_id(&capability.upstream_model)
                 .map_err(|error| V3ApiError::invalid_request_at(state, error.to_string()))?;
         }
         if let Some(config) = custom_config.as_ref() {
@@ -852,8 +854,8 @@ fn capability_from_model(
     capability: crate::models::AccountModelCapability,
 ) -> AccountModelCapability {
     AccountModelCapability {
-        account_id: capability.account_id,
-        model_id: capability.model_id,
+        public_model: capability.public_model,
+        upstream_model: capability.upstream_model,
         protocol: capability.protocol.into(),
         verified_at: capability.verified_at.map(|value| value.to_rfc3339()),
         source: capability.source,
@@ -868,10 +870,19 @@ fn custom_config_write_to_input(write: &AccountCustomConfigWrite) -> AccountCust
 }
 
 fn capability_write_to_input(write: &AccountModelCapabilityWrite) -> AccountModelCapabilityInput {
-    AccountModelCapabilityInput {
-        model_id: write.model_id.clone(),
-        protocol: write.protocol.into(),
-        source: write.source.clone(),
+    match write {
+        AccountModelCapabilityWrite::Canonical(write) => AccountModelCapabilityInput {
+            public_model: write.public_model.clone(),
+            upstream_model: write.upstream_model.clone(),
+            protocol: write.protocol.into(),
+            source: write.source.clone(),
+        },
+        AccountModelCapabilityWrite::Legacy(write) => AccountModelCapabilityInput {
+            public_model: write.model_id.clone(),
+            upstream_model: write.model_id.clone(),
+            protocol: write.protocol.into(),
+            source: write.source.clone(),
+        },
     }
 }
 

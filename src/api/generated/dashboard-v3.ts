@@ -179,6 +179,12 @@ export type AccountSetupStep = "google_account" | "opencode_registration" | "pay
  */
 export type AccountVerificationStatus = "not_required" | "pending" | "verified" | "failed";
 /**
+ * One declared Custom model capability on create or replace. Canonical writes
+ * carry both identities; the legacy `modelId` shape remains accepted so a
+ * stale dashboard can complete one migration-window write without data loss.
+ */
+export type AccountModelCapabilityWrite = AccountModelCapabilityWriteCanonical | AccountModelCapabilityWriteLegacy;
+/**
  * Custom auth scheme. Wire values match V2 kebab-case.
  */
 export type AccountAuthScheme = "bearer" | "x-api-key";
@@ -441,10 +447,10 @@ export interface AccountCustomConfig {
  * One declared Custom model capability as returned on an account.
  */
 export interface AccountModelCapability {
-  accountId: string;
-  modelId: string;
   protocol: AccountUpstreamProtocol;
+  publicModel: string;
   source: string;
+  upstreamModel: string;
   verifiedAt: string | null;
 }
 /**
@@ -489,10 +495,13 @@ export interface AccountCustomConfigWrite {
   endpointUrl: string;
   upstreamProtocol: AccountUpstreamProtocol;
 }
-/**
- * One declared Custom model capability on create or replace.
- */
-export interface AccountModelCapabilityWrite {
+export interface AccountModelCapabilityWriteCanonical {
+  protocol: AccountUpstreamProtocol;
+  publicModel: string;
+  source?: string | null;
+  upstreamModel: string;
+}
+export interface AccountModelCapabilityWriteLegacy {
   modelId: string;
   protocol: AccountUpstreamProtocol;
   source?: string | null;

@@ -878,8 +878,8 @@ pub struct AccountCustomConfig {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountModelCapability {
-    pub account_id: String,
-    pub model_id: String,
+    pub public_model: String,
+    pub upstream_model: String,
     pub protocol: AccountUpstreamProtocol,
     pub verified_at: Option<String>,
     pub source: String,
@@ -1019,11 +1019,31 @@ pub struct AccountModelCapabilitiesUpdate {
     pub capabilities: Vec<AccountModelCapabilityWrite>,
 }
 
-/// One declared Custom model capability on create or replace.
+/// One declared Custom model capability on create or replace. Canonical writes
+/// carry both identities; the legacy `modelId` shape remains accepted so a
+/// stale dashboard can complete one migration-window write without data loss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum AccountModelCapabilityWrite {
+    Canonical(AccountModelCapabilityWriteCanonical),
+    Legacy(AccountModelCapabilityWriteLegacy),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AccountModelCapabilityWrite {
+pub struct AccountModelCapabilityWriteCanonical {
+    pub public_model: String,
+    pub upstream_model: String,
+    pub protocol: AccountUpstreamProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountModelCapabilityWriteLegacy {
     pub model_id: String,
     pub protocol: AccountUpstreamProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3353,6 +3373,48 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn custom_capability_writes_accept_only_canonical_or_legacy_shapes() {
+        let canonical: AccountModelCapabilityWrite = serde_json::from_value(json!({
+            "publicModel": "deepseek-v4-flash",
+            "upstreamModel": "deepseek-v4-flash:0731",
+            "protocol": "chat_completions"
+        }))
+        .unwrap();
+        assert!(matches!(
+            canonical,
+            AccountModelCapabilityWrite::Canonical(_)
+        ));
+        let legacy: AccountModelCapabilityWrite = serde_json::from_value(json!({
+            "modelId": "legacy/model",
+            "protocol": "chat_completions"
+        }))
+        .unwrap();
+        assert!(matches!(legacy, AccountModelCapabilityWrite::Legacy(_)));
+
+        for malformed in [
+            json!({
+                "publicModel": "public-only",
+                "protocol": "chat_completions"
+            }),
+            json!({
+                "upstreamModel": "upstream-only",
+                "protocol": "chat_completions"
+            }),
+            json!({
+                "modelId": "legacy",
+                "publicModel": "mixed",
+                "upstreamModel": "mixed-upstream",
+                "protocol": "chat_completions"
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<AccountModelCapabilityWrite>(malformed).is_err(),
+                "malformed capability shape must fail closed"
+            );
+        }
     }
 
     #[test]

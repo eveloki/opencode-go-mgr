@@ -239,7 +239,8 @@ async fn dashboard_summary_counts_routable_goat_and_custom_accounts() {
                 upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
-                model_id: "custom-summary-model".into(),
+                public_model: "custom-summary-model".into(),
+                upstream_model: "custom-summary-upstream".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: Some("account_declared".into()),
             }],
@@ -260,8 +261,8 @@ async fn dashboard_summary_counts_routable_goat_and_custom_accounts() {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v32() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
+fn dashboard_v3_schema_version_stays_at_v33() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 33);
 }
 
 #[tokio::test]

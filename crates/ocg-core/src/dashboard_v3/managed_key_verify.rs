@@ -678,8 +678,8 @@ fn capability_from_model(
     capability: crate::models::AccountModelCapability,
 ) -> AccountModelCapability {
     AccountModelCapability {
-        account_id: capability.account_id,
-        model_id: capability.model_id,
+        public_model: capability.public_model,
+        upstream_model: capability.upstream_model,
         protocol: capability.protocol.into(),
         verified_at: capability.verified_at.map(|value| value.to_rfc3339()),
         source: capability.source,

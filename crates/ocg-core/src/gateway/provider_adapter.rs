@@ -493,11 +493,16 @@ impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
         if let RoutePolicy::Production {
             contracts: Some(contracts),
         } = policy
-            && !contracts.production_protocol_allowed(account, &plan.model, protocol)
+            && !contracts.production_protocol_allowed(
+                account,
+                plan.resolved_alias.as_deref().unwrap_or(&plan.model),
+                protocol,
+            )
         {
             return Err(format!(
-                "Custom API has no verified support for model `{}` over {:?}",
-                plan.model, plan.upstream
+                "Custom API has no verified support for public model `{}` over {:?}",
+                plan.resolved_alias.as_deref().unwrap_or(&plan.model),
+                plan.upstream
             ));
         }
         let endpoint = resolve_custom_endpoints(&custom.endpoint_url, protocol)

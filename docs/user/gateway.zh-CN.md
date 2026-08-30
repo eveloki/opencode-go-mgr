@@ -49,9 +49,9 @@ Gateway API 必须携带 **Key**，支持 `Authorization: Bearer <key>`、`x-api
 
 转发日志把请求身份与上游身份分开记录，没有 `requested_alias` 字段：
 
-- `requested_model` — 客户端发送的别名或模型名
-- `resolved_alias` — 存在时的规范 kebab 别名
-- `upstream_model` — 该 Plan 的原始上游 ID
+- `requested_model` — 客户端发送的公开名称或 Alias
+- `resolved_alias` — 存在时解析出的公开 Alias
+- `upstream_model` — 实际发送到该账号上游的精确模型 ID
 
 以及 `provider_id` 与 `offering_id`。原生成本字段可选。
 

@@ -18,15 +18,18 @@ test("Custom payload uses one API URL and expands every model to its protocol", 
     key: "custom-key",
     endpoint_url: "https://api.example.com/v1/responses",
     upstream_protocol: "responses",
-    model_capabilities: [{ model_id: "m1" }, { model_id: "m2" }],
+    model_capabilities: [
+      { public_model: "m1", upstream_model: "provider/m1" },
+      { public_model: "m2", upstream_model: "provider/m2" },
+    ],
   });
   assert.deepEqual(payload.custom_config, {
     endpoint_url: "https://api.example.com/v1/responses",
     upstream_protocol: "responses",
   });
   assert.deepEqual(payload.model_capabilities, [
-    { model_id: "m1", protocol: "responses", source: "manual" },
-    { model_id: "m2", protocol: "responses", source: "manual" },
+    { public_model: "m1", upstream_model: "provider/m1", protocol: "responses", source: "manual" },
+    { public_model: "m2", upstream_model: "provider/m2", protocol: "responses", source: "manual" },
   ]);
 });
 
@@ -35,7 +38,7 @@ test("Custom payload rejects missing or malformed Endpoint fields", () => {
     name: "Custom",
     key: "custom-key",
     upstream_protocol: "chat_completions" as const,
-    model_capabilities: [{ model_id: "m" }],
+    model_capabilities: [{ public_model: "m", upstream_model: "provider/m" }],
   };
   const cases: Array<{ endpoint_url?: string; code: AccountCreatePayloadErrorCode }> = [
     { code: "missing_endpoint_url" },
@@ -56,7 +59,7 @@ test("Custom payload requires one upstream protocol and valid model IDs", () => 
     name: "Custom",
     key: "custom-key",
     endpoint_url: "http://localhost:3000/v1/messages",
-    model_capabilities: [{ model_id: "m" }],
+    model_capabilities: [{ public_model: "m", upstream_model: "provider/m" }],
   };
   assert.throws(
     () => buildCreateAccountPayload(customPlan, undefined, base),
@@ -66,9 +69,12 @@ test("Custom payload requires one upstream protocol and valid model IDs", () => 
     () => buildCreateAccountPayload(customPlan, undefined, {
       ...base,
       upstream_protocol: "messages",
-      model_capabilities: [{ model_id: " model-a " }, { model_id: "model-a" }],
+      model_capabilities: [
+        { public_model: " model-a ", upstream_model: "provider/a" },
+        { public_model: "MODEL-A", upstream_model: "provider/a" },
+      ],
     }),
-    (error) => error instanceof AccountCreatePayloadError && error.code === "duplicate_model_id",
+    (error) => error instanceof AccountCreatePayloadError && error.code === "duplicate_public_model",
   );
 });
 

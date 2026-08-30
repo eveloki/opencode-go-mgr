@@ -72,10 +72,10 @@ impl CustomAccountRuntime {
             && is_custom_api(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
     }
 
-    pub fn capability_matching(&self, requested: &str) -> Option<&AccountModelCapability> {
+    pub fn capability_matching_public(&self, requested: &str) -> Option<&AccountModelCapability> {
         self.capabilities
             .iter()
-            .find(|capability| custom_model_id_matches(&capability.model_id, requested))
+            .find(|capability| custom_model_id_matches(&capability.public_model, requested))
     }
 }
 
@@ -91,26 +91,25 @@ pub fn custom_runtimes_by_account(
 
 /// Case-preserving declared IDs from eligible enabled+ready Custom accounts,
 /// de-duplicated in account then capability order.
-pub fn eligible_custom_model_ids(runtimes: &[CustomAccountRuntime]) -> Vec<String> {
+pub fn eligible_custom_public_models(runtimes: &[CustomAccountRuntime]) -> Vec<String> {
     let mut ids = Vec::new();
     for runtime in runtimes.iter().filter(|runtime| runtime.eligible()) {
         for capability in &runtime.capabilities {
-            if ids
-                .iter()
-                .any(|existing: &String| custom_model_id_matches(existing, &capability.model_id))
-            {
+            if ids.iter().any(|existing: &String| {
+                custom_model_id_matches(existing, &capability.public_model)
+            }) {
                 continue;
             }
-            ids.push(capability.model_id.clone());
+            ids.push(capability.public_model.clone());
         }
     }
     ids
 }
 
 pub fn any_eligible_custom_model(runtimes: &[CustomAccountRuntime], requested: &str) -> bool {
-    runtimes
-        .iter()
-        .any(|runtime| runtime.eligible() && runtime.capability_matching(requested).is_some())
+    runtimes.iter().any(|runtime| {
+        runtime.eligible() && runtime.capability_matching_public(requested).is_some()
+    })
 }
 
 pub fn api_format_for_custom_protocol(protocol: UpstreamProtocolKind) -> ApiFormat {
@@ -134,7 +133,7 @@ pub struct CustomVerificationContract {
     pub endpoint_url: String,
     pub upstream_protocol: UpstreamProtocolKind,
     /// Declared capability IDs in persistence order.
-    pub capabilities: Vec<(String, UpstreamProtocolKind)>,
+    pub capabilities: Vec<(String, String, UpstreamProtocolKind)>,
 }
 
 impl CustomVerificationContract {
@@ -153,7 +152,13 @@ impl CustomVerificationContract {
             upstream_protocol: config.upstream_protocol,
             capabilities: capabilities
                 .iter()
-                .map(|capability| (capability.model_id.clone(), capability.protocol))
+                .map(|capability| {
+                    (
+                        capability.public_model.clone(),
+                        capability.upstream_model.clone(),
+                        capability.protocol,
+                    )
+                })
                 .collect(),
         }
     }
@@ -497,10 +502,10 @@ pub fn validate_custom_capability_expansion(
                     .to_string(),
             );
         }
-        if !seen.insert(capability.model_id.to_ascii_lowercase()) {
+        if !seen.insert(capability.public_model.to_ascii_lowercase()) {
             return Err(format!(
                 "duplicate model capability `{}` for the single Custom upstream protocol",
-                capability.model_id
+                capability.public_model
             ));
         }
     }
@@ -550,7 +555,7 @@ pub async fn probe_custom_connection(
         config,
         custom_config,
         custom_config.upstream_protocol,
-        &first_capability.model_id,
+        &first_capability.upstream_model,
         api_key,
         &client,
     )
@@ -740,7 +745,8 @@ mod tests {
         };
         let capability = AccountModelCapability {
             account_id: "acc".into(),
-            model_id: "local".into(),
+            public_model: "local".into(),
+            upstream_model: "local-upstream".into(),
             protocol: UpstreamProtocolKind::ChatCompletions,
             verified_at: None,
             source: "manual".into(),
@@ -1059,14 +1065,16 @@ mod tests {
         let caps = vec![
             AccountModelCapability {
                 account_id: "acc".into(),
-                model_id: "one".into(),
+                public_model: "one".into(),
+                upstream_model: "upstream-one".into(),
                 protocol: UpstreamProtocolKind::Responses,
                 verified_at: None,
                 source: "manual".into(),
             },
             AccountModelCapability {
                 account_id: "acc".into(),
-                model_id: "two".into(),
+                public_model: "two".into(),
+                upstream_model: "upstream-two".into(),
                 protocol: UpstreamProtocolKind::Responses,
                 verified_at: None,
                 source: "manual".into(),
@@ -1080,8 +1088,16 @@ mod tests {
         assert_eq!(
             contract.capabilities,
             vec![
-                ("one".into(), UpstreamProtocolKind::Responses),
-                ("two".into(), UpstreamProtocolKind::Responses)
+                (
+                    "one".into(),
+                    "upstream-one".into(),
+                    UpstreamProtocolKind::Responses
+                ),
+                (
+                    "two".into(),
+                    "upstream-two".into(),
+                    UpstreamProtocolKind::Responses
+                )
             ]
         );
         let reordered = CustomVerificationContract::from_parts(
@@ -1135,7 +1151,8 @@ mod tests {
         };
         let capability = AccountModelCapability {
             account_id: "acc".into(),
-            model_id: "local".into(),
+            public_model: "local".into(),
+            upstream_model: "local".into(),
             protocol: UpstreamProtocolKind::ChatCompletions,
             verified_at: None,
             source: "manual".into(),

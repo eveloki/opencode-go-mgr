@@ -18,9 +18,9 @@ reserved for process and control-plane events.
 Each stored row keeps the request identity separate from the upstream
 identity. There is no `requested_alias` field:
 
-- `requested_model` — the alias or model name the client sent
-- `resolved_alias` — the canonical kebab alias when one exists
-- `upstream_model` — the Plan's raw upstream ID
+- `requested_model` — the public name or Alias the client sent
+- `resolved_alias` — the resolved public Alias when one exists
+- `upstream_model` — the exact model ID actually sent to that account's upstream
 
 plus `provider_id` and `offering_id`. The existing model filter exact-matches
 any of those identities or the legacy `model` column. Native cost

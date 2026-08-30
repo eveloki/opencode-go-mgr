@@ -29,6 +29,24 @@ test("Providers excludes account-scoped Custom API contracts from its supplier n
   assert.match(scopes, /filter\(\(scope\) => scope\.scope_kind === "provider"\)/);
 });
 
+test("Providers exposes a read-only Alias tab from existing contracts and accounts", () => {
+  assert.match(providers, /<n-tab-pane name="aliases"/);
+  assert.match(providers, /providerAliasRows\(flattenProviderScopes\(contracts\.value, catalog\.value\), aliasAccounts\.value\)/);
+  assert.match(providers, /const aliasGroups = computed/);
+  assert.match(providers, /v-for="group in aliasGroups"/);
+  assert.match(providers, /dashboardApi\.getAccounts\(\)/);
+  assert.match(providers, /public_model/);
+  assert.match(providers, /upstream_model/);
+  assert.match(providers, /openCustomAccount\(row\.custom_account_id\)/);
+  const open = providers.slice(providers.indexOf("function openCustomAccount"), providers.indexOf("async function refreshCatalog"));
+  assert.match(open, /applyAppViewSearchParams\(new URL\(window\.location\.href\), "accounts"\)/);
+  assert.match(open, /searchParams\.set\("account_id", accountId\)/);
+  assert.doesNotMatch(open, /dashboardApi\.(?:update|create|delete)/);
+  assert.match(providers, /v-if="accountsLoadError"/);
+  assert.match(providers, /accountsLoadError\.value = dashboardErrorDetail\(accountsResult\.reason\)/);
+  assert.match(providers, /aliasAccounts\.value = accountsResult\.value;[\s\S]*?accountsLoadError\.value = ""/);
+});
+
 test("Providers keeps last-good contracts while actions fail and distinguishes page vs action errors", () => {
   assert.match(providers, /v-else-if="loadError && !contracts"/);
   assert.match(providers, /v-if="loadError && contracts"/);
@@ -146,12 +164,14 @@ test("Providers pricing is filtered to the active provider and 390px layout does
   assert.match(providers, /@media \(max-width: 720px\)/);
 });
 
-test("Providers shows model catalog and model prices in two tabs", () => {
+test("Providers shows catalog, pricing, and the read-only Alias aggregate in three tabs", () => {
   assert.match(providers, /<n-tabs[^>]*v-model:value="activeTab"/);
   assert.match(providers, /<n-tab-pane[^>]*name="catalog"/);
   assert.match(providers, /<n-tab-pane[^>]*name="pricing"/);
+  assert.match(providers, /<n-tab-pane[^>]*name="aliases"/);
   assert.match(providers, /:tab="t\('模型目录'\)"/);
   assert.match(providers, /:tab="t\('模型价格'\)"/);
+  assert.match(providers, /:tab="t\('别名'\)"/);
   assert.doesNotMatch(providers, /id="provider-overview-title"/);
   assert.doesNotMatch(providers, /id="provider-protocol-title"/);
 });

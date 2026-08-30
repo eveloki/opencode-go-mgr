@@ -413,15 +413,17 @@ fn materialize_custom_account_plan(
             account.name
         )));
     }
-    let capability = runtime.capability_matching(routing_model).ok_or_else(|| {
-        ProtocolError::new(format!(
-            "Custom account `{}` did not declare model `{routing_model}`",
-            account.name
-        ))
-    })?;
+    let capability = runtime
+        .capability_matching_public(routing_model)
+        .ok_or_else(|| {
+            ProtocolError::new(format!(
+                "Custom account `{}` did not declare model `{routing_model}`",
+                account.name
+            ))
+        })?;
     let resolved_alias = resolved_alias
         .filter(|alias| !alias.is_empty())
-        .or_else(|| Some(capability.model_id.clone()));
+        .or_else(|| Some(capability.public_model.clone()));
     let contract = contracts
         .scope(&ContractScope::custom_endpoint(&account.id))
         .ok_or_else(|| {
@@ -435,14 +437,14 @@ fn materialize_custom_account_plan(
     let upstream = crate::provider_contracts::select_upstream_protocol(
         contract,
         parsed.client,
-        &capability.model_id,
+        &capability.public_model,
     )
     .map_err(|error| ProtocolError::new(error.message))?;
     materialize_channel_plan(
         config,
         parsed,
         client_model,
-        &capability.model_id,
+        &capability.upstream_model,
         resolved_alias,
         UpstreamChannel::Go,
         None,
@@ -1228,7 +1230,8 @@ mod tests {
             },
             capabilities: vec![AccountModelCapability {
                 account_id: account_id.into(),
-                model_id: model_id.into(),
+                public_model: model_id.into(),
+                upstream_model: model_id.into(),
                 protocol,
                 verified_at: None,
                 source: "manual".into(),

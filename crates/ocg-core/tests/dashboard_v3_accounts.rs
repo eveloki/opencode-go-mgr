@@ -254,8 +254,8 @@ fn mutation_routes(id: &str) -> Vec<(Method, String, Value)> {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v32() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
+fn dashboard_v3_schema_version_stays_at_v33() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 33);
 }
 
 #[tokio::test]
@@ -694,7 +694,8 @@ async fn dashboard_v3_create_gates_for_go_custom_goat_and_zen() {
         custom.custom_config.as_ref().unwrap().endpoint_url,
         "https://api.example.com/v1/messages"
     );
-    assert_eq!(custom.model_capabilities[0].model_id, "org/model");
+    assert_eq!(custom.model_capabilities[0].public_model, "org/model");
+    assert_eq!(custom.model_capabilities[0].upstream_model, "org/model");
 
     let (status, zen) = send_json(
         &harness,
@@ -1045,7 +1046,7 @@ async fn dashboard_v3_custom_invalidation_ack_and_enable_gates() {
     let caps = mutation_account(&caps);
     assert!(caps.enabled);
     assert_eq!(caps.verification_status, AccountVerificationStatus::Pending);
-    assert_eq!(caps.model_capabilities[0].model_id, "org/other");
+    assert_eq!(caps.model_capabilities[0].public_model, "org/other");
 
     // Custom verification is an optional tool: a pending Custom account may be
     // enabled explicitly without verifying first.
@@ -1165,7 +1166,7 @@ async fn dashboard_v3_custom_config_and_capabilities_roll_back_together() {
         .list_account_model_capabilities(&custom_id)
         .unwrap();
     assert_eq!(capabilities.len(), 1);
-    assert_eq!(capabilities[0].model_id, "org/model");
+    assert_eq!(capabilities[0].public_model, "org/model");
     assert_eq!(capabilities[0].protocol.as_str(), "messages");
 
     drop(conn);

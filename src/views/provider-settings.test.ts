@@ -177,7 +177,7 @@ test("account form uses the catalog display name and does not invent GOAT availa
 
   assert.match(accountForm, /label: entry\.display_name/);
   assert.match(accountForm, /t\("添加 \{plan\} 账号"/);
-  assert.match(accountForm, /:aria-label="t\('模型能力'\)"/);
+  assert.match(accountForm, /:aria-label="t\('模型映射'\)"/);
   assert.match(accountForm, /v-model:value="form\.upstreamProtocol"/);
   assert.doesNotMatch(accountForm, /<n-checkbox-group/);
   assert.doesNotMatch(accountForm, /keyPrefixHint|Key 须以/);
@@ -189,8 +189,15 @@ test("account form uses the catalog display name and does not invent GOAT availa
   assert.match(accountForm, /class="purchase-date-control"[\s\S]*?v-if="isEdit"[\s\S]*?:disabled="isPurchaseDateToday"[\s\S]*?@click="setPurchaseDateToday"/);
   assert.match(accountForm, /purchaseDate: timestampFromLocalDate\(account\.purchase_date\),/);
   assert.match(accountForm, /function setPurchaseDateToday\(\)[\s\S]*?form\.value\.purchaseDate = timestampFromLocalDate\(localDateString\(\)\)/);
-  assert.match(accountForm, /v-model:value="modelCapabilityIds"/);
-  assert.match(accountForm, /multiple[\s\S]*?filterable[\s\S]*?tag[\s\S]*?max-tag-count="responsive"/);
+  assert.match(accountForm, /v-model:value="mapping\.public_model"/);
+  assert.match(accountForm, /v-model:value="mapping\.upstream_model"/);
+  assert.match(accountForm, /:key="mapping\.row_id"/);
+  assert.doesNotMatch(accountForm, /:key="`\$\{index\}:\$\{mapping\.public_model\}/);
+  assert.match(accountForm, /function addModelMapping\(\)/);
+  assert.match(accountForm, /function removeModelMapping\(index: number\)/);
+  assert.match(accountForm, /v-model:value="selectedDiscoveredModels"/);
+  assert.match(accountForm, /function importSelectedModels\(\)/);
+  assert.doesNotMatch(accountForm, /form\.value\.modelCapabilities = merged/);
   assert.doesNotMatch(
     accountForm,
     /const values: AccountCreateFormValues = \{[\s\S]*?upstream_protocol: form\.value\.upstreamProtocol[\s\S]*?\};/,

@@ -50,7 +50,8 @@ use super::{V3ApiError, check_expectation, parse_json, parse_mutation_json};
 const ENVELOPE_FORMAT: &str = "ocg-manager-account-backup";
 const ENVELOPE_VERSION: u32 = 1;
 const LEGACY_PAYLOAD_VERSION: u32 = 1;
-const PAYLOAD_VERSION: u32 = 2;
+const NODE_PAYLOAD_VERSION: u32 = 2;
+const PAYLOAD_VERSION: u32 = 3;
 const AAD: &[u8] = b"ocg-manager-account-backup:v1:argon2id-m65536-t3-p1:aes-256-gcm";
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON_ITERATIONS: u32 = 3;
@@ -187,8 +188,23 @@ struct PortableCustomConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PortableModelCapability {
+    Canonical(PortableModelCapabilityCanonical),
+    Legacy(PortableModelCapabilityLegacy),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PortableModelCapability {
+struct PortableModelCapabilityCanonical {
+    public_model: String,
+    upstream_model: String,
+    protocol: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableModelCapabilityLegacy {
     model_id: String,
     protocol: String,
 }
@@ -293,8 +309,17 @@ impl Zeroize for PortableCustomConfig {
 
 impl Zeroize for PortableModelCapability {
     fn zeroize(&mut self) {
-        self.model_id.zeroize();
-        self.protocol.zeroize();
+        match self {
+            Self::Canonical(capability) => {
+                capability.public_model.zeroize();
+                capability.upstream_model.zeroize();
+                capability.protocol.zeroize();
+            }
+            Self::Legacy(capability) => {
+                capability.model_id.zeroize();
+                capability.protocol.zeroize();
+            }
+        }
     }
 }
 
@@ -698,9 +723,12 @@ fn export_payload(state: &CoreState) -> Result<(PortablePayload, u64, u64), Tran
                     contract
                         .model_capabilities
                         .into_iter()
-                        .map(|capability| PortableModelCapability {
-                            model_id: capability.model_id,
-                            protocol: capability.protocol.as_str().to_string(),
+                        .map(|capability| {
+                            PortableModelCapability::Canonical(PortableModelCapabilityCanonical {
+                                public_model: capability.public_model,
+                                upstream_model: capability.upstream_model,
+                                protocol: capability.protocol.as_str().to_string(),
+                            })
                         })
                         .collect(),
                 )
@@ -919,14 +947,16 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, Transf
 
 fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, TransferError> {
     let mut payload = Zeroizing::new(payload);
-    if !matches!(payload.version, LEGACY_PAYLOAD_VERSION | PAYLOAD_VERSION)
-        || payload.accounts.len() > MAX_ACCOUNTS
-        || (payload.version == PAYLOAD_VERSION && payload.node.is_none())
+    if !matches!(
+        payload.version,
+        LEGACY_PAYLOAD_VERSION | NODE_PAYLOAD_VERSION | PAYLOAD_VERSION
+    ) || payload.accounts.len() > MAX_ACCOUNTS
+        || (payload.version >= NODE_PAYLOAD_VERSION && payload.node.is_none())
         || (payload.version == LEGACY_PAYLOAD_VERSION && payload.node.is_some())
     {
         return Err(TransferError::InvalidBundle);
     }
-    let is_node_migration = payload.version == PAYLOAD_VERSION;
+    let is_node_migration = payload.version >= NODE_PAYLOAD_VERSION;
     if payload.exported_at.chars().count() > 64
         || DateTime::parse_from_rfc3339(&payload.exported_at).is_err()
     {
@@ -1140,25 +1170,39 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
                 .model_capabilities
                 .iter()
                 .map(|capability| {
-                    let model_id = capability.model_id.trim().to_string();
-                    crate::provider::validate_custom_model_id(&model_id).map_err(|_| {
-                        TransferError::Invalid(format!("{} has an invalid model ID", prefix()))
+                    let (public_model, upstream_model, protocol_value) = match capability {
+                        PortableModelCapability::Canonical(capability) => (
+                            capability.public_model.trim().to_string(),
+                            capability.upstream_model.trim().to_string(),
+                            capability.protocol.as_str(),
+                        ),
+                        PortableModelCapability::Legacy(capability) => {
+                            let model_id = capability.model_id.trim().to_string();
+                            (model_id.clone(), model_id, capability.protocol.as_str())
+                        }
+                    };
+                    crate::provider::validate_custom_model_id(&public_model).map_err(|_| {
+                        TransferError::Invalid(format!("{} has an invalid public model", prefix()))
                     })?;
-                    if !seen_models.insert(model_id.clone()) {
-                        return Err(TransferError::Invalid(format!(
-                            "{} contains duplicate model IDs",
-                            prefix()
-                        )));
-                    }
-                    let capability_protocol = UpstreamProtocolKind::try_from(
-                        capability.protocol.as_str(),
-                    )
-                    .map_err(|_| {
+                    crate::provider::validate_custom_model_id(&upstream_model).map_err(|_| {
                         TransferError::Invalid(format!(
-                            "{} has an invalid model protocol",
+                            "{} has an invalid upstream model",
                             prefix()
                         ))
                     })?;
+                    if !seen_models.insert(public_model.to_ascii_lowercase()) {
+                        return Err(TransferError::Invalid(format!(
+                            "{} contains duplicate public models",
+                            prefix()
+                        )));
+                    }
+                    let capability_protocol = UpstreamProtocolKind::try_from(protocol_value)
+                        .map_err(|_| {
+                            TransferError::Invalid(format!(
+                                "{} has an invalid model protocol",
+                                prefix()
+                            ))
+                        })?;
                     if capability_protocol != protocol {
                         return Err(TransferError::Invalid(format!(
                             "{} has a model protocol mismatch",
@@ -1166,7 +1210,8 @@ fn validate_payload(payload: PortablePayload) -> Result<ValidatedMigration, Tran
                         )));
                     }
                     Ok(AccountModelCapabilityInput {
-                        model_id,
+                        public_model,
+                        upstream_model,
                         protocol: capability_protocol,
                         source: Some("import".to_string()),
                     })
@@ -1683,6 +1728,50 @@ mod tests {
         }
     }
 
+    fn sample_custom_account() -> PortableAccount {
+        PortableAccount {
+            id: None,
+            provider_id: crate::kernel::ids::CUSTOM_PROVIDER_ID.to_string(),
+            offering_id: crate::kernel::ids::CUSTOM_API_OFFERING_ID.to_string(),
+            name: "Mapped Custom".to_string(),
+            username: None,
+            key: "sk-custom-test-secret".to_string(),
+            enabled: true,
+            account_type: "key".to_string(),
+            setup_step: "ready".to_string(),
+            purchase_date: String::new(),
+            expires_on: String::new(),
+            notes: None,
+            verification_status: Some("pending".to_string()),
+            connection_verified_at: None,
+            custom_config: Some(PortableCustomConfig {
+                endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
+                upstream_protocol: "chat_completions".to_string(),
+            }),
+            model_capabilities: Vec::new(),
+        }
+    }
+
+    fn sample_node(account_id: &str) -> PortableNodeState {
+        let mut config = AppConfig::default();
+        config.gateway_key = "ocg-transfer-primary-key".to_string();
+        PortableNodeState {
+            config,
+            access_keys: Vec::new(),
+            zen_free: PortableZenFree {
+                enabled: false,
+                models: Vec::new(),
+                refreshed_at: None,
+                source_url: String::new(),
+            },
+            account_order: vec![
+                crate::kernel::ids::ZEN_FREE_ACCOUNT_ID.to_string(),
+                account_id.to_string(),
+            ],
+            provider_contracts: Vec::new(),
+        }
+    }
+
     #[test]
     fn encrypted_bundle_round_trips_without_plaintext_secret() {
         let payload = sample_payload();
@@ -1696,6 +1785,69 @@ mod tests {
         let migration = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
         assert_eq!(migration.accounts.len(), 1);
         assert_eq!(migration.accounts[0].key.as_str(), "sk-ocg-test-secret");
+    }
+
+    #[test]
+    fn legacy_v1_and_v2_model_ids_import_as_both_custom_identities() {
+        for version in [LEGACY_PAYLOAD_VERSION, NODE_PAYLOAD_VERSION] {
+            let mut account = sample_custom_account();
+            account.model_capabilities = vec![PortableModelCapability::Legacy(
+                PortableModelCapabilityLegacy {
+                    model_id: "legacy/model:latest".to_string(),
+                    protocol: "chat_completions".to_string(),
+                },
+            )];
+            let node = if version == NODE_PAYLOAD_VERSION {
+                let account_id = "00000000-0000-4000-8000-000000000042";
+                account.id = Some(account_id.to_string());
+                Some(sample_node(account_id))
+            } else {
+                None
+            };
+            let validated = validate_payload(PortablePayload {
+                version,
+                exported_at: "2026-08-29T00:00:00Z".to_string(),
+                accounts: vec![account],
+                node,
+            })
+            .unwrap();
+            let capability = &validated.accounts[0].capabilities[0];
+            assert_eq!(capability.public_model, "legacy/model:latest");
+            assert_eq!(capability.upstream_model, "legacy/model:latest");
+        }
+    }
+
+    #[test]
+    fn v3_exports_canonical_model_mapping_inside_the_v1_envelope() {
+        let account_id = "00000000-0000-4000-8000-000000000043";
+        let mut account = sample_custom_account();
+        account.id = Some(account_id.to_string());
+        account.model_capabilities = vec![PortableModelCapability::Canonical(
+            PortableModelCapabilityCanonical {
+                public_model: "deepseek-v4-flash".to_string(),
+                upstream_model: "deepseek-v4-flash:0731".to_string(),
+                protocol: "chat_completions".to_string(),
+            },
+        )];
+        let payload = PortablePayload {
+            version: PAYLOAD_VERSION,
+            exported_at: "2026-08-29T00:00:00Z".to_string(),
+            accounts: vec![account],
+            node: Some(sample_node(account_id)),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        let capability = &json["accounts"][0]["modelCapabilities"][0];
+        assert_eq!(capability["publicModel"], "deepseek-v4-flash");
+        assert_eq!(capability["upstreamModel"], "deepseek-v4-flash:0731");
+        assert!(capability.get("modelId").is_none());
+
+        let bundle = encrypt_payload(&payload, "correct horse battery").unwrap();
+        let envelope: EncryptedEnvelope = serde_json::from_str(&bundle).unwrap();
+        assert_eq!(envelope.version, ENVELOPE_VERSION);
+        let validated = decrypt_and_validate(&bundle, "correct horse battery").unwrap();
+        let capability = &validated.accounts[0].capabilities[0];
+        assert_eq!(capability.public_model, "deepseek-v4-flash");
+        assert_eq!(capability.upstream_model, "deepseek-v4-flash:0731");
     }
 
     #[test]

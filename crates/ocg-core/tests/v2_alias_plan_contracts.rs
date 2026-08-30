@@ -692,9 +692,10 @@ async fn goat_creates_live_while_custom_creates_a_pending_draft() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        capabilities
-            .iter()
-            .any(|item| item["model_id"] == CUSTOM_UNROUTABLE_MODEL_ID),
+        capabilities.iter().any(|item| {
+            item["public_model"] == CUSTOM_UNROUTABLE_MODEL_ID
+                && item["upstream_model"] == CUSTOM_UNROUTABLE_MODEL_ID
+        }),
         "Custom create must persist model_capabilities: {body}"
     );
     harness.shutdown();

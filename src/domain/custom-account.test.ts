@@ -44,16 +44,33 @@ test("common API bases and legacy standard paths enable model discovery", () => 
 test("one protocol expands each model once and rejects mismatched rows", () => {
   const rows = expandCustomModelCapabilities(["m1", "m2"], "messages");
   assert.deepEqual(rows, [
-    { model_id: "m1", protocol: "messages" },
-    { model_id: "m2", protocol: "messages" },
+    { public_model: "m1", upstream_model: "m1", protocol: "messages" },
+    { public_model: "m2", upstream_model: "m2", protocol: "messages" },
   ]);
   assert.deepEqual(normalizeCustomCapabilities(rows, "messages"), [
-    { model_id: "m1", protocol: "messages", source: "manual" },
-    { model_id: "m2", protocol: "messages", source: "manual" },
+    { public_model: "m1", upstream_model: "m1", protocol: "messages", source: "manual" },
+    { public_model: "m2", upstream_model: "m2", protocol: "messages", source: "manual" },
   ]);
   assert.throws(
-    () => normalizeCustomCapabilities([{ model_id: "m", protocol: "responses" }], "messages"),
+    () => normalizeCustomCapabilities([{ public_model: "m", upstream_model: "m", protocol: "responses" }], "messages"),
     (error) => error instanceof CustomCapabilityError && error.issue === "protocol_mismatch",
+  );
+});
+
+test("public models are case-insensitively unique while upstream IDs are reusable", () => {
+  assert.deepEqual(normalizeCustomCapabilities([
+    { public_model: "chat", upstream_model: "vendor/shared", protocol: "messages" },
+    { public_model: "reasoning", upstream_model: "vendor/shared", protocol: "messages" },
+  ], "messages").map(({ public_model, upstream_model }) => ({ public_model, upstream_model })), [
+    { public_model: "chat", upstream_model: "vendor/shared" },
+    { public_model: "reasoning", upstream_model: "vendor/shared" },
+  ]);
+  assert.throws(
+    () => normalizeCustomCapabilities([
+      { public_model: "Chat", upstream_model: "vendor/a", protocol: "messages" },
+      { public_model: "chat", upstream_model: "vendor/b", protocol: "messages" },
+    ], "messages"),
+    (error) => error instanceof CustomCapabilityError && error.issue === "duplicate_public_model",
   );
 });
 

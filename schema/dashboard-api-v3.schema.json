@@ -741,16 +741,16 @@
       "additionalProperties": false,
       "description": "One declared Custom model capability as returned on an account.",
       "properties": {
-        "accountId": {
-          "type": "string"
-        },
-        "modelId": {
-          "type": "string"
-        },
         "protocol": {
           "$ref": "#/$defs/AccountUpstreamProtocol"
         },
+        "publicModel": {
+          "type": "string"
+        },
         "source": {
+          "type": "string"
+        },
+        "upstreamModel": {
           "type": "string"
         },
         "verifiedAt": {
@@ -761,8 +761,8 @@
         }
       },
       "required": [
-        "accountId",
-        "modelId",
+        "publicModel",
+        "upstreamModel",
         "protocol",
         "verifiedAt",
         "source"
@@ -770,8 +770,44 @@
       "type": "object"
     },
     "AccountModelCapabilityWrite": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccountModelCapabilityWriteCanonical"
+        },
+        {
+          "$ref": "#/$defs/AccountModelCapabilityWriteLegacy"
+        }
+      ],
+      "description": "One declared Custom model capability on create or replace. Canonical writes\ncarry both identities; the legacy `modelId` shape remains accepted so a\nstale dashboard can complete one migration-window write without data loss."
+    },
+    "AccountModelCapabilityWriteCanonical": {
       "additionalProperties": false,
-      "description": "One declared Custom model capability on create or replace.",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstreamModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapabilityWriteLegacy": {
+      "additionalProperties": false,
       "properties": {
         "modelId": {
           "type": "string"

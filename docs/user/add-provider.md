@@ -15,11 +15,11 @@ OCG Manager has no runtime Provider plugin API. The built-in Provider Registry i
 
 1. Open **Accounts** and choose **Add account** → **Custom API**.
 2. Enter a name, the upstream API Key, one API URL, and one upstream protocol: **Chat Completions**, **Responses**, or **Messages**.
-3. Add at least one exact upstream model ID. **Fetch models** can fill the draft when the upstream exposes the optional model-list interface below.
+3. Add at least one mapping: a public model name clients request and the exact upstream model ID. **Fetch models** can fill the draft from upstream IDs when the upstream exposes the optional model-list interface below.
 4. Save the account. A valid new account is enabled by default; **Test connection** is an optional real, potentially billable request through that exact account.
-5. Call authenticated `GET /v1/models` on OCG Manager and confirm the declared model is published, then send one inference request.
+5. Call authenticated `GET /v1/models` on OCG Manager and confirm the routeable public name is published, then send one inference request.
 
-One Custom account uses one upstream protocol for every model on that card. Matching client traffic passes through; other supported client formats are converted to the selected upstream protocol. The declared model ID is both the client-facing ID and the exact upstream ID.
+One Custom account uses one upstream protocol for every mapping on that card. Matching client traffic passes through; other supported client formats are converted to the selected upstream protocol. **Fetch models** returns upstream IDs only; importing one makes `public model = upstream ID` exactly, without suffix stripping or generated Aliases. You may then edit the public name while retaining the exact upstream ID.
 
 ## Upstream HTTP interface
 

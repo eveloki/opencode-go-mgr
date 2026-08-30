@@ -163,6 +163,63 @@
               <PricingCatalog :provider-id="activeScope.provider_id" />
             </section>
           </n-tab-pane>
+
+          <n-tab-pane name="aliases" :tab="t('别名')">
+            <section class="providers-section" aria-labelledby="provider-alias-title">
+              <div class="providers-catalog-head">
+                <div class="providers-catalog-heading">
+                  <h2 id="provider-alias-title">{{ t("别名") }}</h2>
+                  <p class="providers-alias-hint">
+                    {{ t("只读汇总当前供应商合同与 Custom 账号映射；编辑 Custom 映射请回到账号页。") }}
+                  </p>
+                </div>
+              </div>
+              <n-alert
+                v-if="accountsLoadError"
+                type="warning"
+                :title="t('加载 Custom Alias 账号失败: {error}', { error: accountsLoadError })"
+              >
+                <n-button size="small" secondary :loading="loading" @click="loadContracts({ retain: true })">
+                  {{ t("重试") }}
+                </n-button>
+              </n-alert>
+              <n-empty v-if="aliasGroups.length === 0" :description="t('暂无 Alias')" />
+              <div v-else class="providers-alias-table-wrap">
+                <table class="providers-alias-table">
+                  <thead>
+                    <tr>
+                      <th>{{ t("对外模型名") }}</th>
+                      <th>{{ t("供应商 / 方案") }}</th>
+                      <th>{{ t("Custom 账号") }}</th>
+                      <th>{{ t("上游模型 ID") }}</th>
+                      <th>{{ t("可路由") }}</th>
+                      <th>{{ t("操作") }}</th>
+                    </tr>
+                  </thead>
+                  <tbody v-for="group in aliasGroups" :key="group.public_model">
+                    <tr v-for="(row, index) in group.rows" :key="row.key">
+                      <td v-if="index === 0" :rowspan="group.rows.length" class="providers-alias-name">
+                        <code>{{ group.public_model }}</code>
+                      </td>
+                      <td>{{ row.provider_plan }}</td>
+                      <td>{{ row.custom_account ?? '—' }}</td>
+                      <td><code>{{ row.upstream_model }}</code></td>
+                      <td>{{ row.routable ? t("可用") : t("不可用") }}</td>
+                      <td>
+                        <n-button
+                          v-if="row.custom_account_id"
+                          size="small"
+                          tertiary
+                          @click="openCustomAccount(row.custom_account_id)"
+                        >{{ t("编辑 Custom") }}</n-button>
+                        <span v-else>—</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </n-tab-pane>
         </n-tabs>
       </div>
     </div>
@@ -186,7 +243,7 @@ import {
   useMessage,
 } from "naive-ui";
 import type { MenuOption, SelectOption } from "naive-ui";
-import { DashboardRequestError } from "../api/dashboard";
+import { dashboardApi, DashboardRequestError, type Account } from "../api/dashboard";
 import { providerApi } from "../api/providers.ts";
 import { useProvidersStore } from "../stores/providers.ts";
 import type {
@@ -212,6 +269,7 @@ import {
   PROVIDER_PROTOCOLS,
   selectProviderScope,
 } from "../domain/provider-contracts.ts";
+import { providerAliasRows } from "../domain/provider-aliases.ts";
 import {
   CATALOG_SOURCE_CUSTOM_DISCOVERY,
   CATALOG_SOURCE_DECLARED,
@@ -225,8 +283,10 @@ const message = useMessage();
 const providersStore = useProvidersStore();
 const contracts = ref<ProviderContractsResponse | null>(null);
 const catalog = ref<ProviderCatalogEntry[] | null>(null);
+const aliasAccounts = ref<Account[]>([]);
 const loading = ref(false);
 const loadError = ref("");
+const accountsLoadError = ref("");
 const selectedKey = ref<string | null>(null);
 const activeTab = ref("catalog");
 const catalogRefreshing = ref(false);
@@ -250,6 +310,23 @@ const scopes = computed(() => (
       .filter((scope) => scope.scope_kind === "provider")
     : []
 ));
+const aliasRows = computed(() => (
+  contracts.value
+    ? providerAliasRows(flattenProviderScopes(contracts.value, catalog.value), aliasAccounts.value)
+    : []
+));
+const aliasGroups = computed(() => {
+  const groups = new Map<string, typeof aliasRows.value>();
+  for (const row of aliasRows.value) {
+    const key = row.public_model.toLocaleLowerCase();
+    const existing = groups.get(key);
+    if (existing) existing.push(row);
+    else groups.set(key, [row]);
+  }
+  return [...groups.values()]
+    .map((rows) => ({ public_model: rows[0]?.public_model ?? "", rows }))
+    .sort((left, right) => left.public_model.localeCompare(right.public_model));
+});
 const activeSelection = computed(() => {
   const query = selectedKey.value?.split(":") ?? [];
   const scopeKind = query[0] ?? null;
@@ -356,11 +433,18 @@ async function loadContracts(options: { retain?: boolean } = {}): Promise<{ ok: 
   loading.value = true;
   if (!options.retain) loadError.value = "";
   try {
-    const [contractsResult, catalogResult] = await Promise.allSettled([
+    const [contractsResult, catalogResult, accountsResult] = await Promise.allSettled([
       providersStore.loadContracts(),
       providersStore.loadCatalog(),
+      dashboardApi.getAccounts(),
     ]);
     if (catalogResult.status === "fulfilled") catalog.value = catalogResult.value;
+    if (accountsResult.status === "fulfilled") {
+      aliasAccounts.value = accountsResult.value;
+      accountsLoadError.value = "";
+    } else {
+      accountsLoadError.value = dashboardErrorDetail(accountsResult.reason);
+    }
     if (contractsResult.status === "fulfilled") {
       contracts.value = normalizeProviderContractsResponse(contractsResult.value);
       loadError.value = "";
@@ -373,6 +457,13 @@ async function loadContracts(options: { retain?: boolean } = {}): Promise<{ ok: 
   } finally {
     loading.value = false;
   }
+}
+
+function openCustomAccount(accountId: string): void {
+  const url = applyAppViewSearchParams(new URL(window.location.href), "accounts");
+  url.searchParams.set("account_id", accountId);
+  window.history.pushState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
 async function refreshCatalog() {
@@ -622,6 +713,41 @@ onUnmounted(() => {
   margin: 0 0 16px;
   color: var(--ocg-ink);
   font: 700 var(--ocg-font-xl)/1.3 "Bahnschrift", "Segoe UI Variable Display", sans-serif;
+}
+
+.providers-alias-hint {
+  margin: 4px 0 0;
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-sm);
+}
+
+.providers-alias-table-wrap {
+  overflow-x: auto;
+}
+
+.providers-alias-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-size: var(--ocg-font-sm);
+}
+
+.providers-alias-table th,
+.providers-alias-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ocg-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.providers-alias-table th {
+  color: var(--ocg-muted);
+  font-size: var(--ocg-font-xs);
+  font-weight: 600;
+}
+
+.providers-alias-table .providers-alias-name {
+  vertical-align: top;
 }
 .providers-state {
   min-height: 160px;
