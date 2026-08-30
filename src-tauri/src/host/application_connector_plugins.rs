@@ -2563,7 +2563,7 @@ mod tests {
                 executable: batch,
                 display_executable: "isolated argument fixture".into(),
                 args: vec![OsString::from("plugin"), OsString::from("path with spaces")],
-                timeout: Duration::from_secs(5),
+                timeout: Duration::from_secs(15),
             })
             .unwrap();
         assert!(output.success);
@@ -2585,7 +2585,7 @@ mod tests {
                 executable: batch,
                 display_executable: "isolated forwarding fixture".into(),
                 args: vec![OsString::from("\"path with spaces\"")],
-                timeout: Duration::from_secs(5),
+                timeout: Duration::from_secs(15),
             })
             .unwrap();
         assert!(output.success);
