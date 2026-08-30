@@ -26,12 +26,13 @@ no telemetry, no remote sync, and no recovery if the data directory is lost.
   destroy it with the same care as the database and account keys.
 - **No cross-node sync.** Each node manages its own accounts through its own
   dashboard. OCG Manager does not synchronize account credentials between
-  nodes. Accounts can instead be moved explicitly with a password-encrypted
-  `.ocgbackup` file. Export requires the current administrator credentials as
-  a step-up check and encrypts account Keys with Argon2id plus AES-256-GCM.
-  The migration password is not stored and cannot be recovered. Treat the file
-  and password as separate secrets; browser profiles, access credentials, and
-  other node settings are not included.
+  nodes. Portable node state can instead be moved explicitly with a
+  password-encrypted `.ocgbackup` file from the loopback dashboard; no separate
+  administrator step-up is required. Account and Access Keys are encrypted with
+  Argon2id plus AES-256-GCM. The migration password is not stored and cannot be
+  recovered. Treat the file and password as separate secrets. Browser profiles,
+  login passwords, logs, usage, source cooldown state, and machine-local host
+  settings are not included.
 - **Plain HTTP warning.** A non-loopback `http://` root URL exposes the Key
   and request contents to the network. Use HTTPS or a trusted LAN only.
 - **Administrator password.** The single administrator password is stored as

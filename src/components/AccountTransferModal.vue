@@ -2,7 +2,7 @@
   <n-modal
     v-model:show="visible"
     preset="card"
-    :title="mode === 'export' ? t('导出账号迁移包') : t('导入账号迁移包')"
+    :title="mode === 'export' ? t('导出节点迁移包') : t('导入节点迁移包')"
     class="account-transfer-modal"
     style="width: 680px; max-width: calc(100vw - 32px)"
     :mask-closable="!operationLocked"
@@ -10,29 +10,17 @@
   >
     <template v-if="mode === 'export'">
       <n-alert type="info" :show-icon="false" class="transfer-note">
-        {{ t('迁移包由服务端加密，浏览器不会读取或显示明文 Key。需要管理员账号进行一次授权，并使用独立的迁移包密码。') }}
-      </n-alert>
-      <n-alert v-if="!sessionInitialized" type="warning" :show-icon="false" class="transfer-note">
-        {{ t('尚未初始化管理员账号。此处创建的管理员账号用于保护本机控制台和确认账号迁移，请妥善保存。') }}
+        {{ t('节点迁移包由服务端加密，浏览器不会读取或显示明文 Key。设置一个独立密码后，即可迁移账号、Access Keys、路由设置、Zen Free 与 Provider 模型配置。') }}
       </n-alert>
       <n-form label-placement="top" @submit.prevent="exportBundle">
-        <n-form-item :label="t('管理员用户名')" required>
-          <n-input v-model:value="adminUsername" autocomplete="username" :disabled="operationLocked" />
-        </n-form-item>
-        <n-form-item :label="t('管理员密码')" required>
-          <n-input v-model:value="adminPassword" type="password" show-password-on="click" :autocomplete="sessionInitialized ? 'current-password' : 'new-password'" :disabled="operationLocked" />
-        </n-form-item>
-        <n-form-item v-if="!sessionInitialized" :label="t('确认管理员密码')" required>
-          <n-input v-model:value="adminPasswordConfirmation" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
-        </n-form-item>
-        <n-form-item :label="t('迁移包密码')" :feedback="t('至少 12 个字符；此密码只用于加密迁移文件，不是管理员密码。密码丢失后无法找回。')" required>
+        <n-form-item :label="t('迁移包密码')" :feedback="t('至少 12 个字符；此密码只用于加密迁移文件，密码丢失后无法找回。')" required>
           <n-input v-model:value="bundlePassword" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
         </n-form-item>
         <n-form-item :label="t('确认迁移包密码')" required>
           <n-input v-model:value="bundlePasswordConfirmation" type="password" show-password-on="click" autocomplete="new-password" :disabled="operationLocked" />
         </n-form-item>
       </n-form>
-      <p class="transfer-lifecycle">{{ t('不迁移 Zen Free、浏览器资料与 Cookie、登录密码、邀请码、用量和冷却状态。Custom API 导入后保持禁用和待验证，请在启用前核对 Endpoint 与 Key，验证仍为可选；未完成的托管账号会重置注册流程，已完成托管账号的 Key 可迁移但浏览器登录不会迁移。') }}</p>
+      <p class="transfer-lifecycle">{{ t('同 ID 记录会在目标端归并，目标端独有账号按原顺序接在迁入列表后。浏览器 Profile/Cookie、登录密码、邀请码、日志、用量、冷却状态及系统专属设置不会迁移；未完成的托管注册草稿会跳过。') }}</p>
       <n-alert v-if="errorText" type="error" :title="errorText" class="transfer-note" />
       <n-alert v-if="resultText" type="success" :title="resultText" class="transfer-note" />
       <div class="transfer-actions">
@@ -67,14 +55,14 @@
           <n-input v-model:value="bundlePassword" type="password" show-password-on="click" autocomplete="current-password" :disabled="operationLocked" @update:value="clearPreview" />
         </n-form-item>
       </n-form>
-      <p class="transfer-lifecycle">{{ t('不迁移 Zen Free、浏览器资料与 Cookie、登录密码、邀请码、用量和冷却状态。Custom API 导入后保持禁用和待验证，请在启用前核对 Endpoint 与 Key，验证仍为可选；未完成的托管账号会重置注册流程，已完成托管账号的 Key 可迁移但浏览器登录不会迁移。') }}</p>
+      <p class="transfer-lifecycle">{{ t('同 ID 记录会采用迁移包内容，目标端独有账号保留并接在后面。导入后原有主/子 Key、可用账号、Custom API、Zen Free 与模型路由设置可直接继续使用。') }}</p>
 
       <n-alert v-if="errorText" type="error" :title="errorText" class="transfer-note" />
       <n-alert v-if="resultText" type="success" :title="resultText" class="transfer-note" />
 
       <template v-if="preview">
         <n-alert type="info" :show-icon="false" class="transfer-note">
-          {{ t('预览：可导入 {importable} 项，重复 {duplicate} 项。重复项不会覆盖现有账号。', { importable: preview.importableAccounts, duplicate: preview.duplicateAccounts }) }}
+          {{ t('预览：新增 {created} 项，归并 {merged} 项，旧版重复跳过 {duplicate} 项。', { created: previewCreated, merged: previewMerged, duplicate: preview.duplicateAccounts }) }}
         </n-alert>
         <div class="transfer-preview" role="region" :aria-label="t('迁移预览')">
           <div v-for="item in preview.items" :key="item.index" class="transfer-preview-row">
@@ -85,7 +73,7 @@
           </div>
         </div>
         <n-checkbox v-model:checked="importConfirmed" :disabled="operationLocked" class="transfer-confirmation">
-          {{ t('我确认导入将写入当前账号列表；重复账号不会覆盖。') }}
+          {{ t('我确认同 ID 的账号与 Key 将采用迁移包内容，目标端独有账号会保留并接在后面。') }}
         </n-checkbox>
       </template>
 
@@ -108,7 +96,6 @@ import { computed, ref, watch } from "vue";
 import { NAlert, NButton, NCheckbox, NForm, NFormItem, NInput, NModal, NSpace } from "naive-ui";
 import { dashboardApi } from "../api/dashboard.ts";
 import type { AccountImportDisposition, AccountImportPreview } from "../api/generated/dashboard-v3.ts";
-import { useSessionStore } from "../stores/session.ts";
 import { t } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
 
@@ -123,11 +110,7 @@ const emit = defineEmits<{
   imported: [count: number];
 }>();
 
-const session = useSessionStore();
 const fileInput = ref<HTMLInputElement | null>(null);
-const adminUsername = ref("");
-const adminPassword = ref("");
-const adminPasswordConfirmation = ref("");
 const bundlePassword = ref("");
 const bundlePasswordConfirmation = ref("");
 const bundle = ref("");
@@ -146,19 +129,15 @@ const visible = computed({
   get: () => props.show,
   set: (value: boolean) => emit("update:show", value),
 });
-const sessionInitialized = computed(() => session.status?.initialized ?? true);
 const operationLocked = computed(() => busy.value || previewing.value);
 const canExport = computed(() => (
-  Boolean(adminUsername.value.trim())
-  && Boolean(adminPassword.value)
-  && bundlePassword.value.length >= 12
+  bundlePassword.value.length >= 12
   && bundlePassword.value === bundlePasswordConfirmation.value
-  && (sessionInitialized.value || adminPassword.value === adminPasswordConfirmation.value)
 ));
 const canPreview = computed(() => Boolean(bundle.value) && bundlePassword.value.length >= 12);
 const canImport = computed(() => (
   Boolean(preview.value)
-  && (preview.value?.importableAccounts ?? 0) > 0
+  && ((preview.value?.importableAccounts ?? 0) > 0 || preview.value?.items.length === 0)
   && Boolean(bundle.value)
   && bundlePassword.value.length >= 12
   && bundle.value === previewBundleSnapshot.value
@@ -167,20 +146,16 @@ const canImport = computed(() => (
   && !busy.value
 ));
 const liveSummary = computed(() => resultText.value || errorText.value || (preview.value
-  ? t('预览：可导入 {importable} 项，重复 {duplicate} 项。', {
-    importable: preview.value.importableAccounts,
+  ? t('预览：新增 {created} 项，归并 {merged} 项，旧版重复跳过 {duplicate} 项。', {
+    created: previewCreated.value,
+    merged: previewMerged.value,
     duplicate: preview.value.duplicateAccounts,
   })
   : ""));
+const previewMerged = computed(() => preview.value?.items.filter((item) => item.disposition === "merge").length ?? 0);
+const previewCreated = computed(() => Math.max(0, (preview.value?.importableAccounts ?? 0) - previewMerged.value));
 
-watch(() => props.show, async (show) => {
-  if (show && props.mode === "export" && !session.status) {
-    try {
-      await session.loadStatus();
-    } catch (error) {
-      errorText.value = dashboardErrorDetail(error);
-    }
-  }
+watch(() => props.show, (show) => {
   if (!show) clearTransient();
 });
 watch(() => props.mode, clearTransient);
@@ -197,9 +172,6 @@ function clearPreview(): void {
 
 function clearTransient(): void {
   clearPreview();
-  adminUsername.value = "";
-  adminPassword.value = "";
-  adminPasswordConfirmation.value = "";
   bundlePassword.value = "";
   bundlePasswordConfirmation.value = "";
   bundle.value = "";
@@ -212,7 +184,8 @@ function clearTransient(): void {
 }
 
 function dispositionLabel(disposition: AccountImportDisposition): string {
-  return disposition === "import" || disposition === "imported" ? t('将导入') : t('重复，跳过');
+  if (disposition === "merge" || disposition === "merged") return t('按 ID 归并');
+  return disposition === "import" || disposition === "imported" ? t('将新增') : t('重复，跳过');
 }
 
 function dispositionReason(disposition: AccountImportDisposition): string {
@@ -263,11 +236,7 @@ async function exportBundle(): Promise<void> {
   busy.value = true;
   errorText.value = "";
   try {
-    const authStatus = session.status ?? await session.loadStatus();
-    if (!authStatus.initialized) await session.register(adminUsername.value.trim(), adminPassword.value);
     const exported = await dashboardApi.exportAccountTransfer({
-      adminUsername: adminUsername.value.trim(),
-      adminPassword: adminPassword.value,
       bundlePassword: bundlePassword.value,
     });
     downloadBundle(exported.bundle, exported.filename);
@@ -275,8 +244,6 @@ async function exportBundle(): Promise<void> {
       exported: exported.exportedAccounts,
       skipped: exported.skippedAccounts,
     });
-    adminPassword.value = "";
-    adminPasswordConfirmation.value = "";
     bundlePassword.value = "";
     bundlePasswordConfirmation.value = "";
   } catch (error) {
@@ -322,7 +289,7 @@ async function importBundle(): Promise<void> {
       bundle: bundle.value,
       password: bundlePassword.value,
     });
-    resultText.value = t('已导入 {count} 项账号配置。', { count: result.importedAccounts });
+    resultText.value = t('节点配置迁移完成：处理 {count} 项账号。', { count: result.importedAccounts });
     bundlePassword.value = "";
     previewEpoch += 1;
     preview.value = null;

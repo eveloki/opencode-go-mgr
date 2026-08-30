@@ -385,7 +385,7 @@
     },
     "AccountExport": {
       "additionalProperties": false,
-      "description": "Encrypted account migration package returned by the export endpoint.\n`bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no\nplaintext upstream credential is returned to the dashboard.",
+      "description": "Encrypted node migration package returned by the export endpoint.\n`bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no\nplaintext upstream credential is returned to the dashboard.",
       "properties": {
         "bundle": {
           "type": "string"
@@ -426,21 +426,13 @@
     },
     "AccountExportRequest": {
       "additionalProperties": false,
-      "description": "POST `/accounts/transfer/export` body. Both passwords are write-only. The\nadministrator credential is step-up authorization; `bundle_password` is a\ndistinct passphrase used only to encrypt the portable file.",
+      "description": "POST `/accounts/transfer/export` body. The password is write-only and used\nonly to encrypt the portable node-state file.",
       "properties": {
-        "adminPassword": {
-          "type": "string"
-        },
-        "adminUsername": {
-          "type": "string"
-        },
         "bundlePassword": {
           "type": "string"
         }
       },
       "required": [
-        "adminUsername",
-        "adminPassword",
         "bundlePassword"
       ],
       "type": "object"
@@ -449,13 +441,15 @@
       "enum": [
         "import",
         "imported",
+        "merge",
+        "merged",
         "duplicate"
       ],
       "type": "string"
     },
     "AccountImportPreview": {
       "additionalProperties": false,
-      "description": "Secret-free preview of one account migration package.",
+      "description": "Secret-free preview of one node migration package.",
       "properties": {
         "duplicateAccounts": {
           "format": "uint64",

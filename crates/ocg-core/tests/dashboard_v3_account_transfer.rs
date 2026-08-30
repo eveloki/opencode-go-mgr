@@ -1,8 +1,10 @@
-//! Dashboard V3 encrypted account migration: step-up auth, secrecy, preview,
-//! atomic import, duplicate handling, and lifecycle normalization.
+//! Dashboard V3 encrypted node migration: secrecy, preview, stable-ID merge,
+//! atomic import, and target-only account ordering.
 
+use chrono::Utc;
 use ocg_core::provider::{
-    CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, ConnectionVerificationStatus, OPENCODE_PROVIDER_ID,
+    OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use reqwest::header::CACHE_CONTROL;
 use reqwest::{Method, StatusCode};
@@ -14,8 +16,8 @@ mod harness;
 
 use harness::{V3Harness, start_loopback, start_public};
 
-const ADMIN_PASSWORD: &str = "admin-password-123";
 const BUNDLE_PASSWORD: &str = "migration-password-123";
+const PUBLIC_ADMIN_PASSWORD: &str = "public-admin-password-123";
 const GO_KEY: &str = "sk-transfer-go";
 const CUSTOM_KEY: &str = "custom-transfer-key";
 
@@ -63,20 +65,6 @@ fn assert_no_store(headers: &reqwest::header::HeaderMap) {
     );
 }
 
-async fn register_admin(harness: &V3Harness) {
-    let (status, _, body) = send_json(
-        harness,
-        Method::POST,
-        "/auth/register",
-        &cas(
-            harness,
-            json!({ "username": "admin", "password": ADMIN_PASSWORD }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-}
-
 async fn create_source_accounts(harness: &V3Harness) {
     let (status, _, body) = send_json(
         harness,
@@ -113,23 +101,39 @@ async fn create_source_accounts(harness: &V3Harness) {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+async fn make_custom_ready(harness: &V3Harness) -> String {
+    let accounts = harness.state.db.lock().list_accounts().unwrap();
+    let id = accounts
+        .iter()
+        .find(|account| account.provider_id == CUSTOM_PROVIDER_ID)
+        .unwrap()
+        .id
+        .clone();
+    harness
+        .state
+        .db
+        .lock()
+        .set_account_verification(
+            &id,
+            ConnectionVerificationStatus::Verified,
+            Some(Utc::now()),
+            None,
+        )
+        .unwrap();
+    let (status, _, body) = send_json(
+        harness,
+        Method::PATCH,
+        &format!("/accounts/{id}"),
+        &cas(harness, json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    id
+}
+
 #[tokio::test]
 async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     let source = start_loopback("account-transfer-source").await;
-
-    let (status, headers, body) = send_json(
-        &source,
-        Method::POST,
-        "/accounts/transfer/export",
-        &json!({
-            "adminUsername": "admin",
-            "adminPassword": ADMIN_PASSWORD,
-            "bundlePassword": BUNDLE_PASSWORD
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
-    assert_no_store(&headers);
 
     let oversized = source
         .client
@@ -142,16 +146,29 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_no_store(oversized.headers());
 
-    register_admin(&source).await;
     create_source_accounts(&source).await;
+    let custom_id = make_custom_ready(&source).await;
+    let source_go_id = source
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.provider_id == OPENCODE_PROVIDER_ID)
+        .unwrap()
+        .id;
+    let source_primary = source.state.config().gateway_key;
+    let source_sub_key = {
+        let _settings = source.state.settings_update.lock();
+        ocg_core::gateway_keys::create_sub_key(&source.state, "Migrated client").unwrap()
+    };
 
     let (status, headers, body) = send_json(
         &source,
         Method::POST,
         "/accounts/transfer/export",
         &json!({
-            "adminUsername": "admin",
-            "adminPassword": ADMIN_PASSWORD,
             "bundlePassword": BUNDLE_PASSWORD
         }),
     )
@@ -159,7 +176,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_no_store(&headers);
     assert_eq!(body["exportedAccounts"], 2);
-    assert_eq!(body["skippedAccounts"], 1);
+    assert_eq!(body["skippedAccounts"], 0);
     let encoded = body.to_string();
     assert!(!encoded.contains(GO_KEY));
     assert!(!encoded.contains(CUSTOM_KEY));
@@ -170,16 +187,26 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         Method::POST,
         "/accounts/transfer/export",
         &json!({
-            "adminUsername": "admin",
-            "adminPassword": "wrong-admin-password",
-            "bundlePassword": BUNDLE_PASSWORD
+            "bundlePassword": "too-short"
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_no_store(&headers);
 
     let target = start_loopback("account-transfer-target").await;
+    let (status, _, body) = send_json(
+        &target,
+        Method::POST,
+        "/accounts",
+        &cas(
+            &target,
+            json!({ "name": "Migrated Go", "key": "sk-target-extra" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let target_extra_id = body["account"]["id"].as_str().unwrap().to_string();
     let (status, headers, preview) = send_json(
         &target,
         Method::POST,
@@ -232,7 +259,7 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     let stale_import = stale_import.await.unwrap();
     assert_eq!(stale_import.status(), StatusCode::CONFLICT);
     assert_no_store(stale_import.headers());
-    assert_eq!(target.state.db.lock().list_accounts().unwrap().len(), 1);
+    assert_eq!(target.state.db.lock().list_accounts().unwrap().len(), 2);
 
     let before = target.state.settings_revision();
     let (status, headers, imported) = send_json(
@@ -254,28 +281,48 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert!(!imported.to_string().contains(CUSTOM_KEY));
 
     let accounts = target.state.db.lock().list_accounts().unwrap();
-    let migrated: Vec<_> = accounts
+    let ordinary: Vec<_> = accounts
         .iter()
         .filter(|account| account.provider_id != OPENCODE_ZEN_FREE_PROVIDER_ID)
         .collect();
-    assert_eq!(migrated.len(), 2);
-    let go = migrated
+    assert_eq!(ordinary.len(), 3);
+    assert_eq!(
+        accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            ZEN_FREE_ACCOUNT_ID,
+            source_go_id.as_str(),
+            custom_id.as_str(),
+            target_extra_id.as_str(),
+        ]
+    );
+    let go = ordinary
         .iter()
-        .find(|account| account.provider_id == OPENCODE_PROVIDER_ID)
+        .find(|account| account.id == source_go_id)
         .unwrap();
     assert_eq!(target.state.decrypt_key(&go.key_cipher).unwrap(), GO_KEY);
     assert!(go.enabled);
-    let custom = migrated
+    let target_extra = ordinary
         .iter()
-        .find(|account| account.provider_id == CUSTOM_PROVIDER_ID)
+        .find(|account| account.id == target_extra_id)
+        .unwrap();
+    assert_eq!(
+        target.state.decrypt_key(&target_extra.key_cipher).unwrap(),
+        "sk-target-extra"
+    );
+    let custom = ordinary
+        .iter()
+        .find(|account| account.id == custom_id)
         .unwrap();
     assert_eq!(
         target.state.decrypt_key(&custom.key_cipher).unwrap(),
         CUSTOM_KEY
     );
     assert!(
-        !custom.enabled,
-        "Custom accounts must be re-verified after import"
+        custom.enabled,
+        "verified Custom accounts should remain usable"
     );
     let custom_contract = target
         .state
@@ -293,7 +340,22 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .iter()
         .find(|account| account["providerId"] == CUSTOM_PROVIDER_ID)
         .unwrap();
-    assert_eq!(custom_view["verificationStatus"], "pending");
+    assert_eq!(custom_view["verificationStatus"], "verified");
+
+    assert_eq!(target.state.config().gateway_key, source_primary);
+    let target_sub_keys = target
+        .state
+        .db
+        .lock()
+        .list_active_sub_gateway_keys()
+        .unwrap();
+    let migrated_sub_key = target_sub_keys
+        .iter()
+        .find(|key| key.id == source_sub_key.id)
+        .unwrap();
+    assert_eq!(migrated_sub_key.name, source_sub_key.name);
+    assert_eq!(migrated_sub_key.key, source_sub_key.key);
+    assert_eq!(migrated_sub_key.enabled, source_sub_key.enabled);
 
     let revision = target.state.settings_revision();
     let (status, _, duplicate) = send_json(
@@ -307,9 +369,33 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{duplicate}");
-    assert_eq!(duplicate["importedAccounts"], 0);
-    assert_eq!(duplicate["duplicateAccounts"], 2);
-    assert_eq!(target.state.settings_revision(), revision);
+    assert_eq!(duplicate["importedAccounts"], 2);
+    assert_eq!(duplicate["duplicateAccounts"], 0);
+    assert!(
+        duplicate["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["disposition"] == "merged")
+    );
+    assert_eq!(target.state.settings_revision(), revision + 1);
+    assert_eq!(
+        target
+            .state
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            ZEN_FREE_ACCOUNT_ID,
+            source_go_id.as_str(),
+            custom_id.as_str(),
+            target_extra_id.as_str(),
+        ]
+    );
 
     let (status, headers, body) = send_json(
         &target,
@@ -336,7 +422,10 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     let registered = public
         .client
         .post(format!("{}/auth/register", public.v2_base))
-        .json(&json!({ "username": "admin", "password": ADMIN_PASSWORD }))
+        .json(&json!({
+            "username": "admin",
+            "password": PUBLIC_ADMIN_PASSWORD
+        }))
         .send()
         .await
         .unwrap();
@@ -352,8 +441,6 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
         .unwrap()
         .to_string();
     let export_body = json!({
-        "adminUsername": "admin",
-        "adminPassword": ADMIN_PASSWORD,
         "bundlePassword": BUNDLE_PASSWORD
     });
     let insecure = public
@@ -378,7 +465,91 @@ async fn encrypted_account_migration_moves_keys_without_exposing_them() {
     assert_eq!(spoofed_https.status(), StatusCode::FORBIDDEN);
     assert_no_store(spoofed_https.headers());
 
+    let collision_target = start_loopback("account-transfer-key-collision-target").await;
+    let collision_primary = collision_target.state.config().gateway_key;
+    let target_conflict = ocg_core::models::SubGatewayKey {
+        id: "destination-only-key".into(),
+        name: "Destination client".into(),
+        key: source_sub_key.key.clone(),
+        enabled: true,
+        deleted_at: None,
+        created_at: Utc::now(),
+    };
+    collision_target
+        .state
+        .db
+        .lock()
+        .insert_sub_gateway_key(&target_conflict)
+        .unwrap();
+    let before_order = collision_target
+        .state
+        .db
+        .lock()
+        .list_accounts()
+        .unwrap()
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    let (status, headers, body) = send_json(
+        &collision_target,
+        Method::POST,
+        "/accounts/transfer/preview",
+        &json!({ "password": BUNDLE_PASSWORD, "bundle": bundle }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_no_store(&headers);
+    assert!(!body.to_string().contains(&source_sub_key.key));
+    let (status, headers, body) = send_json(
+        &collision_target,
+        Method::POST,
+        "/accounts/transfer/import",
+        &cas(
+            &collision_target,
+            json!({ "password": BUNDLE_PASSWORD, "bundle": bundle }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_no_store(&headers);
+    assert_eq!(
+        collision_target.state.config().gateway_key,
+        collision_primary
+    );
+    assert_eq!(
+        collision_target
+            .state
+            .db
+            .lock()
+            .primary_access_key_value()
+            .unwrap()
+            .as_deref(),
+        Some(collision_primary.as_str())
+    );
+    let target_keys = collision_target
+        .state
+        .db
+        .lock()
+        .list_active_sub_gateway_keys()
+        .unwrap();
+    assert_eq!(target_keys.len(), 1);
+    assert_eq!(target_keys[0].id, target_conflict.id);
+    assert!(target_keys.iter().all(|key| key.id != source_sub_key.id));
+    assert_eq!(
+        collision_target
+            .state
+            .db
+            .lock()
+            .list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>(),
+        before_order
+    );
+
     source.stop();
     target.stop();
     public.stop();
+    collision_target.stop();
 }

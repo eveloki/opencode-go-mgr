@@ -507,7 +507,7 @@ function openTransfer(mode: "import" | "export"): void {
 
 async function handleAccountsImported(count: number): Promise<void> {
   await loadAccounts();
-  message.success(t("已导入 {count} 项账号配置。", { count }));
+  message.success(t("节点配置迁移完成：处理 {count} 项账号。", { count }));
 }
 
 function openCreateModal(plan?: PlanDefinition): void {

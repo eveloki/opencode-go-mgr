@@ -32,28 +32,34 @@ The registry is sealed. Built-in Plan families are:
 | Kimi Code CN | `kimi` / `cn` | Yes | Dedicated Kimi Code Key; fixed official Chat route, authenticated model directory, and manual official weekly/rate-window usage refresh |
 | Custom API | `custom` / `api` | Yes | Trusted-administrator destination; one API URL and one upstream protocol per account; common base URLs are completed automatically; new accounts default on; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
-## Move accounts between nodes
+## Move a node configuration
 
 Use **Export** on the Accounts toolbar to create a password-encrypted
 `.ocgbackup` file, then use **Import** on the destination node to preview and
-confirm the batch. The encrypted file includes account Keys, so the export also
-requires the current OCG Manager administrator username and password as a
-step-up check. A loopback installation without an administrator must create one
-before its first export. Choose a separate migration password of at least 12
+confirm the merge. No separate administrator step-up is required. Choose a
+migration password of at least 12
 characters and transfer it separately from the file; OCG Manager cannot recover
-it. Import never replaces existing accounts: the exact Plan-and-name duplicates
-shown in the preview are skipped, and all other rows are committed together.
+it. The operation remains available only from the node's loopback dashboard;
+forwarded scheme headers do not grant access to a remote dashboard.
 
-The package moves ordinary account configuration, Custom Endpoint/model
-declarations, and ready account Keys. It deliberately excludes Zen Free,
-browser profiles and cookies, third-party login passwords, referral codes,
-usage/cooldown history, verification evidence, logs, access credentials, and
-Settings. Ready managed accounts keep their Key, but their browser login does
-not move. Incomplete managed drafts restart at the first disabled setup step.
-Custom accounts import disabled and pending so their destination and Key can be
-reviewed before enabling them; verification remains optional. V1 transfer is
-available only from the node's loopback dashboard. Remote dashboards cannot
-import or export account migration packages.
+The current V2 package moves usable ordinary accounts and their stable IDs,
+ready account Keys, Custom Endpoint/model declarations and verification state,
+the primary and active sub Access Keys, portable routing/proxy settings, Zen
+Free enablement/catalog, and Provider catalogs, evidence, and protocol
+overrides. Matching stable IDs are merged with package-owned portable fields;
+same-Plan or same-name rows with different IDs coexist. Package account order
+comes first, while destination-only accounts retain their relative order and
+append after it. Destination-only Access Keys and Provider scopes are retained.
+
+Browser profiles/cookies, third-party login passwords, referral codes, logs,
+usage history, and source cooldown state do not move. Existing destination
+usage/cooldown history and browser data for a matching account ID stay in
+place; stale authentication and last-error flags are cleared when package
+account fields replace the stored credential.
+Machine-local listener/root URL, auto-start, and Dock settings also stay with
+the destination. Ready managed accounts keep their Key, but their browser login
+does not move; unfinished managed drafts are skipped. A legacy V1 package is
+still accepted and keeps its older Plan/name duplicate-skip behavior.
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
 `routable=false` offering before it mutates the row, revision, or timestamps.
