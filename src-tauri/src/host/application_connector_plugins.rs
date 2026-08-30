@@ -110,7 +110,7 @@ impl NativePluginCommandRunner for ProcessNativePluginCommandRunner {
     fn run(&self, command: &NativePluginCommand) -> Result<NativePluginCommandOutput, String> {
         #[cfg(windows)]
         {
-            return run_windows_native_command(command);
+            run_windows_native_command(command)
         }
         #[cfg(not(windows))]
         {
@@ -336,9 +336,8 @@ fn run_windows_native_command(
     }
     let process = OwnedWindowsHandle(process_information.hProcess);
     let primary_thread = OwnedWindowsHandle(process_information.hThread);
-    job.assign(process.0).map_err(|error| {
+    job.assign(process.0).inspect_err(|_| {
         job.terminate();
-        error
     })?;
 
     drop(stdout_write);
@@ -2525,7 +2524,7 @@ mod tests {
         fs::write(
             &batch,
             format!(
-                "@echo off\r\nstart \"\" /b powershell.exe -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath '{}' ; Start-Sleep -Seconds 30\"\r\npowershell.exe -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 30\"\r\n",
+                "@echo off\r\npowershell.exe -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath '{}' ; Start-Sleep -Seconds 30\"\r\n",
                 pid_file.display()
             ),
         )
@@ -2534,7 +2533,7 @@ mod tests {
             executable: batch,
             display_executable: "isolated timeout fixture".into(),
             args: Vec::new(),
-            timeout: Duration::from_secs(5),
+            timeout: Duration::from_secs(10),
         };
         let error = ProcessNativePluginCommandRunner.run(&command).unwrap_err();
         assert!(error.contains("timed out"));

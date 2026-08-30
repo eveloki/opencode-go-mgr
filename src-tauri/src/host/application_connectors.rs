@@ -273,7 +273,7 @@ fn execute_with_native_plugins(
                 .into_iter()
                 .map(|id| {
                     if id == ApplicationConnectorId::Dsh {
-                        inspect_dsh_combined(roots, &request.data_dir, cipher, &native_plugins)
+                        inspect_dsh_combined(roots, &request.data_dir, cipher, native_plugins)
                     } else if NativePluginHost::owns(id) {
                         native_plugins.inspect(id)
                     } else {
@@ -285,7 +285,7 @@ fn execute_with_native_plugins(
         }
         ApplicationConnectorHostOperation::Preview => {
             let preview = if request.id == ApplicationConnectorId::Dsh {
-                preview_dsh_combined(roots, cipher, &native_plugins, &request)?
+                preview_dsh_combined(roots, cipher, native_plugins, &request)?
             } else if NativePluginHost::owns(request.id) {
                 native_plugins.preview(&request)?
             } else {
@@ -295,7 +295,7 @@ fn execute_with_native_plugins(
         }
         ApplicationConnectorHostOperation::Commit => {
             let committed = if request.id == ApplicationConnectorId::Dsh {
-                commit_dsh_combined(roots, cipher, &native_plugins, &request)?
+                commit_dsh_combined(roots, cipher, native_plugins, &request)?
             } else if NativePluginHost::owns(request.id) {
                 native_plugins.commit(&request)?
             } else {
@@ -707,10 +707,8 @@ fn is_automatic(id: ApplicationConnectorId) -> bool {
     )
 }
 
-fn manual_detail(id: ApplicationConnectorId) -> &'static str {
-    match id {
-        _ => "this connector requires manual configuration",
-    }
+fn manual_detail(_id: ApplicationConnectorId) -> &'static str {
+    "this connector requires manual configuration"
 }
 
 fn manual_fingerprint(request: &ApplicationConnectorHostRequest) -> String {
@@ -2774,10 +2772,10 @@ fn validate_parent_root(
     validate_parent_against_root(root, parent, id == ApplicationConnectorId::Dsh)
 }
 
-fn connector_root_for_id<'a>(
-    roots: &'a Roots,
+fn connector_root_for_id(
+    roots: &Roots,
     id: ApplicationConnectorId,
-) -> ApplicationConnectorResult<&'a Path> {
+) -> ApplicationConnectorResult<&Path> {
     match id {
         ApplicationConnectorId::Hermes => {
             let root = hermes_root(roots)?;

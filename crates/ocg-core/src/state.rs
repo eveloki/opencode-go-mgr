@@ -486,7 +486,7 @@ impl CoreStateInner {
         &self,
         db: &Database,
     ) -> crate::Result<ImportedNodeRuntime> {
-        let (config, needs_persist) = load_config(&db)?;
+        let (config, needs_persist) = load_config(db)?;
         config.validate().map_err(anyhow::Error::msg)?;
         // Sanitized config JSON can differ in field order and legacy defaults
         // can normalize on load. The typed V2 payload was validated before the
@@ -505,8 +505,7 @@ impl CoreStateInner {
             &zen,
             &provider_models,
         )?;
-        let credentials =
-            crate::gateway_keys::build_credential_snapshot(&*db, &config.gateway_key)?;
+        let credentials = crate::gateway_keys::build_credential_snapshot(db, &config.gateway_key)?;
         Ok(ImportedNodeRuntime {
             config,
             http_client: route_set,
