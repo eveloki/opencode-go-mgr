@@ -4,6 +4,11 @@
 
 本指南面向把 OCG Manager 当作桌面应用、无头 Gateway 或 Docker 服务运行的人。章节按你实际会撞上它们的顺序排列：先装起来，排障在后。
 
+## 新增集成
+
+- [新增供应商](user/add-provider.zh-CN.md) — 通过 Custom API 接入兼容上游，或贡献一个具备完整 HTTP 与路由契约的密封内置供应商。
+- [新增应用](user/add-application.zh-CN.md) — 把未收录客户端接到 Gateway、贡献应用教程，或新增可选的本机 Desktop 连接器。
+
 ## 章节
 
 - [产品定位](user/overview.zh-CN.md) — 产品定位与 Gateway 承担的四个职责。
@@ -12,7 +17,7 @@
 - [接入第一个客户端](user/first-client.zh-CN.md) — 复制 Key 与 API Base URL，用一个请求验证连通。
 - [升级、备份、恢复与卸载](user/upgrade-backup.zh-CN.md) — 升级通道、手动升级、备份、恢复与卸载。
 - [管理面板](user/dashboard.zh-CN.md) — 七个视图、国际化与接入中心。
-- [应用教程与模型能力](user/applications.zh-CN.md) — 16 个客户端教程与模型能力表。
+- [应用教程与模型能力](user/applications.zh-CN.md) — 17 个客户端教程与模型能力表。
 - [账号](user/accounts.zh-CN.md) — Plan、凭据、排序、额度行为与托管注册。
 - [供应商](user/providers.zh-CN.md) — 目录、供应商合约、按模型协议覆盖与探测。
 - [日志与设置](user/logs-settings.zh-CN.md) — 请求日志、设置、代理模式与主题。
@@ -29,6 +34,7 @@
 
 - **新用户** — `overview` → `architecture` → `install` → `first-client` → `accounts` → `providers` → `gateway` → `applications` → `troubleshooting`。
 - **Docker / CLI 运维** — `overview` → `architecture` → `docker` → `cli` → `accounts` → `providers` → `routing` → `logs-settings` → `troubleshooting`。
+- **集成作者** — 上游供应商读 `add-provider`；下游客户端读 `add-application`。
 
 ---
 

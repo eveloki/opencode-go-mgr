@@ -43,6 +43,23 @@ pub struct AccountImportRecord {
     pub account: Account,
     pub custom_config: Option<AccountCustomConfigInput>,
     pub capabilities: Vec<AccountModelCapabilityInput>,
+    pub verification_status: ConnectionVerificationStatus,
+    pub connection_verified_at: Option<DateTime<Utc>>,
+}
+
+/// One fully validated, portable node-state snapshot. Stable IDs merge into an
+/// existing destination; destination-only state is retained according to the
+/// node migration rules. All database-owned state is committed in one
+/// transaction.
+#[derive(Debug, Clone)]
+pub struct NodeImportRecord {
+    pub accounts: Vec<AccountImportRecord>,
+    pub account_order: Vec<String>,
+    pub config_json: String,
+    pub sub_keys: Vec<SubGatewayKey>,
+    pub zen_free_enabled: bool,
+    pub zen_catalog: crate::kernel::zen::ZenFreeModelCatalog,
+    pub provider_contracts: PersistedContracts,
 }
 
 /// Settings key holding the forward-log client-key backfill watermark
@@ -70,7 +87,7 @@ pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// v26 and before any v27 write. Not created for a brand-new empty database.
 pub const PRE_V3_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v3.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 32;
+pub const CURRENT_SCHEMA_VERSION: i32 = 33;
 pub const V27_SCHEMA_VERSION: i32 = 27;
 /// Schema the v27 rewrite expects as its committed source. Historical databases
 /// always migrate through this version first.
@@ -1646,6 +1663,40 @@ fn migrate_to_v32(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v33: Custom capabilities keep their client-facing identity in the existing
+/// `model_id` column and gain the exact model ID sent upstream. Existing rows,
+/// including non-Custom provider catalog rows, preserve their old behavior by
+/// starting with identical public and upstream identities.
+fn migrate_to_v33(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 33 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        version == 32,
+        "v33 requires a canonical schema v32 source, found {version}"
+    );
+    let tx = conn.unchecked_transaction()?;
+    if !table_has_column(&tx, "account_model_capabilities", "upstream_model")? {
+        tx.execute_batch(
+            "ALTER TABLE account_model_capabilities
+                 ADD COLUMN upstream_model TEXT NOT NULL DEFAULT '';
+             UPDATE account_model_capabilities
+                SET upstream_model = model_id;",
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE account_model_capabilities
+                SET upstream_model = model_id
+              WHERE upstream_model = ''",
+            [],
+        )?;
+    }
+    tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (33);")?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod v27_test_hooks {
     use super::V27MigrationFault;
@@ -1774,6 +1825,199 @@ fn insert_account_row(
     Ok(())
 }
 
+fn insert_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
+    let account = &record.account;
+    anyhow::ensure!(
+        account.id != ZEN_FREE_ACCOUNT_ID,
+        "Zen Free is database-owned and cannot be imported"
+    );
+    account.validate_provider_binding()?;
+    ensure_enabled_offering_is_routable(
+        &account.provider_id,
+        &account.offering_id,
+        account.enabled,
+    )?;
+    let plan = builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+    let verification_gates_enablement = plan.verification_policy == VerificationPolicy::Required
+        && ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+    anyhow::ensure!(
+        !account.enabled
+            || !verification_gates_enablement
+            || record.verification_status.allows_enablement(),
+        "an enabled imported account must retain an enabling verification state"
+    );
+    if plan_requires_custom_config(plan) {
+        anyhow::ensure!(
+            record.custom_config.is_some(),
+            "Custom API accounts require a complete endpoint"
+        );
+        anyhow::ensure!(
+            !record.capabilities.is_empty(),
+            "Custom API accounts require at least one model capability"
+        );
+    } else {
+        anyhow::ensure!(
+            record.custom_config.is_none(),
+            "custom config is only available for Custom API accounts"
+        );
+        anyhow::ensure!(
+            record.capabilities.is_empty(),
+            "model capabilities are only available for Custom API accounts"
+        );
+    }
+    let purchase_date = if account.purchase_date.trim().is_empty() {
+        local_today()
+    } else {
+        normalize_purchase_date(&account.purchase_date)?
+    };
+    insert_account_row(conn, account, &purchase_date, record.verification_status)?;
+    if let Some(config) = &record.custom_config {
+        persist_account_custom_config_on(conn, &account.id, config, true)?;
+    }
+    if !record.capabilities.is_empty() {
+        persist_account_model_capabilities_on(conn, &account.id, &record.capabilities)?;
+    }
+    restore_import_verification_on(conn, record)?;
+    Ok(())
+}
+
+fn restore_import_verification_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
+    conn.execute(
+        "UPDATE accounts SET verification_status = ?2,
+             connection_verified_at = ?3, verification_error = NULL
+         WHERE id = ?1",
+        params![
+            record.account.id,
+            record.verification_status.as_str(),
+            record
+                .connection_verified_at
+                .map(|value| value.to_rfc3339()),
+        ],
+    )?;
+    Ok(())
+}
+
+fn merge_import_account_on(conn: &Connection, record: &AccountImportRecord) -> Result<()> {
+    if conn
+        .query_row(
+            "SELECT 1 FROM accounts WHERE id = ?1",
+            [&record.account.id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_none()
+    {
+        return insert_import_account_on(conn, record);
+    }
+    let account = &record.account;
+    account.validate_provider_binding()?;
+    ensure_enabled_offering_is_routable(
+        &account.provider_id,
+        &account.offering_id,
+        account.enabled,
+    )?;
+    let plan = builtin_plan(&account.provider_id, &account.offering_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
+    let verification_gates_enablement = plan.verification_policy == VerificationPolicy::Required
+        && ProviderRegistry::get(&account.provider_id, &account.offering_id)
+            .is_some_and(|descriptor| descriptor.card_actions.enable_requires_verification);
+    anyhow::ensure!(
+        !account.enabled
+            || !verification_gates_enablement
+            || record.verification_status.allows_enablement(),
+        "an enabled imported account must retain an enabling verification state"
+    );
+    if plan_requires_custom_config(plan) {
+        anyhow::ensure!(
+            record.custom_config.is_some(),
+            "Custom API accounts require a complete endpoint"
+        );
+        anyhow::ensure!(
+            !record.capabilities.is_empty(),
+            "Custom API accounts require at least one model capability"
+        );
+    } else {
+        anyhow::ensure!(
+            record.custom_config.is_none(),
+            "custom config is only available for Custom API accounts"
+        );
+        anyhow::ensure!(
+            record.capabilities.is_empty(),
+            "model capabilities are only available for Custom API accounts"
+        );
+    }
+    let purchase_date = if account.purchase_date.trim().is_empty() {
+        local_today()
+    } else {
+        normalize_purchase_date(&account.purchase_date)?
+    };
+    conn.execute(
+        "UPDATE accounts SET
+             name = ?2, username = ?3, key_cipher = ?4, enabled = ?5,
+             recharge_date = ?6, account_type = ?7, setup_step = ?8, notes = ?9,
+             provider_id = ?10, offering_id = ?11, credential_kind = ?12,
+             quota_scope = ?13, verification_status = ?14,
+             connection_verified_at = ?15, verification_error = NULL,
+             auth_error = NULL, last_error = NULL, updated_at = ?16
+         WHERE id = ?1",
+        params![
+            account.id,
+            account.name,
+            account.username,
+            account.key_cipher,
+            account.enabled as i32,
+            purchase_date,
+            account.account_type.as_str(),
+            account.setup_step.as_str(),
+            account.notes,
+            account.provider_id,
+            account.offering_id,
+            account.credential_kind.as_str(),
+            account.quota_scope.as_str(),
+            record.verification_status.as_str(),
+            record
+                .connection_verified_at
+                .map(|value| value.to_rfc3339()),
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    conn.execute(
+        "DELETE FROM account_model_capabilities WHERE account_id = ?1",
+        [&account.id],
+    )?;
+    conn.execute(
+        "DELETE FROM account_custom_configs WHERE account_id = ?1",
+        [&account.id],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocol_overrides
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_model_protocols
+         WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+    )?;
+    conn.execute(
+        "DELETE FROM provider_contract_scopes WHERE scope_kind = ?1 AND scope_id = ?2",
+        params![SCOPE_KIND_CUSTOM_ENDPOINT, account.id],
+    )?;
+    if let Some(config) = &record.custom_config {
+        persist_account_custom_config_on(conn, &account.id, config, true)?;
+    }
+    if !record.capabilities.is_empty() {
+        persist_account_model_capabilities_on(conn, &account.id, &record.capabilities)?;
+    }
+    // Child-table writers correctly invalidate verification during ordinary
+    // edits. A validated node snapshot is different: it carries the source
+    // verification state as part of the portable account definition.
+    restore_import_verification_on(conn, record)?;
+    Ok(())
+}
+
 fn persist_account_custom_config_on(
     conn: &Connection,
     account_id: &str,
@@ -1863,8 +2107,8 @@ fn persist_goat_catalog_on(
         };
         conn.execute(
             "INSERT INTO account_model_capabilities
-             (account_id, model_id, protocol, verified_at, source)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (account_id, model_id, upstream_model, protocol, verified_at, source)
+             VALUES (?1, ?2, ?2, ?3, ?4, ?5)",
             params![
                 account_id,
                 model_id,
@@ -1962,24 +2206,34 @@ fn persist_account_model_capabilities_on(
     )?;
     let mut seen = HashSet::new();
     for capability in capabilities {
-        let model_id = validate_custom_model_id(&capability.model_id)?;
+        let public_model = validate_custom_model_id(&capability.public_model)?;
+        let upstream_model = validate_custom_model_id(&capability.upstream_model)?;
         let source = capability
             .source
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("manual");
-        let key = (model_id.clone(), capability.protocol.as_str().to_string());
+        let key = (
+            public_model.to_ascii_lowercase(),
+            capability.protocol.as_str().to_string(),
+        );
         anyhow::ensure!(
             seen.insert(key),
-            "duplicate model capability `{model_id}` / {}",
+            "duplicate model capability `{public_model}` / {}",
             capability.protocol.as_str()
         );
         conn.execute(
             "INSERT INTO account_model_capabilities (
-                account_id, model_id, protocol, verified_at, source
-             ) VALUES (?1, ?2, ?3, NULL, ?4)",
-            params![account_id, model_id, capability.protocol.as_str(), source],
+                account_id, model_id, upstream_model, protocol, verified_at, source
+             ) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            params![
+                account_id,
+                public_model,
+                upstream_model,
+                capability.protocol.as_str(),
+                source
+            ],
         )?;
     }
     mark_required_verification_stale_on(conn, account_id)?;
@@ -2182,6 +2436,7 @@ impl Database {
         migrate_to_v30(&db.conn)?;
         migrate_to_v31(&db.conn)?;
         migrate_to_v32(&db.conn)?;
+        migrate_to_v33(&db.conn)?;
         Ok(db)
     }
 
@@ -4026,58 +4281,194 @@ impl Database {
     pub fn import_accounts_with_contracts(&self, records: &[AccountImportRecord]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for record in records {
-            let account = &record.account;
-            anyhow::ensure!(
-                account.id != ZEN_FREE_ACCOUNT_ID,
-                "Zen Free is database-owned and cannot be imported"
-            );
-            account.validate_provider_binding()?;
-            ensure_enabled_offering_is_routable(
-                &account.provider_id,
-                &account.offering_id,
-                account.enabled,
-            )?;
-            let plan = builtin_plan(&account.provider_id, &account.offering_id)
-                .ok_or_else(|| anyhow::anyhow!("unknown provider offering"))?;
-            if plan_requires_custom_config(plan) {
-                anyhow::ensure!(
-                    record.custom_config.is_some(),
-                    "Custom API accounts require a complete endpoint"
-                );
-                anyhow::ensure!(
-                    !record.capabilities.is_empty(),
-                    "Custom API accounts require at least one model capability"
-                );
-            } else {
-                anyhow::ensure!(
-                    record.custom_config.is_none(),
-                    "custom config is only available for Custom API accounts"
-                );
-                anyhow::ensure!(
-                    record.capabilities.is_empty(),
-                    "model capabilities are only available for Custom API accounts"
-                );
-            }
-            let purchase_date = if account.purchase_date.trim().is_empty() {
-                local_today()
-            } else {
-                normalize_purchase_date(&account.purchase_date)?
-            };
-            insert_account_row(
-                &tx,
-                account,
-                &purchase_date,
-                default_verification_status(plan),
-            )?;
-            if let Some(config) = &record.custom_config {
-                persist_account_custom_config_on(&tx, &account.id, config, true)?;
-            }
-            if !record.capabilities.is_empty() {
-                persist_account_model_capabilities_on(&tx, &account.id, &record.capabilities)?;
-            }
+            insert_import_account_on(&tx, record)?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Merge one V2 node migration package by stable account/Key id. Existing
+    /// destination rows keep their current order; source-only rows append in
+    /// package order. All database-owned state shares one SQLite transaction.
+    pub fn import_node_state<T>(
+        &self,
+        record: &NodeImportRecord,
+        prepare_runtime: impl FnOnce(&Database) -> Result<T>,
+    ) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut ordered_ids = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM accounts ORDER BY sort_order ASC, created_at ASC, id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for id in rows {
+                ordered_ids.push(id?);
+            }
+        }
+        for account in &record.accounts {
+            merge_import_account_on(&tx, account)?;
+        }
+
+        let (sanitized, primary) = sanitize_config_json_primary_key(&record.config_json)?;
+        let primary =
+            primary.ok_or_else(|| anyhow::anyhow!("node migration primary Key is missing"))?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('config', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [sanitized],
+        )?;
+        for key in &record.sub_keys {
+            anyhow::ensure!(key.deleted_at.is_none(), "migrated sub Key must be active");
+            anyhow::ensure!(
+                key.id != PRIMARY_KEY_ID,
+                "sub Key cannot use the primary id"
+            );
+            tx.execute(
+                "DELETE FROM access_keys WHERE id = ?1 AND is_primary = 0",
+                [&key.id],
+            )?;
+        }
+        upsert_primary_access_key_on(&tx, &primary)?;
+        for key in &record.sub_keys {
+            tx.execute(
+                "INSERT INTO access_keys (id, name, key, is_primary, enabled, deleted_at, created_at)
+                 VALUES (?1, ?2, ?3, 0, ?4, NULL, ?5)",
+                params![
+                    key.id,
+                    key.name,
+                    key.key,
+                    key.enabled as i32,
+                    key.created_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        let merged_sub_keys: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM access_keys WHERE is_primary = 0 AND deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            merged_sub_keys <= 64,
+            "merged node would exceed the 64 active sub Key limit"
+        );
+
+        let zen_changed = tx.execute(
+            "UPDATE accounts SET enabled = ?2, free_alias_enabled = 0, updated_at = ?3
+             WHERE id = ?1 AND provider_id = ?4 AND offering_id = ?5",
+            params![
+                ZEN_FREE_ACCOUNT_ID,
+                record.zen_free_enabled as i32,
+                Utc::now().to_rfc3339(),
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+            ],
+        )?;
+        anyhow::ensure!(zen_changed == 1, "Zen Free singleton is missing");
+
+        let mut ordered_set = ordered_ids.iter().cloned().collect::<HashSet<_>>();
+        for id in &record.account_order {
+            if ordered_set.insert(id.clone()) {
+                ordered_ids.push(id.clone());
+            }
+        }
+        let current_ids = {
+            let mut stmt = tx.prepare("SELECT id FROM accounts")?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<HashSet<_>>>()?
+        };
+        anyhow::ensure!(
+            ordered_ids.len() == current_ids.len()
+                && ordered_ids.iter().collect::<HashSet<_>>().len() == ordered_ids.len()
+                && ordered_ids.iter().all(|id| current_ids.contains(id)),
+            "migrated account order does not cover the merged account set"
+        );
+        for (sort_order, id) in ordered_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE accounts SET sort_order = ?1 WHERE id = ?2",
+                params![sort_order as i64, id],
+            )?;
+        }
+        let zen_models_json = serde_json::to_string(&record.zen_catalog.models)?;
+        tx.execute(
+            "INSERT INTO provider_model_catalogs
+             (provider_id, offering_id, models_json, refreshed_at, source_url)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider_id, offering_id) DO UPDATE SET
+                 models_json = excluded.models_json,
+                 refreshed_at = excluded.refreshed_at,
+                 source_url = excluded.source_url",
+            params![
+                OPENCODE_ZEN_FREE_PROVIDER_ID,
+                ANONYMOUS_FREE_OFFERING_ID,
+                zen_models_json,
+                record
+                    .zen_catalog
+                    .refreshed_at
+                    .map(|value| value.to_rfc3339()),
+                record.zen_catalog.source_url,
+            ],
+        )?;
+
+        for (scope, row) in &record.provider_contracts.scopes {
+            anyhow::ensure!(
+                scope.kind() == crate::provider_contracts::ContractScopeKind::Provider,
+                "node migration only accepts Provider contract scopes"
+            );
+            upsert_contract_catalog_on(
+                &tx,
+                scope,
+                &row.catalog_models,
+                row.catalog_refreshed_at,
+                &row.catalog_source,
+                &row.catalog_source_url,
+                row.updated_at,
+            )?;
+            tx.execute(
+                "DELETE FROM provider_contract_model_protocols
+                 WHERE scope_kind = ?1 AND scope_id = ?2",
+                params![scope.kind_str(), scope.id()],
+            )?;
+            tx.execute(
+                "DELETE FROM provider_contract_model_protocol_overrides
+                 WHERE scope_kind = ?1 AND scope_id = ?2",
+                params![scope.kind_str(), scope.id()],
+            )?;
+            for evidence in record
+                .provider_contracts
+                .evidence
+                .get(scope)
+                .into_iter()
+                .flatten()
+            {
+                upsert_model_protocol_row_on(&tx, evidence)?;
+            }
+            for override_row in record
+                .provider_contracts
+                .overrides
+                .get(scope)
+                .into_iter()
+                .flatten()
+            {
+                set_model_protocol_override_on(
+                    &tx,
+                    scope,
+                    &override_row.model_id,
+                    override_row.protocol,
+                    override_row.state,
+                    override_row.updated_at,
+                )?;
+            }
+        }
+
+        sqlite_foreign_key_check(&tx)?;
+        // The callback reads through this same SQLite connection, so it sees
+        // the uncommitted merged rows. Every fallible runtime construction
+        // step must finish before commit; the caller installs the returned
+        // snapshots only after this transaction succeeds.
+        let runtime = prepare_runtime(self)?;
+        tx.commit()?;
+        Ok(runtime)
     }
 
     pub fn update_account(
@@ -4502,7 +4893,7 @@ impl Database {
         account_id: &str,
     ) -> Result<Vec<AccountModelCapability>> {
         let mut stmt = self.conn.prepare(
-            "SELECT account_id, model_id, protocol, verified_at, source
+            "SELECT account_id, model_id, upstream_model, protocol, verified_at, source
              FROM account_model_capabilities
              WHERE account_id = ?1
              ORDER BY model_id ASC, protocol ASC",
@@ -4516,7 +4907,7 @@ impl Database {
         account_id: &str,
     ) -> Result<Vec<AccountModelCapability>> {
         let mut stmt = self.conn.prepare(
-            "SELECT account_id, model_id, protocol, verified_at, source
+            "SELECT account_id, model_id, upstream_model, protocol, verified_at, source
              FROM account_model_capabilities
              WHERE account_id = ?1
              ORDER BY rowid ASC",
@@ -7278,20 +7669,24 @@ fn custom_verification_contract_still_matches_on(
         return Ok(false);
     }
     let mut stmt = conn.prepare(
-        "SELECT model_id, protocol
+        "SELECT model_id, upstream_model, protocol
          FROM account_model_capabilities
          WHERE account_id = ?1
          ORDER BY rowid ASC",
     )?;
     let rows = stmt.query_map([&contract.account_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
     let mut current = Vec::new();
     for row in rows {
-        let (model_id, protocol) = row?;
+        let (public_model, upstream_model, protocol) = row?;
         let protocol = UpstreamProtocolKind::try_from(protocol.as_str())
             .map_err(|error| anyhow::anyhow!(error))?;
-        current.push((model_id, protocol));
+        current.push((public_model, upstream_model, protocol));
     }
     Ok(current == contract.capabilities)
 }
@@ -7312,16 +7707,17 @@ fn account_custom_config_from_row(row: &Row<'_>) -> rusqlite::Result<AccountCust
 }
 
 fn account_model_capability_from_row(row: &Row<'_>) -> rusqlite::Result<AccountModelCapability> {
-    let protocol_value = row.get::<_, String>(2)?;
+    let protocol_value = row.get::<_, String>(3)?;
     let protocol = UpstreamProtocolKind::try_from(protocol_value.as_str()).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
     })?;
     Ok(AccountModelCapability {
         account_id: row.get(0)?,
-        model_id: row.get(1)?,
+        public_model: row.get(1)?,
+        upstream_model: row.get(2)?,
         protocol,
-        verified_at: row.get::<_, Option<String>>(3)?.map(parse_datetime),
-        source: row.get(4)?,
+        verified_at: row.get::<_, Option<String>>(4)?.map(parse_datetime),
+        source: row.get(5)?,
     })
 }
 
@@ -7747,7 +8143,8 @@ mod tests {
                     upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                 }),
                 &[AccountModelCapabilityInput {
-                    model_id: "org/model".into(),
+                    public_model: "org/model".into(),
+                    upstream_model: "org/model".into(),
                     protocol: UpstreamProtocolKind::ChatCompletions,
                     source: None,
                 }],
@@ -12344,14 +12741,16 @@ mod tests {
         db.replace_account_model_capabilities(
             "custom-1",
             &[AccountModelCapabilityInput {
-                model_id: "deepseek/deepseek-v4-flash".into(),
+                public_model: "deepseek/deepseek-v4-flash".into(),
+                upstream_model: "deepseek/deepseek-v4-flash".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: Some("manual".into()),
             }],
         )
         .unwrap();
         let capabilities = db.list_account_model_capabilities("custom-1").unwrap();
-        assert_eq!(capabilities[0].model_id, "deepseek/deepseek-v4-flash");
+        assert_eq!(capabilities[0].public_model, "deepseek/deepseek-v4-flash");
+        assert_eq!(capabilities[0].upstream_model, "deepseek/deepseek-v4-flash");
 
         db.set_account_verification(
             "custom-1",
@@ -12374,7 +12773,7 @@ mod tests {
         assert_eq!(after_key.status, ConnectionVerificationStatus::Pending);
         let caps_after_key = db.list_account_model_capabilities("custom-1").unwrap();
         assert_eq!(caps_after_key.len(), 1);
-        assert_eq!(caps_after_key[0].model_id, "deepseek/deepseek-v4-flash");
+        assert_eq!(caps_after_key[0].public_model, "deepseek/deepseek-v4-flash");
 
         let unknown = account("unknown");
         let mut unknown = unknown;
@@ -12574,7 +12973,8 @@ mod tests {
                     upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                 }),
                 &[AccountModelCapabilityInput {
-                    model_id: "org/model".into(),
+                    public_model: "org/model".into(),
+                    upstream_model: "org/model".into(),
                     protocol: UpstreamProtocolKind::ChatCompletions,
                     source: None,
                 }],
@@ -12602,7 +13002,8 @@ mod tests {
                 upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
-                model_id: "org/model".into(),
+                public_model: "org/model".into(),
+                upstream_model: "org/model".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
@@ -12629,7 +13030,8 @@ mod tests {
             &go,
             None,
             &[AccountModelCapabilityInput {
-                model_id: "org/model".into(),
+                public_model: "org/model".into(),
+                upstream_model: "org/model".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
@@ -12678,6 +13080,8 @@ mod tests {
                 account: go,
                 custom_config: None,
                 capabilities: Vec::new(),
+                verification_status: ConnectionVerificationStatus::NotRequired,
+                connection_verified_at: None,
             },
             AccountImportRecord {
                 account: custom,
@@ -12686,10 +13090,13 @@ mod tests {
                     upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                 }),
                 capabilities: vec![AccountModelCapabilityInput {
-                    model_id: "org/model".into(),
+                    public_model: "org/model".into(),
+                    upstream_model: "org/model".into(),
                     protocol: UpstreamProtocolKind::ChatCompletions,
                     source: Some("import".into()),
                 }],
+                verification_status: ConnectionVerificationStatus::Pending,
+                connection_verified_at: None,
             },
         ];
         db.conn
@@ -12742,7 +13149,8 @@ mod tests {
                 upstream_protocol: UpstreamProtocolKind::Messages,
             }),
             &[AccountModelCapabilityInput {
-                model_id: "org/model".into(),
+                public_model: "org/model".into(),
+                upstream_model: "org/model".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
@@ -12762,7 +13170,8 @@ mod tests {
                 upstream_protocol: UpstreamProtocolKind::Messages,
             }),
             &[AccountModelCapabilityInput {
-                model_id: "org/model".into(),
+                public_model: "org/model".into(),
+                upstream_model: "org/model".into(),
                 protocol: UpstreamProtocolKind::Messages,
                 source: None,
             }],
@@ -12777,7 +13186,8 @@ mod tests {
         let rejected = db.replace_account_model_capabilities(
             "custom-protocol",
             &[AccountModelCapabilityInput {
-                model_id: "org/other".into(),
+                public_model: "org/other".into(),
+                upstream_model: "org/other".into(),
                 protocol: UpstreamProtocolKind::Responses,
                 source: None,
             }],
@@ -12792,7 +13202,80 @@ mod tests {
             .list_account_model_capabilities("custom-protocol")
             .unwrap();
         assert_eq!(kept.len(), 1);
-        assert!(kept.iter().all(|row| row.model_id == "org/model"));
+        assert!(kept.iter().all(|row| row.public_model == "org/model"));
+
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn custom_capabilities_allow_shared_upstream_but_reject_duplicate_public_names() {
+        let dir = temp_data_dir("custom-model-mapping-uniqueness");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut custom = account("custom-mapping");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.enabled = false;
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            }),
+            &[
+                AccountModelCapabilityInput {
+                    public_model: "public-one".into(),
+                    upstream_model: "shared-upstream:0731".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                },
+                AccountModelCapabilityInput {
+                    public_model: "public-two".into(),
+                    upstream_model: "shared-upstream:0731".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                },
+            ],
+        )
+        .unwrap();
+        let saved = db
+            .list_account_model_capabilities("custom-mapping")
+            .unwrap();
+        assert_eq!(saved.len(), 2);
+        assert!(
+            saved
+                .iter()
+                .all(|row| row.upstream_model == "shared-upstream:0731")
+        );
+
+        let duplicate = db.replace_account_model_capabilities(
+            "custom-mapping",
+            &[
+                AccountModelCapabilityInput {
+                    public_model: "Public-One".into(),
+                    upstream_model: "upstream-a".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                },
+                AccountModelCapabilityInput {
+                    public_model: "public-one".into(),
+                    upstream_model: "upstream-b".into(),
+                    protocol: UpstreamProtocolKind::ChatCompletions,
+                    source: None,
+                },
+            ],
+        );
+        assert!(
+            duplicate
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate model capability")
+        );
+        assert_eq!(
+            db.list_account_model_capabilities("custom-mapping")
+                .unwrap(),
+            saved
+        );
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -12813,7 +13296,8 @@ mod tests {
                 upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
-                model_id: "org/model".into(),
+                public_model: "org/model".into(),
+                upstream_model: "org/model".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
@@ -12871,7 +13355,8 @@ mod tests {
         db.replace_account_model_capabilities(
             "custom-stale",
             &[AccountModelCapabilityInput {
-                model_id: "org/other".into(),
+                public_model: "org/other".into(),
+                upstream_model: "org/other".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
@@ -12927,7 +13412,7 @@ mod tests {
         assert!(after_key_state.verification_error.is_none());
         let caps_after_key = db.list_account_model_capabilities("custom-stale").unwrap();
         assert_eq!(caps_after_key.len(), 1);
-        assert_eq!(caps_after_key[0].model_id, "org/other");
+        assert_eq!(caps_after_key[0].public_model, "org/other");
 
         drop(db);
         fs::remove_dir_all(dir).unwrap();
@@ -12949,7 +13434,8 @@ mod tests {
                 upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
-                model_id: "one".into(),
+                public_model: "one".into(),
+                upstream_model: "one".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
@@ -13020,7 +13506,8 @@ mod tests {
         db.replace_account_model_capabilities(
             "custom-cas",
             &[AccountModelCapabilityInput {
-                model_id: "two".into(),
+                public_model: "two".into(),
+                upstream_model: "two".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
@@ -13084,7 +13571,8 @@ mod tests {
                 upstream_protocol: UpstreamProtocolKind::ChatCompletions,
             }),
             &[AccountModelCapabilityInput {
-                model_id: "one".into(),
+                public_model: "one".into(),
+                upstream_model: "one".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 source: None,
             }],
@@ -13150,7 +13638,8 @@ mod tests {
                         upstream_protocol: UpstreamProtocolKind::ChatCompletions,
                     }),
                     &[AccountModelCapabilityInput {
-                        model_id: "org/model".into(),
+                        public_model: "org/model".into(),
+                        upstream_model: "org/model".into(),
                         protocol: UpstreamProtocolKind::ChatCompletions,
                         source: None,
                     }],
@@ -13749,7 +14238,8 @@ mod tests {
                 upstream_protocol: UpstreamProtocolKind::Messages,
             }),
             &[AccountModelCapabilityInput {
-                model_id: "org/model".into(),
+                public_model: "org/model".into(),
+                upstream_model: "org/model".into(),
                 protocol: UpstreamProtocolKind::Messages,
                 source: None,
             }],
@@ -13814,6 +14304,84 @@ mod tests {
         );
 
         drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v32_to_v33_backfills_public_and_upstream_identities_for_custom_and_goat() {
+        let dir = temp_data_dir("v32-v33-model-mapping");
+        let db = Database::open(dir.clone()).unwrap();
+
+        let mut custom = account("custom-v32");
+        custom.provider_id = CUSTOM_PROVIDER_ID.to_string();
+        custom.offering_id = CUSTOM_API_OFFERING_ID.to_string();
+        custom.enabled = false;
+        db.create_account_with_contract(
+            &custom,
+            Some(&AccountCustomConfigInput {
+                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
+            }),
+            &[AccountModelCapabilityInput {
+                public_model: "custom-public".into(),
+                upstream_model: "custom-public".into(),
+                protocol: UpstreamProtocolKind::ChatCompletions,
+                source: Some("manual".into()),
+            }],
+        )
+        .unwrap();
+
+        let mut goat = account("goat-v32");
+        goat.provider_id = COMMAND_CODE_PROVIDER_ID.to_string();
+        goat.offering_id = GOAT_OFFERING_ID.to_string();
+        goat.enabled = false;
+        db.create_account(&goat).unwrap();
+        persist_goat_catalog_on(&db.conn, &goat.id, &["goat/model".into()], Some(Utc::now()))
+            .unwrap();
+        drop(db);
+
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP INDEX IF EXISTS idx_account_model_capabilities_account;
+             CREATE TABLE account_model_capabilities_v32 (
+                account_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                verified_at TEXT,
+                source TEXT NOT NULL DEFAULT 'manual',
+                PRIMARY KEY (account_id, model_id, protocol),
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+             );
+             INSERT INTO account_model_capabilities_v32
+                (account_id, model_id, protocol, verified_at, source)
+             SELECT account_id, model_id, protocol, verified_at, source
+               FROM account_model_capabilities;
+             DROP TABLE account_model_capabilities;
+             ALTER TABLE account_model_capabilities_v32
+                RENAME TO account_model_capabilities;
+             CREATE INDEX idx_account_model_capabilities_account
+                ON account_model_capabilities(account_id);
+             DELETE FROM schema_version;
+             INSERT INTO schema_version (version) VALUES (32);
+             PRAGMA foreign_keys = ON;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let migrated = Database::open(dir.clone()).unwrap();
+        assert_eq!(migrated.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        for (account_id, expected) in [("custom-v32", "custom-public"), ("goat-v32", "goat/model")]
+        {
+            let capabilities = migrated
+                .list_account_model_capabilities(account_id)
+                .unwrap();
+            assert_eq!(capabilities.len(), 1);
+            assert_eq!(capabilities[0].public_model, expected);
+            assert_eq!(capabilities[0].upstream_model, expected);
+        }
+
+        drop(migrated);
         fs::remove_dir_all(dir).unwrap();
     }
 

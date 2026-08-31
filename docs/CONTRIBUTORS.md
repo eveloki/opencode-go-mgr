@@ -25,6 +25,12 @@ OCG Manager 由 [Klarkxy](https://github.com/klarkxy) 维护，也受益于社�
 
 贡献了多客户端 Key 与按 Key 用量归因（含 `access_keys` 数据库化重构）、 amd64/arm64 多架构容器发布，以及按模型名单的第四种出站代理模式。
 
+### [Mark Yan (@xyzs996)](https://github.com/xyzs996)
+
+- [#50](https://github.com/klarkxy/opencode-go-mgr/pull/50): corrected DeepSeek peak/off-peak pricing to apply the official Monday-to-Friday schedule, with weekend regression coverage.
+
+修正了 DeepSeek 峰谷计价的工作日判定，并增加周末回归测试，确保计价遵循官方的周一至周五时段规则。
+
 ### [zkz098 (@zkz098)](https://github.com/zkz098)
 
 - [#31](https://github.com/klarkxy/opencode-go-mgr/pull/31) (v1.5.6): fixed the Arch Linux AppImage crash by removing the bundled `libwayland-*` libraries.

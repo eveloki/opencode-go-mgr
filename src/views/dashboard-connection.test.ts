@@ -178,9 +178,9 @@ test("model refresh preserves valid selections and falls back only when needed",
   );
 });
 
-test("application catalog has sixteen verified clients and never displays a complete key", () => {
-  assert.equal(APPLICATION_GUIDES.length, 16);
-  assert.equal(new Set(APPLICATION_GUIDES.map((guide) => guide.id)).size, 16);
+test("application catalog has seventeen verified clients and never displays a complete key", () => {
+  assert.equal(APPLICATION_GUIDES.length, 17);
+  assert.equal(new Set(APPLICATION_GUIDES.map((guide) => guide.id)).size, 17);
   assert.ok(APPLICATION_GUIDES.every((guide) => String(guide.id) !== "trae"));
   const officialUrls = new Map([
     ["claude-code", "https://code.claude.com/docs/en/llm-gateway-connect"],
@@ -188,6 +188,7 @@ test("application catalog has sixteen verified clients and never displays a comp
     ["codex", "https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers"],
     ["gemini-cli", "https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md"],
     ["pi", "https://pi.dev/docs/latest/models"],
+    ["dsh", "https://github.com/deepseek-ai/deepseek-harness"],
     ["kimi-code", "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html"],
     ["opencode", "https://opencode.ai/docs/providers/"],
     ["workbuddy", "https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Model"],
@@ -209,6 +210,7 @@ test("application catalog has sixteen verified clients and never displays a comp
     "codex",
     "gemini-cli",
     "pi",
+    "dsh",
     "kimi-code",
     "opencode",
     "workbuddy",
@@ -255,6 +257,7 @@ test("application catalog has sixteen verified clients and never displays a comp
     ["codex", urls.apiBaseUrl],
     ["gemini-cli", urls.rootUrl],
     ["pi", urls.apiBaseUrl],
+    ["dsh", urls.apiBaseUrl],
     ["kimi-code", urls.apiBaseUrl],
     ["opencode", urls.apiBaseUrl],
     ["workbuddy", urls.chatCompletionsUrl],
@@ -392,12 +395,19 @@ test("application catalog has sixteen verified clients and never displays a comp
   }
   assert.doesNotMatch(geminiSnippets[1].copy, /"model":\s*"gemini-/);
 
-  for (const appId of ["codex", "pi", "opencode"]) {
+  for (const appId of ["codex", "opencode"]) {
     const guide = APPLICATION_GUIDES.find((candidate) => candidate.id === appId);
     assert.ok(guide);
     const snippets = guide.snippets(context);
     assert.ok(snippets.some((snippet) => snippet.language === "powershell" && snippet.copy.includes(actualKey)));
     assert.ok(snippets.some((snippet) => snippet.language === "bash" && snippet.copy.includes(actualKey)));
+  }
+  for (const appId of ["pi", "dsh"]) {
+    const guide = APPLICATION_GUIDES.find((candidate) => candidate.id === appId);
+    assert.ok(guide);
+    const snippets = guide.snippets(context);
+    assert.ok(snippets.some((snippet) => snippet.copy.includes(actualKey)), `${appId} native credential`);
+    assert.ok("badge" in guide && guide.badge === "原生插件", `${appId} native plugin badge`);
   }
   const openCode = APPLICATION_GUIDES.find((guide) => guide.id === "opencode");
   assert.ok(openCode);
@@ -433,7 +443,7 @@ test("application catalog has sixteen verified clients and never displays a comp
   const piConfig = JSON.parse(pi.snippets(context)[0].copy);
   assert.equal(piConfig.providers.ocg.baseUrl, urls.apiBaseUrl);
   assert.equal(piConfig.providers.ocg.api, "openai-completions");
-  assert.equal(piConfig.providers.ocg.apiKey, "$OCG_API_KEY");
+  assert.ok(!("apiKey" in piConfig.providers.ocg));
   assert.deepEqual(piConfig.providers.ocg.compat, {
     supportsStore: false,
     supportsDeveloperRole: false,

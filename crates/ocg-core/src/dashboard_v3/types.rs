@@ -24,6 +24,7 @@ use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 
 use crate::models::{AccountSetupStep as ModelAccountSetupStep, AccountType as ModelAccountType};
 use crate::provider::{
@@ -169,6 +170,15 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "AccountImportDisposition",
     "AccountImportRequest",
     "AccountImportResult",
+    "ApplicationConnectorAction",
+    "ApplicationConnectorStatus",
+    "ApplicationConnectorChange",
+    "ApplicationConnectorItem",
+    "ApplicationConnectors",
+    "ApplicationConnectorPreviewRequest",
+    "ApplicationConnectorPreview",
+    "ApplicationConnectorCommitRequest",
+    "ApplicationConnectorCommitResult",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -753,19 +763,16 @@ pub struct AccountMutation {
     pub process_generation: u64,
 }
 
-/// POST `/accounts/transfer/export` body. Both passwords are write-only. The
-/// administrator credential is step-up authorization; `bundle_password` is a
-/// distinct passphrase used only to encrypt the portable file.
+/// POST `/accounts/transfer/export` body. The password is write-only and used
+/// only to encrypt the portable node-state file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountExportRequest {
-    pub admin_username: String,
-    pub admin_password: String,
     pub bundle_password: String,
 }
 
-/// Encrypted account migration package returned by the export endpoint.
+/// Encrypted node migration package returned by the export endpoint.
 /// `bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no
 /// plaintext upstream credential is returned to the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -790,7 +797,7 @@ pub struct AccountImportPreviewRequest {
     pub bundle: String,
 }
 
-/// Secret-free preview of one account migration package.
+/// Secret-free preview of one node migration package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
@@ -824,6 +831,8 @@ pub struct AccountImportPreviewItem {
 pub enum AccountImportDisposition {
     Import,
     Imported,
+    Merge,
+    Merged,
     Duplicate,
 }
 
@@ -869,8 +878,8 @@ pub struct AccountCustomConfig {
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountModelCapability {
-    pub account_id: String,
-    pub model_id: String,
+    pub public_model: String,
+    pub upstream_model: String,
     pub protocol: AccountUpstreamProtocol,
     pub verified_at: Option<String>,
     pub source: String,
@@ -1010,11 +1019,31 @@ pub struct AccountModelCapabilitiesUpdate {
     pub capabilities: Vec<AccountModelCapabilityWrite>,
 }
 
-/// One declared Custom model capability on create or replace.
+/// One declared Custom model capability on create or replace. Canonical writes
+/// carry both identities; the legacy `modelId` shape remains accepted so a
+/// stale dashboard can complete one migration-window write without data loss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum AccountModelCapabilityWrite {
+    Canonical(AccountModelCapabilityWriteCanonical),
+    Legacy(AccountModelCapabilityWriteLegacy),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AccountModelCapabilityWrite {
+pub struct AccountModelCapabilityWriteCanonical {
+    pub public_model: String,
+    pub upstream_model: String,
+    pub protocol: AccountUpstreamProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountModelCapabilityWriteLegacy {
     pub model_id: String,
     pub protocol: AccountUpstreamProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2037,6 +2066,122 @@ pub struct ApplicationModels {
     pub pricing_revision: String,
 }
 
+/// Operation supported by the local Desktop application-connector Host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ApplicationConnectorAction {
+    Connect,
+    Restore,
+}
+
+/// Secret-free connector state. Automatic writes exist only in the local
+/// Desktop Host; every other runtime reports `unsupported_runtime`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum ApplicationConnectorStatus {
+    UnsupportedRuntime,
+    NotDetected,
+    ManualOnly,
+    Ready,
+    Connected,
+    Conflict,
+    Partial,
+}
+
+/// One redacted field-level change. Sensitive values are represented by a
+/// fixed mask; this DTO never carries a plaintext Key or whole config file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationConnectorChange {
+    pub field: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub sensitive: bool,
+}
+
+/// One of the eight statically supported local client surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationConnectorItem {
+    pub id: String,
+    pub status: ApplicationConnectorStatus,
+    pub detected: bool,
+    pub automatic: bool,
+    pub detail: Option<String>,
+    pub target_paths: Vec<String>,
+}
+
+/// GET `/applications/connectors` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationConnectors {
+    pub items: Vec<ApplicationConnectorItem>,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// POST `/applications/connectors/{id}/preview` request. Paths, Gateway URLs,
+/// config text and Key material are intentionally not accepted from callers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationConnectorPreviewRequest {
+    pub action: ApplicationConnectorAction,
+    #[serde(default)]
+    pub key_id: Option<String>,
+    #[serde(default)]
+    pub model_values: BTreeMap<String, String>,
+}
+
+/// Redacted preview tied to the current target-file state by `fingerprint`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationConnectorPreview {
+    pub id: String,
+    pub action: ApplicationConnectorAction,
+    pub status: ApplicationConnectorStatus,
+    pub fingerprint: String,
+    pub detail: Option<String>,
+    pub target_paths: Vec<String>,
+    pub changes: Vec<ApplicationConnectorChange>,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// POST `/applications/connectors/{id}/commit` request. CAS protects the OCG
+/// selection while `previewFingerprint` protects the external config files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationConnectorCommitRequest {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub action: ApplicationConnectorAction,
+    #[serde(default)]
+    pub key_id: Option<String>,
+    #[serde(default)]
+    pub model_values: BTreeMap<String, String>,
+    pub preview_fingerprint: String,
+}
+
+/// Successful commit result. The settings revision advances exactly once for
+/// a real external write and stays unchanged for a verified no-op.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationConnectorCommitResult {
+    pub connector: ApplicationConnectorItem,
+    pub changed: bool,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
 /// Dashboard home totals. `availableAccounts` counts accounts that can
 /// contribute at least one currently enabled production route.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2586,6 +2731,13 @@ pub fn contract_schema() -> Value {
     include_type::<DesktopUpdate>(&mut serialize);
     include_type::<UsageRefresh>(&mut serialize);
     include_type::<UsageRefreshThrottleError>(&mut serialize);
+    include_type::<ApplicationConnectorAction>(&mut serialize);
+    include_type::<ApplicationConnectorStatus>(&mut serialize);
+    include_type::<ApplicationConnectorChange>(&mut serialize);
+    include_type::<ApplicationConnectorItem>(&mut serialize);
+    include_type::<ApplicationConnectors>(&mut serialize);
+    include_type::<ApplicationConnectorPreview>(&mut serialize);
+    include_type::<ApplicationConnectorCommitResult>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
@@ -2631,6 +2783,8 @@ pub fn contract_schema() -> Value {
     include_type::<InstallUpdate>(&mut deserialize);
     include_type::<UsageRefreshUpdate>(&mut deserialize);
     include_type::<ProviderModelsRefreshUpdate>(&mut deserialize);
+    include_type::<ApplicationConnectorPreviewRequest>(&mut deserialize);
+    include_type::<ApplicationConnectorCommitRequest>(&mut deserialize);
     for (name, schema) in deserialize.take_definitions(true) {
         defs.entry(name).or_insert(schema);
     }
@@ -3219,6 +3373,48 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn custom_capability_writes_accept_only_canonical_or_legacy_shapes() {
+        let canonical: AccountModelCapabilityWrite = serde_json::from_value(json!({
+            "publicModel": "deepseek-v4-flash",
+            "upstreamModel": "deepseek-v4-flash:0731",
+            "protocol": "chat_completions"
+        }))
+        .unwrap();
+        assert!(matches!(
+            canonical,
+            AccountModelCapabilityWrite::Canonical(_)
+        ));
+        let legacy: AccountModelCapabilityWrite = serde_json::from_value(json!({
+            "modelId": "legacy/model",
+            "protocol": "chat_completions"
+        }))
+        .unwrap();
+        assert!(matches!(legacy, AccountModelCapabilityWrite::Legacy(_)));
+
+        for malformed in [
+            json!({
+                "publicModel": "public-only",
+                "protocol": "chat_completions"
+            }),
+            json!({
+                "upstreamModel": "upstream-only",
+                "protocol": "chat_completions"
+            }),
+            json!({
+                "modelId": "legacy",
+                "publicModel": "mixed",
+                "upstreamModel": "mixed-upstream",
+                "protocol": "chat_completions"
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<AccountModelCapabilityWrite>(malformed).is_err(),
+                "malformed capability shape must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -4405,6 +4601,17 @@ mod tests {
         "AccountImportRequest",
         "AccountImportResult",
     ];
+    const APPLICATION_CONNECTOR_CATALOG_TYPES: &[&str] = &[
+        "ApplicationConnectorAction",
+        "ApplicationConnectorStatus",
+        "ApplicationConnectorChange",
+        "ApplicationConnectorItem",
+        "ApplicationConnectors",
+        "ApplicationConnectorPreviewRequest",
+        "ApplicationConnectorPreview",
+        "ApplicationConnectorCommitRequest",
+        "ApplicationConnectorCommitResult",
+    ];
 
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
@@ -4484,7 +4691,13 @@ mod tests {
             &CATALOG_TYPE_NAMES[provider_refresh_end..account_transfer_end],
             ACCOUNT_TRANSFER_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), account_transfer_end);
+        let application_connector_end =
+            account_transfer_end + APPLICATION_CONNECTOR_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[account_transfer_end..application_connector_end],
+            APPLICATION_CONNECTOR_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), application_connector_end);
     }
 
     #[test]

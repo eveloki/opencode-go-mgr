@@ -133,7 +133,7 @@
         <n-form-item
           v-if="isCustomPlan"
           path="modelCapabilities"
-          :label="t('模型能力')"
+          :label="t('模型映射')"
           class="full-width-field"
         >
           <div class="capability-rows">
@@ -147,29 +147,63 @@
               >
                 {{ t("获取模型") }}
               </n-button>
+              <n-button size="small" secondary @click="addModelMapping">
+                {{ t("添加映射") }}
+              </n-button>
               <span v-if="discoverySuccess" class="field-hint">{{ discoverySuccess }}</span>
             </div>
             <p v-if="showManualModelHint" class="field-hint">
-              {{ t("非标准完整 Endpoint 无法自动推导 /models；请手动添加模型 ID。") }}
+              {{ t("非标准完整 Endpoint 无法自动推导 /models；请手动添加模型映射。") }}
             </p>
             <n-alert v-if="discoveryError" type="error" :show-icon="false">
               {{ discoveryError }}
             </n-alert>
-            <n-select
-              v-model:value="modelCapabilityIds"
-              multiple
-              filterable
-              tag
-              clearable
-              :options="modelCapabilityOptions"
-              max-tag-count="responsive"
-              :placeholder="t('输入模型 ID 后按 Enter 添加')"
-              :aria-label="t('模型能力')"
-              class="capability-select"
-            />
+            <div v-if="discoveryOptions.length > 0" class="discovery-import">
+              <n-select
+                v-model:value="selectedDiscoveredModels"
+                :options="discoveryOptions"
+                multiple
+                filterable
+                :placeholder="t('选择要导入的模型')"
+                :aria-label="t('选择要导入的模型')"
+                max-tag-count="responsive"
+              />
+              <n-button
+                size="small"
+                secondary
+                :disabled="selectedDiscoveredModels.length === 0"
+                @click="importSelectedModels"
+              >{{ t("导入所选") }}</n-button>
+            </div>
+            <div class="mapping-rows" role="list" :aria-label="t('模型映射')">
+              <div
+                v-for="(mapping, index) in form.modelCapabilities"
+                :key="mapping.row_id"
+                class="mapping-row"
+                role="listitem"
+              >
+                <n-input
+                  v-model:value="mapping.public_model"
+                  :placeholder="t('对外模型名')"
+                  :aria-label="t('对外模型名')"
+                />
+                <n-input
+                  v-model:value="mapping.upstream_model"
+                  :placeholder="t('上游模型 ID')"
+                  :aria-label="t('上游模型 ID')"
+                  class="mono"
+                />
+                <n-button
+                  size="small"
+                  tertiary
+                  :aria-label="t('删除映射')"
+                  @click="removeModelMapping(index)"
+                >{{ t("删除") }}</n-button>
+              </div>
+            </div>
             <p class="field-hint capability-count">
-              {{ t("{count} 个模型", { count: modelCapabilityIds.length }) }} ·
-              {{ t("输入模型 ID 后按 Enter 添加") }}
+              {{ t("{count} 个模型", { count: form.modelCapabilities.length }) }} ·
+              {{ t("对外模型名不区分大小写且必须唯一；上游模型 ID 可复用。") }}
             </p>
           </div>
         </n-form-item>
@@ -247,7 +281,6 @@ import {
   customApiUrlPlaceholder,
   customApiUrlNeedsManualModels,
   customApiUrlSupportsModelDiscovery,
-  expandCustomModelCapabilities,
 } from "../domain/custom-account.ts";
 import { protocolDisplayName } from "../domain/provider-contracts.ts";
 
@@ -264,7 +297,11 @@ export type AccountFormPayload = {
   /** Custom API edit only; persisted via the dedicated custom-config route. */
   upstream_protocol?: AccountProtocol;
   /** Custom API edit only; atomically persisted with the dedicated custom-config route. */
-  model_capabilities?: Array<{ model_id: string; protocol: AccountProtocol }>;
+  model_capabilities?: Array<{
+    public_model: string;
+    upstream_model: string;
+    protocol: AccountProtocol;
+  }>;
 };
 
 type FormModel = {
@@ -276,8 +313,10 @@ type FormModel = {
   offeringId: string;
   endpointUrl: string;
   upstreamProtocol: AccountProtocol | null;
-  modelCapabilities: AccountCreateCapability[];
+  modelCapabilities: EditableModelCapability[];
 };
+
+type EditableModelCapability = AccountCreateCapability & { row_id: number };
 
 type ModelDiscoveryContext = {
   show: boolean;
@@ -319,7 +358,10 @@ const formError = ref("");
 const discoveringModels = ref(false);
 const discoveryError = ref("");
 const discoverySuccess = ref("");
+const discoveredModels = ref<string[]>([]);
+const selectedDiscoveredModels = ref<string[]>([]);
 let discoveryGeneration = 0;
+let nextModelMappingRowId = 1;
 
 const isEdit = computed(() => !!props.account);
 const title = computed(() => {
@@ -400,6 +442,14 @@ const showManualModelHint = computed(() => isCustomPlan.value
   && customApiUrlNeedsManualModels(form.value.endpointUrl, form.value.upstreamProtocol));
 const canDiscoverModels = computed(() => canInferModelEndpoint.value
   && (!!form.value.key.trim() || !!props.account?.id));
+const discoveryOptions = computed(() => {
+  const existing = new Set(
+    form.value.modelCapabilities.map((capability) => capability.public_model.trim().toLocaleLowerCase()),
+  );
+  return discoveredModels.value
+    .filter((model) => !existing.has(model.toLocaleLowerCase()))
+    .map((model) => ({ value: model, label: model }));
+});
 
 const rules = computed<FormRules>(() => {
   const base: FormRules = {
@@ -459,8 +509,10 @@ const rules = computed<FormRules>(() => {
       required: true,
       type: "array",
       validator: (_rule: unknown, value: AccountCreateCapability[]) =>
-        Array.isArray(value) && value.length > 0 && value.every((cap) => cap.model_id.trim()),
-      message: t("请至少添加一个模型能力"),
+        Array.isArray(value) && value.length > 0 && value.every((cap) => (
+          cap.public_model.trim() && cap.upstream_model.trim()
+        )),
+      message: t("请至少添加一个完整模型映射"),
       trigger: ["change"],
     };
   }
@@ -476,6 +528,8 @@ watch(() => props.show, (show) => {
     formError.value = "";
     discoveryError.value = "";
     discoverySuccess.value = "";
+    discoveredModels.value = [];
+    selectedDiscoveredModels.value = [];
   }
 });
 
@@ -505,6 +559,8 @@ watch(
     discoveringModels.value = false;
     discoveryError.value = "";
     discoverySuccess.value = "";
+    discoveredModels.value = [];
+    selectedDiscoveredModels.value = [];
   },
   { flush: "sync" },
 );
@@ -543,12 +599,12 @@ function blankForm(): FormModel {
 }
 
 function formFromAccount(account: Account): FormModel {
-  const seenModelIds = new Set<string>();
-  const modelCapabilities: AccountCreateCapability[] = [];
+  const modelCapabilities: EditableModelCapability[] = [];
   for (const capability of account.model_capabilities) {
-    if (seenModelIds.has(capability.model_id)) continue;
-    seenModelIds.add(capability.model_id);
-    modelCapabilities.push({ model_id: capability.model_id });
+    modelCapabilities.push(modelMapping({
+      public_model: capability.public_model,
+      upstream_model: capability.upstream_model,
+    }));
   }
   return {
     name: account.name,
@@ -578,24 +634,33 @@ function setPurchaseDateToday() {
   form.value.purchaseDate = timestampFromLocalDate(localDateString()) ?? Date.now();
 }
 
-const modelCapabilityIds = computed<string[]>({
-  get: () => form.value.modelCapabilities.map((capability) => capability.model_id),
-  set: (values) => {
-    const seen = new Set<string>();
-    form.value.modelCapabilities = values.flatMap((value) => {
-      const modelId = value.trim();
-      const identity = modelId.toLowerCase();
-      if (!modelId || seen.has(identity)) return [];
-      seen.add(identity);
-      return [{ model_id: modelId }];
-    });
-  },
-});
+function addModelMapping(): void {
+  form.value.modelCapabilities.push(modelMapping({ public_model: "", upstream_model: "" }));
+}
 
-const modelCapabilityOptions = computed(() => modelCapabilityIds.value.map((modelId) => ({
-  label: modelId,
-  value: modelId,
-})));
+function removeModelMapping(index: number): void {
+  form.value.modelCapabilities.splice(index, 1);
+}
+
+function modelMapping(capability: AccountCreateCapability): EditableModelCapability {
+  return { ...capability, row_id: nextModelMappingRowId++ };
+}
+
+function importSelectedModels(): void {
+  const existing = new Set(
+    form.value.modelCapabilities.map((capability) => capability.public_model.trim().toLocaleLowerCase()),
+  );
+  let imported = 0;
+  for (const model of selectedDiscoveredModels.value) {
+    const identity = model.toLocaleLowerCase();
+    if (existing.has(identity)) continue;
+    existing.add(identity);
+    form.value.modelCapabilities.push(modelMapping({ public_model: model, upstream_model: model }));
+    imported += 1;
+  }
+  selectedDiscoveredModels.value = [];
+  discoverySuccess.value = t("已导入 {count} 个模型", { count: imported });
+}
 
 async function discoverModels() {
   if (!canDiscoverModels.value || !form.value.upstreamProtocol) return;
@@ -612,19 +677,8 @@ async function discoverModels() {
       ...(props.account?.id ? { account_id: props.account.id } : {}),
     });
     if (generation !== discoveryGeneration || !modelDiscoveryContextMatches(context)) return;
-    const seen = new Set<string>();
-    const merged = [...form.value.modelCapabilities, ...result.models.map((model_id) => ({
-      model_id,
-    }))].filter((capability) => {
-      const modelId = capability.model_id.trim();
-      const identity = modelId.toLowerCase();
-      if (!modelId || seen.has(identity)) return false;
-      seen.add(identity);
-      return true;
-    }).map((capability) => ({
-      model_id: capability.model_id.trim(),
-    }));
-    form.value.modelCapabilities = merged;
+    discoveredModels.value = result.models;
+    selectedDiscoveredModels.value = [];
     if (result.models.length === 0) {
       discoverySuccess.value = t("未获取到模型，请手动添加模型 ID");
     } else if (result.truncated) {
@@ -668,10 +722,11 @@ async function handleSave() {
     if (isCustomPlan.value) {
       payload.endpoint_url = form.value.endpointUrl.trim();
       payload.upstream_protocol = form.value.upstreamProtocol ?? undefined;
-      payload.model_capabilities = expandCustomModelCapabilities(
-        form.value.modelCapabilities.map((cap) => cap.model_id),
-        form.value.upstreamProtocol ?? "chat_completions",
-      );
+      payload.model_capabilities = form.value.modelCapabilities.map((capability) => ({
+        public_model: capability.public_model,
+        upstream_model: capability.upstream_model,
+        protocol: form.value.upstreamProtocol ?? "chat_completions",
+      }));
     }
     emit("save", payload);
     return;
@@ -750,8 +805,23 @@ async function handleSave() {
   gap: 8px;
 }
 
-.capability-select {
-  width: 100%;
+.discovery-import {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.mapping-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.mapping-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
 }
 
 .capability-count {
@@ -786,6 +856,14 @@ async function handleSave() {
 
 @media (max-width: 640px) {
   .modal-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mapping-row {
+    grid-template-columns: 1fr;
+  }
+
+  .discovery-import {
     grid-template-columns: 1fr;
   }
 

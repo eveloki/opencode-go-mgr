@@ -1,6 +1,6 @@
 [package]
 name = "ocg-manager"
-version = "2.0.0"
+version = "2.1.0"
 description = "OpenCode-Go multi-account key manager"
 authors = ["ocg-manager"]
 license-file = "../LICENSE"
@@ -12,6 +12,7 @@ rust-version = "1.85.0"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+fs2 = "0.4"
 ocg-core = { path = "../crates/ocg-core" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
@@ -21,11 +22,27 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
 tauri-plugin-updater = "2"
+toml_edit = "0.25"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["process", "signal"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
 
 [features]
 default = ["custom-protocol"]

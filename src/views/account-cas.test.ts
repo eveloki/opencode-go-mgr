@@ -54,6 +54,16 @@ test("conflict reload keeps the edit modal for a surviving account, closes it fo
   assert.match(accounts, /editingAccount\.value = stillListed;\s*\n[\s\S]*?if \(!stillListed\) showModal\.value = false;/);
 });
 
+test("Accounts opens and clears explicit account deep links without replaying writes", () => {
+  assert.match(accounts, /function applyAccountDeepLink[\s\S]*?searchParams\.get\("account_id"\)/);
+  assert.match(accounts, /if \(!account\) \{[\s\S]*?clearAccountDeepLink\(\)[\s\S]*?message\.warning/);
+  assert.match(accounts, /editingAccount\.value = account;\s*\n\s*showModal\.value = true;/);
+  assert.match(accounts, /watch\(showModal, \(show\) => \{\s*if \(!show\) clearAccountDeepLink\(\);/);
+  const save = accounts.slice(accounts.indexOf("async function saveCustomAccountEdit"), accounts.indexOf("async function toggleAccount"));
+  assert.match(save, /if \(await recoverAccountMutationConflict\(e\)\) return;/);
+  assert.doesNotMatch(save, /saveCustomAccountEdit\(editing, payload\)/);
+});
+
 test("unroutable cards are fail-closed without provider-specific draft branches", () => {
   assert.match(card, /const isDraft = computed[\s\S]*?!props\.account\.plan_routable/);
   assert.match(card, /v-else-if="isDraft" class="provider-unconfigured"/);

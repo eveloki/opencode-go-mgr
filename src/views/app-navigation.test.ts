@@ -39,3 +39,12 @@ test("leaving providers strips scope query fields", () => {
   assert.equal(url.searchParams.get("scope_kind"), null);
   assert.equal(url.searchParams.get("scope_id"), null);
 });
+
+test("leaving Accounts strips a stale account deep-link parameter", () => {
+  const url = applyAppViewSearchParams(
+    new URL("http://127.0.0.1:9042/dashboard/?view=accounts&account_id=custom-1"),
+    "providers",
+  );
+  assert.equal(url.searchParams.get("view"), "providers");
+  assert.equal(url.searchParams.get("account_id"), null);
+});

@@ -7,6 +7,8 @@
 //! - Desktop Settings: auto-start and Dock visibility hooks
 //! - Updater: signed updates registered as a CoreState starter, never a command
 
+pub mod application_connector_plugins;
+pub mod application_connectors;
 pub mod gateway;
 
 use crate::native_browser;

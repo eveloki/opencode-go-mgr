@@ -48,6 +48,7 @@ export function applyAppViewSearchParams(
   scope?: ProviderScopeQuery | null,
 ): URL {
   url.searchParams.set("view", view);
+  if (view !== "accounts") url.searchParams.delete("account_id");
   if (view !== "providers") {
     url.searchParams.delete("scope_kind");
     url.searchParams.delete("scope_id");

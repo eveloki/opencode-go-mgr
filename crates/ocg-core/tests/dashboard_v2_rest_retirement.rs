@@ -62,6 +62,20 @@ async fn json_status(
     (status, json, text)
 }
 
+async fn start_session_protected(state: Arc<CoreStateInner>) -> ocg_core::state::GatewayHandle {
+    #[cfg(windows)]
+    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+    #[cfg(not(windows))]
+    let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+
+    let handle = gateway::start_gateway_on(state.clone(), addr)
+        .await
+        .unwrap();
+    #[cfg(windows)]
+    state.set_dashboard_local_mode(false);
+    handle
+}
+
 #[tokio::test]
 async fn authenticated_legacy_get_post_and_unknown_rest_return_exact_410() {
     let state = temp_state("loopback-410");
@@ -97,9 +111,7 @@ async fn authenticated_legacy_get_post_and_unknown_rest_return_exact_410() {
 #[tokio::test]
 async fn anonymous_legacy_rest_is_401_before_the_tombstone() {
     let state = temp_state("public-401");
-    let handle = gateway::start_gateway_on(state, SocketAddr::from(([0, 0, 0, 0], 0)))
-        .await
-        .unwrap();
+    let handle = start_session_protected(state).await;
     let client = loopback_client();
     let port = handle.port;
 
@@ -141,9 +153,7 @@ async fn anonymous_legacy_rest_is_401_before_the_tombstone() {
 #[tokio::test]
 async fn v2_auth_endpoints_remain_available() {
     let state = temp_state("auth-live");
-    let handle = gateway::start_gateway_on(state, SocketAddr::from(([0, 0, 0, 0], 0)))
-        .await
-        .unwrap();
+    let handle = start_session_protected(state).await;
     let client = loopback_client();
     let port = handle.port;
 
@@ -241,12 +251,7 @@ async fn browser_websocket_keeps_independent_error_shape() {
     assert_eq!(body["error"], "browser WebSocket Origin is required");
     assert_ne!(body["code"], DASHBOARD_V2_REMOVED_CODE);
 
-    let public = gateway::start_gateway_on(
-        temp_state("browser-ws-anon"),
-        SocketAddr::from(([0, 0, 0, 0], 0)),
-    )
-    .await
-    .unwrap();
+    let public = start_session_protected(temp_state("browser-ws-anon")).await;
     let anon = client
         .get(v2(public.port, "/browser/sessions/opaque-token/ws"))
         .send()

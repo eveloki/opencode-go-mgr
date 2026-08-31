@@ -68,7 +68,7 @@ desktop-specific steps need a real machine.
       non-loopback dashboard, verify the mapping API returns `401` without a
       valid session. Confirm the retired V2
       `PUT /dashboard/api/claude-desktop/models` is authenticated `410`.
-- [ ] Open the **Applications** view and confirm all 16 guides are present
+- [ ] Open the **Applications** view and confirm all 17 guides are present
       and selectable. Spot-check that copied results contain no masked key,
       and actually launch Claude Desktop and Gemini CLI once each for a text
       and a tool call.

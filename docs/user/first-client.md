@@ -11,7 +11,7 @@ Once the gateway is running, connecting a client is mostly a copy-paste exercise
 2. In the dashboard's **Connection Center**, copy the **Key** and the
    **API Base URL** (`http://127.0.0.1:9042/v1`).
 3. Point your client at the base URL with the Key. The
-   **Applications** view has a per-client guide for 16 common tools.
+   **Applications** view has a per-client guide for 17 common tools.
 4. Verify the setup with a real request.
 
 The **Key** is the only secret you hand to the client. It accepts three

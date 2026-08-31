@@ -29,8 +29,8 @@ API. No telemetry, no remote sync — your keys never leave the machine.
 - **Quota bars are warnings, not walls** — 5-hour / weekly / monthly usage is
   a local estimate. A full bar stops nothing; only an upstream `429` cools an
   account down.
-- **16 client guides** — copy-ready snippets for Claude Code, Codex, Gemini
-  CLI, and 13 other tools.
+- **17 client guides** — copy-ready snippets for Claude Code, Codex, Gemini
+  CLI, and 14 other tools.
 - **Desktop, CLI, Docker** — a Tauri v2 tray app, `ocg-manager-cli`, and
   `ghcr.io/klarkxy/opencode-go-mgr`. Installed desktops update themselves,
   signed, from Settings.
@@ -78,6 +78,11 @@ curl http://127.0.0.1:9042/v1/chat/completions \
 
 Install details, per-protocol first-client checks, backup, and upgrades:
 [User guide](docs/USER.md).
+
+## Add Your Provider Or Application
+
+- **Another upstream API:** [Add a Provider](docs/user/add-provider.md) explains the no-code Custom API path and the reviewed built-in Provider path, including URL resolution, authentication, model discovery, and inference contracts.
+- **Another client application:** [Add an Application](docs/user/add-application.md) lists every Gateway interface and explains how to contribute a guide or an optional local Desktop connector.
 
 ## Docker
 

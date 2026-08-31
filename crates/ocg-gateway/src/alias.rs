@@ -519,9 +519,11 @@ pub fn resolve_with_custom(
     requested: &str,
     custom_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
-    let custom_hit = custom_model_ids
+    let custom_alias = custom_model_ids
         .iter()
-        .any(|id| custom_model_id_matches(id, requested));
+        .find(|id| custom_model_id_matches(id, requested))
+        .cloned();
+    let custom_hit = custom_alias.is_some();
     match resolve(requested) {
         Ok(ResolvedModel::Alias {
             requested,
@@ -546,9 +548,10 @@ pub fn resolve_with_custom(
             }
             Ok(ResolvedModel::PinnedRaw { requested, mapping })
         }
-        Err(ResolveError::Unknown { requested }) if custom_hit => Ok(ResolvedModel::PinnedRaw {
+        Err(ResolveError::Unknown { requested }) if custom_hit => Ok(ResolvedModel::Alias {
             requested,
-            mapping: custom_mapping(CUSTOM_DYNAMIC_UPSTREAM),
+            alias: custom_alias.expect("custom alias exists when custom_hit is true"),
+            mappings: vec![custom_mapping(CUSTOM_DYNAMIC_UPSTREAM)],
         }),
         other => other,
     }
@@ -632,16 +635,17 @@ pub fn resolve_with_extended_catalogs(
     };
     let custom_resolved = match go_resolved {
         Ok(resolved) => overlay_custom_catalog(resolved, custom_model_ids),
-        Err(ResolveError::Unknown { requested })
-            if custom_model_ids
-                .iter()
-                .any(|id| custom_model_id_matches(id, &requested)) =>
+        Err(ResolveError::Unknown { requested }) => match custom_model_ids
+            .iter()
+            .find(|id| custom_model_id_matches(id, &requested))
         {
-            Ok(ResolvedModel::PinnedRaw {
+            Some(alias) => Ok(ResolvedModel::Alias {
                 requested,
-                mapping: custom_mapping(CUSTOM_DYNAMIC_UPSTREAM),
-            })
-        }
+                alias: alias.clone(),
+                mappings: vec![custom_mapping(CUSTOM_DYNAMIC_UPSTREAM)],
+            }),
+            None => Err(ResolveError::Unknown { requested }),
+        },
         other => other,
     };
     match custom_resolved {
@@ -2160,11 +2164,19 @@ mod tests {
             other => panic!("expected alias overlay, got {other:?}"),
         }
         match resolve_with_custom("my-local-model", &["my-local-model".into()]).unwrap() {
-            ResolvedModel::PinnedRaw { mapping, .. } => {
-                assert!(mapping.is_custom_api());
-                assert!(mapping.routeable);
+            ResolvedModel::Alias {
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, "my-local-model");
+                assert_eq!(mappings.len(), 1);
+                assert!(mappings[0].is_custom_api());
+                assert!(mappings[0].routeable);
             }
-            other => panic!("expected custom-only pin, got {other:?}"),
+            other => panic!("expected custom-only alias, got {other:?}"),
+        }
+        match resolve_with_custom("org/model", &["org/model".into()]).unwrap() {
+            ResolvedModel::Alias { alias, .. } => assert_eq!(alias, "org/model"),
+            other => panic!("expected raw-shaped Custom public alias, got {other:?}"),
         }
         match resolve_with_custom(
             COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,

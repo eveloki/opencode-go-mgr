@@ -1,0 +1,80 @@
+[简体中文](add-provider.zh-CN.md)
+
+# Add a Provider
+
+Use this guide when you want OCG Manager to route to another upstream service. There are two different integration paths:
+
+| Goal | Path | Repository change |
+| --- | --- | --- |
+| Connect an OpenAI- or Anthropic-compatible endpoint for your own node | Add a **Custom API** account | No |
+| Ship a named Provider/Plan to every OCG Manager user | Add a sealed built-in Provider | Yes, reviewed code and tests |
+
+OCG Manager has no runtime Provider plugin API. The built-in Provider Registry is static and sealed; unknown `provider_id` + `offering_id` pairs fail closed. Custom API is the supported user-configurable HTTP path, not a base class for built-ins.
+
+## Connect a compatible upstream now
+
+1. Open **Accounts** and choose **Add account** → **Custom API**.
+2. Enter a name, the upstream API Key, one API URL, and one upstream protocol: **Chat Completions**, **Responses**, or **Messages**.
+3. Add at least one mapping: a public model name clients request and the exact upstream model ID. **Fetch models** can fill the draft from upstream IDs when the upstream exposes the optional model-list interface below.
+4. Save the account. A valid new account is enabled by default; **Test connection** is an optional real, potentially billable request through that exact account.
+5. Call authenticated `GET /v1/models` on OCG Manager and confirm the routeable public name is published, then send one inference request.
+
+One Custom account uses one upstream protocol for every mapping on that card. Matching client traffic passes through; other supported client formats are converted to the selected upstream protocol. **Fetch models** returns upstream IDs only; importing one makes `public model = upstream ID` exactly, without suffix stripping or generated Aliases. You may then edit the public name while retaining the exact upstream ID.
+
+## Upstream HTTP interface
+
+OCG resolves common base URLs consistently for model discovery, verification, and production traffic:
+
+| Configured API URL | Inference URL | Optional model-list URL |
+| --- | --- | --- |
+| `https://api.example.com` | Adds `/v1/chat/completions`, `/v1/responses`, or `/v1/messages` | `https://api.example.com/v1/models` |
+| `https://api.example.com/v1` | Adds `/chat/completions`, `/responses`, or `/messages` | `https://api.example.com/v1/models` |
+| A complete standard inference URL | Used exactly as entered | The sibling `/models` |
+| A non-standard complete path | Used exactly as entered | Not guessed; enter model IDs manually |
+
+The configured URL must be HTTP or HTTPS and have a host. Embedded credentials, query strings, and fragments are rejected. A trusted administrator may deliberately select a loopback, LAN, or public destination. OCG does not follow redirects.
+
+The selected protocol defines the wire contract:
+
+| Protocol | Standard path | Authentication sent upstream | Required behavior |
+| --- | --- | --- | --- |
+| OpenAI Chat Completions | `/v1/chat/completions` | `Authorization: Bearer <upstream-key>` | Accept Chat request JSON and return Chat JSON or Chat SSE |
+| OpenAI Responses | `/v1/responses` | `Authorization: Bearer <upstream-key>` | Accept Responses request JSON and return Responses JSON or Responses SSE |
+| Anthropic Messages | `/v1/messages` | `x-api-key: <upstream-key>` plus `anthropic-version: 2023-06-01` | Accept Messages request JSON and return Messages JSON or Messages SSE |
+
+OCG derives authentication from the protocol. It never sends both auth styles, retries a `401` with another header, or forwards a dashboard/client Key upstream. The response must follow the selected protocol closely enough for OCG's parser and converter, including standard error bodies and `text/event-stream` framing when streaming.
+
+### Optional model discovery
+
+**Fetch models** sends an authenticated `GET` to the resolved model-list URL. Return an OpenAI/Anthropic-style object with a `data` array:
+
+```json
+{
+  "data": [
+    { "id": "model-a" },
+    { "id": "model-b" }
+  ],
+  "has_more": false
+}
+```
+
+Each usable row needs a non-empty string `id`. For pagination, set `has_more: true`, return `last_id` (or ensure the last usable row has an ID), and accept the next request's `after_id` query parameter. Discovery only updates the unsaved form; it does not save, verify, or enable an account.
+
+## Add a built-in Provider
+
+A built-in integration is appropriate only when the Provider needs product-owned identity, catalog, account lifecycle, routing, pricing/usage, or other semantics that Custom API cannot express. Start from the current code, not an older requirements document.
+
+1. Define stable Provider/Offering identities, the Plan row, credential/quota semantics, and an exhaustive `ProviderAdapterKind` mapping in `crates/ocg-domain/src/ids.rs` and `provider.rs`.
+2. Add only verified protocol facts to `crates/ocg-domain/src/protocol.rs`. Request routing must never probe a billable endpoint to guess a protocol.
+3. Add code-owned client Alias mappings in `crates/ocg-gateway/src/alias.rs`. Preserve exact upstream IDs and reject ambiguous raw IDs; a discovered row must not silently invent a public Alias.
+4. Implement the host route resolver in `ocg-core`. The adapter returns an `AttemptSpec`; database access, Key decryption, proxy selection, and outbound HTTP remain host-owned.
+5. Add the account and **Providers** control-plane/UI workflow, including catalog refresh, enablement, verification, errors, cooldown, pricing, and usage only where the Provider actually supports them. Dashboard writes use `/dashboard/api/v3` CAS.
+6. Update the paired user guides and tests. At minimum run `cargo test -p ocg-domain`, `cargo test -p ocg-gateway`, `cargo test -p ocg-core`, the relevant frontend tests, and `pnpm run build:web`. Contract changes also require `pnpm run contract:v3:check`.
+
+Before opening a contribution, write down the upstream origin, auth scheme, catalog source, supported model/protocol pairs, streaming behavior, error semantics, quota/price source, and a non-billable validation plan. Keep the new family fail-closed until its complete routing and control-plane path exists.
+
+For repository architecture details, continue with [Extending OCG Manager](../maintainer/extending.md) and [Runtime invariants](../maintainer/runtime-invariants.md).
+
+---
+
+[User guide index](../USER.md) · [简体中文](add-provider.zh-CN.md) · [Add an application](add-application.md) · [Docs index](../README.md)

@@ -43,11 +43,11 @@ export interface AccountCustomConfig {
 }
 
 export interface AccountModelCapability {
-  account_id: string;
-  model_id: string;
+  public_model: string;
   protocol: AccountProtocol;
   verified_at: string | null;
   source: string;
+  upstream_model: string;
 }
 
 /** Explicit UI projection. Write-only credentials are always empty strings. */
@@ -98,9 +98,10 @@ export interface AccountCustomConfigUpdateInput extends AccountCustomConfigInput
 }
 
 export interface AccountModelCapabilityInput {
-  model_id: string;
+  public_model: string;
   protocol: AccountProtocol;
   source?: string;
+  upstream_model: string;
 }
 
 export interface AccountInput {
@@ -491,11 +492,11 @@ export function presentAccount(value: V3Account): Account {
       updated_at: value.customConfig.updatedAt,
     },
     model_capabilities: value.modelCapabilities.map((capability) => ({
-      account_id: capability.accountId,
-      model_id: capability.modelId,
+      public_model: capability.publicModel,
       protocol: capability.protocol,
       verified_at: capability.verifiedAt,
       source: capability.source,
+      upstream_model: capability.upstreamModel,
     })),
   };
 }
@@ -515,9 +516,10 @@ export function accountCreateInput(value: AccountInput): Omit<V3AccountCreate, "
       upstreamProtocol: value.custom_config.upstream_protocol,
     } : undefined,
     modelCapabilities: value.model_capabilities?.map((capability) => ({
-      modelId: capability.model_id,
+      publicModel: capability.public_model,
       protocol: capability.protocol,
       source: capability.source,
+      upstreamModel: capability.upstream_model,
     })),
   };
 }

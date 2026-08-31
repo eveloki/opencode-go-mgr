@@ -249,8 +249,8 @@ async fn closed_proxy_addr() -> String {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v32() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 32);
+fn dashboard_v3_schema_version_stays_at_v33() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 33);
 }
 
 #[test]

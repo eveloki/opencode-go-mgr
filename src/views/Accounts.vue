@@ -147,12 +147,13 @@
     />
 
     <AccountFormModal
-      v-model:show="showModal"
+      :show="showModal"
       :account="editingAccount"
       :is-cooling="editingAccount ? isCooling(editingAccount, now) : false"
       :busy="busy"
       :plan="selectedPlanForCreate"
       :catalog="providerCatalog"
+      @update:show="setAccountFormVisible"
       @save="onFormSave"
       @reset-cooldown="resetCooldown(editingAccount!.id)"
     />
@@ -248,7 +249,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -507,7 +508,7 @@ function openTransfer(mode: "import" | "export"): void {
 
 async function handleAccountsImported(count: number): Promise<void> {
   await loadAccounts();
-  message.success(t("已导入 {count} 项账号配置。", { count }));
+  message.success(t("节点配置迁移完成：处理 {count} 项账号。", { count }));
 }
 
 function openCreateModal(plan?: PlanDefinition): void {
@@ -583,6 +584,34 @@ function openEditModal(id: string): void {
   editingAccount.value = accounts.value.find((account) => account.id === id) ?? null;
   showModal.value = true;
 }
+
+function clearAccountDeepLink(): void {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("account_id")) return;
+  url.searchParams.delete("account_id");
+  window.history.replaceState(null, "", url);
+}
+
+function setAccountFormVisible(show: boolean): void {
+  showModal.value = show;
+}
+
+function applyAccountDeepLink(): void {
+  const accountId = new URL(window.location.href).searchParams.get("account_id");
+  if (!accountId) return;
+  const account = accounts.value.find((item) => item.id === accountId);
+  if (!account) {
+    clearAccountDeepLink();
+    message.warning(t("未找到指定账号，已清除链接参数"));
+    return;
+  }
+  editingAccount.value = account;
+  showModal.value = true;
+}
+
+watch(showModal, (show) => {
+  if (!show) clearAccountDeepLink();
+});
 
 async function createManagedAccount(): Promise<void> {
   const name = managedDraft.value.name.trim();
@@ -785,6 +814,7 @@ async function loadAccounts() {
     const loaded = await accountsStore.loadPresented();
     accounts.value = loaded;
     settingsRevision.value = loaded[0]?.revision ?? settingsRevision.value;
+    applyAccountDeepLink();
     // 限流并发拉取用量，避免账号多时 N 次请求同时打到后端；Zen Free 无 Key 维度用量。
     // GOAT 的本地估算不依赖 OpenCode Go 定价快照是否加载成功。
     if (

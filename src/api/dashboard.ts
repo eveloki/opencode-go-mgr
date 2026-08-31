@@ -21,6 +21,8 @@ import type {
   AccountModelCapabilitiesUpdate,
   AccountSetupStep,
   AccountUsageUpdate,
+  ApplicationConnectorCommitRequest,
+  ApplicationConnectorPreviewRequest,
   AuthStatus,
   ClaudeDesktopModelsUpdate,
   ForwardLogQuery as V3ForwardLogQuery,
@@ -138,6 +140,13 @@ export const dashboardApi = {
     dashboardV3.logoutAdmin(expectation),
 
   getConnection: async (): Promise<ConnectionInfo> => presentConnection(await dashboardV3.getConnection()),
+  getApplicationConnectors: () => dashboardV3.getApplicationConnectors(),
+  previewApplicationConnector: (id: string, input: ApplicationConnectorPreviewRequest) =>
+    dashboardV3.previewApplicationConnector(id, input),
+  commitApplicationConnector: (
+    id: string,
+    input: WithoutExpectation<ApplicationConnectorCommitRequest>,
+  ) => withCas((expectation) => dashboardV3.commitApplicationConnector(id, input, expectation)),
   createKey: async (name: string, expectation: MutationExpectation): Promise<void> => {
     await dashboardV3.createKey(name, expectation);
   },
@@ -220,9 +229,10 @@ export const dashboardApi = {
       endpointUrl: config.endpoint_url,
       upstreamProtocol: config.upstream_protocol,
       modelCapabilities: config.model_capabilities.map((capability) => ({
-        modelId: capability.model_id,
+        publicModel: capability.public_model,
         protocol: capability.protocol,
         source: capability.source,
+        upstreamModel: capability.upstream_model,
       })),
     };
     return dashboardV3.putAccountCustomConfig(
@@ -238,9 +248,10 @@ export const dashboardApi = {
     _ignoredRevision?: number,
   ): Promise<Account> => mutatedAccount(withCas((expectation) => dashboardV3.putAccountModelCapabilities(id, {
     capabilities: capabilities.map((capability) => ({
-      modelId: capability.model_id,
+      publicModel: capability.public_model,
       protocol: capability.protocol,
       source: capability.source,
+      upstreamModel: capability.upstream_model,
     })),
   } satisfies WithoutExpectation<AccountModelCapabilitiesUpdate>, expectation))),
 

@@ -285,12 +285,28 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
             })
         })
         .collect();
-    let custom_ids = eligible_custom_model_ids(state, &contracts);
-    for id in custom_ids {
+    let custom_ids = eligible_custom_public_models(state, &contracts);
+    for id in &custom_ids {
+        let routeable_custom_alias = matches!(
+            crate::alias::resolve_with_extended_catalogs(
+                id,
+                &go_ids,
+                &zen_catalog.models,
+                &custom_ids,
+                &goat_ids,
+                &minimax_ids,
+                &kimi_ids,
+            ),
+            Ok(crate::alias::ResolvedModel::Alias { mappings, .. })
+                if mappings.iter().any(|mapping| mapping.is_custom_api() && mapping.routeable)
+        );
+        if !routeable_custom_alias {
+            continue;
+        }
         if data.iter().any(|item| {
             item.get("id")
                 .and_then(|value| value.as_str())
-                .is_some_and(|existing| crate::custom::custom_model_id_matches(existing, &id))
+                .is_some_and(|existing| crate::custom::custom_model_id_matches(existing, id))
         }) {
             continue;
         }
@@ -371,19 +387,19 @@ fn provider_catalog_model_ids(
         .unwrap_or_default()
 }
 
-fn eligible_custom_model_ids(
+fn eligible_custom_public_models(
     state: &CoreState,
     contracts: &crate::provider_contracts::EffectiveContractSet,
 ) -> Vec<String> {
     let Ok(runtimes) = state.db.lock().list_custom_account_runtimes() else {
         return Vec::new();
     };
-    crate::custom::eligible_custom_model_ids(&runtimes)
+    crate::custom::eligible_custom_public_models(&runtimes)
         .into_iter()
         .filter(|id| {
             runtimes.iter().any(|runtime| {
                 runtime.eligible()
-                    && runtime.capability_matching(id).is_some()
+                    && runtime.capability_matching_public(id).is_some()
                     && contracts
                         .scope(&crate::provider_contracts::ContractScope::custom_endpoint(
                             &runtime.account_id,
@@ -465,7 +481,7 @@ async fn proxy_handler_inner(
     let contracts = state.provider_contracts();
     let go_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
-    let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
+    let custom_model_ids = eligible_custom_public_models(&state, &contracts);
     let goat_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
     let minimax_model_ids =
@@ -574,7 +590,7 @@ async fn gemini_proxy_handler(
     let contracts = state.provider_contracts();
     let go_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::OPENCODE_PROVIDER_ID);
-    let custom_model_ids = eligible_custom_model_ids(&state, &contracts);
+    let custom_model_ids = eligible_custom_public_models(&state, &contracts);
     let goat_model_ids =
         provider_catalog_model_ids(&contracts, crate::provider::COMMAND_CODE_PROVIDER_ID);
     let minimax_model_ids =

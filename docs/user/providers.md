@@ -2,6 +2,8 @@
 
 # Providers
 
+Want to connect another upstream or contribute a built-in integration? Start with [Add a Provider](add-provider.md), which includes the upstream HTTP contract and the sealed-registry path.
+
 **Providers** is the supplier control plane — the page you land on when an old
 bookmark still ends in `?view=pricing`.
 
@@ -10,12 +12,20 @@ capability-specific adapters. Custom API is a Configurable HTTP adapter, not a b
 everyone inherits from. Scopes are split like this:
 
 - `Provider(provider_id)` for built-ins.
-- `CustomEndpoint(account_id)` for each Custom destination. Custom endpoints
-  stay isolated from each other and from the built-in families.
+- `CustomEndpoint(account_id)` scopes keep Custom mappings account-owned and
+  never editable from this page.
 
-The left rail lists those scopes. The main pane has two tabs: **Model catalog**
-and **Pricing**. The old catalog and model-contract views are merged into one
-matrix on the Model catalog tab.
+The left rail lists the built-in Provider scopes. The main pane has three tabs:
+**Model catalog**, **Pricing**, and **Alias**. The old catalog and
+model-contract views are merged into one matrix on the Model catalog tab.
+
+**Alias** is read-only. It aggregates the existing Provider contracts and
+account capabilities into public names, with
+their routeability and exact upstream identities. It does not create a new
+Alias API, store, cache, or editor. A Custom mapping links to the one editor on
+**Accounts** with `?view=accounts&account_id=<id>`; loading that link opens the
+matching account editor. Closing the editor removes `account_id`; an unknown
+account shows a notice and clears the stale parameter.
 
 **Model catalog** is local. The matrix has one row per current catalog model and
 three columns — Chat Completions, Responses, and Messages. Each cell is a binary
@@ -70,10 +80,11 @@ and Messages stay unsupported. Existing overrides and probe results for
 surviving models are preserved. A failed or empty refresh keeps the previous
 snapshot.
 
-Custom API continues to use each account's declared model IDs; discovery never
-silently replaces that declaration. The account form **Fetch models** action is
-an unsaved-form helper that merges selected IDs into the declaration being
-edited. Command Code uses its public official `/models` directory: the GOAT
+Custom API continues to use account-owned public-name → upstream-ID mappings;
+discovery never silently replaces them. The account form **Fetch models** action
+is an unsaved-form helper that returns upstream IDs only. Selecting one imports
+an exact `public name = upstream ID` row, without suffix stripping or generated
+Aliases. Command Code uses its public official `/models` directory: the GOAT
 preset starts enabled, while additional models discovered later start disabled
 until you enable their supported protocol in the matrix. It has no separate
 Max or account-level GOAT/All mode.
@@ -94,8 +105,9 @@ as described under
 [Zen Free models](routing.md#zen-free-models).
 
 If every model/protocol cell for a Provider is off, that Provider contributes
-no route. If an Alias has no enabled mapping from any Provider, it is removed
-from downstream `GET /v1/models` supply.
+no route. Authenticated downstream `GET /v1/models` publishes only routeable
+public names. It omits raw-only identities and raw-name conflicts; an ambiguous
+raw identity fails as `ambiguous_model_id` without an upstream request.
 
 OpenCode Go and Zen Free rows have a **Test** button. It probes every protocol
 for that model without asking for an account. For each protocol the provider
@@ -149,7 +161,7 @@ probes. Flow: Alias → account
 eligibility → adapter ceiling → saved contract → per-model/per-protocol
 effective state → passthrough or conversion. Authenticated `GET /v1/models` and
 protected `GET /dashboard/api/v3/application-models` publish only currently
-routable models that have an effective enabled protocol. The Applications picker
+routable public names that have an effective enabled protocol. The Applications picker
 stays Go aliases ∩ active pricing and does not include Custom.
 
 ---

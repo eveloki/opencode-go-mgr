@@ -385,7 +385,7 @@
     },
     "AccountExport": {
       "additionalProperties": false,
-      "description": "Encrypted account migration package returned by the export endpoint.\n`bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no\nplaintext upstream credential is returned to the dashboard.",
+      "description": "Encrypted node migration package returned by the export endpoint.\n`bundle` contains only a versioned Argon2id + AES-256-GCM envelope; no\nplaintext upstream credential is returned to the dashboard.",
       "properties": {
         "bundle": {
           "type": "string"
@@ -426,21 +426,13 @@
     },
     "AccountExportRequest": {
       "additionalProperties": false,
-      "description": "POST `/accounts/transfer/export` body. Both passwords are write-only. The\nadministrator credential is step-up authorization; `bundle_password` is a\ndistinct passphrase used only to encrypt the portable file.",
+      "description": "POST `/accounts/transfer/export` body. The password is write-only and used\nonly to encrypt the portable node-state file.",
       "properties": {
-        "adminPassword": {
-          "type": "string"
-        },
-        "adminUsername": {
-          "type": "string"
-        },
         "bundlePassword": {
           "type": "string"
         }
       },
       "required": [
-        "adminUsername",
-        "adminPassword",
         "bundlePassword"
       ],
       "type": "object"
@@ -449,13 +441,15 @@
       "enum": [
         "import",
         "imported",
+        "merge",
+        "merged",
         "duplicate"
       ],
       "type": "string"
     },
     "AccountImportPreview": {
       "additionalProperties": false,
-      "description": "Secret-free preview of one account migration package.",
+      "description": "Secret-free preview of one node migration package.",
       "properties": {
         "duplicateAccounts": {
           "format": "uint64",
@@ -747,16 +741,16 @@
       "additionalProperties": false,
       "description": "One declared Custom model capability as returned on an account.",
       "properties": {
-        "accountId": {
-          "type": "string"
-        },
-        "modelId": {
-          "type": "string"
-        },
         "protocol": {
           "$ref": "#/$defs/AccountUpstreamProtocol"
         },
+        "publicModel": {
+          "type": "string"
+        },
         "source": {
+          "type": "string"
+        },
+        "upstreamModel": {
           "type": "string"
         },
         "verifiedAt": {
@@ -767,8 +761,8 @@
         }
       },
       "required": [
-        "accountId",
-        "modelId",
+        "publicModel",
+        "upstreamModel",
         "protocol",
         "verifiedAt",
         "source"
@@ -776,8 +770,44 @@
       "type": "object"
     },
     "AccountModelCapabilityWrite": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccountModelCapabilityWriteCanonical"
+        },
+        {
+          "$ref": "#/$defs/AccountModelCapabilityWriteLegacy"
+        }
+      ],
+      "description": "One declared Custom model capability on create or replace. Canonical writes\ncarry both identities; the legacy `modelId` shape remains accepted so a\nstale dashboard can complete one migration-window write without data loss."
+    },
+    "AccountModelCapabilityWriteCanonical": {
       "additionalProperties": false,
-      "description": "One declared Custom model capability on create or replace.",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/AccountUpstreamProtocol"
+        },
+        "publicModel": {
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstreamModel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "publicModel",
+        "upstreamModel",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "AccountModelCapabilityWriteLegacy": {
+      "additionalProperties": false,
       "properties": {
         "modelId": {
           "type": "string"
@@ -1113,6 +1143,282 @@
       },
       "required": [
         "expectedRevision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ApplicationConnectorAction": {
+      "description": "Operation supported by the local Desktop application-connector Host.",
+      "enum": [
+        "connect",
+        "restore"
+      ],
+      "type": "string"
+    },
+    "ApplicationConnectorChange": {
+      "additionalProperties": false,
+      "description": "One redacted field-level change. Sensitive values are represented by a\nfixed mask; this DTO never carries a plaintext Key or whole config file.",
+      "properties": {
+        "after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "before": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field": {
+          "type": "string"
+        },
+        "sensitive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "field",
+        "before",
+        "after",
+        "sensitive"
+      ],
+      "type": "object"
+    },
+    "ApplicationConnectorCommitRequest": {
+      "additionalProperties": false,
+      "description": "POST `/applications/connectors/{id}/commit` request. CAS protects the OCG\nselection while `previewFingerprint` protects the external config files.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ApplicationConnectorAction"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keyId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelValues": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "previewFingerprint": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "processGeneration",
+        "action",
+        "previewFingerprint"
+      ],
+      "type": "object"
+    },
+    "ApplicationConnectorCommitResult": {
+      "additionalProperties": false,
+      "description": "Successful commit result. The settings revision advances exactly once for\na real external write and stays unchanged for a verified no-op.",
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "connector": {
+          "$ref": "#/$defs/ApplicationConnectorItem"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "connector",
+        "changed",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ApplicationConnectorItem": {
+      "additionalProperties": false,
+      "description": "One of the eight statically supported local client surfaces.",
+      "properties": {
+        "automatic": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detected": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ApplicationConnectorStatus"
+        },
+        "targetPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "detected",
+        "automatic",
+        "detail",
+        "targetPaths"
+      ],
+      "type": "object"
+    },
+    "ApplicationConnectorPreview": {
+      "additionalProperties": false,
+      "description": "Redacted preview tied to the current target-file state by `fingerprint`.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ApplicationConnectorAction"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/ApplicationConnectorChange"
+          },
+          "type": "array"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/ApplicationConnectorStatus"
+        },
+        "targetPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "action",
+        "status",
+        "fingerprint",
+        "detail",
+        "targetPaths",
+        "changes",
+        "revision",
+        "processGeneration"
+      ],
+      "type": "object"
+    },
+    "ApplicationConnectorPreviewRequest": {
+      "additionalProperties": false,
+      "description": "POST `/applications/connectors/{id}/preview` request. Paths, Gateway URLs,\nconfig text and Key material are intentionally not accepted from callers.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ApplicationConnectorAction"
+        },
+        "keyId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelValues": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "ApplicationConnectorStatus": {
+      "description": "Secret-free connector state. Automatic writes exist only in the local\nDesktop Host; every other runtime reports `unsupported_runtime`.",
+      "enum": [
+        "unsupported_runtime",
+        "not_detected",
+        "manual_only",
+        "ready",
+        "connected",
+        "conflict",
+        "partial"
+      ],
+      "type": "string"
+    },
+    "ApplicationConnectors": {
+      "additionalProperties": false,
+      "description": "GET `/applications/connectors` response.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ApplicationConnectorItem"
+          },
+          "type": "array"
+        },
+        "processGeneration": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision",
         "processGeneration"
       ],
       "type": "object"
@@ -5650,6 +5956,33 @@
     },
     {
       "$ref": "#/$defs/AccountImportResult"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectorAction"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectorStatus"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectorChange"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectorItem"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectors"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectorPreviewRequest"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectorPreview"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectorCommitRequest"
+    },
+    {
+      "$ref": "#/$defs/ApplicationConnectorCommitResult"
     }
   ],
   "title": "DashboardApiV3"

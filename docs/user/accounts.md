@@ -30,30 +30,38 @@ The registry is sealed. Built-in Plan families are:
 | Command Code GOAT | `command-code` / `goat` | Yes | Public Provider catalog; GOAT preset models default on, additional models default off in the Providers matrix; no account-level GOAT/All or Max mode |
 | MiniMax CN Token Plan | `minimax` / `cn` | Yes | Dedicated `sk-cp` Key; fixed official Chat route, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` / `cn` | Yes | Dedicated Kimi Code Key; fixed official Chat route, authenticated model directory, and manual official weekly/rate-window usage refresh |
-| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; one API URL and one upstream protocol per account; common base URLs are completed automatically; new accounts default on; eligible declared IDs appear on `/v1/models`; unpriced/unknown cost, no quota debit |
+| Custom API | `custom` / `api` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts default on; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
-## Move accounts between nodes
+## Move a node configuration
 
 Use **Export** on the Accounts toolbar to create a password-encrypted
 `.ocgbackup` file, then use **Import** on the destination node to preview and
-confirm the batch. The encrypted file includes account Keys, so the export also
-requires the current OCG Manager administrator username and password as a
-step-up check. A loopback installation without an administrator must create one
-before its first export. Choose a separate migration password of at least 12
+confirm the merge. No separate administrator step-up is required. Choose a
+migration password of at least 12
 characters and transfer it separately from the file; OCG Manager cannot recover
-it. Import never replaces existing accounts: the exact Plan-and-name duplicates
-shown in the preview are skipped, and all other rows are committed together.
+it. The operation remains available only from the node's loopback dashboard;
+forwarded scheme headers do not grant access to a remote dashboard.
 
-The package moves ordinary account configuration, Custom Endpoint/model
-declarations, and ready account Keys. It deliberately excludes Zen Free,
-browser profiles and cookies, third-party login passwords, referral codes,
-usage/cooldown history, verification evidence, logs, access credentials, and
-Settings. Ready managed accounts keep their Key, but their browser login does
-not move. Incomplete managed drafts restart at the first disabled setup step.
-Custom accounts import disabled and pending so their destination and Key can be
-reviewed before enabling them; verification remains optional. V1 transfer is
-available only from the node's loopback dashboard. Remote dashboards cannot
-import or export account migration packages.
+The current V3 payload moves usable ordinary accounts and their stable IDs,
+ready account Keys, Custom Endpoint/public-model → upstream-ID mappings and verification state,
+the primary and active sub Access Keys, portable routing/proxy settings, Zen
+Free enablement/catalog, and Provider catalogs, evidence, and protocol
+overrides. Matching stable IDs are merged with package-owned portable fields;
+same-Plan or same-name rows with different IDs coexist. Existing destination
+accounts keep their current order and position; source-only accounts append in
+package order. Destination-only Access Keys and Provider scopes are retained.
+
+Browser profiles/cookies, third-party login passwords, referral codes, logs,
+usage history, and source cooldown state do not move. Existing destination
+usage/cooldown history and browser data for a matching account ID stay in
+place; stale authentication and last-error flags are cleared when package
+account fields replace the stored credential.
+Machine-local listener/root URL, auto-start, and Dock settings also stay with
+the destination. Ready managed accounts keep their Key, but their browser login
+does not move; unfinished managed drafts are skipped. A legacy V1 package is
+still accepted and keeps its older Plan/name duplicate-skip behavior; V2 remains
+import-compatible. The outer encrypted envelope remains version 1 while the
+portable payload version evolves.
 
 Every persistent mutation path rejects `enabled=true` for a catalogued
 `routable=false` offering before it mutates the row, revision, or timestamps.
@@ -81,10 +89,12 @@ catalog. It does not prove that a stored Key is valid. The Providers matrix is
 the only model-supply control: GOAT preset rows default on, newly discovered
 rows default off, and inference 401/403 is the real Key-auth signal.
 
-Custom API is a live trusted-administrator destination. The card stores one
-API URL, one upstream protocol (Chat Completions,
-Responses, or Messages), and at least one model capability. That protocol is
-uniform across every model on the account and is the effective preferred
+Custom API is a live trusted-administrator destination. **Accounts** is the
+only editor for its mappings: each row pairs a public model name (what the
+client requests) with the exact upstream model ID (what OCG sends). The card
+stores one API URL, one upstream protocol (Chat Completions, Responses, or
+Messages), and at least one mapping. That protocol is uniform across every
+mapping on the account and is the effective preferred
 protocol: matching client traffic passes through, while other supported client
 formats, including Gemini, convert to it. Entering an origin root is recommended:
 OCG appends `/v1` and the selected protocol path. A base already ending in
@@ -92,7 +102,9 @@ OCG appends `/v1` and the selected protocol path. A base already ending in
 Endpoints remain exact. **Fetch models** derives `/v1/models` from a root or
 versioned base, or the sibling `/models` from a complete standard Endpoint.
 Non-standard complete paths remain exact for inference and retain manual model
-entry instead of guessing a directory URL. Fetching does not save, verify, or
+entry instead of guessing a directory URL. Discovery returns upstream IDs only.
+Choosing one imports a row with the public name and upstream ID exactly equal;
+it never strips suffixes or invents an Alias. Fetching does not save, verify, or
 enable the account.
 
 A trusted administrator may configure any syntactically valid HTTP or HTTPS
@@ -119,16 +131,14 @@ may consume provider quota. Provider-page tests remain the separate,
 low-frequency control for validating newly added Provider model/protocol
 capabilities and may use eligible-account fallback.
 
-Eligible accounts (enabled + ready + non-empty key) expose their declared model
-IDs on authenticated `GET /v1/models` and can be selected for those IDs.
-Declared capability IDs are both the client-facing names and the upstream model
-names; matching is case-insensitive for kebab IDs, and names with `/`, `_`, or
-whitespace never fold onto a kebab alias. Custom overlay never steals a
-published Go or Zen Free alias. Overlap with another Plan's unique raw ID
-returns `ambiguous_model_id` and does not call upstream. Undeclared names stay
-unknown (`400`). Changing the Endpoint, Key, declared capabilities, or protocol
-leaves the account enabled. Endpoint and upstream
-protocol can be edited after create; the config and complete model-capability
+Eligible accounts (enabled + ready + non-empty key) expose only their routeable
+public names on authenticated `GET /v1/models`; upstream-only IDs are not a
+second public catalog. A Custom public name resolves to its paired exact
+upstream ID. A public name never steals a published built-in Alias. Raw identity
+conflicts are excluded from publication and resolve as `ambiguous_model_id`
+without an upstream call. Undeclared names stay unknown (`400`). Changing the
+Endpoint, Key, mappings, or protocol leaves the account enabled. Endpoint and
+upstream protocol can be edited after create; the config and complete mapping
 set are replaced in one CAS transaction. Disabling the declared protocol makes
 the model unroutable; no fixed-priority fallback or override can enable an
 undeclared protocol. Custom traffic is

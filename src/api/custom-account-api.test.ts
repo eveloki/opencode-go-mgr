@@ -118,7 +118,7 @@ test("custom config PUT sends one Endpoint, protocol, and capability list with C
   await dashboardApi.updateAccountCustomConfig("custom-1", {
     endpoint_url: "http://192.168.1.10:8080/v1/messages",
     upstream_protocol: "messages",
-    model_capabilities: [{ model_id: "model-a", protocol: "messages", source: "manual" }],
+    model_capabilities: [{ public_model: "model-a", upstream_model: "provider/model-a", protocol: "messages", source: "manual" }],
   });
 
   assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/custom-config");
@@ -126,7 +126,7 @@ test("custom config PUT sends one Endpoint, protocol, and capability list with C
   assert.deepEqual(requests[0]?.body, {
     endpointUrl: "http://192.168.1.10:8080/v1/messages",
     upstreamProtocol: "messages",
-    modelCapabilities: [{ modelId: "model-a", protocol: "messages", source: "manual" }],
+    modelCapabilities: [{ publicModel: "model-a", upstreamModel: "provider/model-a", protocol: "messages", source: "manual" }],
     expectedRevision: 9,
     processGeneration: 99,
   });
@@ -137,16 +137,16 @@ test("model capabilities PUT wraps the list and keeps exact model IDs and order"
   const requests = installBrowser(() => ({ account: v3Account("custom-1") }));
 
   await dashboardApi.updateAccountModelCapabilities("custom-1", [
-    { model_id: "Org/Model-B", protocol: "chat_completions", source: "manual" },
-    { model_id: "custom_model.a", protocol: "chat_completions", source: "manual" },
+    { public_model: "Org/Model-B", upstream_model: "vendor/model-b", protocol: "chat_completions", source: "manual" },
+    { public_model: "custom_model.a", upstream_model: "vendor/model-b", protocol: "chat_completions", source: "manual" },
   ]);
 
   assert.equal(requests[0]?.url, "/dashboard/api/v3/accounts/custom-1/model-capabilities");
   assert.equal(requests[0]?.method, "PUT");
   assert.deepEqual(requests[0]?.body, {
     capabilities: [
-      { modelId: "Org/Model-B", protocol: "chat_completions", source: "manual" },
-      { modelId: "custom_model.a", protocol: "chat_completions", source: "manual" },
+      { publicModel: "Org/Model-B", upstreamModel: "vendor/model-b", protocol: "chat_completions", source: "manual" },
+      { publicModel: "custom_model.a", upstreamModel: "vendor/model-b", protocol: "chat_completions", source: "manual" },
     ],
     expectedRevision: 10,
     processGeneration: 99,

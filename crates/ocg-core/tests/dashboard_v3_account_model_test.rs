@@ -26,6 +26,7 @@ struct CapturedCall {
     path: String,
     authorization: Option<String>,
     x_api_key: Option<String>,
+    body: Value,
 }
 
 struct ProbeOrigin {
@@ -46,7 +47,7 @@ async fn start_origin() -> ProbeOrigin {
     let calls_for_handler = calls.clone();
     let target_auth = format!("Bearer {TARGET_KEY}");
     let app = Router::new().fallback(any(
-        move |_method: HttpMethod, uri: OriginalUri, headers: HeaderMap, _body: Bytes| {
+        move |_method: HttpMethod, uri: OriginalUri, headers: HeaderMap, body: Bytes| {
             let calls = calls_for_handler.clone();
             let target_auth = target_auth.clone();
             async move {
@@ -56,6 +57,7 @@ async fn start_origin() -> ProbeOrigin {
                     path: uri.0.path().to_string(),
                     authorization: authorization.clone(),
                     x_api_key,
+                    body: serde_json::from_slice(&body).unwrap_or(Value::Null),
                 });
                 if authorization.as_deref() == Some(target_auth.as_str()) {
                     (
@@ -254,7 +256,8 @@ async fn custom_model_test_uses_the_declared_protocol_and_route_without_secrets(
                     "upstreamProtocol": "responses"
                 },
                 "modelCapabilities": [{
-                    "modelId":"declared-custom-model",
+                    "publicModel":"declared-custom-model",
+                    "upstreamModel":"upstream-custom-model:latest",
                     "protocol":"responses"
                 }]
             }),
@@ -273,6 +276,7 @@ async fn custom_model_test_uses_the_declared_protocol_and_route_without_secrets(
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["protocol"], "responses");
+    assert_eq!(body["modelId"], "declared-custom-model");
     assert_eq!(body["success"], true);
     assert_eq!(body["httpStatus"], 200);
     assert!(!body.to_string().contains(CUSTOM_KEY), "{body}");
@@ -280,6 +284,7 @@ async fn custom_model_test_uses_the_declared_protocol_and_route_without_secrets(
     let calls = origin.calls.lock().unwrap();
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].path, "/v1/responses");
+    assert_eq!(calls[0].body["model"], "upstream-custom-model:latest");
     assert_eq!(
         calls[0].authorization.as_deref(),
         Some("Bearer custom-account-model-secret")

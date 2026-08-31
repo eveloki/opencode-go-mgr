@@ -17,7 +17,7 @@
 - **一个端口，五种线协议**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、Gemini `generateContent` / `streamGenerateContent`，以及 Claude Desktop。客户端永远不需要知道上游想要哪一种。
 - **拖动即调序**：账号卡片持久保存一个全局顺序；严格优先、粘性、轮询都在能力过滤后复用它。
 - **额度条是警告，不是墙**：5 小时 / 本周 / 本月用量只是本地估算。满格不停流量；只有上游 `429` 才会让账号冷却。
-- **16 个客户端教程**：Claude Code、Codex、Gemini CLI 等 16 个工具，配置片段直接复制。
+- **17 个客户端教程**：Claude Code、Codex、Gemini CLI 等 17 个工具，配置片段直接复制。
 - **桌面端、CLI、Docker**：Tauri v2 托盘应用、`ocg-manager-cli`、`ghcr.io/klarkxy/opencode-go-mgr`。已安装的桌面版可在设置页完成签名自更新。
 
 ## 下载
@@ -51,6 +51,11 @@ curl http://127.0.0.1:9042/v1/chat/completions \
 ```
 
 安装细节、五种协议的最小检查、备份与升级见[用户指南](docs/USER.zh-CN.md)。
+
+## 新增供应商或应用
+
+- **接入另一个上游 API：**[新增供应商](docs/user/add-provider.zh-CN.md)覆盖无需改代码的 Custom API 路径，以及经过审查的内置 Provider 路径，并写明 URL 解析、鉴权、模型发现与推理接口。
+- **接入另一个客户端：**[新增应用](docs/user/add-application.zh-CN.md)列出全部 Gateway 接口，并说明如何贡献教程或可选的本机 Desktop 连接器。
 
 ## Docker
 

@@ -4,6 +4,11 @@
 
 This guide is for people running OCG Manager as a desktop app, a headless gateway, or a Docker service. Chapters follow the order you will actually meet them: install first, troubleshoot later.
 
+## Add integrations
+
+- [Add a Provider](user/add-provider.md) — Connect a compatible upstream through Custom API, or contribute a sealed built-in Provider with its complete HTTP and routing contract.
+- [Add an Application](user/add-application.md) — Connect an unlisted client to the Gateway, contribute an Applications guide, or add an optional local Desktop connector.
+
 ## Chapters
 
 - [What OCG Manager Does](user/overview.md) — Product positioning and the four jobs the gateway performs.
@@ -12,7 +17,7 @@ This guide is for people running OCG Manager as a desktop app, a headless gatewa
 - [Connect Your First Client](user/first-client.md) — Copy the Key and base URL, then prove it with one request.
 - [Upgrade, Backup, Restore, And Uninstall](user/upgrade-backup.md) — Updater channel, manual upgrade, backup, restore, and uninstall.
 - [The Dashboard](user/dashboard.md) — The seven views, i18n, and Connection Center.
-- [Application Guides And Model Capabilities](user/applications.md) — 16 client tutorials and the model capability table.
+- [Application Guides And Model Capabilities](user/applications.md) — 17 client tutorials and the model capability table.
 - [Accounts](user/accounts.md) — Plans, credentials, ordering, quota behavior, and managed onboarding.
 - [Providers](user/providers.md) — Catalog, provider contracts, per-model protocol overrides, and probes.
 - [Logs And Settings](user/logs-settings.md) — Request logs, settings, proxy modes, and theme.
@@ -29,6 +34,7 @@ This guide is for people running OCG Manager as a desktop app, a headless gatewa
 
 - **New user** — `overview` → `architecture` → `install` → `first-client` → `accounts` → `providers` → `gateway` → `applications` → `troubleshooting`.
 - **Docker / CLI operator** — `overview` → `architecture` → `docker` → `cli` → `accounts` → `providers` → `routing` → `logs-settings` → `troubleshooting`.
+- **Integration author** — `add-provider` for an upstream; `add-application` for a downstream client.
 
 ---
 

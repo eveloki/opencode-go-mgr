@@ -2,14 +2,18 @@
 
 # 供应商
 
+要接入另一个上游或贡献内置集成，请先阅读[新增供应商](add-provider.zh-CN.md)；其中包含上游 HTTP 接口与密封注册表路径。
+
 **供应商** 是供应商控制面——如果你的旧书签还挂着 `?view=pricing`，进来的就是这个视图。
 
 底层是静态 Provider Registry 加几个按能力拆分的适配器。Custom API 只是其中一个 Configurable HTTP 适配器，不是基类，其他方案不会继承它。范围划分如下：
 
 - 内置家族使用 `Provider(provider_id)`。
-- 每个 Custom 目的地使用 `CustomEndpoint(account_id)`。Custom 端点彼此隔离，也与内置家族隔离。
+- `CustomEndpoint(account_id)` 范围内的 Custom 映射仍归账号所有，不能在本页编辑。
 
-左侧列出这些范围。主区有两个子页签：**模型目录** 与 **价格**。原来的目录与模型合约视图合并为模型目录页签上的一张矩阵表。
+左侧列出内置 Provider 范围。主区有三个子页签：**模型目录**、**价格** 与 **Alias**。原来的目录与模型合约视图合并为模型目录页签上的一张矩阵表。
+
+**Alias** 是只读聚合页。它把现有 Provider 合约和账号能力汇总成公开名称，并展示可路由性与精确上游身份。它不会新建 Alias API、store、cache 或编辑器。Custom 映射通过 `?view=accounts&account_id=<id>` 跳转到**账号**页唯一的编辑器；加载该链接会打开对应账号编辑框。关闭编辑框会移除 `account_id`；账号不存在时会提示，并清掉失效参数。
 
 **模型目录** 是本地的。矩阵只列出当前目录中的模型，并以三个上游协议（Chat Completions、Responses、Messages）为列。每格是 effective 模型/协议状态的二态开关：打开写入 `force_on`，关闭写入 `force_off`；列菜单可以整列打开或关闭。开关会先立即更新显示，再在后台执行带 CAS 保护的保存，只有受影响的格子显示保存进度。
 
@@ -23,11 +27,11 @@ MiniMax 与 Kimi 需要一个符合条件的账号 Key。MiniMax 刷新 `https:/
 
 首次成功刷新前，内置静态目录只是初始预设；刷新成功后，保存的官方快照成为权威目录并替代静态预设。刷新新增的模型会出现在矩阵中。OpenCode Go 与 Command Code 的新增协议单元格默认关闭，只有手动打开或测试成功后才会启用；MiniMax CN 与 Kimi Code CN 则直接启用密封合约中的 Chat Completions，Responses 与 Messages 不受支持。仍留在目录中的模型会保留既有覆盖与探测结果；刷新失败或结果为空时继续保留旧快照。
 
-Custom API 继续使用各账号声明的模型 ID，发现结果不会静默替换声明。账号表单里的 **获取模型** 只是未保存表单辅助，把选中的 ID 合并进正在编辑的声明。Command Code 使用官方公开的 `/models` 目录：GOAT 预设默认启用，后续发现的额外模型默认关闭，只有在矩阵中开启其受支持协议后才会供应；不再存在独立的 Max 或账号级 GOAT/全部模式。
+Custom API 继续使用账号所有的公开名称 → 上游 ID 映射，发现结果不会静默替换它们。账号表单里的 **获取模型** 只是未保存表单辅助，且只返回上游 ID。选择一个 ID 时，原样导入为“公开名称 = 上游 ID”，不剥离后缀、不生成 Alias。Command Code 使用官方公开的 `/models` 目录：GOAT 预设默认开启，后续发现的额外模型默认关闭，只有在矩阵中开启其受支持协议后才会供应；不再存在独立的 Max 或账号级 GOAT/全部模式。
 
 本地目录会进入解析，请求时不会再访问上游。内置 Alias 权威是静态且由代码持有：最早 OpenCode Go 表提供 Go 名称，密封 MiniMax CN、Kimi CN 与选定 GOAT 长名称映射表提供供应商 Alias，但不会据此新增 Go 路由。Command 会先去掉 Provider 命名空间并复用已有代码持有的 Alias；只有短名已获授权时才去掉已知套餐后缀。例如 `nvidia/nemotron-3-ultra-550b-a55b` 使用 Alias `nemotron-3-ultra`。保存的 CN 行只激活其精确密封映射。无法匹配的内置模型保留为精确 raw ID，不会作为新 Alias 公布；CN 映射仍保留上游 ID 的准确拼写。Zen Free 只有在去掉 `-free` 后的名称已被 Go 表授权时才加入该 Alias，原始 `-free` ID 始终可作为精确 raw pin 使用，见 [Zen Free 模型](routing.zh-CN.md#zen-free-模型)。
 
-当某个供应商的模型/协议单元格全部关闭时，该供应商不再产生路由；当一个 Alias 在所有供应商都没有启用映射时，它会从下游 `GET /v1/models` 供应中移除。
+当某个供应商的模型/协议单元格全部关闭时，该供应商不再产生路由。带鉴权的下游 `GET /v1/models` 只公布可路由的公开名称；raw-only 身份和 raw 名称冲突都会排除。歧义 raw 身份以 `ambiguous_model_id` 失败，绝不请求上游。
 
 OpenCode Go 与 Zen Free 的每行都有 **测试** 按钮，不需要指定账号。对于该模型的每个协议，供应商会按已保存的路由顺序自动尝试符合条件的账号，并在首次成功后停止。Popconfirm 会提示这些真实最小请求可能消耗额度。Command Code GOAT、MiniMax CN、Kimi Code CN 与 Custom 端点范围不显示测试按钮，因为这些适配器不提供该 V3 协议探测操作。模型必须属于当前供应商目录；通过校验后会真正测试三个协议端点，包括静态表尚未收录的新拉取模型。页面会在矩阵上方逐项展示成功、失败或跳过状态、HTTP 状态、可读的上游错误消息，以及上游给出时的安全帮助/计费链接；每个真实账号尝试都会写入脱敏的请求日志，协议探测内容不会进入运行日志。单个账号失败不会禁用其他符合条件账号可以服务的协议。
 
@@ -41,7 +45,7 @@ OpenCode Go 与 Zen Free 的每行都有 **测试** 按钮，不需要指定账�
 
 不存在按模型划分的额度池。
 
-客户端请求不会探测：请求路径不会发现或探测。流程是：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 透传或转换。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/v3/application-models` 只公布当前可路由且 effective 协议已启用的模型。应用选择器仍是 Go 别名 ∩ 当前价格快照，不含 Custom。
+客户端请求不会探测：请求路径不会发现或探测。流程是：别名 → 账号资格 → 适配器上限 → 已保存合约 → 按模型/按协议 effective 状态 → 透传或转换。带鉴权的 `GET /v1/models` 与受保护的 `GET /dashboard/api/v3/application-models` 只公布当前可路由且 effective 协议已启用的公开名称。应用选择器仍是 Go 别名 ∩ 当前价格快照，不含 Custom。
 
 ---
 

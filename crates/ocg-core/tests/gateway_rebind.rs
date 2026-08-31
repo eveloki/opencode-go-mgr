@@ -11,8 +11,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+#[cfg(not(windows))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Barrier, oneshot};
+#[cfg(not(windows))]
+use tokio::sync::Barrier;
+use tokio::sync::oneshot;
 
 struct DropSignal(Arc<AtomicBool>);
 
@@ -38,6 +41,7 @@ fn loopback(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
+#[cfg(not(windows))]
 fn public(port: u16) -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], port))
 }
@@ -64,6 +68,7 @@ async fn install_listener(state: &CoreState) -> u16 {
 /// Installs a real listener whose shutdown future pauses on a barrier after
 /// observing the lifecycle signal. This keeps the old socket serving without
 /// sleeps, making the public-to-loopback trust transition deterministic.
+#[cfg(not(windows))]
 async fn install_held_listener(
     state: &CoreState,
     addr: SocketAddr,
@@ -133,6 +138,7 @@ async fn assert_not_serving(port: u16, key: &str) {
     );
 }
 
+#[cfg(not(windows))]
 async fn assert_dashboard_auth(port: u16, expected: reqwest::StatusCode) {
     let client = loopback_client();
     for path in ["/dashboard/api/v3/contract"] {
@@ -277,6 +283,7 @@ async fn rebind_does_not_change_settings_revision_or_process_generation() {
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn public_to_loopback_keeps_old_public_listener_authenticated_until_stopped() {
     let (dir, state) = temp_state("public-to-loopback-auth");
     let (old_port, shutdown_seen, release) = install_held_listener(&state, public(0)).await;
@@ -310,6 +317,7 @@ async fn public_to_loopback_keeps_old_public_listener_authenticated_until_stoppe
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn loopback_to_public_requires_v2_and_v3_auth_on_final_listener() {
     let (dir, state) = temp_state("loopback-to-public-auth");
     let old_port = install_listener(&state).await;
@@ -329,6 +337,7 @@ async fn loopback_to_public_requires_v2_and_v3_auth_on_final_listener() {
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn failed_public_bind_preserves_old_loopback_listener_and_local_trust() {
     let (dir, state) = temp_state("failed-public-auth");
     let old_port = install_listener(&state).await;
@@ -350,6 +359,7 @@ async fn failed_public_bind_preserves_old_loopback_listener_and_local_trust() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[cfg(not(windows))]
 async fn concurrent_mixed_rebinds_are_serialized_and_return_installed_ports() {
     let (dir, state) = temp_state("concurrent-mixed");
     let (old_port, shutdown_seen, release) = install_held_listener(&state, loopback(0)).await;
@@ -446,6 +456,7 @@ async fn stop_timeout_aborts_and_awaits_listener_task_termination() {
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn signal_only_public_to_loopback_restores_trust_after_old_listener_quiesces() {
     let (dir, state) = temp_state("signal-only-public-to-loopback");
     let (old_port, shutdown_seen, release) = install_held_listener(&state, public(0)).await;
@@ -486,6 +497,7 @@ async fn signal_only_public_to_loopback_restores_trust_after_old_listener_quiesc
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn independently_bound_public_listener_keeps_shared_trust_fail_closed() {
     let (dir, state) = temp_state("independent-bind-trust");
     let public_handle = GatewayLifecycle::bind(state.clone(), public(0))
@@ -511,6 +523,7 @@ async fn independently_bound_public_listener_keeps_shared_trust_fail_closed() {
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn stopping_last_independent_public_listener_restores_installed_loopback_trust() {
     let (dir, state) = temp_state("independent-public-stop-restores-trust");
     let loopback_port = install_listener(&state).await;
@@ -541,6 +554,7 @@ async fn stopping_last_independent_public_listener_restores_installed_loopback_t
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn new_independent_public_during_displaced_public_drain_stays_fail_closed() {
     let (dir, state) = temp_state("overlapping-public-drain");
     let old_public = GatewayLifecycle::bind(state.clone(), public(0))

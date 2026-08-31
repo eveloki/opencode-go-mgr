@@ -1001,7 +1001,7 @@ fn merge_custom_scope(
     let declared: Vec<(String, UpstreamProtocolKind)> = runtime
         .capabilities
         .iter()
-        .map(|capability| (capability.model_id.clone(), capability.protocol))
+        .map(|capability| (capability.public_model.clone(), capability.protocol))
         .collect();
     let mut catalog_models = Vec::new();
     let mut catalog_seen = HashSet::new();
@@ -1736,7 +1736,8 @@ mod tests {
             },
             capabilities: vec![AccountModelCapability {
                 account_id: "custom-1".into(),
-                model_id: "declared-model".into(),
+                public_model: "declared-model".into(),
+                upstream_model: "declared-upstream".into(),
                 protocol: UpstreamProtocolKind::ChatCompletions,
                 verified_at: None,
                 source: "manual".into(),
@@ -1784,7 +1785,8 @@ mod tests {
                 .iter()
                 .map(|(model_id, protocol)| AccountModelCapability {
                     account_id: "custom-single".into(),
-                    model_id: model_id.clone(),
+                    public_model: model_id.clone(),
+                    upstream_model: model_id.clone(),
                     protocol: *protocol,
                     verified_at: None,
                     source: "manual".into(),

@@ -120,7 +120,11 @@ pub struct CustomModelDiscoveryResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountModelCapability {
     pub account_id: String,
-    pub model_id: String,
+    /// Client-facing Custom model identity. The persisted column remains
+    /// `model_id` for migration compatibility.
+    pub public_model: String,
+    /// Exact model identity written to the selected upstream request.
+    pub upstream_model: String,
     pub protocol: UpstreamProtocolKind,
     pub verified_at: Option<DateTime<Utc>>,
     pub source: String,
@@ -128,7 +132,8 @@ pub struct AccountModelCapability {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountModelCapabilityInput {
-    pub model_id: String,
+    pub public_model: String,
+    pub upstream_model: String,
     pub protocol: UpstreamProtocolKind,
     #[serde(default)]
     pub source: Option<String>,

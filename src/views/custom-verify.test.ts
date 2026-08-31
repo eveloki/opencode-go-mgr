@@ -129,17 +129,21 @@ test("the form declares one API URL and one account-level protocol", () => {
   assert.match(form, /customApiUrlNeedsManualModels/);
   assert.match(form, /v-if="showManualModelHint"/);
   assert.match(form, /推荐填写不带 \/v1 的 API 根地址/);
-  assert.match(form, /非标准完整 Endpoint 无法自动推导 \/models；请手动添加模型 ID。/);
+  assert.match(form, /非标准完整 Endpoint 无法自动推导 \/models；请手动添加模型映射。/);
   assert.doesNotMatch(form, /capabilityProtocol/);
   assert.doesNotMatch(form, /authScheme|auth_scheme/);
   // API URL and protocol stay editable after create; no immutability hints.
   assert.doesNotMatch(form, /fieldImmutableAfterCreate/);
   assert.doesNotMatch(form, /创建后不可修改/);
   assert.match(form, /customEndpointUrlIssue\(value \?\? ""\)/);
-  // Edit mode forwards the API URL, protocol, and expanded rows.
+  // Edit mode forwards the API URL, account-wide protocol, and canonical rows.
   assert.match(form, /payload\.endpoint_url = form\.value\.endpointUrl\.trim\(\)/);
   assert.match(form, /payload\.upstream_protocol = form\.value\.upstreamProtocol/);
-  assert.match(form, /payload\.model_capabilities = expandCustomModelCapabilities\(/);
+  assert.match(form, /public_model: capability\.public_model/);
+  assert.match(form, /upstream_model: capability\.upstream_model/);
+  assert.match(form, /v-model:value="selectedDiscoveredModels"/);
+  assert.match(form, /for \(const model of selectedDiscoveredModels\.value\)/);
+  assert.match(form, /modelMapping\(\{ public_model: model, upstream_model: model \}\)/);
 });
 
 test("model discovery ignores responses after the form context changes", () => {

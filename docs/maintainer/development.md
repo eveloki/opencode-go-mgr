@@ -60,18 +60,30 @@ When a commit stages `*.rs` files, `.githooks/pre-commit` runs
 
 ## Checks And Builds
 
-```bash
-pnpm install
-pnpm run test
-pnpm run build:web
-pnpm run design:lint
-pnpm run contract:v3:check
-pnpm run build
-```
+During development, run the smallest check that covers the changed ownership
+boundary:
+
+| Change scope | Local check |
+| --- | --- |
+| One frontend or script behavior | `node --experimental-strip-types --test <test-file>` |
+| Vue/dashboard change | focused adjacent test, then `pnpm run build:web` |
+| One Rust crate | `cargo test -p <package>`; add a test-name filter when useful |
+| Core or Dashboard V3 behavior | `cargo test -p ocg-core <filter>` |
+| Desktop Host behavior | `cargo test -p ocg-manager --lib` |
+| Dashboard V3 schema or generated types | `pnpm run contract:v3:check` |
+
+Run `pnpm install --frozen-lockfile` after cloning or when the pnpm lockfile
+changes, not before every test. Use the full `pnpm run test` only for a
+cross-frontend/Rust change, shared manifest or test-infrastructure change, or
+an integration/release gate. Run `pnpm run design:lint` when `DESIGN.md` or
+theme rules change. Run `pnpm run build` only when native release artifacts
+are actually required; the complete pre-tag sequence remains in
+`releasing.md`.
 
 - `pnpm run build:web` is the **frontend-only** production build
   (`vue-tsc && vite build`). Use it when you only need to validate the
-  dashboard.
+  dashboard. Do not run it again immediately after `pnpm run test`: that
+  command already performs the same TypeScript check and Vite build.
 - `pnpm run test` runs `pnpm run test:web` (Node `--experimental-strip-types`
   over `scripts/*.test.mjs` and `src/**/*.test.ts`), `vue-tsc --noEmit`,
   `vite build`, then `cargo test --workspace --locked`.
@@ -146,7 +158,7 @@ Script-level tests live in `scripts/*.test.mjs` (release helpers, Dashboard V3
 contract, container publish). Pair them with `pnpm run build:web` and
 `pnpm run contract:v3:check`.
 
-The 16 application guides are driven by
+The 17 application guides are driven by
 `src/views/application-guides.ts`. When changing that registry, check the
 guide count, unique IDs, protocol endpoints, the display/copy masking
 difference, and the Claude Desktop three-role persistence behavior.

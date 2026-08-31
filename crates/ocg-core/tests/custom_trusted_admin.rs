@@ -16,6 +16,8 @@ use harness::*;
 
 const CUSTOM_MODEL: &str = "custom-local-model";
 const CUSTOM_MODEL_2: &str = "custom-other-model";
+const MAPPED_PUBLIC_MODEL: &str = "deepseek-v4-flash";
+const MAPPED_UPSTREAM_MODEL: &str = "deepseek-v4-flash:0731";
 const CHAT_PREFERRED_BUILTIN_ALIAS: &str = "hy3";
 const CUSTOM_KEY_2: &str = "v2-secret-KEY-9f3a2c1b-custom-2";
 const SUCCESS_RESPONSES_BODY: &str = r#"{"id":"ok","object":"response","model":"upstream-should-not-leak","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":2}}"#;
@@ -129,6 +131,39 @@ async fn create_verified_enabled_custom(
         Some("verified"),
         "{verified}"
     );
+    verified
+}
+
+async fn create_verified_enabled_custom_mapping(
+    harness: &V2Harness,
+    name: &str,
+    key: &str,
+    public_model: &str,
+    upstream_model: &str,
+) -> Value {
+    let origin = custom_origin(harness);
+    let (status, draft) = harness
+        .create_account(json!({
+            "provider_id": CUSTOM_PROVIDER_ID,
+            "offering_id": CUSTOM_OFFERING_ID,
+            "name": name,
+            "key": key,
+            "expected_revision": harness.settings_revision().await,
+            "custom_config": {
+                "endpoint_url": custom_endpoint(&origin, "chat_completions"),
+                "upstream_protocol": "chat_completions"
+            },
+            "model_capabilities": [{
+                "public_model": public_model,
+                "upstream_model": upstream_model,
+                "protocol": "chat_completions"
+            }]
+        }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    let id = draft["id"].as_str().unwrap();
+    let (status, verified) = verify_account(harness, id).await;
+    assert_eq!(status, StatusCode::OK, "{verified}");
     verified
 }
 
@@ -253,6 +288,57 @@ async fn chat_bearer_verifies_lists_resolves_and_logs_unknown_cost() {
     assert_eq!(item["upstream_model"].as_str(), Some(CUSTOM_MODEL));
     assert_eq!(item["cost_state"].as_str(), Some("unknown"));
     assert!(item["cost"].is_null(), "{item}");
+    harness.shutdown();
+}
+
+#[tokio::test]
+async fn public_custom_alias_materializes_upstream_model_and_logs_all_three_identities() {
+    let harness = V2Harness::start_with_upstream(Some(protocol_success_replies(
+        &[CUSTOM_ACCOUNT_KEY],
+        SUCCESS_CHAT_BODY,
+    )))
+    .await;
+    let account = create_verified_enabled_custom_mapping(
+        &harness,
+        "mapped-custom",
+        CUSTOM_ACCOUNT_KEY,
+        MAPPED_PUBLIC_MODEL,
+        MAPPED_UPSTREAM_MODEL,
+    )
+    .await;
+
+    let catalog = harness.list_client_models().await.1;
+    let ids = catalog["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&MAPPED_PUBLIC_MODEL), "{catalog}");
+    assert!(!ids.contains(&MAPPED_UPSTREAM_MODEL), "{catalog}");
+
+    let verification_calls = harness.fake_calls();
+    assert!(verification_calls.iter().any(|call| {
+        serde_json::from_str::<Value>(&call.body)
+            .is_ok_and(|body| body["model"] == MAPPED_UPSTREAM_MODEL)
+    }));
+    let calls_before = verification_calls.len();
+    let (status, body) = harness.chat(MAPPED_PUBLIC_MODEL).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let calls = harness.fake_calls();
+    assert_eq!(calls.len(), calls_before + 1);
+    let upstream_body: Value = serde_json::from_str(&calls.last().unwrap().body).unwrap();
+    assert_eq!(upstream_body["model"], MAPPED_UPSTREAM_MODEL);
+
+    let logs = harness.forward_logs().await;
+    let item = logs["items"]
+        .as_array()
+        .and_then(|items| items.first())
+        .unwrap();
+    assert_eq!(item["account_id"], account["id"]);
+    assert_eq!(item["requested_model"], MAPPED_PUBLIC_MODEL);
+    assert_eq!(item["resolved_alias"], MAPPED_PUBLIC_MODEL);
+    assert_eq!(item["upstream_model"], MAPPED_UPSTREAM_MODEL);
     harness.shutdown();
 }
 
@@ -644,6 +730,15 @@ async fn goat_raw_overlap_with_custom_is_ambiguous_and_does_not_call_upstream() 
         "bearer",
     )
     .await;
+    let catalog = harness.list_client_models().await.1;
+    assert!(
+        !catalog["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == GOAT_UNIQUE_RAW_ID),
+        "ambiguous raw/public collision must not be published: {catalog}"
+    );
     let calls_before = harness.fake_calls().len();
     let (status, body) = harness.chat(GOAT_UNIQUE_RAW_ID).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -952,7 +1047,8 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
                 &format!("/accounts/{id}/model-capabilities"),
                 &json!({
                     "capabilities": [{
-                        "model_id": CUSTOM_MODEL_2,
+                        "public_model": CUSTOM_MODEL,
+                        "upstream_model": CUSTOM_MODEL_2,
                         "protocol": "chat_completions"
                     }]
                 }),
@@ -964,7 +1060,11 @@ async fn delayed_verify_probe_conflicts_on_key_config_caps_delete_and_concurrent
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let after = harness.account_by_id(&id).await;
         assert_eq!(after["verification_status"].as_str(), Some("pending"));
-        assert_eq!(after["model_capabilities"][0]["model_id"], CUSTOM_MODEL_2);
+        assert_eq!(after["model_capabilities"][0]["public_model"], CUSTOM_MODEL);
+        assert_eq!(
+            after["model_capabilities"][0]["upstream_model"],
+            CUSTOM_MODEL_2
+        );
         harness.shutdown();
     }
 

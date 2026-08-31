@@ -3,16 +3,16 @@ import type { PlanDefinition } from "./plans.ts";
 import {
   CustomCapabilityError,
   customEndpointUrlIssue,
-  expandCustomModelCapabilities,
   isCustomProtocol,
   normalizeCustomCapabilities,
 } from "./custom-account.ts";
 
 export type UpstreamProtocol = "chat_completions" | "responses" | "messages";
 
-/** The form declares plain model IDs; one account-level protocol applies to all. */
+/** The form declares public-to-upstream model mappings; protocol is account-wide. */
 export interface AccountCreateCapability {
-  model_id: string;
+  public_model: string;
+  upstream_model: string;
 }
 
 export interface AccountCreateFormValues {
@@ -36,9 +36,11 @@ export type AccountCreatePayloadErrorCode =
   | "endpoint_url_with_credentials"
   | "missing_upstream_protocol"
   | "missing_model_capabilities"
-  | "duplicate_model_id"
-  | "model_id_too_long"
-  | "model_id_has_control_character"
+  | "duplicate_public_model"
+  | "public_model_too_long"
+  | "public_model_has_control_character"
+  | "upstream_model_too_long"
+  | "upstream_model_has_control_character"
   | "capability_protocol_mismatch"
   | "custom_fields_not_allowed";
 
@@ -52,9 +54,11 @@ const ACCOUNT_CREATE_PAYLOAD_ERROR_KEYS = {
   endpoint_url_with_credentials: "Endpoint 不能包含用户名或密码",
   missing_upstream_protocol: "请选择上游协议",
   missing_model_capabilities: "请至少添加一个模型能力",
-  duplicate_model_id: "模型 ID 不能重复",
-  model_id_too_long: "模型 ID 最多 200 个字符",
-  model_id_has_control_character: "模型 ID 不能包含控制字符",
+  duplicate_public_model: "对外模型名不能重复",
+  public_model_too_long: "对外模型名最多 200 个字符",
+  public_model_has_control_character: "对外模型名不能包含控制字符",
+  upstream_model_too_long: "上游模型 ID 最多 200 个字符",
+  upstream_model_has_control_character: "上游模型 ID 不能包含控制字符",
   capability_protocol_mismatch: "模型能力必须使用所选上游协议",
   custom_fields_not_allowed: "账号创建失败，请重试",
 } as const satisfies Record<AccountCreatePayloadErrorCode, string>;
@@ -126,19 +130,22 @@ export function buildCreateAccountPayload(
     };
     try {
       payload.model_capabilities = normalizeCustomCapabilities(
-        expandCustomModelCapabilities(
-          values.model_capabilities.map((capability) => capability.model_id),
-          values.upstream_protocol,
-        ),
+        values.model_capabilities.map((capability) => ({
+          public_model: capability.public_model,
+          upstream_model: capability.upstream_model,
+          protocol: values.upstream_protocol!,
+        })),
         values.upstream_protocol,
       );
     } catch (error) {
       if (error instanceof CustomCapabilityError) {
         const code = ({
           missing: "missing_model_capabilities",
-          duplicate_model_id: "duplicate_model_id",
-          model_id_too_long: "model_id_too_long",
-          model_id_has_control_character: "model_id_has_control_character",
+          duplicate_public_model: "duplicate_public_model",
+          public_model_too_long: "public_model_too_long",
+          public_model_has_control_character: "public_model_has_control_character",
+          upstream_model_too_long: "upstream_model_too_long",
+          upstream_model_has_control_character: "upstream_model_has_control_character",
           protocol_mismatch: "capability_protocol_mismatch",
         } as const)[error.issue];
         throw new AccountCreatePayloadError(code);

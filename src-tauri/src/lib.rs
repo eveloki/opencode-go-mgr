@@ -39,7 +39,7 @@ pub fn run() {
         }
     };
 
-    let core_state = match CoreStateInner::new(db, data_dir.clone(), cipher) {
+    let core_state = match CoreStateInner::new(db, data_dir.clone(), cipher.clone()) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("failed to initialize state: {}", e);
@@ -62,6 +62,7 @@ pub fn run() {
     }
 
     host::register_desktop_settings(&core_state);
+    host::application_connectors::register(&core_state, cipher);
 
     let browser_processes = Arc::new(Mutex::new(BrowserProcessState::default()));
     host::register_native_browser(&core_state, browser_processes.clone());

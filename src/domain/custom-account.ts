@@ -36,16 +36,20 @@ export const MAX_CUSTOM_MODEL_ID_CHARS = 200;
 
 export type CustomCapabilityIssue =
   | "missing"
-  | "duplicate_model_id"
-  | "model_id_too_long"
-  | "model_id_has_control_character"
+  | "duplicate_public_model"
+  | "public_model_too_long"
+  | "public_model_has_control_character"
+  | "upstream_model_too_long"
+  | "upstream_model_has_control_character"
   | "protocol_mismatch";
 
 export const CUSTOM_CAPABILITY_ISSUE_KEYS = {
   missing: "请至少添加一个模型能力",
-  duplicate_model_id: "模型 ID 不能重复",
-  model_id_too_long: "模型 ID 最多 200 个字符",
-  model_id_has_control_character: "模型 ID 不能包含控制字符",
+  duplicate_public_model: "对外模型名不能重复",
+  public_model_too_long: "对外模型名最多 200 个字符",
+  public_model_has_control_character: "对外模型名不能包含控制字符",
+  upstream_model_too_long: "上游模型 ID 最多 200 个字符",
+  upstream_model_has_control_character: "上游模型 ID 不能包含控制字符",
   protocol_mismatch: "模型能力必须使用所选上游协议",
 } as const satisfies Record<CustomCapabilityIssue, string>;
 
@@ -126,37 +130,52 @@ export function customApiUrlNeedsManualModels(
     && !customApiUrlSupportsModelDiscovery(endpointUrl, protocol);
 }
 
-/** Expand each declared model into exactly the selected upstream protocol. */
+/** Discovery maps each exact upstream ID to the same public name by default. */
 export function expandCustomModelCapabilities(
   modelIds: readonly string[],
   upstreamProtocol: AccountProtocol,
-): Pick<AccountModelCapabilityInput, "model_id" | "protocol">[] {
-  return modelIds.map((model_id) => ({ model_id, protocol: upstreamProtocol }));
+): Pick<AccountModelCapabilityInput, "public_model" | "upstream_model" | "protocol">[] {
+  return modelIds.map((model) => ({
+    public_model: model,
+    upstream_model: model,
+    protocol: upstreamProtocol,
+  }));
 }
 
 export function normalizeCustomCapabilities(
-  capabilities: readonly Pick<AccountModelCapabilityInput, "model_id" | "protocol">[],
+  capabilities: readonly Pick<AccountModelCapabilityInput, "public_model" | "upstream_model" | "protocol">[],
   upstreamProtocol: AccountProtocol,
 ): AccountModelCapabilityInput[] {
   if (capabilities.length === 0) throw new CustomCapabilityError("missing");
 
-  const seenRows = new Set<string>();
+  const seenPublicModels = new Set<string>();
   return capabilities.map((capability) => {
-    const model_id = capability.model_id.trim();
-    if (Array.from(model_id).length > MAX_CUSTOM_MODEL_ID_CHARS) {
-      throw new CustomCapabilityError("model_id_too_long");
+    const public_model = capability.public_model.trim();
+    const upstream_model = capability.upstream_model.trim();
+    if (Array.from(public_model).length > MAX_CUSTOM_MODEL_ID_CHARS) {
+      throw new CustomCapabilityError("public_model_too_long");
     }
-    if (/[\u0000-\u001F\u007F-\u009F]/u.test(model_id)) {
-      throw new CustomCapabilityError("model_id_has_control_character");
+    if (Array.from(upstream_model).length > MAX_CUSTOM_MODEL_ID_CHARS) {
+      throw new CustomCapabilityError("upstream_model_too_long");
+    }
+    if (/[\u0000-\u001F\u007F-\u009F]/u.test(public_model)) {
+      throw new CustomCapabilityError("public_model_has_control_character");
+    }
+    if (/[\u0000-\u001F\u007F-\u009F]/u.test(upstream_model)) {
+      throw new CustomCapabilityError("upstream_model_has_control_character");
     }
     if (capability.protocol !== upstreamProtocol) {
       throw new CustomCapabilityError("protocol_mismatch");
     }
-    if (!model_id || seenRows.has(model_id)) {
-      throw new CustomCapabilityError(!model_id ? "missing" : "duplicate_model_id");
+    const publicIdentity = public_model.toLocaleLowerCase();
+    if (!public_model || !upstream_model) {
+      throw new CustomCapabilityError("missing");
     }
-    seenRows.add(model_id);
-    return { model_id, protocol: capability.protocol, source: "manual" };
+    if (seenPublicModels.has(publicIdentity)) {
+      throw new CustomCapabilityError("duplicate_public_model");
+    }
+    seenPublicModels.add(publicIdentity);
+    return { public_model, upstream_model, protocol: capability.protocol, source: "manual" };
   });
 }
 
@@ -166,7 +185,7 @@ export type CustomAccountEditInput = {
   key?: string;
   endpoint_url?: string;
   upstream_protocol?: AccountProtocol;
-  model_capabilities?: readonly Pick<AccountModelCapabilityInput, "model_id" | "protocol">[];
+  model_capabilities?: readonly Pick<AccountModelCapabilityInput, "public_model" | "upstream_model" | "protocol">[];
 };
 
 export type CustomAccountEditPlan = {
@@ -186,7 +205,8 @@ function sameCapabilities(
   next: readonly AccountModelCapabilityInput[],
 ): boolean {
   return saved.length === next.length && saved.every((capability, index) => (
-    capability.model_id.trim() === next[index]?.model_id
+    capability.public_model.trim() === next[index]?.public_model
+      && capability.upstream_model.trim() === next[index]?.upstream_model
       && capability.protocol === next[index]?.protocol
   ));
 }

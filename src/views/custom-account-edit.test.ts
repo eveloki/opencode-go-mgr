@@ -18,7 +18,7 @@ function customAccount(): Account {
       account_id: "custom-1", endpoint_url: "https://api.example.com/v1/responses",
       upstream_protocol: "responses", created_at: "2026-08-21T00:00:00Z", updated_at: "2026-08-21T00:00:00Z",
     },
-    model_capabilities: [{ account_id: "custom-1", model_id: "model-a", protocol: "responses", verified_at: null, source: "manual" }],
+    model_capabilities: [{ public_model: "model-a", upstream_model: "provider/model-a", protocol: "responses", verified_at: null, source: "manual" }],
   };
 }
 
@@ -26,11 +26,11 @@ test("Custom config and capabilities use one atomic config write", async () => {
   const account = customAccount();
   const plan = planCustomAccountEdit(account, {
     name: "Custom", endpoint_url: "https://api.example.com/v1/messages", upstream_protocol: "messages",
-    model_capabilities: [{ model_id: "model-a", protocol: "messages" }],
+    model_capabilities: [{ public_model: "model-a", upstream_model: "provider/model-a", protocol: "messages" }],
   });
   assert.deepEqual(plan.customConfig, {
     endpoint_url: "https://api.example.com/v1/messages", upstream_protocol: "messages",
-    model_capabilities: [{ model_id: "model-a", protocol: "messages", source: "manual" }],
+    model_capabilities: [{ public_model: "model-a", upstream_model: "provider/model-a", protocol: "messages", source: "manual" }],
   });
   const calls: string[] = [];
   await applyCustomAccountEditPlan(plan, {
@@ -43,7 +43,7 @@ test("Custom config and capabilities use one atomic config write", async () => {
 test("metadata-only edits do not rewrite Custom config", () => {
   const plan = planCustomAccountEdit(customAccount(), {
     name: "Renamed", endpoint_url: "https://api.example.com/v1/responses",
-    upstream_protocol: "responses", model_capabilities: [{ model_id: "model-a", protocol: "responses" }],
+    upstream_protocol: "responses", model_capabilities: [{ public_model: "model-a", upstream_model: "provider/model-a", protocol: "responses" }],
   });
   assert.ok(plan.account);
   assert.equal(plan.customConfig, undefined);

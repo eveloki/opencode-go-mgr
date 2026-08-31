@@ -49,16 +49,24 @@ pnpm run hooks:install
 
 ## 检查与构建
 
-```bash
-pnpm install
-pnpm run test
-pnpm run build:web
-pnpm run design:lint
-pnpm run contract:v3:check
-pnpm run build
-```
+开发过程中，默认运行能覆盖本次改动归属边界的最小检查：
 
-- `pnpm run build:web` 是 **纯前端** 生产构建（`vue-tsc && vite build`），只验证面板时用它。
+| 改动范围 | 本地检查 |
+| --- | --- |
+| 单个前端或脚本行为 | `node --experimental-strip-types --test <test-file>` |
+| Vue/dashboard 改动 | 相邻聚焦测试，再运行 `pnpm run build:web` |
+| 单个 Rust crate | `cargo test -p <package>`；必要时再加测试名过滤 |
+| Core 或 Dashboard V3 行为 | `cargo test -p ocg-core <filter>` |
+| Desktop Host 行为 | `cargo test -p ocg-manager --lib` |
+| Dashboard V3 Schema 或生成类型 | `pnpm run contract:v3:check` |
+
+只在首次克隆或 pnpm 锁文件变化后运行 `pnpm install --frozen-lockfile`，不必每次
+测试前都安装依赖。只有改动跨越前端/Rust、涉及共享清单或测试基础设施，或者进入
+集成/发版门禁时，才运行完整的 `pnpm run test`。改动 `DESIGN.md` 或主题规则时运行
+`pnpm run design:lint`。只有确实需要原生发版产物时才运行 `pnpm run build`；完整的
+tag 前检查序列仍以 `releasing.zh-CN.md` 为准。
+
+- `pnpm run build:web` 是 **纯前端** 生产构建（`vue-tsc && vite build`），只验证面板时用它。不要在 `pnpm run test` 后立即再跑一次：后者已经执行相同的 TypeScript 检查与 Vite 构建。
 - `pnpm run test` 跑 `pnpm run test:web`（Node `--experimental-strip-types` 覆盖 `scripts/*.test.mjs` 与 `src/**/*.test.ts`）、`vue-tsc --noEmit`、`vite build`，然后 `cargo test --workspace --locked`。
 - `pnpm run test:rust` 单独跑锁定依赖的 workspace Rust 套件。
 - `pnpm run contract:v3:check` 用 `ocg-core` 的 `export_dashboard_v3_schema` example 重新生成 Dashboard V3 JSON Schema，若 `schema/dashboard-api-v3.schema.json` 或 `src/api/generated/dashboard-v3.ts` 漂移则失败。写入用 `pnpm run contract:v3:generate`。
@@ -117,7 +125,7 @@ bump 该进程的 `settings_revision`。它不能创建 Custom 账号、子 Key 
 `scripts/*.test.mjs`（发版辅助、Dashboard V3 契约、容器发布）。最后跑
 `pnpm run build:web` 与 `pnpm run contract:v3:check`。
 
-16 个应用教程由 `src/views/application-guides.ts` 驱动；改动注册表时检查教程
+17 个应用教程由 `src/views/application-guides.ts` 驱动；改动注册表时检查教程
 数量、唯一 ID、协议端点、display/copy 脱敏差异，以及 Claude Desktop 三个角色
 模型的持久化行为。
 
