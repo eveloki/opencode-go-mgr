@@ -38,3 +38,15 @@ test("forward log total tokens do not double count cached or cache-written input
   };
   assert.equal(forwardLogTotalTokens(row), 35_836);
 });
+
+test("forward log total tokens stay input + output when cache write is nonzero", () => {
+  // Anthropic-style row: input already includes cache read and cache write
+  // (100 = 50 fresh + 30 cache read + 20 cache write).
+  const row = {
+    prompt_tokens: 100,
+    completion_tokens: 50,
+    cached_tokens: 30,
+    cache_creation_tokens: 20,
+  };
+  assert.equal(forwardLogTotalTokens(row), 150);
+});

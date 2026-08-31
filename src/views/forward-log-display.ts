@@ -20,8 +20,10 @@ export function forwardLogAlias(
 
 /**
  * Total tokens for a request-log row. `prompt_tokens` already includes the
- * cached-read and cache-write portions, so adding them again would double
- * count; the total is input + output only.
+ * cached-read and cache-write portions (the Messages path adds them back
+ * explicitly; Chat/Responses rely on the upstream convention where
+ * `prompt_tokens` includes cached and cache-write is always 0), so adding
+ * them again would double count. The total is input + output only.
  */
 export function forwardLogTotalTokens(
   row: Pick<ForwardLog, "prompt_tokens" | "completion_tokens">,
