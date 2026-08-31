@@ -4,6 +4,7 @@ import {
   forwardLogAlias,
   forwardLogRequestedModel,
   forwardLogResolvedAlias,
+  forwardLogTotalTokens,
   forwardLogUpstreamModel,
 } from "./forward-log-display.ts";
 
@@ -24,4 +25,16 @@ test("legacy forward logs still expose their stored model without inventing an A
   assert.equal(forwardLogAlias({ model: "legacy", requested_model: null, resolved_alias: null }), "legacy");
   assert.equal(forwardLogRequestedModel({ requested_model: null }), null);
   assert.equal(forwardLogResolvedAlias({ resolved_alias: "  " }), null);
+});
+
+test("forward log total tokens do not double count cached or cache-written input", () => {
+  // prompt_tokens already includes the cached-read and cache-write portions
+  // (31,331 = 99 fresh + 31,232 cache read), so the total is input + output.
+  const row = {
+    prompt_tokens: 31_331,
+    completion_tokens: 4_505,
+    cached_tokens: 31_232,
+    cache_creation_tokens: 0,
+  };
+  assert.equal(forwardLogTotalTokens(row), 35_836);
 });
