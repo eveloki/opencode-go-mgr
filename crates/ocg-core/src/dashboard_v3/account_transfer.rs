@@ -1753,8 +1753,10 @@ mod tests {
     }
 
     fn sample_node(account_id: &str) -> PortableNodeState {
-        let mut config = AppConfig::default();
-        config.gateway_key = "ocg-transfer-primary-key".to_string();
+        let config = AppConfig {
+            gateway_key: "ocg-transfer-primary-key".to_string(),
+            ..AppConfig::default()
+        };
         PortableNodeState {
             config,
             access_keys: Vec::new(),

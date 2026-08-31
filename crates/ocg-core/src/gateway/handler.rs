@@ -306,7 +306,7 @@ fn published_alias_models_response(state: &CoreState) -> axum::response::Respons
         if data.iter().any(|item| {
             item.get("id")
                 .and_then(|value| value.as_str())
-                .is_some_and(|existing| crate::custom::custom_model_id_matches(existing, &id))
+                .is_some_and(|existing| crate::custom::custom_model_id_matches(existing, id))
         }) {
             continue;
         }
