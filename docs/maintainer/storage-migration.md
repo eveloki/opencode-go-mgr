@@ -51,6 +51,29 @@ public-name = upstream-ID behavior exactly. New Custom mappings may retain a
 distinct public model name and exact upstream model ID; no suffix normalization
 or generated Alias is applied by this migration.
 
+## Schema v34 — Ollama Cloud usage state
+
+v34 creates the  table. One row per configured
+account holds:
+
+-  — the obfuscated browser-session Cookie for the
+   usage scrape. It uses the same
+  -derived facility as account keys and is explicitly not
+  AEAD; it is never returned by any API and never enters an export payload.
+-  — , , , or .
+-  — the sanitized JSON from the last successful scrape (5h/7d
+  windows, per-model request counts, optional plan/balance). Written only on
+  success; failures update status/backoff columns and never clear it.
+- , , ,
+   — manual-refresh throttle and the fixed backoff ladder
+  (5m → 15m → 1h → 6h cap).
+
+The row is keyed by  with , so account
+deletion removes the usage state; clearing the Cookie deletes the row and
+returns the capability to the unconfigured state. The migration is
+additive-only: no existing table, row, or routing fact changes, and because
+the step runs after v27 it does not create a new pre-v3 snapshot.
+
 Before any v27 write, an existing (non-empty) library gets a unique, never-overwritten sibling snapshot:
 
 ```text

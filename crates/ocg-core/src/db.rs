@@ -87,7 +87,7 @@ pub const PRE_V23_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v23.";
 /// v26 and before any v27 write. Not created for a brand-new empty database.
 pub const PRE_V3_BACKUP_FILE_PREFIX: &str = "data.sqlite.pre-v3.";
 /// Highest schema this binary can open or migrate. Newer databases fail closed.
-pub const CURRENT_SCHEMA_VERSION: i32 = 33;
+pub const CURRENT_SCHEMA_VERSION: i32 = 34;
 pub const V27_SCHEMA_VERSION: i32 = 27;
 /// Schema the v27 rewrite expects as its committed source. Historical databases
 /// always migrate through this version first.
@@ -1697,6 +1697,41 @@ fn migrate_to_v33(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v34: Ollama Cloud Cookie usage state. One row per configured account holds
+/// the obfuscated web-session Cookie (same `.encryption-key` facility as
+/// account keys, explicitly not AEAD) plus the manual-refresh state machine.
+/// `snapshot` is written only on a successful scrape; failures update the
+/// status/backoff columns and never touch it. The row cascades with the
+/// account and is deliberately excluded from node export payloads.
+fn migrate_to_v34(conn: &Connection) -> Result<()> {
+    let version = schema_version_on(conn)?;
+    if version >= 34 {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        version == 33,
+        "v34 requires a canonical schema v33 source, found {version}"
+    );
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ollama_cloud_usage_state (
+            account_id TEXT PRIMARY KEY,
+            cookie_cipher TEXT,
+            status TEXT NOT NULL DEFAULT 'unconfigured',
+            snapshot TEXT,
+            last_error TEXT,
+            last_success_at TEXT,
+            last_attempt_at TEXT,
+            next_eligible_at TEXT,
+            failure_streak INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        );
+        INSERT OR REPLACE INTO schema_version (version) VALUES (34);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod v27_test_hooks {
     use super::V27MigrationFault;
@@ -2437,6 +2472,7 @@ impl Database {
         migrate_to_v31(&db.conn)?;
         migrate_to_v32(&db.conn)?;
         migrate_to_v33(&db.conn)?;
+        migrate_to_v34(&db.conn)?;
         Ok(db)
     }
 
@@ -4841,6 +4877,154 @@ impl Database {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Ollama Cloud Cookie + usage state for one account, if configured.
+    pub fn ollama_cloud_usage_state(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<OllamaCloudUsageState>> {
+        self.conn
+            .query_row(
+                "SELECT account_id, cookie_cipher IS NOT NULL, status, snapshot, last_error,
+                        last_success_at, last_attempt_at, next_eligible_at,
+                        failure_streak
+                 FROM ollama_cloud_usage_state WHERE account_id = ?1",
+                [account_id],
+                ollama_cloud_usage_state_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Store the obfuscated web-session Cookie. Configuring (or replacing) a
+    /// Cookie resets the whole capability to the unconfigured-but-ready state:
+    /// the previous snapshot and backoff no longer describe the new session.
+    pub fn set_ollama_cloud_cookie(&self, account_id: &str, cookie_cipher: &str) -> Result<()> {
+        anyhow::ensure!(self.get_account(account_id)?.is_some(), "account not found");
+        self.conn
+            .execute(
+                "INSERT INTO ollama_cloud_usage_state
+                     (account_id, cookie_cipher, status, snapshot, failure_streak)
+                 VALUES (?1, ?2, 'unconfigured', NULL, 0)
+                 ON CONFLICT(account_id) DO UPDATE SET
+                     cookie_cipher = excluded.cookie_cipher,
+                     status = 'unconfigured',
+                     snapshot = NULL,
+                     last_error = NULL,
+                     last_success_at = NULL,
+                     last_attempt_at = NULL,
+                     next_eligible_at = NULL,
+                     failure_streak = 0",
+                params![account_id, cookie_cipher],
+            )
+            .map(|_| ())?;
+        Ok(())
+    }
+
+    /// Clearing the Cookie returns the capability to the unconfigured state;
+    /// the row, snapshot, and refresh metadata go with it.
+    pub fn clear_ollama_cloud_cookie(&self, account_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM ollama_cloud_usage_state WHERE account_id = ?1",
+                [account_id],
+            )
+            .map(|_| ())?;
+        Ok(())
+    }
+
+    /// The obfuscated Cookie ciphertext, resolved through the Host cipher by
+    /// the caller. Never exposed through any API response.
+    pub fn ollama_cloud_cookie_cipher(&self, account_id: &str) -> Result<Option<String>> {
+        let cipher: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT cookie_cipher FROM ollama_cloud_usage_state WHERE account_id = ?1",
+                [account_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(cipher)
+    }
+
+    /// CAS guard for the manual refresh: the stored Cookie must match the
+    /// snapshot the caller decrypted, otherwise the account changed mid-flight.
+    pub fn ollama_cloud_usage_state_for_cookie(
+        &self,
+        account_id: &str,
+        cookie_cipher: &str,
+    ) -> Result<Option<OllamaCloudUsageState>> {
+        self.conn
+            .query_row(
+                "SELECT account_id, cookie_cipher IS NOT NULL, status, snapshot, last_error,
+                        last_success_at, last_attempt_at, next_eligible_at,
+                        failure_streak
+                 FROM ollama_cloud_usage_state
+                 WHERE account_id = ?1 AND cookie_cipher = ?2",
+                params![account_id, cookie_cipher],
+                ollama_cloud_usage_state_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Record a successful scrape. `snapshot_json` is the sanitized snapshot
+    /// (no HTML, no Cookie, no session fields); failure columns reset.
+    pub fn commit_ollama_cloud_usage_success(
+        &self,
+        account_id: &str,
+        snapshot_json: &str,
+        now: DateTime<Utc>,
+        next_eligible_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE ollama_cloud_usage_state
+                 SET status = 'ok', snapshot = ?2, last_error = NULL,
+                     last_success_at = ?3, last_attempt_at = ?3,
+                     next_eligible_at = ?4, failure_streak = 0
+                 WHERE account_id = ?1",
+                params![
+                    account_id,
+                    snapshot_json,
+                    now.to_rfc3339(),
+                    next_eligible_at.map(|at| at.to_rfc3339())
+                ],
+            )
+            .map(|_| ())?;
+        Ok(())
+    }
+
+    /// Record a failed (or unauthorized) attempt. Only status/attempt metadata
+    /// and the backoff ladder move; the last successful snapshot stays intact.
+    pub fn record_ollama_cloud_usage_failure(
+        &self,
+        account_id: &str,
+        status: &str,
+        last_error: Option<&str>,
+        now: DateTime<Utc>,
+        next_eligible_at: Option<DateTime<Utc>>,
+        failure_streak: i64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE ollama_cloud_usage_state
+                 SET status = ?2, last_error = ?3, last_attempt_at = ?4,
+                     next_eligible_at = ?5, failure_streak = ?6
+                 WHERE account_id = ?1",
+                params![
+                    account_id,
+                    status,
+                    last_error,
+                    now.to_rfc3339(),
+                    next_eligible_at.map(|at| at.to_rfc3339()),
+                    failure_streak
+                ],
+            )
+            .map(|_| ())?;
+        Ok(())
     }
 
     pub fn upsert_account_custom_config(
@@ -7703,6 +7887,22 @@ fn account_custom_config_from_row(row: &Row<'_>) -> rusqlite::Result<AccountCust
         upstream_protocol,
         created_at: parse_datetime(row.get::<_, String>(3)?),
         updated_at: parse_datetime(row.get::<_, String>(4)?),
+    })
+}
+
+fn ollama_cloud_usage_state_from_row(row: &Row<'_>) -> rusqlite::Result<OllamaCloudUsageState> {
+    let parse_stamp =
+        |value: Option<String>| value.filter(|text| !text.is_empty()).map(parse_datetime);
+    Ok(OllamaCloudUsageState {
+        account_id: row.get(0)?,
+        cookie_configured: row.get(1)?,
+        status: row.get(2)?,
+        snapshot: row.get(3)?,
+        last_error: row.get(4)?,
+        last_success_at: parse_stamp(row.get(5)?),
+        last_attempt_at: parse_stamp(row.get(6)?),
+        next_eligible_at: parse_stamp(row.get(7)?),
+        failure_streak: row.get(8)?,
     })
 }
 
@@ -13730,12 +13930,15 @@ mod tests {
             .copied()
             .filter(|plan| !plan.routable)
             .collect();
+        // Ollama Cloud is the current fail-closed offering; the assertion
+        // keeps the sanitation fixture meaningful and fails when the enable
+        // bit is opened without revisiting this test.
         assert_eq!(
             unroutable
                 .iter()
                 .map(|plan| (plan.offering.provider_id, plan.offering.offering_id))
                 .collect::<Vec<_>>(),
-            Vec::<(&str, &str)>::new()
+            vec![(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID)]
         );
         assert!(
             builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
@@ -13808,6 +14011,16 @@ mod tests {
             "draft-api-notes",
         );
         leftover_enable(&db, "draft-api");
+
+        // A stale enabled Ollama Cloud row is disabled at open (fail-closed
+        // sanitation) and stays disabled on the second open.
+        persist_unroutable_draft(
+            &db,
+            builtin_plan(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID).unwrap(),
+            "ollama-leftover",
+            "ollama-leftover-notes",
+        );
+        leftover_enable(&db, "ollama-leftover");
 
         let zen_before = sanitation_snapshot(&db, ZEN_FREE_ACCOUNT_ID);
         let go_before = sanitation_snapshot(&db, "go-keep");
@@ -13884,6 +14097,13 @@ mod tests {
             "now-routable Custom leftovers must not be disabled at open"
         );
 
+        let ollama_after = sanitation_snapshot(&db, "ollama-leftover");
+        assert_eq!(ollama_after.name, "ollama-leftover");
+        assert!(
+            !ollama_after.enabled,
+            "unroutable Ollama leftovers must be disabled at open"
+        );
+
         let first_pass: Vec<_> = [
             ZEN_FREE_ACCOUNT_ID,
             "go-keep",
@@ -13892,6 +14112,7 @@ mod tests {
             "goat-verified",
             "goat-failed",
             "draft-api",
+            "ollama-leftover",
         ]
         .into_iter()
         .map(|id| (id.to_string(), sanitation_snapshot(&db, id)))
@@ -14382,6 +14603,74 @@ mod tests {
         }
 
         drop(migrated);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v33_to_v34_creates_ollama_usage_state_without_touching_existing_data() {
+        let dir = temp_data_dir("v33-v34-ollama-usage");
+        let db = Database::open(dir.clone()).unwrap();
+        let mut ollama = account("ollama-v33");
+        ollama.provider_id = OLLAMA_PROVIDER_ID.to_string();
+        ollama.offering_id = OLLAMA_CLOUD_OFFERING_ID.to_string();
+        ollama.enabled = false;
+        db.create_account(&ollama).unwrap();
+        let go = account("go-v33");
+        db.create_account(&go).unwrap();
+        drop(db);
+
+        // Rewind to a canonical v33 source: the usage table does not exist yet.
+        let conn = Connection::open(dir.join("data.sqlite")).unwrap();
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS ollama_cloud_usage_state;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version (version) VALUES (33);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let backups_before = pre_v3_backup_paths(&dir);
+        let migrated = Database::open(dir.clone()).unwrap();
+        assert_eq!(migrated.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        assert!(
+            table_exists(&migrated.conn, "ollama_cloud_usage_state").unwrap(),
+            "v34 creates the Ollama usage state table"
+        );
+        // Non-destructive: routing-relevant rows survive untouched and the
+        // pre-v3 backup policy is untouched by post-v27 steps.
+        assert!(migrated.get_account("go-v33").unwrap().is_some());
+        assert!(migrated.get_account("ollama-v33").unwrap().is_some());
+        assert!(
+            migrated
+                .ollama_cloud_usage_state("ollama-v33")
+                .unwrap()
+                .is_none(),
+            "the capability starts unconfigured after migration"
+        );
+        assert_eq!(pre_v3_backup_paths(&dir), backups_before);
+
+        // Idempotent reopen and cascade semantics.
+        drop(migrated);
+        let mut db = Database::open(dir.clone()).unwrap();
+        let cipher = db
+            .conn
+            .query_row(
+                "SELECT key_cipher FROM accounts WHERE id = 'ollama-v33'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        db.set_ollama_cloud_cookie("ollama-v33", &cipher).unwrap();
+        let state = db.ollama_cloud_usage_state("ollama-v33").unwrap().unwrap();
+        assert!(state.cookie_configured);
+        assert_eq!(state.status, "unconfigured");
+        assert!(state.snapshot.is_none());
+        db.delete_account("ollama-v33").unwrap();
+        assert!(
+            db.ollama_cloud_usage_state("ollama-v33").unwrap().is_none(),
+            "deleting the account cascades the usage state row"
+        );
+        drop(db);
         fs::remove_dir_all(dir).unwrap();
     }
 

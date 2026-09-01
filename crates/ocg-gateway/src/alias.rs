@@ -29,8 +29,9 @@ use ocg_domain::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
     COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
     CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, KIMI_CN_OFFERING_ID, KIMI_PROVIDER_ID,
-    MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, custom_model_id_matches, is_free_model, looks_raw_shaped,
+    MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID, OLLAMA_PROVIDER_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, custom_model_id_matches, is_free_model,
+    looks_raw_shaped,
 };
 use ocg_domain::protocol::supported_model_ids;
 use ocg_domain::provider::is_custom_api;
@@ -99,6 +100,10 @@ impl ProviderMapping {
 
     pub fn is_kimi_cn(&self) -> bool {
         self.provider_id == KIMI_PROVIDER_ID && self.offering_id == KIMI_CN_OFFERING_ID
+    }
+
+    pub fn is_ollama_cloud(&self) -> bool {
+        self.provider_id == OLLAMA_PROVIDER_ID && self.offering_id == OLLAMA_CLOUD_OFFERING_ID
     }
 }
 
@@ -250,6 +255,24 @@ fn build_extended_registry(
     minimax_model_ids: &[String],
     kimi_model_ids: &[String],
 ) -> Registry {
+    build_sealed_registry(
+        zen_free_models,
+        goat_model_ids,
+        minimax_model_ids,
+        kimi_model_ids,
+        &[],
+        &[],
+    )
+}
+
+fn build_sealed_registry(
+    zen_free_models: &[String],
+    goat_model_ids: &[String],
+    minimax_model_ids: &[String],
+    kimi_model_ids: &[String],
+    ollama_model_ids: &[String],
+    ollama_pinned_model_ids: &[String],
+) -> Registry {
     let mut registry = build_registry(zen_free_models);
     insert_sealed_catalog(
         &mut registry,
@@ -264,6 +287,7 @@ fn build_extended_registry(
         kimi_catalog_alias,
     );
     insert_goat_catalog(&mut registry, goat_model_ids);
+    insert_ollama_catalog(&mut registry, ollama_model_ids, ollama_pinned_model_ids);
     registry
 }
 
@@ -406,6 +430,75 @@ fn kimi_mapping(upstream_model: &str) -> ProviderMapping {
         offering_id: KIMI_CN_OFFERING_ID,
         upstream_model: upstream_model.to_string(),
         routeable: true,
+    }
+}
+
+fn ollama_mapping(upstream_model: &str, routeable: bool) -> ProviderMapping {
+    ProviderMapping {
+        provider_id: OLLAMA_PROVIDER_ID,
+        offering_id: OLLAMA_CLOUD_OFFERING_ID,
+        upstream_model: upstream_model.to_string(),
+        routeable,
+    }
+}
+
+/// Strip the trailing `:` tag from an Ollama Cloud catalog id
+/// (`model:tag` → `model`). Ids without a tag keep their exact spelling;
+/// the stem is only ever compared against code-owned alias stems, never
+/// published on its own. Tag values are upstream runtime data: this function
+/// must stay free of hardcoded snapshot ids.
+fn ollama_catalog_stem(model_id: &str) -> &str {
+    let trimmed = model_id.trim();
+    match trimmed.rsplit_once(':') {
+        Some((stem, tag)) if !stem.is_empty() && !tag.is_empty() => stem,
+        _ => trimmed,
+    }
+}
+
+/// Ollama Cloud catalog overlay. Every exact catalog id (including `:` tags)
+/// becomes a raw pin. The family never creates or steals an alias: the only
+/// contribution is appending one routeable mapping to a code-owned shared
+/// alias when the stem guard resolves exactly one candidate — directly, or
+/// through the administrator-pinned subset when the catalog rotates and old
+/// and new tags coexist. Zero or ambiguous matches leave this family's
+/// mapping out entirely; the alias keeps serving its existing families.
+fn insert_ollama_catalog(
+    registry: &mut Registry,
+    model_ids: &[String],
+    pinned_model_ids: &[String],
+) {
+    for model_id in model_ids {
+        upsert_mapping(registry, None, ollama_mapping(model_id, true));
+    }
+    for stem in ocg_domain::protocol::ollama_cloud_shared_alias_stems() {
+        let matches: Vec<&String> = model_ids
+            .iter()
+            .filter(|id| ollama_catalog_stem(id).eq_ignore_ascii_case(stem))
+            .collect();
+        let binding = match matches.len() {
+            1 => Some(matches[0].clone()),
+            0 => None,
+            _ => {
+                // Old and new snapshot tags coexist: only an explicit
+                // administrator pin may pick one (fail-closed, no guessing).
+                let pinned: Vec<&String> = matches
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        pinned_model_ids
+                            .iter()
+                            .any(|pinned| pinned.trim().eq_ignore_ascii_case(id.trim()))
+                    })
+                    .collect();
+                (pinned.len() == 1).then(|| pinned[0].clone())
+            }
+        };
+        let Some(binding) = binding else {
+            continue;
+        };
+        if is_code_owned_alias(registry, stem) {
+            insert_mapping(registry, stem, ollama_mapping(&binding, true));
+        }
     }
 }
 
@@ -612,7 +705,8 @@ pub fn resolve_with_all_catalogs(
 /// Extended sealed-provider overlay used by the host. Existing public helpers
 /// keep their stable signatures while MiniMax/Kimi catalogs participate in
 /// raw-ID ambiguity and may join aliases authorized by the Go table or their
-/// own sealed adapter maps.
+/// own sealed adapter maps. Ollama-blind; the host request path uses
+/// [`resolve_with_sealed_catalogs`].
 pub fn resolve_with_extended_catalogs(
     requested: &str,
     go_model_ids: &[String],
@@ -622,11 +716,42 @@ pub fn resolve_with_extended_catalogs(
     minimax_model_ids: &[String],
     kimi_model_ids: &[String],
 ) -> Result<ResolvedModel, ResolveError> {
-    let registry = build_extended_registry(
+    resolve_with_sealed_catalogs(
+        requested,
+        go_model_ids,
+        zen_free_models,
+        custom_model_ids,
+        goat_model_ids,
+        minimax_model_ids,
+        kimi_model_ids,
+        &[],
+        &[],
+    )
+}
+
+/// Full sealed-family overlay including the Ollama Cloud catalog. Exact
+/// Ollama catalog ids (with `:` tags) pin raw; shared aliases gain one
+/// Ollama mapping only through the stem single-match/pin guard, so this
+/// family can never create, steal, or republish an alias.
+#[allow(clippy::too_many_arguments)] // positional parity with the sibling catalog overlays
+pub fn resolve_with_sealed_catalogs(
+    requested: &str,
+    go_model_ids: &[String],
+    zen_free_models: &[String],
+    custom_model_ids: &[String],
+    goat_model_ids: &[String],
+    minimax_model_ids: &[String],
+    kimi_model_ids: &[String],
+    ollama_model_ids: &[String],
+    ollama_pinned_model_ids: &[String],
+) -> Result<ResolvedModel, ResolveError> {
+    let registry = build_sealed_registry(
         zen_free_models,
         goat_model_ids,
         minimax_model_ids,
         kimi_model_ids,
+        ollama_model_ids,
+        ollama_pinned_model_ids,
     );
     let go_resolved = match resolve_in(&registry, requested) {
         Ok(resolved) => overlay_go_catalog(resolved, go_model_ids),
@@ -1031,6 +1156,29 @@ pub fn published_routeable_aliases_with_extended_catalogs(
     ))
 }
 
+/// Ollama-aware publication: appending a routeable Ollama mapping to a
+/// Go-owned shared alias must never add, remove, or duplicate a published
+/// entry — the first routeable mapping (Go) keeps ownership.
+pub fn published_routeable_aliases_with_sealed_catalogs(
+    go_model_ids: &[String],
+    zen_free_models: &[String],
+    goat_model_ids: &[String],
+    minimax_model_ids: &[String],
+    kimi_model_ids: &[String],
+    ollama_model_ids: &[String],
+    ollama_pinned_model_ids: &[String],
+) -> Vec<PublishedAlias> {
+    let _ = go_model_ids;
+    published_routeable_in(&build_sealed_registry(
+        zen_free_models,
+        goat_model_ids,
+        minimax_model_ids,
+        kimi_model_ids,
+        ollama_model_ids,
+        ollama_pinned_model_ids,
+    ))
+}
+
 fn go_catalog_alias(model_id: &str) -> String {
     model_id
         .trim()
@@ -1146,6 +1294,18 @@ pub fn canonical_alias_for_provider_model(
             .map(str::to_string)
             .unwrap_or_default();
     }
+    if provider_id == OLLAMA_PROVIDER_ID {
+        let stem = ollama_catalog_stem(upstream_model);
+        return if is_code_owned_alias(&registry, stem)
+            && ocg_domain::protocol::ollama_cloud_shared_alias_stems()
+                .iter()
+                .any(|authorized| authorized.eq_ignore_ascii_case(stem))
+        {
+            stem.to_string()
+        } else {
+            String::new()
+        };
+    }
     if provider_id == CUSTOM_PROVIDER_ID {
         return upstream_model.trim().to_string();
     }
@@ -1224,6 +1384,33 @@ pub fn routeable_aliases_for_with_extended_catalogs(
     )
 }
 
+/// Ollama-aware family alias list: shared aliases whose stem guard (or
+/// administrator pin) currently binds an Ollama catalog id.
+#[allow(clippy::too_many_arguments)] // positional parity with the sibling catalog overlays
+pub fn routeable_aliases_for_with_sealed_catalogs(
+    provider_id: &str,
+    offering_id: &str,
+    zen_free_models: &[String],
+    goat_model_ids: &[String],
+    minimax_model_ids: &[String],
+    kimi_model_ids: &[String],
+    ollama_model_ids: &[String],
+    ollama_pinned_model_ids: &[String],
+) -> Vec<String> {
+    routeable_aliases_for_in(
+        &build_sealed_registry(
+            zen_free_models,
+            goat_model_ids,
+            minimax_model_ids,
+            kimi_model_ids,
+            ollama_model_ids,
+            ollama_pinned_model_ids,
+        ),
+        provider_id,
+        offering_id,
+    )
+}
+
 pub fn is_published_alias(name: &str) -> bool {
     matches!(resolve(name), Ok(ResolvedModel::Alias { .. }))
 }
@@ -1236,6 +1423,28 @@ type ResolveCatalogs =
 type RouteableWithZen = fn(&str, &str, &[String]) -> Vec<String>;
 type RouteableProviderExtendedCatalogs =
     fn(&str, &str, &[String], &[String], &[String], &[String]) -> Vec<String>;
+type ResolveSealedCatalogs = fn(
+    &str,
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+) -> Result<ResolvedModel, ResolveError>;
+type RouteableSealedCatalogs = fn(
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+    &[String],
+) -> Vec<PublishedAlias>;
+type RouteableProviderSealedCatalogs =
+    fn(&str, &str, &[String], &[String], &[String], &[String], &[String], &[String]) -> Vec<String>;
 
 const _: ResolveName = resolve;
 const _: ResolveCustom = resolve_with_custom;
@@ -1249,6 +1458,9 @@ const _: fn(&[String], &[String]) -> Vec<PublishedAlias> =
 const _: fn(&str, &str) -> Vec<String> = routeable_aliases_for;
 const _: RouteableWithZen = routeable_aliases_for_with_zen;
 const _: RouteableProviderExtendedCatalogs = routeable_aliases_for_with_extended_catalogs;
+const _: ResolveSealedCatalogs = resolve_with_sealed_catalogs;
+const _: RouteableSealedCatalogs = published_routeable_aliases_with_sealed_catalogs;
+const _: RouteableProviderSealedCatalogs = routeable_aliases_for_with_sealed_catalogs;
 const _: fn(&str) -> bool = is_published_alias;
 
 #[cfg(test)]
@@ -2390,5 +2602,287 @@ mod tests {
             resolve_with_extended_catalogs("vendor/shared", &[], &[], &[], &[], &shared, &shared)
                 .unwrap_err();
         assert_eq!(error.code(), Some(AMBIGUOUS_MODEL_ID));
+    }
+
+    fn resolve_ollama(
+        requested: &str,
+        ollama: &[&str],
+        pinned: &[&str],
+    ) -> Result<ResolvedModel, ResolveError> {
+        let ollama_models: Vec<String> = ollama.iter().map(|id| id.to_string()).collect();
+        let pinned_models: Vec<String> = pinned.iter().map(|id| id.to_string()).collect();
+        resolve_with_sealed_catalogs(
+            requested,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &ollama_models,
+            &pinned_models,
+        )
+    }
+
+    fn published_ollama(ollama: &[&str], pinned: &[&str]) -> Vec<PublishedAlias> {
+        let ollama_models: Vec<String> = ollama.iter().map(|id| id.to_string()).collect();
+        let pinned_models: Vec<String> = pinned.iter().map(|id| id.to_string()).collect();
+        published_routeable_aliases_with_sealed_catalogs(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &ollama_models,
+            &pinned_models,
+        )
+    }
+
+    #[test]
+    fn ollama_source_never_hardcodes_date_tagged_snapshot_ids() {
+        let production = production_source(include_str!("alias.rs"));
+        let bytes = production.as_bytes();
+        for (index, window) in bytes.windows(5).enumerate() {
+            if window[0] == b':'
+                && window[1..5].iter().all(u8::is_ascii_digit)
+                && !window[1..5].iter().all(|digit| *digit == b'0')
+            {
+                let context =
+                    &production[index.saturating_sub(24)..(index + 8).min(production.len())];
+                panic!(
+                    "date-tagged snapshot ids are runtime catalog data and must stay out of alias.rs: ...{context}..."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ollama_overlay_appends_shared_alias_mappings_without_stealing_publication() {
+        match resolve_ollama(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+            &["deepseek-v4-flash:0731", "gpt-oss:20b", "gpt-oss:120b"],
+            &[],
+        )
+        .unwrap()
+        {
+            ResolvedModel::Alias {
+                alias, mappings, ..
+            } => {
+                assert_eq!(alias, "deepseek-v4-flash");
+                assert!(
+                    mappings.iter().any(ProviderMapping::is_opencode_go),
+                    "Go keeps owning the shared alias"
+                );
+                assert!(mappings.iter().any(|mapping| {
+                    mapping.is_ollama_cloud()
+                        && mapping.routeable
+                        && mapping.upstream_model == "deepseek-v4-flash:0731"
+                }));
+                assert!(
+                    !mappings.iter().any(|mapping| {
+                        mapping.is_ollama_cloud() && mapping.upstream_model == "gpt-oss:20b"
+                    }),
+                    "size-variant stems must not bind the shared alias"
+                );
+            }
+            other => panic!("expected shared alias, got {other:?}"),
+        }
+
+        // Exact catalog ids (with `:` tags) pin raw; no cross-account fallback.
+        for exact in ["deepseek-v4-flash:0731", "gpt-oss:20b", "gpt-oss:120b"] {
+            match resolve_ollama(
+                exact,
+                &["deepseek-v4-flash:0731", "gpt-oss:20b", "gpt-oss:120b"],
+                &[],
+            )
+            .unwrap()
+            {
+                ResolvedModel::PinnedRaw { requested, mapping } => {
+                    assert_eq!(requested, exact);
+                    assert!(mapping.is_ollama_cloud());
+                    assert!(mapping.routeable);
+                    assert_eq!(mapping.upstream_model, exact);
+                    assert!(
+                        !ResolvedModel::PinnedRaw {
+                            requested: exact.to_string(),
+                            mapping: mapping.clone(),
+                        }
+                        .allows_cross_account_fallback()
+                    );
+                }
+                other => panic!("expected raw pin for `{exact}`, got {other:?}"),
+            }
+        }
+        assert!(resolve_ollama("deepseek-v4-flash:0999", &[], &[]).is_err());
+
+        // Size variants sharing one stem never create or publish a stem alias.
+        assert!(resolve_ollama("gpt-oss", &["gpt-oss:20b", "gpt-oss:120b"], &[]).is_err());
+        let published = published_ollama(
+            &["deepseek-v4-flash:0731", "gpt-oss:20b", "gpt-oss:120b"],
+            &[],
+        );
+        assert!(
+            !published
+                .iter()
+                .any(|item| item.alias == "gpt-oss" || item.alias.contains(':')),
+            "exact ids and unpinned stems must stay off GET /v1/models"
+        );
+        let flash = published
+            .iter()
+            .find(|item| item.alias == "deepseek-v4-flash")
+            .expect("the shared alias keeps its existing publication");
+        assert_eq!(flash.owned_by, OPENCODE_PROVIDER_ID);
+    }
+
+    #[test]
+    fn ollama_overlay_rotates_snapshot_bindings_without_code_changes() {
+        // Old tag bound...
+        match resolve_ollama("deepseek-v4-pro", &["deepseek-v4-pro:0731"], &[]).unwrap() {
+            ResolvedModel::Alias { mappings, .. } => assert!(mappings.iter().any(|mapping| {
+                mapping.is_ollama_cloud() && mapping.upstream_model == "deepseek-v4-pro:0731"
+            })),
+            other => panic!("expected alias, got {other:?}"),
+        }
+        // ...upstream rotates the unique tag, refresh rebinds automatically.
+        match resolve_ollama("deepseek-v4-pro", &["deepseek-v4-pro:0915"], &[]).unwrap() {
+            ResolvedModel::Alias { mappings, .. } => {
+                let ollama: Vec<_> = mappings
+                    .iter()
+                    .filter(|mapping| mapping.is_ollama_cloud())
+                    .collect();
+                assert_eq!(ollama.len(), 1);
+                assert_eq!(ollama[0].upstream_model, "deepseek-v4-pro:0915");
+            }
+            other => panic!("expected alias, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ollama_overlay_coexisting_tags_fail_closed_until_pinned() {
+        let coexisting: &[&str] = &["deepseek-v4-flash:0731", "deepseek-v4-flash:0915"];
+        // Ambiguous: this family's mapping drops out, the alias keeps serving
+        // its existing families, and nothing turns into a client 400.
+        match resolve_ollama(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS, coexisting, &[]).unwrap() {
+            ResolvedModel::Alias { mappings, .. } => {
+                assert!(
+                    mappings.iter().any(ProviderMapping::is_opencode_go),
+                    "Go keeps serving the shared alias"
+                );
+                assert!(
+                    !mappings.iter().any(ProviderMapping::is_ollama_cloud),
+                    "coexisting tags must fail closed, not guess"
+                );
+            }
+            other => panic!("expected shared alias, got {other:?}"),
+        }
+        // Exact ids stay routable raw pins during the ambiguity window.
+        assert!(matches!(
+            resolve_ollama("deepseek-v4-flash:0731", coexisting, &[]).unwrap(),
+            ResolvedModel::PinnedRaw { mapping, .. } if mapping.is_ollama_cloud()
+        ));
+        // One administrator pin resolves the ambiguity...
+        match resolve_ollama(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+            coexisting,
+            &["deepseek-v4-flash:0915"],
+        )
+        .unwrap()
+        {
+            ResolvedModel::Alias { mappings, .. } => {
+                let ollama: Vec<_> = mappings
+                    .iter()
+                    .filter(|mapping| mapping.is_ollama_cloud())
+                    .collect();
+                assert_eq!(ollama.len(), 1);
+                assert_eq!(ollama[0].upstream_model, "deepseek-v4-flash:0915");
+                assert!(ollama[0].routeable);
+            }
+            other => panic!("expected pinned binding, got {other:?}"),
+        }
+        // ...but two pins are still ambiguous: fail closed again.
+        match resolve_ollama(
+            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS,
+            coexisting,
+            coexisting,
+        )
+        .unwrap()
+        {
+            ResolvedModel::Alias { mappings, .. } => assert!(
+                !mappings.iter().any(ProviderMapping::is_ollama_cloud),
+                "double pins must not guess either"
+            ),
+            other => panic!("expected shared alias, got {other:?}"),
+        }
+        // Publication is invariant across all three states.
+        let before: Vec<String> = published_ollama(&[], &[])
+            .into_iter()
+            .map(|item| item.alias)
+            .collect();
+        let states: Vec<Vec<&str>> = vec![
+            vec![],
+            vec!["deepseek-v4-flash:0915"],
+            vec!["deepseek-v4-flash:0731", "deepseek-v4-flash:0915"],
+        ];
+        for pinned in states {
+            let current: Vec<String> = published_ollama(coexisting, &pinned)
+                .into_iter()
+                .map(|item| item.alias)
+                .collect();
+            assert_eq!(
+                current, before,
+                "Ollama must not add, remove, or duplicate published entries"
+            );
+        }
+    }
+
+    #[test]
+    fn ollama_family_alias_list_follows_the_stem_guard() {
+        let ollama_models: Vec<String> = ["deepseek-v4-flash:0731", "gpt-oss:120b"]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        assert_eq!(
+            routeable_aliases_for_with_sealed_catalogs(
+                OLLAMA_PROVIDER_ID,
+                OLLAMA_CLOUD_OFFERING_ID,
+                &[],
+                &[],
+                &[],
+                &[],
+                &ollama_models,
+                &[],
+            ),
+            vec!["deepseek-v4-flash".to_string()]
+        );
+        let coexisting: Vec<String> = ["deepseek-v4-flash:0731", "deepseek-v4-flash:0915"]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        assert!(
+            routeable_aliases_for_with_sealed_catalogs(
+                OLLAMA_PROVIDER_ID,
+                OLLAMA_CLOUD_OFFERING_ID,
+                &[],
+                &[],
+                &[],
+                &[],
+                &coexisting,
+                &[],
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            canonical_alias_for_provider_model(
+                OLLAMA_PROVIDER_ID,
+                "deepseek-v4-flash:0731",
+                &[],
+                &[],
+            ),
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            canonical_alias_for_provider_model(OLLAMA_PROVIDER_ID, "gpt-oss:120b", &[], &[]),
+            ""
+        );
     }
 }

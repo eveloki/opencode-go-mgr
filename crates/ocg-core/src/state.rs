@@ -96,6 +96,8 @@ pub struct CoreStateInner {
     pub zen_free_models_refresh: tokio::sync::Mutex<()>,
     pub provider_models_refresh: tokio::sync::Mutex<()>,
     pub provider_usage_refresh: tokio::sync::Mutex<()>,
+    /// Single-flight lock for the Ollama Cloud manual usage refresh.
+    pub ollama_usage_refresh: tokio::sync::Mutex<()>,
     provider_contracts: RwLock<Arc<crate::provider_contracts::EffectiveContractSet>>,
     pub routing: RoutingRuntime,
     pub browser: crate::browser::BrowserRuntime,
@@ -344,6 +346,7 @@ impl CoreStateInner {
             zen_free_models_refresh: tokio::sync::Mutex::new(()),
             provider_models_refresh: tokio::sync::Mutex::new(()),
             provider_usage_refresh: tokio::sync::Mutex::new(()),
+            ollama_usage_refresh: tokio::sync::Mutex::new(()),
             provider_contracts: RwLock::new(Arc::new(provider_contracts)),
             routing: RoutingRuntime::new(),
             browser: crate::browser::BrowserRuntime::new(),

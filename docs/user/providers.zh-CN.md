@@ -25,6 +25,8 @@
 
 MiniMax 与 Kimi 需要一个符合条件的账号 Key。MiniMax 刷新 `https://api.minimaxi.com/v1/models`；Kimi 刷新 `https://api.kimi.com/coding/v1/models`。保存的模型只激活代码内的密封映射；无法匹配的模型保留为精确 raw ID。MiniMax 把 M3、M2.7/M2.5/M2.1 的标准与 highspeed 变体，以及 M2 映射到对应的小写 kebab Alias。Kimi 映射为 `kimi-for-coding` → `kimi-k2.7-code`、`kimi-for-coding-highspeed` → `kimi-k2.7-code-highspeed`、`k3` → `kimi-k3`、`k3-256k` → `kimi-k3-256k`。转发始终保留每个准确的上游 ID。请求时不会临时访问上游。
 
+Ollama Cloud 刷新公开且无需鉴权的目录 `https://ollama.com/v1/models`，不选择账号；该端点只用于目录发现，绝不是 Key 校验。目录精确 id（含尺寸变体等 `: ` 标签）原样登记并保留为 raw pin。家族固定只支持 Chat Completions：发现的行会立即启用 Chat，Responses 与 Messages 不受支持，页面也不提供协议探测入口。Ollama Cloud 绝不创建或抢占已发布别名：它对别名的唯一贡献，是在剥离 `: ` 标签后恰好命中一个目录 id 时，向 Go 拥有的别名（如共享的 `deepseek-v4-flash`）追加一个可路由映射。上游轮换导致同词干两个快照并存时，该映射自动退出——别名仍由既有家族照常服务，直到你在矩阵中钉定一个精确 id；钉定会被后续刷新尊重。带日期标签的快照 id 是运行时目录数据，绝不出现在代码或发版中。
+
 首次成功刷新前，内置静态目录只是初始预设；刷新成功后，保存的官方快照成为权威目录并替代静态预设。刷新新增的模型会出现在矩阵中。OpenCode Go 与 Command Code 的新增协议单元格默认关闭，只有手动打开或测试成功后才会启用；MiniMax CN 与 Kimi Code CN 则直接启用密封合约中的 Chat Completions，Responses 与 Messages 不受支持。仍留在目录中的模型会保留既有覆盖与探测结果；刷新失败或结果为空时继续保留旧快照。
 
 Custom API 继续使用账号所有的公开名称 → 上游 ID 映射，发现结果不会静默替换它们。账号表单里的 **获取模型** 只是未保存表单辅助，且只返回上游 ID。选择一个 ID 时，原样导入为“公开名称 = 上游 ID”，不剥离后缀、不生成 Alias。Command Code 使用官方公开的 `/models` 目录：GOAT 预设默认开启，后续发现的额外模型默认关闭，只有在矩阵中开启其受支持协议后才会供应；不再存在独立的 Max 或账号级 GOAT/全部模式。
@@ -33,7 +35,7 @@ Custom API 继续使用账号所有的公开名称 → 上游 ID 映射，发现
 
 当某个供应商的模型/协议单元格全部关闭时，该供应商不再产生路由。带鉴权的下游 `GET /v1/models` 只公布可路由的公开名称；raw-only 身份和 raw 名称冲突都会排除。歧义 raw 身份以 `ambiguous_model_id` 失败，绝不请求上游。
 
-OpenCode Go 与 Zen Free 的每行都有 **测试** 按钮，不需要指定账号。对于该模型的每个协议，供应商会按已保存的路由顺序自动尝试符合条件的账号，并在首次成功后停止。Popconfirm 会提示这些真实最小请求可能消耗额度。Command Code GOAT、MiniMax CN、Kimi Code CN 与 Custom 端点范围不显示测试按钮，因为这些适配器不提供该 V3 协议探测操作。模型必须属于当前供应商目录；通过校验后会真正测试三个协议端点，包括静态表尚未收录的新拉取模型。页面会在矩阵上方逐项展示成功、失败或跳过状态、HTTP 状态、可读的上游错误消息，以及上游给出时的安全帮助/计费链接；每个真实账号尝试都会写入脱敏的请求日志，协议探测内容不会进入运行日志。单个账号失败不会禁用其他符合条件账号可以服务的协议。
+OpenCode Go 与 Zen Free 的每行都有 **测试** 按钮，不需要指定账号。对于该模型的每个协议，供应商会按已保存的路由顺序自动尝试符合条件的账号，并在首次成功后停止。Popconfirm 会提示这些真实最小请求可能消耗额度。Command Code GOAT、MiniMax CN、Kimi Code CN、Ollama Cloud 与 Custom 端点范围不显示测试按钮，因为这些适配器不提供该 V3 协议探测操作。模型必须属于当前供应商目录；通过校验后会真正测试三个协议端点，包括静态表尚未收录的新拉取模型。页面会在矩阵上方逐项展示成功、失败或跳过状态、HTTP 状态、可读的上游错误消息，以及上游给出时的安全帮助/计费链接；每个真实账号尝试都会写入脱敏的请求日志，协议探测内容不会进入运行日志。单个账号失败不会禁用其他符合条件账号可以服务的协议。
 
 **价格** 按所选供应商限定范围。**刷新价格表** 只抓取并校验当前所选 Provider 自己的官方来源。OpenCode 与 Command Code 的 revision 和最后成功快照彼此独立；一个失败不会动另一个。以后某个 Provider 若包含多个有价格的 Plan，一次操作也只刷新该 Provider 内的 Plan。刷新仍只能手动发起：
 
@@ -41,6 +43,7 @@ OpenCode Go 与 Zen Free 的每行都有 **测试** 按钮，不需要指定账�
 - Command Code GOAT 展示从 `https://commandcode.ai/docs/plans/goat` 保存的官方费率快照，不再在供应商页展示订阅月费或时间窗口额度卡。每个已定价模型的应用倍率都可手动修改并保存；新请求使用保存后的 Provider revision 计算，缺失或歧义行仍为 unpriced。刷新若将覆盖手动倍率会先请求确认。它与 OpenCode Go 分开；账号卡会把 OCG 内已定价请求日志投影到本地 `$14 / $35 / $70` 三个窗口，并允许手工修正，但不会把这称为官方实时用量。
 - Zen Free 无价格（额度按出口 IP 共享）。
 - Custom API 为 unpriced：成功转发记 `cost_state=unknown`，不扣额度，也没有官方用量刷新。
+- Ollama Cloud unpriced：转发按 `cost_state=unpriced` 记账，不做 Go 价格换算；用量来自可选的 Cookie 抓取，目标固定为 `https://ollama.com/settings` 页（手动刷新，30 秒限速，失败按 5 分钟 → 15 分钟 → 1 小时 → 6 小时固定退避）。用量失败绝不写推理冷却，也不影响路由资格。
 - MiniMax CN 与 Kimi Code CN 在 OCG 内为 unpriced，但账号卡可手工读取官方订阅窗口（`/token_plan/remains` 与 `/usages`）。这些快照只用于展示，不自动轮询，也不影响推理资格。
 
 不存在按模型划分的额度池。

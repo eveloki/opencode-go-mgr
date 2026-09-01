@@ -36,6 +36,13 @@ pub mod selector;
 #[doc(hidden)]
 pub mod protocol;
 
+/// Pure provider wire normalization (`Bytes -> Bytes` / `Value -> Value`).
+///
+/// Public only as the cross-crate bridge; the host crate's `gateway::wire`
+/// facade keeps these paths crate-private.
+#[doc(hidden)]
+pub mod wire;
+
 #[cfg(test)]
 mod source_boundary {
     use std::collections::{BTreeMap, BTreeSet};
@@ -49,7 +56,8 @@ mod source_boundary {
         Token,
     };
 
-    const ALLOWED_DEPENDENCIES: &[&str] = &["anyhow", "base64", "ocg-domain", "serde_json"];
+    const ALLOWED_DEPENDENCIES: &[&str] =
+        &["anyhow", "base64", "bytes", "ocg-domain", "serde_json"];
     const ALLOWED_DEV_DEPENDENCIES: &[&str] = &["syn", "toml"];
     const FORBIDDEN_IDENTIFIERS: &[&str] = &[
         "CoreState",

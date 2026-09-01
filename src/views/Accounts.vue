@@ -104,6 +104,7 @@
           :catalog="providerCatalog"
           :usage="getUsage(account.id)"
           :provider-usage="providerUsageMap[account.id] ?? null"
+          :ollama-usage="ollamaUsageMap[account.id] ?? null"
           :limits="usageLimitsFor(account)"
           :edits="usageEdits[account.id]"
           :now="now"
@@ -281,7 +282,12 @@ import type {
 } from "../api/dashboard";
 import { isCooling } from "../domain/accounts-usage.ts";
 import { accountIsReady, accountMenuOptions } from "../domain/account-display.ts";
-import { isCommandCodeGoatAccount, isOfficialCnPlanAccount, isZenFreeAccount } from "../domain/account-providers.ts";
+import {
+  isCommandCodeGoatAccount,
+  isOfficialCnPlanAccount,
+  isOllamaCloudAccount,
+  isZenFreeAccount,
+} from "../domain/account-providers.ts";
 import {
   executeCustomAccountEdit,
   isCustomApiAccount,
@@ -385,6 +391,7 @@ const {
   loadQuotaLimits,
   loadAccountUsage,
   retryQuotaLimits,
+  ollamaUsageMap,
 } = useAccountUsage(accounts, now);
 
 const {
@@ -771,6 +778,7 @@ function removeAccountState(id: string): void {
 function accountHasUsageDisplay(account: Account): boolean {
   return isCommandCodeGoatAccount(account)
     || isOfficialCnPlanAccount(account)
+    || isOllamaCloudAccount(account)
     || (account.provider_id === "opencode" && account.offering_id === "go");
 }
 
@@ -821,6 +829,7 @@ async function loadAccounts() {
       quotaLimits.value
       || loaded.some(isCommandCodeGoatAccount)
       || loaded.some(isOfficialCnPlanAccount)
+      || loaded.some(isOllamaCloudAccount)
     ) {
       await mapWithConcurrency(
         loaded.filter((account) => (
@@ -828,6 +837,7 @@ async function loadAccounts() {
           && (
             isCommandCodeGoatAccount(account)
             || isOfficialCnPlanAccount(account)
+            || isOllamaCloudAccount(account)
             || (
               quotaLimits.value
               && account.provider_id === "opencode"
@@ -907,12 +917,20 @@ async function onFormSave(payload: AccountInput | AccountFormPayload) {
       notes: payload.notes ?? "",
     };
     if (payload.key !== undefined) update.key = payload.key;
+    const ollamaCookie = (payload as AccountFormPayload).ollama_cookie;
+    const wantsOllamaCookieWrite = isOllamaCloudAccount(editing) && ollamaCookie !== undefined;
     busy.value = true;
     try {
       const saved = await runWithFreshSettingsRevision((revision) => dashboardApi.updateAccount(editing.id, {
         ...update,
         expected_revision: revision,
       }));
+      if (wantsOllamaCookieWrite) {
+        // providerApi.setOllamaCookie drives its own control-plane tokens,
+        // mirroring the Custom edit flow: a stale token 409s into the shared
+        // conflict recovery below.
+        await providerApi.setOllamaCookie(saved.id, ollamaCookie ?? null);
+      }
       replaceAccount(saved);
       // purchase_date defines the monthly usage window and changing it clears
       // the persisted calibration offset, so the local usage snapshot must be

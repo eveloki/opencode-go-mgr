@@ -97,6 +97,35 @@
         </n-form-item>
 
         <n-form-item
+          v-if="isEdit && isOllamaPlan"
+          path="ollamaCookie"
+          :label="t('网页会话 Cookie（可选）')"
+          class="full-width-field"
+        >
+          <n-input
+            v-model:value="form.ollamaCookie"
+            :input-props="{ 'aria-label': t('网页会话 Cookie（可选）') }"
+            type="password"
+            show-password-on="click"
+            :placeholder="t('粘贴浏览器 Cookie 请求头，如 session=...; theme=...；留空保持不变')"
+          >
+            <template #suffix>
+              <n-button
+                text
+                size="tiny"
+                type="warning"
+                :title="t('清除已保存的网页会话 Cookie，用量状态一并归零')"
+                @click="clearOllamaCookieField = true"
+              >
+                {{ t('清除') }}
+              </n-button>
+            </template>
+          </n-input>
+          <template v-if="ollamaCookieIssue" #feedback>
+            <span role="alert">{{ ollamaCookieIssue }}</span>
+          </template>
+        </n-form-item>
+        <n-form-item
           v-if="isCustomPlan"
           path="endpointUrl"
           :label="t('API 地址')"
@@ -302,6 +331,8 @@ export type AccountFormPayload = {
     upstream_model: string;
     protocol: AccountProtocol;
   }>;
+  /** Ollama Cloud edit only; pasted web-session Cookie request header. */
+  ollama_cookie?: string | null;
 };
 
 type FormModel = {
@@ -314,6 +345,7 @@ type FormModel = {
   endpointUrl: string;
   upstreamProtocol: AccountProtocol | null;
   modelCapabilities: EditableModelCapability[];
+  ollamaCookie: string;
 };
 
 type EditableModelCapability = AccountCreateCapability & { row_id: number };
@@ -353,6 +385,9 @@ useLocalizedModalCloseLabel(toRef(props, "show"), "account-modal");
 
 const formRef = ref<FormInst | null>(null);
 const form = ref<FormModel>(blankForm());
+// One-shot flag: the next save clears the stored web-session Cookie
+// (payload.ollama_cookie = null) instead of leaving it unchanged.
+const clearOllamaCookieField = ref(false);
 const nameWasEdited = ref(false);
 const formError = ref("");
 const discoveringModels = ref(false);
@@ -381,6 +416,37 @@ const effectivePlan = computed<PlanDefinition | null>(() => {
 });
 
 const isCustomPlan = computed(() => effectivePlan.value?.id === "custom-endpoint");
+const isOllamaPlan = computed(() => effectivePlan.value?.id === "ollama-cloud");
+
+/** Mirrors the server-side Cookie header contract for inline feedback. */
+const ollamaCookieIssue = computed(() => {
+  if (!isOllamaPlan.value || !isEdit.value) return "";
+  const raw = form.value.ollamaCookie.trim();
+  if (!raw) return "";
+  if (raw.length > 16 * 1024) return t("Cookie 超过 16KB 上限");
+  const seen = new Set<string>();
+  for (const part of raw.split(";")) {
+    const pair = part.trim();
+    if (!pair) continue;
+    const eq = pair.indexOf("=");
+    if (eq <= 0 || eq === pair.length - 1) {
+      return t("请粘贴 Cookie 请求头（name=value 形式），而不是 Set-Cookie 响应头");
+    }
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (value.includes('"') || value.includes(",")) {
+      return t("Cookie 值包含非法字符: {name}", { name });
+    }
+    const lower = name.toLowerCase();
+    if (["path", "domain", "expires", "max-age", "samesite", "same-site", "secure", "httponly", "partitioned", "priority"].includes(lower)) {
+      return t("请粘贴 Cookie 请求头（name=value 形式），而不是 Set-Cookie 响应头");
+    }
+    if (name.startsWith("$")) return t("Cookie 名称不能以 $ 开头");
+    if (seen.has(lower)) return t("Cookie 名称重复: {name}", { name });
+    seen.add(lower);
+  }
+  return "";
+});
 
 const offeringOptions = computed(() => {
   const plan = effectivePlan.value;
@@ -523,6 +589,7 @@ const rules = computed<FormRules>(() => {
 watch(() => props.show, (show) => {
   if (show) {
     form.value = props.account ? formFromAccount(props.account) : blankForm();
+    clearOllamaCookieField.value = false;
     nameWasEdited.value = isEdit.value;
     formRef.value?.restoreValidation();
     formError.value = "";
@@ -595,6 +662,7 @@ function blankForm(): FormModel {
     endpointUrl: "",
     upstreamProtocol: "chat_completions",
     modelCapabilities: [],
+    ollamaCookie: "",
   };
 }
 
@@ -616,6 +684,7 @@ function formFromAccount(account: Account): FormModel {
     endpointUrl: account.custom_config?.endpoint_url ?? "",
     upstreamProtocol: account.custom_config?.upstream_protocol ?? "chat_completions",
     modelCapabilities,
+    ollamaCookie: "",
   };
 }
 
@@ -719,6 +788,13 @@ async function handleSave() {
     if (form.value.key.trim()) {
       payload.key = form.value.key.trim();
     }
+    if (isOllamaPlan.value) {
+      if (form.value.ollamaCookie.trim()) {
+        payload.ollama_cookie = form.value.ollamaCookie.trim();
+      } else if (clearOllamaCookieField.value) {
+        payload.ollama_cookie = form.value.ollamaCookie.trim();
+      }
+    }
     if (isCustomPlan.value) {
       payload.endpoint_url = form.value.endpointUrl.trim();
       payload.upstream_protocol = form.value.upstreamProtocol ?? undefined;
@@ -727,6 +803,10 @@ async function handleSave() {
         upstream_model: capability.upstream_model,
         protocol: form.value.upstreamProtocol ?? "chat_completions",
       }));
+    }
+    if (ollamaCookieIssue.value) {
+      formError.value = ollamaCookieIssue.value;
+      return;
     }
     emit("save", payload);
     return;

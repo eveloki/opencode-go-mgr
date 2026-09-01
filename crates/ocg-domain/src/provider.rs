@@ -11,8 +11,8 @@ use crate::catalog::{
 use crate::ids::{
     ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID,
     CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID, KIMI_CN_OFFERING_ID, KIMI_PROVIDER_ID,
-    MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-    OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
+    MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID, OLLAMA_PROVIDER_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -51,6 +51,12 @@ pub const KIMI_CN_MODELS_PATH: &str = "/models";
 pub const KIMI_CN_USAGE_URL: &str = "https://api.kimi.com/coding/v1/usages";
 pub const KIMI_CN_MODEL_SOURCE: &str = "kimi_cn_get_models";
 pub const MAX_KIMI_CN_MODELS_CATALOG: usize = 1_000;
+
+/// Ollama Cloud surface constants live in [`crate::ids`] next to the provider
+/// identity because the Cookie usage page URL is not an API endpoint. The
+/// model source below feeds the Provider catalog refresh evidence rows.
+pub const OLLAMA_CLOUD_MODEL_SOURCE: &str = "ollama_cloud_get_models";
+pub const MAX_OLLAMA_CLOUD_MODELS_CATALOG: usize = 1_000;
 
 /// Models included by the GOAT subscription page. These are the default-on
 /// rows in the Provider model/protocol matrix. Models discovered beyond this
@@ -294,6 +300,7 @@ const MINIMAX_CN_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
 const KIMI_CN_FORM_FIELDS: [PlanFormField; 4] =
     [NAME_FIELD, KEY_FIELD, PURCHASE_DATE_FIELD, NOTES_FIELD];
+const OLLAMA_CLOUD_FORM_FIELDS: [PlanFormField; 3] = [NAME_FIELD, KEY_FIELD, NOTES_FIELD];
 const CUSTOM_FORM_FIELDS: [PlanFormField; 6] = [
     NAME_FIELD,
     KEY_FIELD,
@@ -332,7 +339,7 @@ const fn key_offering(provider_id: &'static str, offering_id: &'static str) -> B
     }
 }
 
-pub const BUILTIN_PLANS: [BuiltinPlan; 6] = [
+pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
     BuiltinPlan {
         offering: key_offering(OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
         display_name: "OpenCode Go",
@@ -442,6 +449,28 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 6] = [
         form_fields: &KIMI_CN_FORM_FIELDS,
     },
     BuiltinPlan {
+        offering: key_offering(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID),
+        display_name: "Ollama Cloud",
+        display_family: "Ollama",
+        creation_availability: CreationAvailability::Available,
+        creation_unavailable_reason: None,
+        verification_policy: VerificationPolicy::NotRequired,
+        verification_runtime_availability: "not_applicable",
+        // Enablement writes stay rejected while this offering is marked
+        // non-routable (fail-closed merge).
+        routable: false,
+        managed_registration: false,
+        pricing_availability: "unpriced",
+        usage_availability: "local_state",
+        manual_usage_calibration: false,
+        quota_unit: "request",
+        model_source: OLLAMA_CLOUD_MODEL_SOURCE,
+        key_prefix: None,
+        auth_schemes: &BEARER_AUTH,
+        upstream_protocols: &CHAT_PROTOCOLS,
+        form_fields: &OLLAMA_CLOUD_FORM_FIELDS,
+    },
+    BuiltinPlan {
         offering: key_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
         display_name: "Custom API",
         display_family: "Custom",
@@ -463,13 +492,14 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 6] = [
     },
 ];
 
-pub const BUILTIN_OFFERINGS: [BuiltinOffering; 6] = [
+pub const BUILTIN_OFFERINGS: [BuiltinOffering; 7] = [
     BUILTIN_PLANS[0].offering,
     BUILTIN_PLANS[1].offering,
     BUILTIN_PLANS[2].offering,
     BUILTIN_PLANS[3].offering,
     BUILTIN_PLANS[4].offering,
     BUILTIN_PLANS[5].offering,
+    BUILTIN_PLANS[6].offering,
 ];
 
 pub fn default_provider_id() -> String {
@@ -508,16 +538,18 @@ pub enum ProviderAdapterKind {
     CommandCodeGoat,
     MiniMaxCn,
     KimiCn,
+    OllamaCloud,
     ConfigurableHttp,
 }
 
 impl ProviderAdapterKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::OpenCodeGo,
         Self::ZenFree,
         Self::CommandCodeGoat,
         Self::MiniMaxCn,
         Self::KimiCn,
+        Self::OllamaCloud,
         Self::ConfigurableHttp,
     ];
 
@@ -528,6 +560,7 @@ impl ProviderAdapterKind {
             (COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID) => Some(Self::CommandCodeGoat),
             (MINIMAX_PROVIDER_ID, MINIMAX_CN_OFFERING_ID) => Some(Self::MiniMaxCn),
             (KIMI_PROVIDER_ID, KIMI_CN_OFFERING_ID) => Some(Self::KimiCn),
+            (OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID) => Some(Self::OllamaCloud),
             (CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID) => Some(Self::ConfigurableHttp),
             _ => None,
         }
@@ -540,6 +573,7 @@ impl ProviderAdapterKind {
             Self::CommandCodeGoat => "command_code_goat",
             Self::MiniMaxCn => "minimax_cn",
             Self::KimiCn => "kimi_cn",
+            Self::OllamaCloud => "ollama_cloud",
             Self::ConfigurableHttp => "configurable_http",
         }
     }
@@ -553,6 +587,7 @@ impl ProviderAdapterKind {
             Self::CommandCodeGoat => Some(COMMAND_CODE_PROVIDER_ID),
             Self::MiniMaxCn => Some(MINIMAX_PROVIDER_ID),
             Self::KimiCn => Some(KIMI_PROVIDER_ID),
+            Self::OllamaCloud => Some(OLLAMA_PROVIDER_ID),
             Self::ConfigurableHttp => None,
         }
     }
@@ -563,7 +598,8 @@ impl ProviderAdapterKind {
             | Self::ZenFree
             | Self::CommandCodeGoat
             | Self::MiniMaxCn
-            | Self::KimiCn => true,
+            | Self::KimiCn
+            | Self::OllamaCloud => true,
             Self::ConfigurableHttp => false,
         }
     }
@@ -571,7 +607,7 @@ impl ProviderAdapterKind {
     pub const fn protocol_probe_supported(self) -> bool {
         match self {
             Self::OpenCodeGo | Self::ZenFree | Self::ConfigurableHttp => true,
-            Self::CommandCodeGoat | Self::MiniMaxCn | Self::KimiCn => false,
+            Self::CommandCodeGoat | Self::MiniMaxCn | Self::KimiCn | Self::OllamaCloud => false,
         }
     }
 }
@@ -597,6 +633,12 @@ pub struct MiniMaxCnAdapter;
 /// Zero-sized Kimi Code CN adapter identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct KimiCnAdapter;
+
+/// Zero-sized Ollama Cloud adapter identity. Fixed-origin Chat-Completions
+/// route with Bearer auth; the offering is non-routable in the catalog until
+/// the enable bit is deliberately opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OllamaCloudAdapter;
 
 /// Zero-sized Configurable HTTP adapter identity (Custom API). Not a base class
 /// other adapters inherit from.
@@ -922,6 +964,7 @@ impl sealed::Sealed for ZenFreeAdapter {}
 impl sealed::Sealed for CommandCodeGoatAdapter {}
 impl sealed::Sealed for MiniMaxCnAdapter {}
 impl sealed::Sealed for KimiCnAdapter {}
+impl sealed::Sealed for OllamaCloudAdapter {}
 impl sealed::Sealed for ConfigurableHttpAdapter {}
 
 /// Static model-catalog capability contract. Sealed to the five concrete
@@ -997,6 +1040,7 @@ impl ProviderAdapterKind {
             Self::CommandCodeGoat => ProviderCapabilities::compose(CommandCodeGoatAdapter, plan),
             Self::MiniMaxCn => ProviderCapabilities::compose(MiniMaxCnAdapter, plan),
             Self::KimiCn => ProviderCapabilities::compose(KimiCnAdapter, plan),
+            Self::OllamaCloud => ProviderCapabilities::compose(OllamaCloudAdapter, plan),
             Self::ConfigurableHttp => ProviderCapabilities::compose(ConfigurableHttpAdapter, plan),
         }
     }
@@ -1483,6 +1527,103 @@ impl CardCapabilities for KimiCnAdapter {
     }
 }
 
+impl ModelCatalogAdapter for OllamaCloudAdapter {
+    fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
+        ModelCatalogDescriptor {
+            kind: ModelCatalogKind::ProviderPersistedSnapshot,
+            catalog_source: plan.model_source,
+            publishes_client_aliases: true,
+            admin_explicit_refresh: true,
+            overlays_declared_ids: false,
+            snapshot_is_adapter_input_only: false,
+        }
+    }
+}
+
+impl InferenceAdapter for OllamaCloudAdapter {
+    fn inference(plan: BuiltinPlan) -> InferenceRoutingDescriptor {
+        InferenceRoutingDescriptor {
+            catalog_routable: plan.routable,
+            production_inference: true,
+            channel: Some(InferenceChannelKind::Go),
+            credential_kind: plan.offering.credential_kind,
+            quota_scope: plan.offering.quota_scope,
+            auth: InferenceAuthDescriptor::Bearer,
+            follow_redirects: false,
+            origin: InferenceOriginKind::OfficialFixed,
+            loopback_test_seam_only: false,
+        }
+    }
+}
+
+impl ProtocolProbeAdapter for OllamaCloudAdapter {
+    fn protocol_probe(_plan: BuiltinPlan) -> ProtocolProbeDescriptor {
+        ProtocolProbeDescriptor {
+            request_path_may_trial: false,
+            matrix: ProtocolMatrixKind::FixedChatCompletions,
+            unknown_zen_free_defaults_to_chat: false,
+            fallback_priority: &CHAT_PROTOCOLS,
+            explicit_probe: false,
+            structural_ceiling: StructuralProbeCeiling::Unavailable,
+        }
+    }
+}
+
+impl VerificationAdapter for OllamaCloudAdapter {
+    fn verification(plan: BuiltinPlan) -> VerificationDescriptor {
+        VerificationDescriptor {
+            policy: plan.verification_policy,
+            runtime_availability: plan.verification_runtime_availability,
+            never_auto_enable: false,
+            probe_first_declared_model: false,
+            uses_get_models: false,
+        }
+    }
+}
+
+impl UsageAdapter for OllamaCloudAdapter {
+    fn usage(plan: BuiltinPlan) -> UsageDescriptor {
+        UsageDescriptor {
+            catalog_availability: plan.usage_availability,
+            contract: UsageContractKind::LocalState,
+            // No official JSON usage API exists; the account-level Cookie
+            // settings scrape is a separate capability, not this endpoint.
+            endpoint: None,
+            experimental: false,
+            automatic_sync: false,
+            authoritative_for_quota: false,
+            affects_inference_eligibility: false,
+            publishes_capability: true,
+            manual_calibration: plan.manual_usage_calibration,
+            egress_ip_shared_cooldown_window: false,
+        }
+    }
+}
+
+impl PricingAdapter for OllamaCloudAdapter {
+    fn pricing(plan: BuiltinPlan) -> PricingDescriptor {
+        catalog_pricing(plan)
+    }
+}
+
+impl CardCapabilities for OllamaCloudAdapter {
+    fn card_capabilities(plan: BuiltinPlan) -> CardActionsDescriptor {
+        CardActionsDescriptor {
+            persisted_enable_allowed: plan.routable,
+            enable_requires_verification: false,
+            managed_registration: false,
+            fetch_zen_models: false,
+            discover_models: false,
+            usage_refresh: true,
+            manual_usage_calibration: plan.manual_usage_calibration,
+            connection_verify: CardVerifyAction::NotApplicable,
+            protocol_and_auth_immutable_after_create: false,
+            protocol_probe: false,
+            catalog_refresh: true,
+        }
+    }
+}
+
 impl ModelCatalogAdapter for ConfigurableHttpAdapter {
     fn model_catalog(plan: BuiltinPlan) -> ModelCatalogDescriptor {
         ModelCatalogDescriptor {
@@ -1809,7 +1950,8 @@ mod tests {
     use crate::ids::{
         ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         COMMAND_CODE_PROVIDER_ID, CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GO_OFFERING_ID,
-        GOAT_OFFERING_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
+        GOAT_OFFERING_ID, OLLAMA_CLOUD_OFFERING_ID, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+        OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_ID,
     };
 
     #[test]
@@ -1910,7 +2052,7 @@ mod tests {
 
     #[test]
     fn catalog_hardcodes_plans_and_keeps_unverified_offerings_unroutable() {
-        assert_eq!(BUILTIN_PLANS.len(), 6);
+        assert_eq!(BUILTIN_PLANS.len(), 7);
         let goat = builtin_plan(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID).unwrap();
         assert!(goat.routable);
         assert_eq!(goat.verification_policy, VerificationPolicy::NotRequired);
@@ -1954,6 +2096,30 @@ mod tests {
         assert!(plan_requires_custom_config(custom));
         assert!(is_custom_api(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID));
         assert!(!is_custom_api(OPENCODE_PROVIDER_ID, GO_OFFERING_ID));
+
+        let ollama = builtin_plan(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID).unwrap();
+        assert!(!ollama.routable, "Ollama Cloud must merge fail-closed");
+        assert_eq!(ollama.pricing_availability, "unpriced");
+        assert_eq!(ollama.usage_availability, "local_state");
+        assert_eq!(ollama.model_source, OLLAMA_CLOUD_MODEL_SOURCE);
+        assert_eq!(ollama.auth_schemes, &BEARER_AUTH);
+        assert_eq!(ollama.upstream_protocols, &CHAT_PROTOCOLS);
+        assert!(
+            !ollama
+                .upstream_protocols
+                .contains(&UpstreamProtocolKind::Responses)
+        );
+        assert!(
+            !ollama
+                .form_fields
+                .iter()
+                .any(|field| field.id == "purchase_date")
+        );
+        assert!(
+            !ProviderAdapterKind::from_offering(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID)
+                .unwrap()
+                .protocol_probe_supported()
+        );
 
         let go = builtin_plan(OPENCODE_PROVIDER_ID, GO_OFFERING_ID).unwrap();
         assert!(go.routable);
@@ -2149,6 +2315,13 @@ mod tests {
                     assert!(descriptor.inference.production_inference);
                     assert!(descriptor.inference.catalog_routable);
                 }
+                ProviderAdapterKind::OllamaCloud => {
+                    assert!(descriptor.inference.production_inference);
+                    assert!(
+                        !descriptor.inference.catalog_routable,
+                        "Ollama Cloud stays fail-closed until its enable bit is opened"
+                    );
+                }
             }
         }
         for kind in ProviderAdapterKind::ALL {
@@ -2160,7 +2333,53 @@ mod tests {
         assert_eq!(seen.len(), ProviderAdapterKind::ALL.len());
         assert!(ProviderAdapterKind::from_offering("unknown", "unknown").is_none());
         assert!(ProviderRegistry::get("unknown", "unknown").is_none());
-        assert_eq!(ProviderAdapterKind::ALL.len(), 6);
+        assert_eq!(ProviderAdapterKind::ALL.len(), 7);
+    }
+
+    #[test]
+    fn ollama_cloud_offering_rejects_enablement_and_protocol_probes_until_opened() {
+        // Contract for the fail-closed merge: while `routable` stays false the
+        // persisted enable bit must be rejected for every write path that
+        // consults the sealed registry, and the fixed-Chat family exposes no
+        // protocol-probe surface.
+        assert!(!offering_allows_enablement(
+            OLLAMA_PROVIDER_ID,
+            OLLAMA_CLOUD_OFFERING_ID
+        ));
+        let error =
+            ensure_enabled_offering_is_routable(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID, true)
+                .expect_err("Ollama Cloud enablement must be rejected while fail-closed");
+        assert!(matches!(
+            error,
+            ProviderBindingError::EnablementNotRoutable {
+                provider_id: OLLAMA_PROVIDER_ID,
+                offering_id: OLLAMA_CLOUD_OFFERING_ID,
+                display_name: "Ollama Cloud",
+            }
+        ));
+        assert!(error.to_string().contains("not routable"));
+        // Disabled drafts stay writable so accounts can be staged.
+        assert!(
+            ensure_enabled_offering_is_routable(
+                OLLAMA_PROVIDER_ID,
+                OLLAMA_CLOUD_OFFERING_ID,
+                false
+            )
+            .is_ok()
+        );
+        let descriptor =
+            ProviderRegistry::get(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID).unwrap();
+        assert_eq!(descriptor.kind, ProviderAdapterKind::OllamaCloud);
+        assert!(!descriptor.protocol_probe.explicit_probe);
+        assert!(!descriptor.card_actions.protocol_probe);
+        assert!(descriptor.card_actions.catalog_refresh);
+        assert!(!descriptor.card_actions.persisted_enable_allowed);
+        assert_eq!(descriptor.usage.contract, UsageContractKind::LocalState);
+        assert!(descriptor.card_actions.usage_refresh);
+        assert_eq!(
+            descriptor.model_catalog.kind,
+            ModelCatalogKind::ProviderPersistedSnapshot
+        );
     }
 
     #[test]
@@ -2318,6 +2537,7 @@ mod tests {
                 ProviderAdapterKind::CommandCodeGoat => compose(CommandCodeGoatAdapter, plan),
                 ProviderAdapterKind::MiniMaxCn => compose(MiniMaxCnAdapter, plan),
                 ProviderAdapterKind::KimiCn => compose(KimiCnAdapter, plan),
+                ProviderAdapterKind::OllamaCloud => compose(OllamaCloudAdapter, plan),
                 ProviderAdapterKind::ConfigurableHttp => compose(ConfigurableHttpAdapter, plan),
             };
             let descriptor =

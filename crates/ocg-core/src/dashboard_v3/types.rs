@@ -179,6 +179,9 @@ pub const CATALOG_TYPE_NAMES: &[&str] = &[
     "ApplicationConnectorPreview",
     "ApplicationConnectorCommitRequest",
     "ApplicationConnectorCommitResult",
+    "OllamaUsageStatus",
+    "OllamaCookieUpdate",
+    "OllamaUsageThrottleError",
 ];
 
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
@@ -2637,6 +2640,52 @@ pub struct UsageRefreshThrottleError {
     pub next_allowed_at: String,
 }
 
+/// GET `/accounts/{id}/ollama-usage` response. The Cookie itself never
+/// appears: `cookieConfigured` is the only Cookie fact the API exposes, and
+/// `snapshot` is the sanitized usage view from the last successful scrape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OllamaUsageStatus {
+    pub account_id: String,
+    pub cookie_configured: bool,
+    /// `unconfigured` | `ok` | `unauthorized` | `failed`.
+    pub status: String,
+    pub snapshot: Option<serde_json::Value>,
+    /// Sanitized failure reason from the most recent attempt (≤256 chars,
+    /// no HTML fragments or URL query strings); `null` after a success.
+    pub last_error: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_attempt_at: Option<String>,
+    pub next_eligible_at: Option<String>,
+    pub failure_streak: i64,
+    pub revision: u64,
+    pub process_generation: u64,
+}
+
+/// PUT `/accounts/{id}/ollama-cookie` body. A `null` (or absent) `cookie`
+/// clears the stored web session and resets the capability; a string is the
+/// pasted Cookie request header validated server-side before storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OllamaCookieUpdate {
+    #[serde(flatten)]
+    pub expectation: MutationExpectation,
+    pub cookie: Option<String>,
+}
+
+/// POST `/accounts/{id}/ollama-usage/refresh` throttle response (HTTP 429):
+/// the absolute instant the next manual attempt becomes eligible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OllamaUsageThrottleError {
+    pub code: String,
+    pub message: String,
+    pub next_allowed_at: String,
+}
+
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.
 ///
 /// Response types are generated with the serialize contract so `Option` fields
@@ -2738,9 +2787,12 @@ pub fn contract_schema() -> Value {
     include_type::<ApplicationConnectors>(&mut serialize);
     include_type::<ApplicationConnectorPreview>(&mut serialize);
     include_type::<ApplicationConnectorCommitResult>(&mut serialize);
+    include_type::<OllamaUsageStatus>(&mut serialize);
     let mut defs = serialize.take_definitions(true);
 
     let mut deserialize = SchemaSettings::draft2020_12().into_generator();
+    include_type::<OllamaCookieUpdate>(&mut deserialize);
+    include_type::<OllamaUsageThrottleError>(&mut deserialize);
     include_type::<MutationExpectation>(&mut deserialize);
     include_type::<SettingsUpdate>(&mut deserialize);
     include_type::<KeyCreate>(&mut deserialize);
@@ -4613,6 +4665,12 @@ mod tests {
         "ApplicationConnectorCommitResult",
     ];
 
+    const OLLAMA_USAGE_CATALOG_TYPES: &[&str] = &[
+        "OllamaUsageStatus",
+        "OllamaCookieUpdate",
+        "OllamaUsageThrottleError",
+    ];
+
     #[test]
     fn catalog_type_names_append_pricing_dtos_after_the_provider_prefix() {
         let prefix_len = ACCOUNTS_CATALOG_PREFIX.len() + PROVIDER_CATALOG_TYPES.len();
@@ -4697,7 +4755,12 @@ mod tests {
             &CATALOG_TYPE_NAMES[account_transfer_end..application_connector_end],
             APPLICATION_CONNECTOR_CATALOG_TYPES
         );
-        assert_eq!(CATALOG_TYPE_NAMES.len(), application_connector_end);
+        let ollama_usage_end = application_connector_end + OLLAMA_USAGE_CATALOG_TYPES.len();
+        assert_eq!(
+            &CATALOG_TYPE_NAMES[application_connector_end..ollama_usage_end],
+            OLLAMA_USAGE_CATALOG_TYPES
+        );
+        assert_eq!(CATALOG_TYPE_NAMES.len(), ollama_usage_end);
     }
 
     #[test]

@@ -176,6 +176,7 @@ fn policy_for_kind(kind: ProviderAdapterKind) -> ProviderErrorPolicy {
         ProviderAdapterKind::CommandCodeGoat
         | ProviderAdapterKind::MiniMaxCn
         | ProviderAdapterKind::KimiCn
+        | ProviderAdapterKind::OllamaCloud
         | ProviderAdapterKind::ConfigurableHttp => ProviderErrorPolicy {
             inference_401: Auth401Policy::RotatePersistAuthError,
             rate_limit_429: RateLimit429Policy::GenericFiveMinute,
@@ -411,6 +412,7 @@ mod tests {
                 ProviderAdapterKind::CommandCodeGoat
                 | ProviderAdapterKind::MiniMaxCn
                 | ProviderAdapterKind::KimiCn
+                | ProviderAdapterKind::OllamaCloud
                 | ProviderAdapterKind::ConfigurableHttp => {
                     assert_eq!(policy.inference_401, Auth401Policy::RotatePersistAuthError);
                     assert_eq!(policy.rate_limit_429, RateLimit429Policy::GenericFiveMinute);

@@ -141,7 +141,10 @@ export type DashboardApiV3 =
   | ApplicationConnectorPreviewRequest
   | ApplicationConnectorPreview
   | ApplicationConnectorCommitRequest
-  | ApplicationConnectorCommitResult;
+  | ApplicationConnectorCommitResult
+  | OllamaUsageStatus
+  | OllamaCookieUpdate
+  | OllamaUsageThrottleError;
 /**
  * Which listed models take the list-mode exception leg.
  */
@@ -1762,4 +1765,48 @@ export interface ApplicationConnectorCommitResult {
   connector: ApplicationConnectorItem;
   processGeneration: number;
   revision: number;
+}
+/**
+ * GET `/accounts/{id}/ollama-usage` response. The Cookie itself never
+ * appears: `cookieConfigured` is the only Cookie fact the API exposes, and
+ * `snapshot` is the sanitized usage view from the last successful scrape.
+ */
+export interface OllamaUsageStatus {
+  accountId: string;
+  cookieConfigured: boolean;
+  failureStreak: number;
+  lastAttemptAt: string | null;
+  /**
+   * Sanitized failure reason from the most recent attempt (≤256 chars,
+   * no HTML fragments or URL query strings); `null` after a success.
+   */
+  lastError: string | null;
+  lastSuccessAt: string | null;
+  nextEligibleAt: string | null;
+  processGeneration: number;
+  revision: number;
+  snapshot: any;
+  /**
+   * `unconfigured` | `ok` | `unauthorized` | `failed`.
+   */
+  status: string;
+}
+/**
+ * PUT `/accounts/{id}/ollama-cookie` body. A `null` (or absent) `cookie`
+ * clears the stored web session and resets the capability; a string is the
+ * pasted Cookie request header validated server-side before storage.
+ */
+export interface OllamaCookieUpdate {
+  cookie?: string | null;
+  expectedRevision: number;
+  processGeneration: number;
+}
+/**
+ * POST `/accounts/{id}/ollama-usage/refresh` throttle response (HTTP 429):
+ * the absolute instant the next manual attempt becomes eligible.
+ */
+export interface OllamaUsageThrottleError {
+  code: string;
+  message: string;
+  nextAllowedAt: string;
 }

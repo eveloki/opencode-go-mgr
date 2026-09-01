@@ -27,20 +27,30 @@ use crate::gateway::protocol::{
     ApiFormat, RequestPlan, command_code_supports_upstream, command_code_upstream_path,
     opencode_supports_upstream,
 };
+use crate::gateway::wire::WireNormalization;
 use crate::models::{Account, AppConfig, UpstreamChannel};
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_CHAT_COMPLETIONS_PATH, COMMAND_CODE_GOAT_HOST,
     COMMAND_CODE_GOAT_MESSAGES_PATH, COMMAND_CODE_GOAT_MODELS_PATH, CommandCodeGoatAdapter,
     ConfigurableHttpAdapter, CredentialKind, InferenceAuthDescriptor, KIMI_CN_BASE_URL,
     KIMI_CN_CHAT_COMPLETIONS_PATH, KimiCnAdapter, MINIMAX_CN_BASE_URL,
-    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MiniMaxCnAdapter, OpenCodeGoAdapter, ProviderAdapterKind,
-    ProviderRegistry, QuotaScope, UpstreamAuthScheme, ZEN_FREE_ACCOUNT_ID, ZenFreeAdapter,
+    MINIMAX_CN_CHAT_COMPLETIONS_PATH, MiniMaxCnAdapter, OllamaCloudAdapter, OpenCodeGoAdapter,
+    ProviderAdapterKind, ProviderRegistry, QuotaScope, UpstreamAuthScheme, ZEN_FREE_ACCOUNT_ID,
+    ZenFreeAdapter,
 };
 use crate::provider_contracts::EffectiveContractSet;
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 pub(crate) use crate::gateway::attempt::UpstreamAuth;
+
+// Fixed Ollama Cloud origin lives with the provider identities in the domain
+// crate; re-exported here so route construction reads like the other fixed
+// providers.
+pub use crate::kernel::ids::{
+    OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_CLOUD_MODELS_PATH,
+    OLLAMA_CLOUD_OFFERING_ID, OLLAMA_CLOUD_SETTINGS_URL, OLLAMA_PROVIDER_ID,
+};
 
 /// Deterministic official Command Code GOAT transport. Production inference
 /// uses this origin after an account is enabled, verified, and catalogued.
@@ -95,6 +105,66 @@ struct GoatLoopbackRoute {
 
 static GOAT_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, GoatLoopbackRoute>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+static OLLAMA_LOOPBACK_ROUTES: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// RAII guard for the integration-only Ollama Cloud seam. The production
+/// adapter always uses the fixed `https://ollama.com` origin; without a live
+/// guard, tests cannot reach a fake upstream.
+#[doc(hidden)]
+pub struct OllamaCloudLoopbackRouteGuard {
+    account_id: String,
+    origin: String,
+}
+
+impl Drop for OllamaCloudLoopbackRouteGuard {
+    fn drop(&mut self) {
+        if let Ok(mut routes) = OLLAMA_LOOPBACK_ROUTES.write()
+            && routes
+                .get(&self.account_id)
+                .is_some_and(|origin| *origin == self.origin)
+        {
+            routes.remove(&self.account_id);
+        }
+    }
+}
+
+/// Installs a loopback-only origin substitute used by gateway integration
+/// tests. Path, protocol, Bearer auth, and the wire normalization marker come
+/// from the official Ollama Cloud contract; this cannot configure a remote
+/// production endpoint.
+#[doc(hidden)]
+pub fn install_ollama_cloud_loopback_route_for_test(
+    account_id: impl Into<String>,
+    origin: impl Into<String>,
+) -> Result<OllamaCloudLoopbackRouteGuard, String> {
+    let account_id = account_id.into();
+    let origin = origin.into();
+    ensure_loopback_base(&origin)?;
+    let trimmed = origin.trim_end_matches('/').to_string();
+    let guard = OllamaCloudLoopbackRouteGuard {
+        account_id: account_id.clone(),
+        origin: trimmed.clone(),
+    };
+    OLLAMA_LOOPBACK_ROUTES
+        .write()
+        .map_err(|_| "Ollama Cloud loopback route lock is poisoned".to_string())?
+        .insert(account_id, trimmed);
+    Ok(guard)
+}
+
+fn ollama_cloud_base_url_for(account: &Account) -> String {
+    OLLAMA_LOOPBACK_ROUTES
+        .read()
+        .map(|routes| {
+            routes
+                .get(&account.id)
+                .cloned()
+                .unwrap_or_else(|| OLLAMA_CLOUD_BASE_URL.to_string())
+        })
+        .unwrap_or_else(|_| OLLAMA_CLOUD_BASE_URL.to_string())
+}
 
 #[cfg(debug_assertions)]
 #[doc(hidden)]
@@ -227,6 +297,9 @@ fn resolve_route_with_policy(
             MiniMaxCnAdapter.resolve(account, config, plan, policy)
         }
         Some(ProviderAdapterKind::KimiCn) => KimiCnAdapter.resolve(account, config, plan, policy),
+        Some(ProviderAdapterKind::OllamaCloud) => {
+            OllamaCloudAdapter.resolve(account, config, plan, policy)
+        }
         Some(ProviderAdapterKind::ConfigurableHttp) => {
             ConfigurableHttpAdapter.resolve(account, config, plan, policy)
         }
@@ -282,6 +355,7 @@ impl RuntimeRouteAdapter for OpenCodeGoAdapter {
             follow_redirects: descriptor.inference.follow_redirects,
             credential: credential_handle(account, descriptor),
             proxy_routing: ProxyRoutingModel::RequestEntrySnapshot,
+            wire_normalization: WireNormalization::None,
         })
     }
 }
@@ -328,6 +402,7 @@ impl RuntimeRouteAdapter for ZenFreeAdapter {
             follow_redirects: descriptor.inference.follow_redirects,
             credential: credential_handle(account, descriptor),
             proxy_routing: ProxyRoutingModel::RequestEntrySnapshot,
+            wire_normalization: WireNormalization::None,
         })
     }
 }
@@ -388,10 +463,12 @@ impl RuntimeRouteAdapter for CommandCodeGoatAdapter {
             follow_redirects: descriptor.inference.follow_redirects,
             credential: credential_handle(account, descriptor),
             proxy_routing: ProxyRoutingModel::ProcessWideNoRedirect,
+            wire_normalization: WireNormalization::None,
         })
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one add per sealed fixed-Chat family keeps dispatch obvious
 fn resolve_fixed_chat_plan(
     account: &Account,
     plan: &RequestPlan,
@@ -400,6 +477,7 @@ fn resolve_fixed_chat_plan(
     label: &str,
     base_url: &str,
     path: &str,
+    wire_normalization: WireNormalization,
 ) -> Result<AttemptSpec, String> {
     if matches!(policy, RoutePolicy::Probe) {
         return Err(format!("protocol probes are not available for {label}"));
@@ -425,6 +503,7 @@ fn resolve_fixed_chat_plan(
         follow_redirects: descriptor.inference.follow_redirects,
         credential: credential_handle(account, descriptor),
         proxy_routing: ProxyRoutingModel::ProcessWideNoRedirect,
+        wire_normalization,
     })
 }
 
@@ -444,6 +523,7 @@ impl RuntimeRouteAdapter for MiniMaxCnAdapter {
             "MiniMax CN Token Plan",
             MINIMAX_CN_BASE_URL,
             MINIMAX_CN_CHAT_COMPLETIONS_PATH,
+            WireNormalization::None,
         )
     }
 }
@@ -464,6 +544,29 @@ impl RuntimeRouteAdapter for KimiCnAdapter {
             "Kimi Code CN",
             KIMI_CN_BASE_URL,
             KIMI_CN_CHAT_COMPLETIONS_PATH,
+            WireNormalization::None,
+        )
+    }
+}
+
+impl RuntimeRouteAdapter for OllamaCloudAdapter {
+    fn resolve(
+        self,
+        account: &Account,
+        _config: &AppConfig,
+        plan: &RequestPlan,
+        policy: RoutePolicy<'_>,
+    ) -> Result<AttemptSpec, String> {
+        let base_url = ollama_cloud_base_url_for(account);
+        resolve_fixed_chat_plan(
+            account,
+            plan,
+            policy,
+            ProviderAdapterKind::OllamaCloud,
+            "Ollama Cloud",
+            &base_url,
+            OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH,
+            WireNormalization::OllamaCloud,
         )
     }
 }
@@ -524,6 +627,7 @@ impl RuntimeRouteAdapter for ConfigurableHttpAdapter {
             follow_redirects: descriptor.inference.follow_redirects,
             credential: credential_handle(account, descriptor),
             proxy_routing: ProxyRoutingModel::IsolatedTrustedAdmin,
+            wire_normalization: WireNormalization::None,
         })
     }
 }
@@ -683,8 +787,9 @@ mod tests {
         ANONYMOUS_FREE_OFFERING_ID, COMMAND_CODE_GOAT_BASE_URL,
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM, COMMAND_CODE_PROVIDER_ID,
         CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID, GO_OFFERING_ID, GOAT_OFFERING_ID,
-        MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
-        OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_NAME,
+        InferenceOriginKind, MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID, OLLAMA_CLOUD_BASE_URL,
+        OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH, OLLAMA_CLOUD_OFFERING_ID, OLLAMA_PROVIDER_ID,
+        OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ZEN_FREE_ACCOUNT_NAME,
     };
     use bytes::Bytes;
     use chrono::Utc;
@@ -1068,6 +1173,7 @@ mod tests {
                 | ProviderAdapterKind::CommandCodeGoat
                 | ProviderAdapterKind::MiniMaxCn
                 | ProviderAdapterKind::KimiCn
+                | ProviderAdapterKind::OllamaCloud
                 | ProviderAdapterKind::ConfigurableHttp => {}
             }
             let descriptor = ProviderRegistry::iter()
@@ -1094,6 +1200,15 @@ mod tests {
                 ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
                     assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
                     assert!(!descriptor.inference.follow_redirects);
+                }
+                ProviderAdapterKind::OllamaCloud => {
+                    assert_eq!(descriptor.inference.auth, InferenceAuthDescriptor::Bearer);
+                    assert!(!descriptor.inference.follow_redirects);
+                    assert_eq!(
+                        descriptor.inference.origin,
+                        InferenceOriginKind::OfficialFixed
+                    );
+                    assert!(!descriptor.inference.catalog_routable);
                 }
                 ProviderAdapterKind::ConfigurableHttp => {
                     assert_eq!(
@@ -1227,6 +1342,96 @@ mod tests {
         .expect("account-level tests use the fixed production Chat route");
         assert_eq!(route.base_url, MINIMAX_CN_BASE_URL);
         assert_eq!(route.path, MINIMAX_CN_CHAT_COMPLETIONS_PATH);
+    }
+
+    #[test]
+    fn ollama_cloud_route_is_fixed_bearer_chat_with_wire_normalization() {
+        let config = AppConfig::default();
+        let ollama = account(
+            "ollama-1",
+            OLLAMA_PROVIDER_ID,
+            OLLAMA_CLOUD_OFFERING_ID,
+            CredentialKind::ApiKey,
+            QuotaScope::Key,
+        );
+        let route = resolve_route(
+            &ollama,
+            &config,
+            &chat_plan(
+                "gpt-oss:120b",
+                UpstreamChannel::Go,
+                ApiFormat::ChatCompletions,
+                None,
+            ),
+        )
+        .expect("fixed Chat route resolves for catalog ids");
+        assert_eq!(route.base_url, OLLAMA_CLOUD_BASE_URL);
+        assert_eq!(route.path, OLLAMA_CLOUD_CHAT_COMPLETIONS_PATH);
+        assert_eq!(route.upstream, ApiFormat::ChatCompletions);
+        assert_eq!(route.auth, UpstreamAuth::Bearer);
+        assert_eq!(route.wire_auth(), UpstreamAuth::Bearer);
+        assert!(!route.follow_redirects);
+        assert_eq!(
+            route.proxy_routing,
+            ProxyRoutingModel::ProcessWideNoRedirect
+        );
+        assert!(route.restricted_upstream_url());
+        assert!(!route.isolates_client_headers());
+        assert_eq!(
+            route.credential,
+            CredentialHandle::Account {
+                id: "ollama-1".into()
+            }
+        );
+        assert_eq!(
+            route.wire_normalization,
+            crate::gateway::wire::WireNormalization::OllamaCloud
+        );
+
+        // Non-Chat upstream and the free channel are rejected before any
+        // outbound call; probes have no surface on a fixed-Chat family.
+        assert!(
+            resolve_route(
+                &ollama,
+                &config,
+                &chat_plan(
+                    "gpt-oss:120b",
+                    UpstreamChannel::Go,
+                    ApiFormat::Responses,
+                    None
+                ),
+            )
+            .unwrap_err()
+            .contains("only accepts Chat Completions upstream")
+        );
+        assert!(
+            resolve_route(
+                &ollama,
+                &config,
+                &chat_plan(
+                    "gpt-oss:120b",
+                    UpstreamChannel::Free,
+                    ApiFormat::ChatCompletions,
+                    None
+                ),
+            )
+            .unwrap_err()
+            .contains("does not serve the Zen free channel")
+        );
+        assert!(
+            resolve_probe_route(
+                &ollama,
+                &config,
+                &chat_plan(
+                    "gpt-oss:120b",
+                    UpstreamChannel::Go,
+                    ApiFormat::ChatCompletions,
+                    None
+                ),
+            )
+            .unwrap_err()
+            .contains("protocol probes are not available for Ollama Cloud")
+        );
     }
 
     #[test]
