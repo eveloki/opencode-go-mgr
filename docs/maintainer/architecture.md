@@ -368,8 +368,8 @@ concurrent settings changes affect only later requests.
 | OpenCode Go | `opencode` / `go` | yes | Official keys only |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | yes | Credentialless singleton, DB-owned |
 | Command Code GOAT | `command-code` / `goat` | yes | Fixed official origin; public Provider catalog; model supply controlled by the Provider matrix |
-| MiniMax CN Token Plan | `minimax` / `cn-token-plan` | yes | Fixed CN origin and Chat Completions protocol |
-| Kimi Code CN | `kimi-code` / `cn` | yes | Fixed CN origin and Chat Completions protocol |
+| MiniMax CN Token Plan | `minimax` / `cn-token-plan` | yes | Fixed CN Chat Completions and Anthropic Messages origins |
+| Kimi Code CN | `kimi-code` / `cn` | yes | Fixed CN Chat Completions and Anthropic Messages paths |
 | Custom API | `custom` / `api` | yes | Trusted-admin destination |
 
 Every persistent mutation path rejects `enabled=true` for a
@@ -403,7 +403,7 @@ The CLI calls the same mutation services without an argv CAS token. There
 is no Tauri `invoke` path.
 
 ```text
-  Vue 3  (seven views, KeepAlive)
+  Vue 3  (eight views, KeepAlive)
     Pinia: session / controlPlane / connection
            accounts / providers / settings
            |

@@ -11,15 +11,15 @@
 - 每个精确的内置 Provider/Offering 合约使用 `Provider(contract_scope_id)`；既有 scope ID 继续保留历史上类似 Provider ID 的取值。
 - `CustomEndpoint(account_id)` 范围内的 Custom 映射仍归账号所有，不能在本页编辑。
 
-左侧列出内置 Provider/Offering 合约范围。主区有三个子页签：**模型目录**、**价格** 与 **Alias**。原来的目录与模型合约视图合并为模型目录页签上的一张矩阵表。
+左侧列出内置 Provider/Offering 合约范围。主区有两个子页签：**模型目录**与**价格**。原来的目录与模型合约视图合并为模型目录页签上的一张矩阵表。
 
-**Alias** 是只读聚合页。它把现有 Provider 合约和账号能力汇总成公开名称，并展示可路由性与精确上游身份。它不会新建 Alias API、store、cache 或编辑器。Custom 映射通过 `?view=accounts&account_id=<id>` 跳转到**账号**页唯一的编辑器；加载该链接会打开对应账号编辑框。关闭编辑框会移除 `account_id`；账号不存在时会提示，并清掉失效参数。
+**别名** 是独立的核心页面，因为它的只读表跨越所有 Provider 合约与 Custom 账号，而不属于当前选中的供应商。它把现有合约和账号能力汇总成公开名称，并展示可路由性与精确上游身份。它不会新建 Alias API、store、cache 或编辑器。Custom 映射通过 `?view=accounts&account_id=<id>` 跳转到**账号**页唯一的编辑器；加载该链接会打开对应账号编辑框。关闭编辑框会移除 `account_id`；账号不存在时会提示，并清掉失效参数。
 
 **模型目录** 是本地的。矩阵只列出当前目录中的模型，并以三个上游协议（Chat Completions、Responses、Messages）为列。每格是 effective 模型/协议状态的二态开关：打开写入 `force_on`，关闭写入 `force_off`；列菜单可以整列打开或关闭。开关会先立即更新显示，再在后台执行带 CAS 保护的保存，只有受影响的格子显示保存进度。
 
 底层静态、预设与探测证据仍保留在合约中，但紧凑矩阵不再显示独立徽标。显式开关或成功探测写入覆盖前，存储默认仍是 `auto`。供应商级探测成功会固定为 `force_on`；账号尝试失败会报告并保留证据，但不会把共享协议固定为 `force_off`，只有显式关闭开关才会这样做。
 
-内置 **OpenCode Go**、**Zen Free**、**Command Code GOAT**、**MiniMax CN** 与 **Kimi Code CN** 的目录头部都提供 **恢复静态协议快照**。它不会请求上游，保留当前模型目录，清除手动开关和探测证据，并恢复日期为 **2026-08-27** 的静态协议快照。当前目录中未出现在该快照里的模型/协议对默认保持关闭，但有两类密封适配器例外：MiniMax CN 与 Kimi Code CN 只恢复 Chat Completions；GOAT 在该日期之后新增的模型会恢复供应商家族预设（Anthropic ID 使用 Messages，其他 ID 使用 Chat Completions）。这些 GOAT 行显示为“预设”，不会伪装成静态已验证或探测确认。仅刷新目录时，新发现的 GOAT 行仍默认关闭。
+内置 **OpenCode Go**、**Zen Free**、**Command Code GOAT**、**MiniMax CN** 与 **Kimi Code CN** 的目录头部都提供 **恢复官方协议基线**。它不会请求上游，保留当前模型目录，清除手动开关和探测证据，并恢复在 **2026-09-01** 开发时核对的官方默认能力。OpenCode Go 与已知 Zen 行默认只开启官方为该模型列出的原生上游端点；GOAT 的 Anthropic 模型 ID 使用 Messages，其他供应商家族使用 Chat Completions，新发现且不属于内置预设的模型仍默认关闭；MiniMax CN 与 Kimi Code CN 都默认支持 Chat Completions 与 Messages，均不声明 Responses。官方基线未列出的协议保持关闭，只有管理员显式开启可构造路径或显式探测成功后才会写入额外正面证据。
 
 轻量来源信息、刷新动作与矩阵共用同一块内容区域，不再有独立的目录摘要卡片，也没有刷新账号选择器。所有可刷新的范围使用同一个动作：OpenCode Go 由后端选择符合条件的 Go 账号访问官方鉴权目录；Zen Free 访问固定的官方无鉴权目录 `https://opencode.ai/zen/v1/models`；Command Code 直接访问固定的公开官方 `/models` 目录，不选择账号。刷新始终由用户显式触发。
 

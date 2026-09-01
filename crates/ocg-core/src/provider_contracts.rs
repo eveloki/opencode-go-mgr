@@ -46,16 +46,11 @@ const MAX_PROBE_ERROR_CHARS: usize = 500;
 pub fn static_protocol_snapshot_date(scope_id: &str) -> Option<&'static str> {
     let provider_id = provider_scope_descriptor(scope_id)?.provider_id;
     match provider_id {
-        OPENCODE_PROVIDER_ID => {
-            Some(crate::kernel::protocol::OPENCODE_GO_STATIC_PROTOCOL_SNAPSHOT_DATE)
-        }
-        OPENCODE_ZEN_FREE_PROVIDER_ID => {
-            Some(crate::kernel::protocol::ZEN_FREE_STATIC_PROTOCOL_SNAPSHOT_DATE)
-        }
-        COMMAND_CODE_PROVIDER_ID => {
-            Some(crate::kernel::protocol::COMMAND_CODE_GOAT_STATIC_PROTOCOL_SNAPSHOT_DATE)
-        }
-        MINIMAX_PROVIDER_ID | KIMI_PROVIDER_ID => Some("2026-08-27"),
+        OPENCODE_PROVIDER_ID
+        | OPENCODE_ZEN_FREE_PROVIDER_ID
+        | COMMAND_CODE_PROVIDER_ID
+        | MINIMAX_PROVIDER_ID
+        | KIMI_PROVIDER_ID => Some(crate::kernel::protocol::OFFICIAL_PROTOCOL_BASELINE_DATE),
         _ => None,
     }
 }
@@ -561,7 +556,6 @@ pub fn select_upstream_protocol(
 pub fn safety_ceiling_protocols(
     probe: ProtocolProbeDescriptor,
     model_id: &str,
-    declared: &[(String, UpstreamProtocolKind)],
 ) -> Vec<UpstreamProtocolKind> {
     match probe.structural_ceiling {
         StructuralProbeCeiling::Unavailable => Vec::new(),
@@ -572,9 +566,7 @@ pub fn safety_ceiling_protocols(
                 .filter_map(protocol_from_api)
                 .collect()
         }
-        StructuralProbeCeiling::FixedChatCompletions => {
-            vec![UpstreamProtocolKind::ChatCompletions]
-        }
+        StructuralProbeCeiling::Fixed(protocols) => protocols.to_vec(),
         StructuralProbeCeiling::OpenCodeConstructable => {
             if model_id.trim().is_empty() {
                 Vec::new()
@@ -591,11 +583,6 @@ pub fn safety_ceiling_protocols(
                 Vec::new()
             }
         }
-        StructuralProbeCeiling::AccountDeclared => declared
-            .iter()
-            .filter(|(id, _)| custom_model_id_matches(id, model_id))
-            .map(|(_, protocol)| *protocol)
-            .collect(),
     }
 }
 
@@ -612,17 +599,23 @@ pub fn static_verified_protocols(
             .collect();
     }
     match adapter {
-        ProviderAdapterKind::OpenCodeGo => {
-            crate::kernel::protocol::snapshot_protocols(OPENCODE_PROVIDER_ID, model_id)
-        }
-        ProviderAdapterKind::ZenFree => {
-            crate::kernel::protocol::snapshot_protocols(OPENCODE_ZEN_FREE_PROVIDER_ID, model_id)
+        ProviderAdapterKind::OpenCodeGo | ProviderAdapterKind::ZenFree => {
+            opencode_profile(model_id)
+                .map(|(_, supported)| supported.to_vec())
+                .unwrap_or_default()
         }
         ProviderAdapterKind::CommandCodeGoat => {
-            crate::kernel::protocol::snapshot_protocols(COMMAND_CODE_PROVIDER_ID, model_id)
+            if model_id.eq_ignore_ascii_case("stealth/ox-alpha") {
+                Vec::new()
+            } else {
+                ocg_domain::protocol::command_code_supported_formats(model_id).to_vec()
+            }
         }
         ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
-            return vec![UpstreamProtocolKind::ChatCompletions];
+            return vec![
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Messages,
+            ];
         }
         ProviderAdapterKind::Cpa => {
             return vec![
@@ -649,9 +642,8 @@ pub fn probe_may_add(
     probe: ProtocolProbeDescriptor,
     model_id: &str,
     protocol: UpstreamProtocolKind,
-    declared: &[(String, UpstreamProtocolKind)],
 ) -> bool {
-    probe.explicit_probe && safety_ceiling_protocols(probe, model_id, declared).contains(&protocol)
+    probe.explicit_probe && safety_ceiling_protocols(probe, model_id).contains(&protocol)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1077,9 +1069,8 @@ fn preferred_protocol(
                 .and_then(protocol_from_api)
                 .unwrap_or(UpstreamProtocolKind::ChatCompletions)
         }
-        ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
-            UpstreamProtocolKind::ChatCompletions
-        }
+        ProviderAdapterKind::MiniMaxCn => UpstreamProtocolKind::Messages,
+        ProviderAdapterKind::KimiCn => UpstreamProtocolKind::ChatCompletions,
         ProviderAdapterKind::Cpa => UpstreamProtocolKind::ChatCompletions,
         ProviderAdapterKind::ConfigurableHttp => {
             // A Custom endpoint binds every declared model to exactly one
@@ -1117,7 +1108,7 @@ fn merge_model_contract(
             .filter_map(protocol_from_api)
             .collect()
     } else {
-        safety_ceiling_protocols(probe, model_id, declared)
+        safety_ceiling_protocols(probe, model_id)
     };
     let static_verified = static_verified_protocols(adapter, model_id, declared);
     let mut protocols = BTreeMap::new();
@@ -1132,8 +1123,9 @@ fn merge_model_contract(
             .find(|row| custom_or_case_match(&row.model_id, model_id) && row.protocol == protocol)
             .map(|row| row.state)
             .unwrap_or(ProtocolOverrideState::Auto);
-        let has_override = override_state != ProtocolOverrideState::Auto;
-        if persisted.is_none() && !in_ceiling && !statically_verified && !has_override {
+        // Persisted rows from an older or broader baseline must not resurrect a
+        // protocol outside the adapter's current sealed structural ceiling.
+        if adapter != ProviderAdapterKind::ConfigurableHttp && !in_ceiling && !statically_verified {
             continue;
         }
         let source = persisted
@@ -1149,17 +1141,10 @@ fn merge_model_contract(
         // through the explicit overrides the probe handler persists.
         let evidence_available = (statically_verified || source.confers_support()) && supported;
         let (available, enabled) = match override_state {
-            // Sealed and configurable HTTP adapters may force on only a
-            // protocol already admitted by their adapter safety ceiling.
-            ProtocolOverrideState::ForceOn
-                if matches!(
-                    adapter,
-                    ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::ConfigurableHttp
-                ) =>
-            {
-                (supported, supported)
-            }
-            ProtocolOverrideState::ForceOn => (true, true),
+            // A manual switch may activate a constructible or documented
+            // protocol, but it cannot expand a sealed adapter beyond its
+            // registered safety ceiling.
+            ProtocolOverrideState::ForceOn => (supported, supported),
             ProtocolOverrideState::ForceOff => (evidence_available, false),
             ProtocolOverrideState::Auto => (
                 evidence_available,
@@ -1239,7 +1224,7 @@ fn overlay_probe_confirmed_models(
         {
             continue;
         }
-        if !probe_may_add(probe, &row.model_id, row.protocol, declared) {
+        if !probe_may_add(probe, &row.model_id, row.protocol) {
             continue;
         }
         extra.insert(row.model_id.clone());

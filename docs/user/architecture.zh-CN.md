@@ -127,13 +127,13 @@ Zen Free 只有启用开关；不需要时直接关掉卡片。目录刷新在�
 
 ## 面板、Key 与账号卡
 
-侧栏有七个视图。`browser` 是托管会话覆盖页，不是第八项。SPA 读写 `/dashboard/api/v3`。回环监听默认跳过面板登录（带转发头时仍需登录）；客户端访问 `/v1` 仍然需要 Key。
+侧栏有八个视图。`browser` 是托管会话覆盖页，不是第九项。SPA 读写 `/dashboard/api/v3`。回环监听默认跳过面板登录（带转发头时仍需登录）；客户端访问 `/v1` 仍然需要 Key。
 
 ```text
-  Dashboard -> Access Keys -> Accounts -> Providers
-      ^                                      |
-      |                                      v
-  Settings <- Logs <- Applications <---------+
+  Dashboard -> Access Keys -> Accounts -> Providers -> Aliases
+      ^                                                   |
+      |                                                   v
+  Settings <- Logs <- Applications <----------------------+
 
   接入中心（Dashboard 首屏）
     复制 API 根地址 / Key / 轮换当前 Key

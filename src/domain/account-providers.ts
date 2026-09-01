@@ -39,7 +39,7 @@ export const ZEN_FREE_ACCOUNT_ID = "00000000-0000-0000-0000-000000000002";
 export const ZEN_FREE_PROVIDER_ID = "opencode-zen-free";
 export const ZEN_FREE_OFFERING_ID = "anonymous-free";
 
-/** Static external-integration singleton; it is routable but not a Plan. */
+/** Staged static external-integration singleton; routing is currently forced off. */
 export const CPA_ACCOUNT_ID = "00000000-0000-0000-0000-000000000003";
 export const CPA_PROVIDER_ID = "cpa";
 export const CPA_OFFERING_ID = "local";

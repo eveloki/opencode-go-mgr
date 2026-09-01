@@ -30,7 +30,7 @@ Gateway 只做四件事，顺序基本符合直觉：
               SQLite schema v34（仅本地）
 ```
 
-请求路径、Plan、七个面板视图和协议转换的文字图见
+请求路径、Plan、八个面板视图和协议转换的文字图见
 [架构图](architecture.zh-CN.md)。
 
 ---

@@ -17,14 +17,6 @@
       <n-alert v-if="formError" type="error" class="form-error" role="alert">
         {{ formError }}
       </n-alert>
-      <n-alert
-        v-if="isCustomPlan"
-        type="warning"
-        :show-icon="false"
-        class="form-error"
-      >
-        {{ t("目标端点由管理员自行选择并负责：使用 http:// 时 Key 将明文传输；测试连接会发送最小真实请求，可能产生服务商费用。") }}
-      </n-alert>
       <div class="modal-grid">
         <n-form-item v-if="!isEdit && offeringOptions.length > 1" path="offeringId" :label="t('服务套餐')">
           <n-select
@@ -87,13 +79,18 @@
           :label="t('API Key')"
           class="full-width-field"
         >
-          <n-input
-            v-model:value="form.key"
-            :input-props="{ 'aria-label': t('API Key') }"
-            type="password"
-            show-password-on="click"
-            :placeholder="keyPlaceholder"
-          />
+          <div class="key-field">
+            <n-input
+              v-model:value="form.key"
+              :input-props="{ 'aria-label': t('API Key') }"
+              type="password"
+              show-password-on="click"
+              :placeholder="keyPlaceholder"
+            />
+            <p v-if="isEdit" class="field-hint">
+              {{ t("编辑时留空将继续使用已保存的 Key；填写新值才会替换。") }}
+            </p>
+          </div>
         </n-form-item>
 
         <n-form-item
@@ -110,6 +107,9 @@
             />
             <p class="field-hint">
               {{ t("推荐填写不带 /v1 的 API 根地址；OCG 会自动补全 /v1 和协议路径。已带 /v1 时不会重复添加。") }}
+            </p>
+            <p v-if="insecureCustomEndpoint" class="field-hint field-hint--warning">
+              {{ t("Key 与请求内容会以明文传输。仅在可信局域网内使用，公网接入请配置 HTTPS。") }}
             </p>
           </div>
         </n-form-item>
@@ -436,6 +436,13 @@ const upstreamProtocolOptions = computed(() => {
 });
 
 const endpointPlaceholder = computed(() => customApiUrlPlaceholder());
+const insecureCustomEndpoint = computed(() => {
+  try {
+    return new URL(form.value.endpointUrl.trim()).protocol === "http:";
+  } catch {
+    return false;
+  }
+});
 const canInferModelEndpoint = computed(() => isCustomPlan.value
   && customApiUrlSupportsModelDiscovery(form.value.endpointUrl, form.value.upstreamProtocol));
 const showManualModelHint = computed(() => isCustomPlan.value
@@ -794,6 +801,10 @@ async function handleSave() {
   font-size: var(--ocg-font-xs);
 }
 
+.field-hint--warning {
+  color: var(--ocg-warning);
+}
+
 .capability-rows {
   display: grid;
   gap: 8px;
@@ -829,6 +840,7 @@ async function handleSave() {
   font-variant-numeric: tabular-nums;
 }
 
+.key-field,
 .endpoint-field,
 .protocol-field {
   display: grid;

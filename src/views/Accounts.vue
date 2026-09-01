@@ -1,9 +1,35 @@
 <template>
   <div class="accounts-view">
     <n-space vertical :size="16" class="accounts-content">
-      <n-space justify="space-between" align="center" class="accounts-toolbar">
-        <n-h3 style="margin: 0">{{ t("账号") }}</n-h3>
-        <n-space wrap>
+      <div class="accounts-toolbar">
+        <div
+          v-if="!accountListLoading && !accountListError && accounts.length > 0"
+          class="accounts-filter-bar"
+        >
+          <div class="filter-field">
+            <span class="filter-label">{{ t("按方案筛选") }}</span>
+            <n-select
+              v-model:value="planFilter"
+              :options="planFilterOptions"
+              :placeholder="t('按方案筛选')"
+              :aria-label="t('按方案筛选')"
+              :consistent-menu-width="false"
+              size="small"
+            />
+          </div>
+          <div class="filter-field">
+            <span class="filter-label">{{ t("按状态筛选") }}</span>
+            <n-select
+              v-model:value="statusFilter"
+              :options="statusFilterOptions"
+              :placeholder="t('按状态筛选')"
+              :aria-label="t('按状态筛选')"
+              :consistent-menu-width="false"
+              size="small"
+            />
+          </div>
+        </div>
+        <n-space wrap class="accounts-actions">
           <n-button @click="openTransfer('import')">{{ t("导入账号") }}</n-button>
           <n-button @click="openTransfer('export')">{{ t("导出账号") }}</n-button>
           <n-button type="primary" @click="openAddModal">
@@ -13,7 +39,7 @@
             {{ t("新增账号") }}
           </n-button>
         </n-space>
-      </n-space>
+      </div>
 
       <span id="account-order-instructions" class="sr-only">
         {{ t("使用上下方向键调整优先级") }}
@@ -42,33 +68,6 @@
           {{ t("重试") }}
         </n-button>
       </n-alert>
-
-      <template v-else-if="accounts.length > 0">
-        <div class="accounts-filter-bar">
-          <div class="filter-field">
-            <span class="filter-label">{{ t("按方案筛选") }}</span>
-            <n-select
-              v-model:value="planFilter"
-              :options="planFilterOptions"
-              :placeholder="t('按方案筛选')"
-              :aria-label="t('按方案筛选')"
-              :consistent-menu-width="false"
-              size="small"
-            />
-          </div>
-          <div class="filter-field">
-            <span class="filter-label">{{ t("按状态筛选") }}</span>
-            <n-select
-              v-model:value="statusFilter"
-              :options="statusFilterOptions"
-              :placeholder="t('按状态筛选')"
-              :aria-label="t('按状态筛选')"
-              :consistent-menu-width="false"
-              size="small"
-            />
-          </div>
-        </div>
-      </template>
 
       <n-alert v-if="quotaLimitsError" type="warning" :title="t('用量加载失败')">
         <n-button
@@ -258,7 +257,6 @@ import {
   NEmpty,
   NForm,
   NFormItem,
-  NH3,
   NIcon,
   NInput,
   NModal,
@@ -304,6 +302,7 @@ import {
 } from "../domain/plans.ts";
 import { t, type MessageKey } from "../i18n/index.ts";
 import { dashboardErrorDetail } from "../utils/errors.ts";
+import { readAccountDeepLink } from "./app-navigation.ts";
 import { mapWithConcurrency } from "../utils/async.ts";
 import { useLocalizedModalCloseLabel } from "../utils/modal-close-label.ts";
 import {
@@ -467,9 +466,7 @@ const statusFilterOptions = computed(() => [
 
 
 function handleMenuSelect(key: string | number, accountId: string) {
-  if (key === "open-cpa") {
-    openCpa();
-  } else if (key === "open-console") {
+  if (key === "open-console") {
     void openAccountBrowser(accountId, "console");
   } else if (key === "continue-setup") {
     openManagedWizard(accountId);
@@ -500,14 +497,6 @@ function handleMenuSelect(key: string | number, accountId: string) {
       onPositiveClick: () => deleteAccount(accountId),
     });
   }
-}
-
-function openCpa(): void {
-  const url = new URL(window.location.href);
-  url.searchParams.set("view", "cpa");
-  url.searchParams.delete("account_id");
-  window.history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
 function openAddModal(): void {
@@ -610,7 +599,7 @@ function setAccountFormVisible(show: boolean): void {
 }
 
 function applyAccountDeepLink(): void {
-  const accountId = new URL(window.location.href).searchParams.get("account_id");
+  const accountId = readAccountDeepLink(window.location.search);
   if (!accountId) return;
   const account = accounts.value.find((item) => item.id === accountId);
   if (!account) {
@@ -618,6 +607,15 @@ function applyAccountDeepLink(): void {
     message.warning(t("未找到指定账号，已清除链接参数"));
     return;
   }
+  editingAccount.value = account;
+  showModal.value = true;
+}
+
+function applyCachedAccountDeepLink(): void {
+  const accountId = readAccountDeepLink(window.location.search);
+  if (!accountId) return;
+  const account = accountsStore.byId.get(accountId);
+  if (!account) return;
   editingAccount.value = account;
   showModal.value = true;
 }
@@ -1206,6 +1204,7 @@ onMounted(() => {
 onActivated(() => {
   startClock();
   now.value = Date.now();
+  applyCachedAccountDeepLink();
   if (activatedOnce) void initializeAccounts();
   else activatedOnce = true;
 });
@@ -1229,7 +1228,17 @@ onUnmounted(() => {
 }
 
 .accounts-toolbar {
-  min-height: 34px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 16px;
+  min-width: 0;
+}
+
+.accounts-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .account-list {
@@ -1247,7 +1256,8 @@ onUnmounted(() => {
   flex-wrap: wrap;
   align-items: flex-end;
   gap: 12px;
-  margin-bottom: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .accounts-filter-bar .filter-field {
@@ -1268,8 +1278,18 @@ onUnmounted(() => {
 }
 
 @media (max-width: 640px) {
+  .accounts-toolbar {
+    gap: 12px;
+  }
+
   .accounts-filter-bar {
+    flex-basis: 100%;
     gap: 8px;
+  }
+
+  .accounts-actions {
+    width: 100%;
+    justify-content: flex-end;
   }
 
   .accounts-filter-bar .filter-field {

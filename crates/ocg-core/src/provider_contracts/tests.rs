@@ -54,6 +54,58 @@ fn provider_scopes_identify_one_exact_registered_offering() {
 }
 
 #[test]
+fn official_protocol_baselines_cover_every_builtin_provider_shape() {
+    assert_eq!(
+        static_protocol_snapshot_date(OPENCODE_PROVIDER_ID),
+        Some("2026-09-01")
+    );
+    assert_eq!(
+        static_protocol_snapshot_date(MINIMAX_PROVIDER_ID),
+        Some("2026-09-01")
+    );
+    assert_eq!(
+        static_verified_protocols(ProviderAdapterKind::OpenCodeGo, "deepseek-v4-flash", &[],),
+        vec![UpstreamProtocolKind::ChatCompletions]
+    );
+    assert_eq!(
+        static_verified_protocols(ProviderAdapterKind::OpenCodeGo, "grok-4.6", &[]),
+        vec![UpstreamProtocolKind::Responses]
+    );
+    assert_eq!(
+        static_verified_protocols(ProviderAdapterKind::CommandCodeGoat, "claude-fable-5", &[],),
+        vec![UpstreamProtocolKind::Messages]
+    );
+    for adapter in [ProviderAdapterKind::MiniMaxCn, ProviderAdapterKind::KimiCn] {
+        assert_eq!(
+            static_verified_protocols(adapter, "catalog-model", &[]),
+            vec![
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Messages,
+            ]
+        );
+        let probe = ProviderRegistry::iter()
+            .find(|descriptor| descriptor.kind == adapter)
+            .unwrap()
+            .protocol_probe;
+        assert_eq!(
+            safety_ceiling_protocols(probe, "catalog-model"),
+            vec![
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Messages,
+            ]
+        );
+    }
+    assert_eq!(
+        static_verified_protocols(ProviderAdapterKind::Cpa, "catalog-model", &[]),
+        vec![
+            UpstreamProtocolKind::ChatCompletions,
+            UpstreamProtocolKind::Responses,
+            UpstreamProtocolKind::Messages,
+        ]
+    );
+}
+
+#[test]
 fn probe_success_adds_inside_ceiling_and_failure_does_not_remove_static() {
     let now = Utc::now();
     let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
@@ -111,11 +163,8 @@ fn probe_success_adds_inside_ceiling_and_failure_does_not_remove_static() {
 
 #[test]
 fn opencode_ceiling_is_constructable_paths_not_static_model_protocols() {
-    let grok_ceiling = safety_ceiling_protocols(
-        probe_for(OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
-        "grok-4.5",
-        &[],
-    );
+    let grok_ceiling =
+        safety_ceiling_protocols(probe_for(OPENCODE_PROVIDER_ID, GO_OFFERING_ID), "grok-4.5");
     let grok_static = static_verified_protocols(ProviderAdapterKind::OpenCodeGo, "grok-4.5", &[]);
     assert!(grok_ceiling.contains(&UpstreamProtocolKind::ChatCompletions));
     assert!(grok_ceiling.contains(&UpstreamProtocolKind::Responses));
@@ -125,32 +174,27 @@ fn opencode_ceiling_is_constructable_paths_not_static_model_protocols() {
         probe_for(OPENCODE_PROVIDER_ID, GO_OFFERING_ID),
         "grok-4.5",
         UpstreamProtocolKind::ChatCompletions,
-        &[],
     ));
 
     let unknown_zen = safety_ceiling_protocols(
         probe_for(OPENCODE_ZEN_FREE_PROVIDER_ID, ANONYMOUS_FREE_OFFERING_ID),
         "brand-new-promo-free",
-        &[],
     );
     assert_eq!(unknown_zen, vec![UpstreamProtocolKind::ChatCompletions]);
     assert!(probe_may_add(
         probe_for(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         UpstreamProtocolKind::ChatCompletions,
-        &[],
     ));
     assert!(!probe_may_add(
         probe_for(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
         COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
         UpstreamProtocolKind::Messages,
-        &[],
     ));
     assert!(probe_may_add(
         probe_for(COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID),
         "claude-sonnet-5",
         UpstreamProtocolKind::Messages,
-        &[],
     ));
     for (provider_id, offering_id) in [
         (MINIMAX_PROVIDER_ID, MINIMAX_CN_OFFERING_ID),
@@ -160,13 +204,16 @@ fn opencode_ceiling_is_constructable_paths_not_static_model_protocols() {
             probe_for(provider_id, offering_id),
             "new-catalog-model",
             UpstreamProtocolKind::ChatCompletions,
-            &[],
+        ));
+        assert!(probe_may_add(
+            probe_for(provider_id, offering_id),
+            "new-catalog-model",
+            UpstreamProtocolKind::Messages,
         ));
         assert!(!probe_may_add(
             probe_for(provider_id, offering_id),
             "new-catalog-model",
             UpstreamProtocolKind::Responses,
-            &[],
         ));
     }
 }
@@ -259,6 +306,29 @@ fn override_force_off_disables_without_destroying_evidence() {
     let grok = go.model("grok-4.5").unwrap();
     assert!(grok.routable);
     assert!(grok.protocols.get("responses").unwrap().enabled);
+}
+
+#[test]
+fn stale_override_outside_fixed_provider_ceiling_is_not_materialized() {
+    let mut persisted = empty_persisted();
+    let scope = ContractScope::provider(MINIMAX_PROVIDER_ID);
+    persisted.overrides.insert(
+        scope.clone(),
+        vec![PersistedModelProtocolOverride {
+            scope,
+            model_id: "MiniMax-M3".into(),
+            protocol: UpstreamProtocolKind::Responses,
+            state: ProtocolOverrideState::ForceOff,
+            updated_at: Utc::now(),
+        }],
+    );
+
+    let set = build_effective_contracts(&zen_seed(), &[], persisted);
+    let minimax = set.providers.get(MINIMAX_PROVIDER_ID).unwrap();
+    let model = minimax.model("MiniMax-M3").unwrap();
+    assert!(model.protocols.contains_key("chat_completions"));
+    assert!(model.protocols.contains_key("messages"));
+    assert!(!model.protocols.contains_key("responses"));
 }
 
 #[test]
@@ -554,7 +624,7 @@ fn custom_discovery_does_not_become_routable_without_declaration() {
 
 #[test]
 fn custom_declared_protocol_is_preferred_and_other_clients_fall_back_to_it() {
-    let declared = vec![("declared-model".to_string(), UpstreamProtocolKind::Messages)];
+    let declared = [("declared-model".to_string(), UpstreamProtocolKind::Messages)];
     let runtime = CustomAccountRuntime {
         account_id: "custom-single".into(),
         enabled: true,
@@ -583,11 +653,11 @@ fn custom_declared_protocol_is_preferred_and_other_clients_fall_back_to_it() {
     let ceiling = safety_ceiling_protocols(
         probe_for(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID),
         "declared-model",
-        &declared,
     );
-    assert!(ceiling.contains(&UpstreamProtocolKind::Messages));
-    assert!(!ceiling.contains(&UpstreamProtocolKind::ChatCompletions));
-    assert!(!ceiling.contains(&UpstreamProtocolKind::Responses));
+    assert!(
+        ceiling.is_empty(),
+        "Custom uses exact-account model tests, not Provider probes"
+    );
 
     let set = build_effective_contracts(
         &zen_seed(),

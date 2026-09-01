@@ -215,8 +215,8 @@ Command Code GOAT 的请求计费只读取其最新、已验证的 Provider 范�
 | OpenCode Go | `opencode` / `go` | 是 | 只接受官方分发 Key |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | 是 | 无凭据单例，数据库持有 |
 | Command Code GOAT | `command-code` / `goat` | 是 | 固定官方源；公开供应商目录；模型供应由供应商矩阵控制 |
-| MiniMax CN Token Plan | `minimax` / `cn-token-plan` | 是 | 固定中国区源与 Chat Completions 协议 |
-| Kimi Code CN | `kimi-code` / `cn` | 是 | 固定中国区源与 Chat Completions 协议 |
+| MiniMax CN Token Plan | `minimax` / `cn-token-plan` | 是 | 固定中国区 Chat Completions 与 Anthropic Messages 来源 |
+| Kimi Code CN | `kimi-code` / `cn` | 是 | 固定中国区 Chat Completions 与 Anthropic Messages 路径 |
 | Custom API | `custom` / `api` | 是 | 受信管理员目的地 |
 
 所有持久化变更路径都不会在改动行、revision 或时间戳之前把 `routable=false` offering 的 `enabled` 设为 `true`。每次 `Database::open` 都会把历史 Command Code 验证状态统一为 `not_required`，因为公开目录不是 Key 验证；enabled 状态保持不变。Go、Zen Free、GOAT、MiniMax、Kimi、Custom 与未知 pair 的其他状态不受影响。
@@ -229,7 +229,7 @@ Custom API（`custom.rs` + `custom_http.rs`）接受一个语法合法的 HTTP/H
 Vue SPA 是当前唯一的面板客户端，走 HTTP Dashboard V3。CLI 调用同一组变更服务，argv 上没有 CAS 令牌。没有 Tauri `invoke` 路径。
 
 ```text
-  Vue 3  （七个视图，KeepAlive）
+  Vue 3  （八个视图，KeepAlive）
     Pinia: session / controlPlane / connection
            accounts / providers / settings
            |

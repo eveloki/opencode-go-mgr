@@ -473,8 +473,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         (
             "/v1/responses",
             "deepseek-v4-flash",
-            "/v1/responses",
-            RESPONSES_SUCCESS_BODY,
+            "/v1/chat/completions",
+            SUCCESS_BODY,
         ),
         ("/v1/responses", "hy3", "/v1/chat/completions", SUCCESS_BODY),
         (
@@ -492,8 +492,8 @@ async fn routes_all_client_formats_to_each_models_native_protocol() {
         (
             "/v1/messages",
             "deepseek-v4-flash",
-            "/v1/messages",
-            MESSAGES_SUCCESS_BODY,
+            "/v1/chat/completions",
+            SUCCESS_BODY,
         ),
         ("/v1/messages", "hy3", "/v1/chat/completions", SUCCESS_BODY),
         (
@@ -736,8 +736,8 @@ async fn inference_skips_accounts_with_unusable_stored_credentials() {
         (
             "/v1/responses",
             "deepseek-v4-flash",
-            "/v1/responses",
-            RESPONSES_SUCCESS_BODY,
+            "/v1/chat/completions",
+            SUCCESS_BODY,
         ),
         (
             "/v1/messages",

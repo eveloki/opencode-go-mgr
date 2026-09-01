@@ -143,7 +143,7 @@ fn catalog_hardcodes_plans_and_keeps_unverified_offerings_unroutable() {
     assert_eq!(goat.usage_availability, "local_state");
     assert!(goat.manual_usage_calibration);
     assert_eq!(goat.auth_schemes, &BEARER_AUTH);
-    assert_eq!(goat.upstream_protocols, &GOAT_PROTOCOLS);
+    assert_eq!(goat.upstream_protocols, &CHAT_MESSAGES_PROTOCOLS);
     assert!(
         !goat
             .upstream_protocols
@@ -168,6 +168,18 @@ fn catalog_hardcodes_plans_and_keeps_unverified_offerings_unroutable() {
     ));
     assert!(!is_command_code_goat(OPENCODE_PROVIDER_ID, GO_OFFERING_ID));
 
+    for plan in [
+        builtin_plan(MINIMAX_PROVIDER_ID, MINIMAX_CN_OFFERING_ID).unwrap(),
+        builtin_plan(KIMI_PROVIDER_ID, KIMI_CN_OFFERING_ID).unwrap(),
+    ] {
+        assert_eq!(plan.upstream_protocols, &CHAT_MESSAGES_PROTOCOLS);
+        assert!(
+            !plan
+                .upstream_protocols
+                .contains(&UpstreamProtocolKind::Responses)
+        );
+    }
+
     let custom = builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
     assert!(custom.routable);
     assert_eq!(custom.verification_runtime_availability, "available");
@@ -179,7 +191,7 @@ fn catalog_hardcodes_plans_and_keeps_unverified_offerings_unroutable() {
     assert!(!is_custom_api(OPENCODE_PROVIDER_ID, GO_OFFERING_ID));
 
     let cpa = builtin_plan(CPA_PROVIDER_ID, CPA_OFFERING_ID).unwrap();
-    assert!(cpa.routable);
+    assert!(!cpa.routable);
     assert_eq!(
         cpa.product_surface,
         ProviderProductSurface::ExternalIntegration
@@ -391,7 +403,6 @@ fn provider_registry_is_exhaustive_for_plans_and_adapter_kinds() {
                     | ProviderAdapterKind::CommandCodeGoat
                     | ProviderAdapterKind::MiniMaxCn
                     | ProviderAdapterKind::KimiCn
-                    | ProviderAdapterKind::ConfigurableHttp
             )
         );
         assert_eq!(
@@ -402,18 +413,11 @@ fn provider_registry_is_exhaustive_for_plans_and_adapter_kinds() {
             descriptor.usage.egress_ip_shared_cooldown_window,
             kind == ProviderAdapterKind::ZenFree
         );
-        match kind {
-            ProviderAdapterKind::OpenCodeGo
-            | ProviderAdapterKind::ZenFree
-            | ProviderAdapterKind::CommandCodeGoat
-            | ProviderAdapterKind::MiniMaxCn
-            | ProviderAdapterKind::KimiCn
-            | ProviderAdapterKind::ConfigurableHttp
-            | ProviderAdapterKind::Cpa => {
-                assert!(descriptor.inference.production_inference);
-                assert!(descriptor.inference.catalog_routable);
-            }
-        }
+        assert!(descriptor.inference.production_inference);
+        assert_eq!(
+            descriptor.inference.catalog_routable,
+            kind != ProviderAdapterKind::Cpa
+        );
     }
     for kind in ProviderAdapterKind::ALL {
         assert!(
@@ -516,16 +520,24 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
     assert!(!goat.verification.uses_get_models);
     assert!(!goat.verification.never_auto_enable);
 
-    for fixed_chat in [
+    for fixed_provider in [
         ProviderRegistry::get(MINIMAX_PROVIDER_ID, MINIMAX_CN_OFFERING_ID).unwrap(),
         ProviderRegistry::get(KIMI_PROVIDER_ID, KIMI_CN_OFFERING_ID).unwrap(),
     ] {
-        assert!(fixed_chat.protocol_probe.explicit_probe);
+        assert!(fixed_provider.protocol_probe.explicit_probe);
         assert_eq!(
-            fixed_chat.protocol_probe.structural_ceiling,
-            StructuralProbeCeiling::FixedChatCompletions
+            fixed_provider.protocol_probe.structural_ceiling,
+            StructuralProbeCeiling::Fixed(&CHAT_MESSAGES_PROTOCOLS)
         );
-        assert!(fixed_chat.card_actions.protocol_probe);
+        assert_eq!(
+            fixed_provider.protocol_probe.matrix,
+            ProtocolMatrixKind::FixedProviderProtocols
+        );
+        assert_eq!(
+            fixed_provider.protocol_probe.fallback_priority,
+            &CHAT_MESSAGES_PROTOCOLS
+        );
+        assert!(fixed_provider.card_actions.protocol_probe);
     }
 
     let custom = ProviderRegistry::get(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).unwrap();
@@ -550,12 +562,13 @@ fn adapter_descriptors_preserve_current_capability_decisions() {
     assert!(!custom.card_actions.protocol_and_auth_immutable_after_create);
     assert!(!custom.card_actions.enable_requires_verification);
     assert!(custom.card_actions.discover_models);
-    assert!(custom.card_actions.protocol_probe);
+    assert!(!custom.card_actions.protocol_probe);
     assert!(!custom.card_actions.catalog_refresh);
     assert_eq!(
         custom.protocol_probe.structural_ceiling,
-        StructuralProbeCeiling::AccountDeclared
+        StructuralProbeCeiling::Unavailable
     );
+    assert!(!custom.protocol_probe.explicit_probe);
     assert!(!custom.usage.egress_ip_shared_cooldown_window);
 
     assert_ne!(go.kind, ProviderAdapterKind::ConfigurableHttp);

@@ -5891,7 +5891,7 @@ fn open_sanitizes_unroutable_catalog_leftovers_without_touching_go_zen_or_unknow
             .iter()
             .map(|plan| (plan.offering.provider_id, plan.offering.offering_id))
             .collect::<Vec<_>>(),
-        Vec::<(&str, &str)>::new()
+        vec![(CPA_PROVIDER_ID, CPA_OFFERING_ID)]
     );
     assert!(
         builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID).is_some_and(|plan| plan.routable)
@@ -6585,7 +6585,7 @@ fn cpa_singleton_upsert_catalog_and_disconnect_are_idempotent_and_atomic() {
     assert_eq!(record.account_id, CPA_ACCOUNT_ID);
     assert_eq!(record.base_url, "http://127.0.0.1:9317");
     assert_eq!(record.management_key_cipher, management_cipher);
-    assert!(db.get_account(CPA_ACCOUNT_ID).unwrap().unwrap().enabled);
+    assert!(!db.get_account(CPA_ACCOUNT_ID).unwrap().unwrap().enabled);
 
     db.conn
         .execute(

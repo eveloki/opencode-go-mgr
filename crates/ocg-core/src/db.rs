@@ -4014,11 +4014,10 @@ impl Database {
         Ok(scope)
     }
 
-    /// Clear mutable protocol judgments for a built-in snapshot provider while
-    /// preserving its current catalog. Static-supported pairs intentionally have no
-    /// override (Auto). GOAT rows added after the dated snapshot restore their
-    /// sealed family protocol as Preset evidence; every other absent pair receives
-    /// ForceOff so a future preferred-protocol fallback cannot make it live.
+    /// Clear mutable protocol judgments for a built-in provider while preserving
+    /// its current catalog. Official baseline pairs intentionally have no override
+    /// (Auto); constructible non-baseline pairs receive ForceOff. Protocols outside
+    /// the adapter's sealed ceiling are omitted entirely.
     pub fn reset_provider_static_model_protocols(
         &self,
         scope: &ContractScope,
@@ -4042,49 +4041,24 @@ impl Database {
              WHERE scope_kind = ?1 AND scope_id = ?2",
             params![scope.kind_str(), scope.id()],
         )?;
+        let descriptor = crate::provider_contracts::provider_scope_descriptor(scope.id())
+            .expect("validated built-in snapshot provider");
         for model_id in current_models {
-            let descriptor = crate::provider_contracts::provider_scope_descriptor(scope.id())
-                .expect("validated built-in snapshot provider");
             let static_protocols = crate::provider_contracts::static_verified_protocols(
                 descriptor.kind,
                 model_id,
                 &[],
             );
-            let preset_protocols: Vec<_> = if descriptor.kind
-                == ProviderAdapterKind::CommandCodeGoat
-                && static_protocols.is_empty()
-                && !command_code_goat_includes_model(model_id)
-            {
-                ocg_domain::protocol::command_code_supported_formats(model_id)
-                    .iter()
-                    .copied()
-                    .filter_map(crate::provider_contracts::protocol_from_api)
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            for protocol in &preset_protocols {
-                upsert_model_protocol_row_on(
-                    &tx,
-                    &PersistedModelProtocol {
-                        scope: scope.clone(),
-                        model_id: model_id.clone(),
-                        protocol: *protocol,
-                        source: ContractEvidenceSource::Preset,
-                        verified_at: None,
-                        observed_at: None,
-                        last_probe_result: None,
-                        last_probe_at: None,
-                        last_probe_error: None,
-                    },
-                )?;
-            }
+            let ceiling = crate::provider_contracts::safety_ceiling_protocols(
+                descriptor.protocol_probe,
+                model_id,
+            );
             for protocol in [
                 UpstreamProtocolKind::ChatCompletions,
                 UpstreamProtocolKind::Responses,
                 UpstreamProtocolKind::Messages,
             ] {
-                if !static_protocols.contains(&protocol) && !preset_protocols.contains(&protocol) {
+                if ceiling.contains(&protocol) && !static_protocols.contains(&protocol) {
                     set_model_protocol_override_on(
                         &tx,
                         scope,
@@ -4704,6 +4678,8 @@ impl Database {
         );
         let plan = builtin_plan(CPA_PROVIDER_ID, CPA_OFFERING_ID)
             .ok_or_else(|| anyhow::anyhow!("CPA provider offering is not registered"))?;
+        let mut account = account.clone();
+        account.enabled = account.enabled && plan.routable;
         validate_account_binding(
             &account.id,
             &account.provider_id,
@@ -4750,7 +4726,7 @@ impl Database {
             let purchase_date = local_today();
             insert_account_row(
                 &tx,
-                account,
+                &account,
                 &purchase_date,
                 default_verification_status(plan),
             )?;
