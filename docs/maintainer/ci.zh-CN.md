@@ -45,12 +45,13 @@ CAS 的 V3 `PUT`。
 ## draft-release 与 verify-release
 
 `v*` tag 触发时，下游 `draft-release` job 下载三个 runner 的 Actions artifact，
-把平台 payload、签名与 `compose.example.yaml` 组装进 `release/`，生成使用不可变
+把平台 payload、签名、`compose.example.yaml` 与 `cpa-config.example.yaml` 组装进
+`release/`，生成使用不可变
 tag URL 和 bundle 感知平台键的 `latest.json`，再重写覆盖 manifest、签名和其余附
 件的 `SHA256SUMS`，最后创建或更新 **draft** GitHub Release。
 
 `verify-release` 要求 GitHub 附件名称与组装后的 `release/` 集合逐名一致。本地验
-证器还固定校验当前 15 个文件，再重新推导 `latest.json`、重算全部 checksum、验
+证器还固定校验当前 16 个文件，再重新推导 `latest.json`、重算全部 checksum、验
 证四份升级签名，并把每个下载文件与 GitHub Release 存储层报告的 digest 对比。
 
 draft job 会把数字 Release ID 传给下游；验证和公开 job 都重新校验该 ID、tag 与
