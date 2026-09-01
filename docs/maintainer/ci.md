@@ -82,10 +82,8 @@ test/type/lint suite is not repeated on all three native runners.
   env APPIMAGE_EXTRACT_AND_RUN=1 WEBKIT_DISABLE_COMPOSITING_MODE=1` and wait
   for the dashboard.
 
-`scripts/smoke-windows-release.ps1` uses the legacy V2 settings route exactly
-once while bootstrapping the currently published v1.8.2 binary, which predates
-Dashboard V3. After the overwrite restart, update status and every settings
-read/write use V3. Candidate auto-start writes obtain the live `revision` /
+`scripts/smoke-windows-release.ps1` uses Dashboard V3 for both the published
+baseline and the candidate. Auto-start writes obtain the live `revision` /
 `processGeneration` pair from `GET /dashboard/api/v3/settings` and send a
 CAS-aware V3 `PUT`.
 
