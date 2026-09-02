@@ -30,7 +30,7 @@ The registry is sealed. Built-in Plan families are:
 | Command Code GOAT | `command-code` / `goat` | Yes | Public Provider catalog; GOAT preset models default on, additional models default off in the Providers matrix; no account-level GOAT/All or Max mode |
 | MiniMax CN Token Plan | `minimax` / `cn` | Yes | Dedicated `sk-cp` Key; fixed official Chat route, authenticated model directory, and manual official Token Plan usage refresh |
 | Kimi Code CN | `kimi` / `cn` | Yes | Dedicated Kimi Code Key; fixed official Chat route, authenticated model directory, and manual official weekly/rate-window usage refresh |
-| Ollama Cloud | `ollama` / `cloud` | Yes (enable-gated until routing, control plane, and usage paths are verified) | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account-level optional web-session Cookie for a manual usage scrape of `https://ollama.com/settings`; unpriced |
+| Ollama Cloud | `ollama` / `cloud` | Yes | Fixed-origin Chat Completions only (`https://ollama.com`, Bearer); public keyless catalog refresh; account-level optional web-session Cookie for a manual usage scrape of `https://ollama.com/settings`; unpriced |
 | Custom API | `custom` / `api` | Yes | Trusted-administrator destination; one API URL, one account-wide upstream protocol, and public-name → upstream-ID mappings per account; common base URLs are completed automatically; new accounts default on; eligible public names appear on `/v1/models`; unpriced/unknown cost, no quota debit |
 
 ## Move a node configuration

@@ -1208,7 +1208,9 @@ mod tests {
                         descriptor.inference.origin,
                         InferenceOriginKind::OfficialFixed
                     );
-                    assert!(!descriptor.inference.catalog_routable);
+                    // The fail-closed merge gate is open: routing, control
+                    // plane, and usage all shipped.
+                    assert!(descriptor.inference.catalog_routable);
                 }
                 ProviderAdapterKind::ConfigurableHttp => {
                     assert_eq!(

@@ -1075,7 +1075,24 @@ impl StreamConverter {
             return Ok((passthrough, Vec::new(), false));
         };
         let payload = payload.trim();
-        let mut value = parse_sse_payload(payload)?;
+        // Non-JSON data lines are opaque upstream frames (keepalives, pings):
+        // they pass through byte-for-byte and never fail the stream; only
+        // JSON payloads take the normalization and conversion paths.
+        let mut value = match parse_sse_payload(payload) {
+            Ok(value) => value,
+            Err(_) => {
+                let passthrough = sanitize_passthrough_sse_frame(
+                    self.source,
+                    frame,
+                    &self.model,
+                    &self.client_model,
+                    secret,
+                    None,
+                    self.wire_normalization,
+                );
+                return Ok((passthrough, Vec::new(), false));
+            }
+        };
         // Sanitize reads the raw parsed payload so its internal diff sees the
         // normalization rewrite and replaces the data field; the conversion
         // path below then consumes the normalized value.
@@ -1106,7 +1123,12 @@ impl StreamConverter {
                 continue;
             };
             let payload = payload.trim();
-            let mut value = parse_sse_payload(payload)?;
+            // A non-JSON data line (keepalive, ping) cannot be represented in
+            // the client protocol; drop the opaque frame instead of failing
+            // the whole converted stream.
+            let Ok(mut value) = parse_sse_payload(payload) else {
+                continue;
+            };
             if let Some(parsed) = value.as_mut() {
                 self.wire_normalization.normalize_response_value(parsed);
             }
@@ -2693,7 +2715,9 @@ fn parse_sse_frame(frame: &[u8]) -> Result<Option<(Option<String>, String)>, Pro
 }
 
 /// Parse a trimmed SSE data payload. Empty payloads and the `[DONE]` sentinel
-/// have no JSON body and map to `None`; anything else must be valid JSON.
+/// have no JSON body and map to `None`; a parse failure marks an opaque
+/// non-JSON frame, which callers pass through (same-protocol) or drop
+/// (cross-protocol) instead of failing the stream.
 fn parse_sse_payload(payload: &str) -> Result<Option<Value>, ProtocolError> {
     if payload.is_empty() || payload == "[DONE]" {
         return Ok(None);
@@ -2799,9 +2823,13 @@ fn redact_sse_metadata(frame: Bytes, known_secret: &str) -> Bytes {
             (raw_line, "")
         };
         let value = line.split_once(':').and_then(|(field, value)| {
-            // Data lines are parsed and redacted as JSON above. Every other
-            // field is metadata, including provider extension fields.
-            (field != "data").then_some((field, value))
+            // JSON data lines are parsed and redacted as JSON above. A data
+            // line that is not valid JSON is opaque text (keepalive, ping) and
+            // gets the same plain-text secret redaction as metadata fields.
+            if field == "data" && serde_json::from_str::<Value>(value.trim()).is_ok() {
+                return None;
+            }
+            Some((field, value))
         });
         if let Some((field, value)) = value {
             let redacted = redact_known_secret(value, known_secret);
@@ -3148,6 +3176,72 @@ mod tests {
         let text = String::from_utf8(output.concat()).unwrap();
         assert!(text.contains("\"model\":\"deepseek-v4-flash\""));
         assert!(!text.contains("upstream-should-not-leak"));
+    }
+
+    #[test]
+    fn same_protocol_opaque_frames_pass_through_and_never_fail_the_stream() {
+        let mut plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
+        plan.model = "deepseek-v4-flash:0731".into();
+        plan.client_model = "deepseek-v4-flash".into();
+        let mut converter = StreamConverter::new_with_known_secret_and_normalization(
+            &plan,
+            None,
+            WireNormalization::OllamaCloud,
+        );
+        let input = concat!(
+            "data: ping\n\n",
+            "data: {\"id\":\"c\",\"model\":\"deepseek-v4-flash:0731\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"thinking\":\"why\"},\"finish_reason\":null}]}\n\n",
+            "data: ping\n\n",
+            "data: {\"id\":\"c\",\"model\":\"deepseek-v4-flash:0731\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let output = converter
+            .process_chunk(Bytes::from_static(input.as_bytes()))
+            .expect("opaque non-JSON frames must not fail the same-protocol stream");
+        let text = String::from_utf8(output.concat()).unwrap();
+        // The keepalive frames stay byte-identical; the JSON deltas still get
+        // the wire-normalization backfill and the model rename.
+        assert_eq!(text.matches("data: ping\n\n").count(), 2);
+        assert!(text.contains("\"reasoning_content\":\"why\""));
+        assert!(text.contains("\"thinking\":\"why\""));
+        assert!(text.contains("\"content\":\"ok\""));
+        assert!(text.contains("\"model\":\"deepseek-v4-flash\""));
+        assert!(!text.contains("deepseek-v4-flash:0731"));
+    }
+
+    #[test]
+    fn same_protocol_opaque_frames_redact_the_known_secret() {
+        let plan = plan(ApiFormat::ChatCompletions, ApiFormat::ChatCompletions);
+        let mut converter = StreamConverter::new_with_known_secret(&plan, Some("sk-opaque-secret"));
+        let input = concat!(
+            "data: ping sk-opaque-secret\n\n",
+            "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut output = converter
+            .process_chunk(Bytes::from_static(input.as_bytes()))
+            .expect("opaque frames must not fail the stream");
+        output.extend(converter.finish().expect("stream should finish"));
+        let text = String::from_utf8(output.concat()).unwrap();
+        assert!(
+            !text.contains("sk-opaque-secret"),
+            "opaque data lines must not leak the known secret: {text}"
+        );
+        assert!(text.contains("data: ping <redacted>"), "{text}");
+        assert!(text.contains("\"content\":\"ok\""));
+    }
+
+    #[test]
+    fn cross_protocol_opaque_frames_are_dropped_without_failing_the_stream() {
+        let source = concat!(
+            "data: ping\n\n",
+            "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"why\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let anthropic = convert(ApiFormat::Messages, ApiFormat::ChatCompletions, source);
+        assert!(anthropic.contains("\"type\":\"thinking_delta\""));
+        assert!(anthropic.contains("ok"));
+        assert!(!anthropic.contains("ping"));
     }
 
     #[test]

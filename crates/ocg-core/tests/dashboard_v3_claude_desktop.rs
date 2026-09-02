@@ -244,11 +244,14 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "ApplicationConnectorCommitRequest",
             "ApplicationConnectorCommitResult",
             "OllamaUsageStatus",
+            "OllamaUsageSnapshot",
+            "OllamaUsageWindow",
+            "OllamaUsageModelRequests",
             "OllamaCookieUpdate",
             "OllamaUsageThrottleError",
         ]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), application_connector_start + 12);
+    assert_eq!(CATALOG_TYPE_NAMES.len(), application_connector_start + 15);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");

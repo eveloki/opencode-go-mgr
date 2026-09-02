@@ -107,7 +107,7 @@
                 size="small"
                 :aria-label="t('刷新额度')"
                 :loading="usageRefreshLoading"
-                :disabled="(!isOfficialCn && !isOllamaCloud && isUsageRefreshBlocked(account, now)) || usageLoading || !!usageLoadError"
+                :disabled="(!isOfficialCn && !isOllamaCloud && isUsageRefreshBlocked(account, now)) || usageLoading || (!isOllamaCloud && !!usageLoadError)"
                 @click="emit('refresh-usage')"
               >
                 <template #icon><n-icon :component="ReloadOutlined" /></template>

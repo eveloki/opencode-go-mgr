@@ -13897,6 +13897,36 @@ mod tests {
             assert_eq!(edited.name, format!("{id}-renamed"));
         }
 
+        // Ollama Cloud opened its enable bit once routing, control plane, and
+        // usage shipped; enabled rows must persist through the same gates.
+        let mut ollama = account("ollama-enabled");
+        ollama.provider_id = OLLAMA_PROVIDER_ID.to_string();
+        ollama.offering_id = OLLAMA_CLOUD_OFFERING_ID.to_string();
+        ollama.enabled = true;
+        db.create_account(&ollama).unwrap();
+        assert!(db.get_account("ollama-enabled").unwrap().unwrap().enabled);
+        db.update_account(
+            "ollama-enabled",
+            &AccountUpdate {
+                enabled: Some(false),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        db.update_account(
+            "ollama-enabled",
+            &AccountUpdate {
+                enabled: Some(true),
+                ..AccountUpdate::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(db.get_account("ollama-enabled").unwrap().unwrap().enabled);
+
         db.update_account(
             "go-enabled",
             &AccountUpdate {
@@ -13930,15 +13960,17 @@ mod tests {
             .copied()
             .filter(|plan| !plan.routable)
             .collect();
-        // Ollama Cloud is the current fail-closed offering; the assertion
-        // keeps the sanitation fixture meaningful and fails when the enable
-        // bit is opened without revisiting this test.
-        assert_eq!(
-            unroutable
-                .iter()
-                .map(|plan| (plan.offering.provider_id, plan.offering.offering_id))
-                .collect::<Vec<_>>(),
-            vec![(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID)]
+        // No plan currently merges fail-closed (Ollama Cloud opened its gate
+        // once routing, control plane, and usage shipped). The sanitation at
+        // open stays in place for any future unroutable offering; this
+        // assertion fails when one is added without revisiting this fixture.
+        assert!(
+            unroutable.is_empty(),
+            "unexpected unroutable plans: {unroutable:?}"
+        );
+        assert!(
+            builtin_plan(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID)
+                .is_some_and(|plan| plan.routable)
         );
         assert!(
             builtin_plan(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID)
@@ -14012,8 +14044,8 @@ mod tests {
         );
         leftover_enable(&db, "draft-api");
 
-        // A stale enabled Ollama Cloud row is disabled at open (fail-closed
-        // sanitation) and stays disabled on the second open.
+        // An enabled Ollama Cloud row is now legitimate (routable offering),
+        // so open must leave it untouched.
         persist_unroutable_draft(
             &db,
             builtin_plan(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID).unwrap(),
@@ -14100,8 +14132,8 @@ mod tests {
         let ollama_after = sanitation_snapshot(&db, "ollama-leftover");
         assert_eq!(ollama_after.name, "ollama-leftover");
         assert!(
-            !ollama_after.enabled,
-            "unroutable Ollama leftovers must be disabled at open"
+            ollama_after.enabled,
+            "routable Ollama leftovers must not be disabled at open"
         );
 
         let first_pass: Vec<_> = [

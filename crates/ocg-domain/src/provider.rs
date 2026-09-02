@@ -456,9 +456,9 @@ pub const BUILTIN_PLANS: [BuiltinPlan; 7] = [
         creation_unavailable_reason: None,
         verification_policy: VerificationPolicy::NotRequired,
         verification_runtime_availability: "not_applicable",
-        // Enablement writes stay rejected while this offering is marked
-        // non-routable (fail-closed merge).
-        routable: false,
+        // Routing, control plane, and usage paths are complete; the
+        // fail-closed merge gate is opened per the change migration plan.
+        routable: true,
         managed_registration: false,
         pricing_availability: "unpriced",
         usage_availability: "local_state",
@@ -2098,7 +2098,10 @@ mod tests {
         assert!(!is_custom_api(OPENCODE_PROVIDER_ID, GO_OFFERING_ID));
 
         let ollama = builtin_plan(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID).unwrap();
-        assert!(!ollama.routable, "Ollama Cloud must merge fail-closed");
+        assert!(
+            ollama.routable,
+            "Ollama Cloud opens only after all paths ship"
+        );
         assert_eq!(ollama.pricing_availability, "unpriced");
         assert_eq!(ollama.usage_availability, "local_state");
         assert_eq!(ollama.model_source, OLLAMA_CLOUD_MODEL_SOURCE);
@@ -2311,16 +2314,10 @@ mod tests {
                 | ProviderAdapterKind::CommandCodeGoat
                 | ProviderAdapterKind::MiniMaxCn
                 | ProviderAdapterKind::KimiCn
+                | ProviderAdapterKind::OllamaCloud
                 | ProviderAdapterKind::ConfigurableHttp => {
                     assert!(descriptor.inference.production_inference);
                     assert!(descriptor.inference.catalog_routable);
-                }
-                ProviderAdapterKind::OllamaCloud => {
-                    assert!(descriptor.inference.production_inference);
-                    assert!(
-                        !descriptor.inference.catalog_routable,
-                        "Ollama Cloud stays fail-closed until its enable bit is opened"
-                    );
                 }
             }
         }
@@ -2337,43 +2334,27 @@ mod tests {
     }
 
     #[test]
-    fn ollama_cloud_offering_rejects_enablement_and_protocol_probes_until_opened() {
-        // Contract for the fail-closed merge: while `routable` stays false the
-        // persisted enable bit must be rejected for every write path that
-        // consults the sealed registry, and the fixed-Chat family exposes no
-        // protocol-probe surface.
-        assert!(!offering_allows_enablement(
+    fn ollama_cloud_offering_enablement_is_open_and_probes_stay_unsupported() {
+        // Routing, control plane, and usage are complete, so persisted
+        // enablement is admitted; the fixed-Chat family still exposes no
+        // protocol-probe surface. Any future fail-closed merge reuses the
+        // generic `catalog_enablement_gate_is_fail_closed_for_unroutable_plans`
+        // contract plus the DB-open sanitation.
+        assert!(offering_allows_enablement(
             OLLAMA_PROVIDER_ID,
             OLLAMA_CLOUD_OFFERING_ID
         ));
-        let error =
-            ensure_enabled_offering_is_routable(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID, true)
-                .expect_err("Ollama Cloud enablement must be rejected while fail-closed");
-        assert!(matches!(
-            error,
-            ProviderBindingError::EnablementNotRoutable {
-                provider_id: OLLAMA_PROVIDER_ID,
-                offering_id: OLLAMA_CLOUD_OFFERING_ID,
-                display_name: "Ollama Cloud",
-            }
-        ));
-        assert!(error.to_string().contains("not routable"));
-        // Disabled drafts stay writable so accounts can be staged.
-        assert!(
-            ensure_enabled_offering_is_routable(
-                OLLAMA_PROVIDER_ID,
-                OLLAMA_CLOUD_OFFERING_ID,
-                false
-            )
-            .is_ok()
-        );
+        ensure_enabled_offering_is_routable(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID, true)
+            .expect("opened Ollama Cloud enablement must persist");
+        ensure_enabled_offering_is_routable(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID, false)
+            .expect("disabled drafts stay writable so accounts can be staged");
         let descriptor =
             ProviderRegistry::get(OLLAMA_PROVIDER_ID, OLLAMA_CLOUD_OFFERING_ID).unwrap();
         assert_eq!(descriptor.kind, ProviderAdapterKind::OllamaCloud);
         assert!(!descriptor.protocol_probe.explicit_probe);
         assert!(!descriptor.card_actions.protocol_probe);
         assert!(descriptor.card_actions.catalog_refresh);
-        assert!(!descriptor.card_actions.persisted_enable_allowed);
+        assert!(descriptor.card_actions.persisted_enable_allowed);
         assert_eq!(descriptor.usage.contract, UsageContractKind::LocalState);
         assert!(descriptor.card_actions.usage_refresh);
         assert_eq!(

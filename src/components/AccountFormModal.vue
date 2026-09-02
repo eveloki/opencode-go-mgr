@@ -97,7 +97,7 @@
         </n-form-item>
 
         <n-form-item
-          v-if="isEdit && isOllamaPlan"
+          v-if="isOllamaPlan"
           path="ollamaCookie"
           :label="t('网页会话 Cookie（可选）')"
           class="full-width-field"
@@ -111,11 +111,12 @@
           >
             <template #suffix>
               <n-button
+                v-if="isEdit"
                 text
                 size="tiny"
                 type="warning"
                 :title="t('清除已保存的网页会话 Cookie，用量状态一并归零')"
-                @click="clearOllamaCookieField = true"
+                @click="onClearOllamaCookie"
               >
                 {{ t('清除') }}
               </n-button>
@@ -331,7 +332,9 @@ export type AccountFormPayload = {
     upstream_model: string;
     protocol: AccountProtocol;
   }>;
-  /** Ollama Cloud edit only; pasted web-session Cookie request header. */
+  /** Ollama Cloud only; pasted web-session Cookie request header. Edits write
+   * it through the dedicated cookie route; creates attach it after the account
+   * exists (the route is account-scoped). `""` clears the stored Cookie. */
   ollama_cookie?: string | null;
 };
 
@@ -386,7 +389,9 @@ useLocalizedModalCloseLabel(toRef(props, "show"), "account-modal");
 const formRef = ref<FormInst | null>(null);
 const form = ref<FormModel>(blankForm());
 // One-shot flag: the next save clears the stored web-session Cookie
-// (payload.ollama_cookie = null) instead of leaving it unchanged.
+// (payload.ollama_cookie = "") instead of leaving it unchanged. Clicking the
+// clear button also empties the input so a freshly pasted value cannot be
+// submitted by accident.
 const clearOllamaCookieField = ref(false);
 const nameWasEdited = ref(false);
 const formError = ref("");
@@ -418,9 +423,16 @@ const effectivePlan = computed<PlanDefinition | null>(() => {
 const isCustomPlan = computed(() => effectivePlan.value?.id === "custom-endpoint");
 const isOllamaPlan = computed(() => effectivePlan.value?.id === "ollama-cloud");
 
+/** The clear action empties the field immediately: the save branch must never
+ * let a freshly pasted value win over an explicit clear request. */
+function onClearOllamaCookie() {
+  form.value.ollamaCookie = "";
+  clearOllamaCookieField.value = true;
+}
+
 /** Mirrors the server-side Cookie header contract for inline feedback. */
 const ollamaCookieIssue = computed(() => {
-  if (!isOllamaPlan.value || !isEdit.value) return "";
+  if (!isOllamaPlan.value) return "";
   const raw = form.value.ollamaCookie.trim();
   if (!raw) return "";
   if (raw.length > 16 * 1024) return t("Cookie 超过 16KB 上限");
@@ -789,9 +801,10 @@ async function handleSave() {
       payload.key = form.value.key.trim();
     }
     if (isOllamaPlan.value) {
-      if (form.value.ollamaCookie.trim()) {
-        payload.ollama_cookie = form.value.ollamaCookie.trim();
-      } else if (clearOllamaCookieField.value) {
+      // An explicit clear wins over whatever the (now emptied) input held.
+      if (clearOllamaCookieField.value) {
+        payload.ollama_cookie = "";
+      } else if (form.value.ollamaCookie.trim()) {
         payload.ollama_cookie = form.value.ollamaCookie.trim();
       }
     }
@@ -824,6 +837,10 @@ async function handleSave() {
     key: form.value.key,
     notes: form.value.notes,
   };
+  if (ollamaCookieIssue.value) {
+    formError.value = ollamaCookieIssue.value;
+    return;
+  }
   if (hasField("purchase_date")) {
     values.purchase_date = form.value.purchaseDate === null
       ? undefined
@@ -841,7 +858,17 @@ async function handleSave() {
   }
 
   try {
-    const payload = buildCreateAccountPayload(plan, form.value.offeringId, values);
+    // The cookie route is account-scoped, so a create-time Cookie rides along
+    // on the payload and Accounts.vue writes it right after the account exists.
+    const payload: AccountInput & { ollama_cookie?: string } = buildCreateAccountPayload(
+      plan,
+      form.value.offeringId,
+      values,
+    );
+    const cookie = form.value.ollamaCookie.trim();
+    if (isOllamaPlan.value && cookie) {
+      payload.ollama_cookie = cookie;
+    }
     emit("save", payload);
   } catch (error) {
     // Never submit a degraded payload: the backend rejects incomplete Custom
