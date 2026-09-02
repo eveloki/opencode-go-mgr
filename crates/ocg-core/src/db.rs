@@ -3543,16 +3543,6 @@ impl Database {
             )?;
             ensure_column(&tx, "accounts", "connection_verified_at", "TEXT")?;
             ensure_column(&tx, "accounts", "verification_error", "TEXT")?;
-            // Databases that reached v22 before the v22 column list gained
-            // free_alias_enabled never revisit v22, yet later statements in
-            // this chain read it — top it up here for the same reason as
-            // forward_logs.raw_cost_usd below.
-            ensure_column(
-                &tx,
-                "accounts",
-                "free_alias_enabled",
-                "INTEGER NOT NULL DEFAULT 0",
-            )?;
             for (column, definition) in [
                 ("requested_model", "TEXT"),
                 ("resolved_alias", "TEXT"),
@@ -3560,10 +3550,6 @@ impl Database {
                 ("native_cost_value", "REAL"),
                 ("native_cost_unit", "TEXT"),
                 ("native_cost_currency", "TEXT"),
-                // Databases that reached v22 before the v22 column list gained
-                // raw_cost_usd never revisit v22; the backfill below reads it,
-                // so make sure it exists here too.
-                ("raw_cost_usd", "REAL"),
             ] {
                 ensure_column(&tx, "forward_logs", column, definition)?;
             }
