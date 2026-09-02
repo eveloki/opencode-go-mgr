@@ -2303,11 +2303,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "state": {
           "type": "string"
         }
@@ -2315,9 +2310,7 @@
       "required": [
         "expectedRevision",
         "processGeneration",
-        "state",
-        "revision",
-        "processGeneration"
+        "state"
       ],
       "type": "object"
     },

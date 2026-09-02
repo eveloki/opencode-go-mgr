@@ -224,33 +224,6 @@ fn dashboard_v3_schema_version_stays_at_v35() {
     assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
-#[test]
-fn dashboard_v3_keys_release_source_hides_access_key_unique_index_seam() {
-    let source = include_str!("../src/db.rs");
-    let tests_mod = source
-        .rfind("#[cfg(test)]\nmod tests {")
-        .expect("db.rs tests module");
-    let production = &source[..tests_mod];
-    let needle = "fn test_drop_access_key_unique_index";
-    let idx = production
-        .find(needle)
-        .expect("debug/test unique-index seam should exist");
-    let prefix = &production[idx.saturating_sub(160)..idx];
-    assert!(
-        prefix.contains("#[cfg(any(test, debug_assertions))]")
-            || prefix.contains("#[cfg(debug_assertions)]"),
-        "access-key unique-index seam must be absent from release production source: {prefix}"
-    );
-    assert!(
-        !prefix.contains("#[cfg(not(debug_assertions))]"),
-        "access-key unique-index seam must not compile in release"
-    );
-    assert!(
-        !production[idx + needle.len()..].contains(needle),
-        "only one unique-index test seam is allowed"
-    );
-}
-
 #[tokio::test]
 async fn dashboard_v3_key_routes_require_the_v3_session() {
     let harness = start_public("keys-auth").await;

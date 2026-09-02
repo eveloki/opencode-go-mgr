@@ -2924,8 +2924,6 @@ pub struct CpaOAuthSessionDelete {
     #[serde(flatten)]
     pub expectation: MutationExpectation,
     pub state: String,
-    pub revision: u64,
-    pub process_generation: u64,
 }
 
 /// Deterministic JSON Schema catalog for the checked-in V3 contract.

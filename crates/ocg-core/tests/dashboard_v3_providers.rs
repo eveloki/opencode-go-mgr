@@ -710,11 +710,13 @@ async fn dashboard_v3_provider_contracts_project_five_scopes_and_custom_endpoint
     );
     assert!(parsed.custom_endpoints.is_empty());
     assert!(
-        parsed
-            .providers
-            .iter()
-            .all(|group| group.card.protocol_probe),
-        "every built-in Provider scope must expose the shared probe action"
+        parsed.providers.iter().all(|group| {
+            group.card.protocol_probe
+                // Ollama Cloud is a fixed Chat-only family with no probeable
+                // protocol surface, so the shared probe action stays off.
+                || group.provider_id == OLLAMA_PROVIDER_ID
+        }),
+        "every probeable built-in Provider scope must expose the shared probe action"
     );
     assert!(body["providers"][0].get("scope_kind").is_none());
     assert_eq!(body["providers"][0]["scopeKind"], "provider");
@@ -1818,10 +1820,11 @@ async fn dashboard_v3_ollama_catalog_refresh_is_public_and_respects_admin_pins()
         "admin pins are persistent data the refresh must respect"
     );
 
-    // The family stays fail-closed at the offering level.
+    // Routing, control plane, and usage have shipped, so the offering is
+    // routable; catalog refresh remains the only catalog path.
     let offering = &ollama.offerings[0];
     assert_eq!(offering.offering_id, OLLAMA_CLOUD_OFFERING_ID);
-    assert!(!offering.routable);
+    assert!(offering.routable);
 
     harness.stop();
 }

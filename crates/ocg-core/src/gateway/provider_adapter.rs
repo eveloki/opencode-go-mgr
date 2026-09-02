@@ -420,6 +420,7 @@ fn resolve_command_code_goat(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // positional parity with the sealed-route family
 fn resolve_fixed_provider_plan(
     account: &Account,
     plan: &RequestPlan,

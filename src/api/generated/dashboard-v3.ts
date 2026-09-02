@@ -1940,7 +1940,6 @@ export interface CpaOAuthStatus {
 export interface CpaOAuthSessionDelete {
   expectedRevision: number;
   processGeneration: number;
-  revision: number;
   state: string;
 }
 /**
