@@ -10,7 +10,6 @@ use ocg_core::dashboard_v3::{
     ERROR_CONFLICT, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
     ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
 };
-use ocg_core::db::CURRENT_SCHEMA_VERSION;
 #[cfg(debug_assertions)]
 use ocg_core::models::DEFAULT_ACCOUNT_TEST_MODEL;
 use ocg_core::models::{
@@ -440,8 +439,8 @@ fn assert_no_secret_logs(harness: &V3Harness, extra: &[&str]) {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[test]

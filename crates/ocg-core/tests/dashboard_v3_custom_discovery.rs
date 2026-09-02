@@ -11,7 +11,6 @@ use ocg_core::dashboard_v3::{
     CustomModelDiscoveryResponse, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_NOT_FOUND,
     ERROR_UNAUTHORIZED,
 };
-use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::models::{ProxyListDirection, ProxyMode};
 use ocg_core::provider::{CUSTOM_API_OFFERING_ID, CUSTOM_PROVIDER_ID};
 use ocg_core::provider_contracts::ContractScope;
@@ -353,8 +352,8 @@ async fn create_custom_account(harness: &V3Harness, base_url: &str, _auth: &str)
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[tokio::test]
@@ -993,7 +992,7 @@ async fn v2_discovery_coexists_and_keeps_snake_case() {
     assert!(!v3_text.contains(CUSTOM_KEY), "{v3_auth}");
     assert_eq!(v3["revision"], before);
     assert_eq!(harness.state.settings_revision(), before);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
     harness.stop();
 }
 

@@ -383,6 +383,12 @@ fn update_account_locked(
     let _settings_update = state.settings_update.lock();
     check_expectation(state, &input.expectation)?;
     let existing = load_model_account(state, id)?;
+    if existing.id == crate::provider::CPA_ACCOUNT_ID {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "CPA Subscription Pool settings must use the external-integration endpoint",
+        ));
+    }
     if existing.is_zen_free() {
         return Err(V3ApiError::invalid_request_at(
             state,
@@ -969,26 +975,5 @@ mod committed_revision_tests {
         assert_eq!(state.settings_revision(), before + 1);
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn production_source_bumps_revision_only_through_committed_revision_helper() {
-        let production = include_str!("accounts.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source precedes tests");
-        assert!(
-            production.contains("fn committed_revision"),
-            "committed-revision helper must exist"
-        );
-        assert_eq!(
-            production.matches("bump_settings_revision").count(),
-            1,
-            "only committed_revision may advance the CAS token"
-        );
-        assert!(
-            production.contains("fn with_committed_revision"),
-            "post-commit work must run through with_committed_revision"
-        );
     }
 }

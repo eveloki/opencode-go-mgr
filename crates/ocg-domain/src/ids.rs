@@ -15,6 +15,10 @@ pub const MINIMAX_PROVIDER_ID: &str = "minimax";
 pub const KIMI_PROVIDER_ID: &str = "kimi";
 pub const OLLAMA_PROVIDER_ID: &str = "ollama";
 
+/// Reserved sealed provider identity for the local CPA external integration.
+/// This is not a user-defined Provider row or plugin identifier.
+pub const CPA_PROVIDER_ID: &str = "cpa";
+
 pub const GO_OFFERING_ID: &str = "go";
 pub const GOAT_OFFERING_ID: &str = "goat";
 pub const ANONYMOUS_FREE_OFFERING_ID: &str = "anonymous-free";
@@ -35,6 +39,8 @@ pub const OLLAMA_CLOUD_MODELS_PATH: &str = "/v1/models";
 /// This is a page URL, never an inference or JSON usage API endpoint.
 pub const OLLAMA_CLOUD_SETTINGS_URL: &str = "https://ollama.com/settings";
 
+pub const CPA_OFFERING_ID: &str = "local";
+
 /// Client-facing Alias. Go still owns the published kebab alias; GOAT maps it
 /// internally to the slash raw ID and stays non-routeable.
 pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_ALIAS: &str = "deepseek-v4-flash";
@@ -45,6 +51,12 @@ pub const COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM: &str = "deepseek/deepsee
 /// route. It is created by schema migration, never by the generic account API.
 pub const ZEN_FREE_ACCOUNT_ID: &str = "00000000-0000-0000-0000-000000000002";
 pub const ZEN_FREE_ACCOUNT_NAME: &str = "OpenCode Zen Free";
+
+/// Reserved singleton account row for the local CPA subscription pool. It is
+/// created only by the external-integration control plane, never by generic
+/// account creation.
+pub const CPA_ACCOUNT_ID: &str = "00000000-0000-0000-0000-000000000003";
+pub const CPA_ACCOUNT_NAME: &str = "CPA Subscription Pool";
 
 /// Fixed attribution id for the primary key. The recognizable fixed pattern
 /// keeps it visually distinct from generated v4 UUIDs and the nil UUID.

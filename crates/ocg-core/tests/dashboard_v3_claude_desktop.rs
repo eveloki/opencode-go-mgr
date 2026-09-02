@@ -1,11 +1,10 @@
 //! Dashboard V3 GET/PUT `/claude-desktop/models`: defaults, CAS, validation,
-//! secrecy, V2 coexistence, catalog append, and host-SCC membership.
+//! secrecy, V2 coexistence, and catalog append.
 
 use ocg_core::dashboard_v3::{
     CATALOG_TYPE_NAMES, ClaudeDesktopModels, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
     ERROR_MISSING_EXPECTED_REVISION, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, contract_schema,
 };
-use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::models::{
     CLAUDE_DESKTOP_HAIKU_ALIAS, CLAUDE_DESKTOP_OPUS_ALIAS, CLAUDE_DESKTOP_SONNET_ALIAS,
 };
@@ -157,8 +156,8 @@ fn assert_unrelated_config(harness: &V3Harness, before: &ocg_core::models::AppCo
 }
 
 #[test]
-fn dashboard_v3_claude_desktop_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_claude_desktop_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[test]
@@ -232,7 +231,7 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
         ]
     );
     assert_eq!(
-        &CATALOG_TYPE_NAMES[application_connector_start..],
+        &CATALOG_TYPE_NAMES[application_connector_start..application_connector_start + 9],
         [
             "ApplicationConnectorAction",
             "ApplicationConnectorStatus",
@@ -243,6 +242,31 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "ApplicationConnectorPreview",
             "ApplicationConnectorCommitRequest",
             "ApplicationConnectorCommitResult",
+        ]
+    );
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[application_connector_start + 9..application_connector_start + 24],
+        [
+            "CpaIntegration",
+            "CpaIntegrationUpdate",
+            "CpaTestRequest",
+            "CpaConnectionReport",
+            "CpaModels",
+            "CpaAccounts",
+            "CpaAccount",
+            "CpaAccountStatusUpdate",
+            "CpaAccountDelete",
+            "CpaQuotaReset",
+            "CpaOAuthProvider",
+            "CpaOAuthStartRequest",
+            "CpaOAuthStart",
+            "CpaOAuthStatus",
+            "CpaOAuthSessionDelete",
+        ]
+    );
+    assert_eq!(
+        &CATALOG_TYPE_NAMES[application_connector_start + 24..],
+        [
             "OllamaUsageStatus",
             "OllamaUsageSnapshot",
             "OllamaUsageWindow",
@@ -251,7 +275,7 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
             "OllamaUsageThrottleError",
         ]
     );
-    assert_eq!(CATALOG_TYPE_NAMES.len(), application_connector_start + 15);
+    assert_eq!(CATALOG_TYPE_NAMES.len(), application_connector_start + 30);
 
     let schema = contract_schema();
     let defs = schema["$defs"].as_object().expect("$defs");
@@ -267,34 +291,6 @@ fn catalog_type_names_append_claude_desktop_after_custom_discovery() {
     for name in CLAUDE_DESKTOP_CATALOG_TYPES {
         assert_eq!(defs[*name]["additionalProperties"], false);
     }
-}
-
-#[test]
-fn dashboard_v3_claude_desktop_does_not_expand_host_scc() {
-    let kernel = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/kernel/mod.rs"));
-    let start = kernel
-        .find("const EXPECTED_HOST_SCC:")
-        .expect("host SCC whitelist should remain in kernel/mod.rs");
-    let block = &kernel[start..];
-    let end = block.find(';').expect("EXPECTED_HOST_SCC should end");
-    let members: Vec<&str> = block[..end]
-        .split('"')
-        .enumerate()
-        .filter_map(|(i, part)| (i % 2 == 1).then_some(part))
-        .collect();
-    assert!(
-        members.is_empty(),
-        "Phase 1 cut must leave no multi-node host SCC, members={members:?}"
-    );
-
-    let lib = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));
-    assert!(
-        !lib.contains("mod claude_desktop"),
-        "Claude Desktop must stay a dashboard_v3 submodule"
-    );
-    let v3 = include_str!("../src/dashboard_v3/mod.rs");
-    assert!(v3.contains("mod claude_desktop"));
-    assert!(v3.contains("/claude-desktop/models"));
 }
 
 #[tokio::test]

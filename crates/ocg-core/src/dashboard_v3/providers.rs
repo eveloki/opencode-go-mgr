@@ -3,8 +3,8 @@
 //! Catalog, contracts, model capabilities, and saved Zen models are local
 //! reads. Zen enablement and provider-scope protocol switches share the V3
 //! CAS envelope. Zen catalog refresh uses the fixed official keyless directory.
-//! Go/Zen protocol probes share the crate-root transport. Custom scopes hide
-//! the Provider Test action; account-page tests use V3 model-tests.
+//! Every built-in Provider scope shares the crate-root protocol-probe transport.
+//! Custom scopes hide the Provider Test action; account-page tests use V3 model-tests.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -34,10 +34,10 @@ use crate::models::{Account as ModelAccount, AppConfig, ForwardLog, UpstreamChan
 use crate::protocol_probe::{self, ProtocolProbeContext, ProtocolProbeRunError};
 use crate::provider::{
     BUILTIN_PLANS, BuiltinPlan, COMMAND_CODE_PROVIDER_ID, CUSTOM_PROVIDER_ID,
-    ConnectionVerificationStatus, GO_OFFERING_ID, KIMI_CN_BASE_URL, KIMI_CN_OFFERING_ID,
-    KIMI_PROVIDER_ID, MINIMAX_CN_BASE_URL, MINIMAX_CN_OFFERING_ID, MINIMAX_PROVIDER_ID,
-    OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID, ProviderAdapterKind,
-    ProviderRegistry, ZEN_FREE_ACCOUNT_ID, default_verification_status,
+    ConnectionVerificationStatus, GO_OFFERING_ID, GOAT_OFFERING_ID, KIMI_CN_BASE_URL,
+    KIMI_CN_OFFERING_ID, KIMI_PROVIDER_ID, MINIMAX_CN_BASE_URL, MINIMAX_CN_OFFERING_ID,
+    MINIMAX_PROVIDER_ID, OLLAMA_PROVIDER_ID, OPENCODE_PROVIDER_ID, OPENCODE_ZEN_FREE_PROVIDER_ID,
+    ProviderAdapterKind, ProviderRegistry, ZEN_FREE_ACCOUNT_ID, default_verification_status,
 };
 use crate::provider_contracts::{
     self, ContractScope, EffectiveContractSet, EffectiveModelContract as DomainModelContract,
@@ -752,15 +752,49 @@ pub(super) async fn put_provider_model_protocol_overrides(
     let input = parse_mutation_json::<ModelProtocolOverridesUpdate>(&body)?;
     let _settings_update = state.settings_update.lock();
     check_expectation(&state, &input.expectation)?;
-    let scope = ContractScope::parse(provider_contracts::SCOPE_KIND_PROVIDER, &scope_id)
-        .map_err(|message| V3ApiError::invalid_request_at(&state, message))?;
+    let scope = ContractScope::provider(&scope_id);
     validate_provider_scope(&state, &scope)?;
+    validate_provider_protocol_overrides(&state, &scope_id, &input.overrides)?;
     commit_model_protocol_overrides(&state, &scope, input.overrides)
 }
 
-/// Restore a built-in provider's current catalog to its static protocol
-/// snapshot. This never contacts an upstream: it deliberately clears all
-/// manual/probe evidence and makes static-unknown pairs explicitly off.
+fn validate_provider_protocol_overrides(
+    state: &CoreState,
+    scope_id: &str,
+    overrides: &[ModelProtocolOverride],
+) -> Result<(), V3ApiError> {
+    let descriptor = provider_contracts::provider_scope_descriptor(scope_id)
+        .ok_or_else(|| V3ApiError::not_found_at(state, "provider not found"))?;
+    let contracts = state.provider_contracts();
+    let scope = contracts
+        .providers
+        .get(scope_id)
+        .ok_or_else(|| V3ApiError::not_found_at(state, "provider scope not found"))?;
+    for item in overrides {
+        let model = scope.model(&item.model_id).ok_or_else(|| {
+            V3ApiError::invalid_request_at(
+                state,
+                "modelId is not present in the current provider catalog",
+            )
+        })?;
+        let protocol = crate::provider::UpstreamProtocolKind::from(item.protocol);
+        let ceiling = provider_contracts::safety_ceiling_protocols(
+            descriptor.protocol_probe,
+            &model.model_id,
+        );
+        if !ceiling.contains(&protocol) {
+            return Err(V3ApiError::invalid_request_at(
+                state,
+                "protocol is outside this provider's documented capability ceiling",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Restore a built-in provider's current catalog to its development-time
+/// official protocol baseline. This never contacts an upstream: it clears all
+/// manual/probe evidence and makes baseline-unknown pairs explicitly off.
 pub(super) async fn reset_provider_model_protocols_to_static(
     State(state): State<CoreState>,
     Path(scope_id): Path<String>,
@@ -772,7 +806,7 @@ pub(super) async fn reset_provider_model_protocols_to_static(
     if provider_contracts::static_protocol_snapshot_date(&scope_id).is_none() {
         return Err(V3ApiError::invalid_request_at(
             &state,
-            "this provider does not support restoring a static protocol snapshot",
+            "this provider does not support restoring an official protocol baseline",
         ));
     }
     let scope = ContractScope::parse(provider_contracts::SCOPE_KIND_PROVIDER, &scope_id)
@@ -784,16 +818,19 @@ pub(super) async fn reset_provider_model_protocols_to_static(
         .map(|contract| contract.catalog.models.to_vec())
         .ok_or_else(|| V3ApiError::not_found_at(&state, "provider scope not found"))?;
     let now = Utc::now();
-    {
+    let revision = {
         let db = state.db.lock();
         db.reset_provider_static_model_protocols(&scope, &models, now)
             .map_err(V3ApiError::internal)?;
+        // The reset transaction is already durable. Advance CAS before the
+        // fallible reload so persisted state can never hide behind an old token.
+        let revision = state.bump_settings_revision();
         state
             .reload_provider_contracts_locked(&db)
             .map_err(V3ApiError::internal)?;
-    }
+        revision
+    };
     state.routing.reset();
-    let revision = state.bump_settings_revision();
     state.log_runtime_event(
         "info",
         "provider",
@@ -1133,22 +1170,21 @@ fn prepare_protocol_probe(
     provider_id: &str,
     input: &ProtocolProbeRequest,
 ) -> Result<PreparedProtocolProbe, V3ApiError> {
-    let adapter = match provider_contracts::adapter_kind_for_provider_scope(provider_id) {
-        Some(ProviderAdapterKind::ConfigurableHttp) => {
-            return Err(V3ApiError::invalid_request_at(
-                state,
-                "protocol probes for Custom API are account-owned",
-            ));
-        }
-        None => return Err(V3ApiError::not_found_at(state, "provider not found")),
-        Some(kind) if !kind.protocol_probe_supported() => {
-            return Err(V3ApiError::not_implemented(
-                state,
-                "protocol probes are not available for this Plan in this slice",
-            ));
-        }
-        Some(kind) => kind,
-    };
+    if provider_id == CUSTOM_PROVIDER_ID {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "protocol probes for Custom API are account-owned",
+        ));
+    }
+    let descriptor = provider_contracts::provider_scope_descriptor(provider_id)
+        .ok_or_else(|| V3ApiError::not_found_at(state, "provider not found"))?;
+    if !descriptor.card_actions.protocol_probe {
+        return Err(V3ApiError::not_implemented(
+            state,
+            "protocol probes are not available for this Plan in this slice",
+        ));
+    }
+    let adapter = descriptor.kind;
     let model_id = input.model_id.trim();
     if model_id.is_empty() {
         return Err(V3ApiError::invalid_request_at(state, "modelId is required"));
@@ -1159,14 +1195,27 @@ fn prepare_protocol_probe(
             "at least one explicit upstream protocol is required",
         ));
     }
-    let protocols: Vec<_> = input
+    let scope = ContractScope::provider(provider_id);
+    ensure_probe_model_is_current(state, &scope, provider_id, model_id)?;
+    let requested_protocols: Vec<_> = input
         .protocols
         .iter()
         .copied()
         .map(crate::provider::UpstreamProtocolKind::from)
         .collect();
-    protocol_probe::require_unique_probe_protocols(&protocols)
+    protocol_probe::require_unique_probe_protocols(&requested_protocols)
         .map_err(|message| V3ApiError::invalid_request_at(state, message))?;
+    let ceiling = provider_contracts::safety_ceiling_protocols(descriptor.protocol_probe, model_id);
+    let protocols = requested_protocols
+        .into_iter()
+        .filter(|protocol| ceiling.contains(protocol))
+        .collect::<Vec<_>>();
+    if protocols.is_empty() {
+        return Err(V3ApiError::invalid_request_at(
+            state,
+            "none of the requested protocols are probeable for this model",
+        ));
+    }
     let now = Utc::now();
     let all_accounts = state
         .db
@@ -1185,10 +1234,12 @@ fn prepare_protocol_probe(
                 && match adapter {
                     ProviderAdapterKind::OpenCodeGo => account.offering_id == GO_OFFERING_ID,
                     ProviderAdapterKind::ZenFree => account.id == ZEN_FREE_ACCOUNT_ID,
-                    ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => false,
-                    ProviderAdapterKind::OllamaCloud => false,
-                    ProviderAdapterKind::ConfigurableHttp
-                    | ProviderAdapterKind::CommandCodeGoat => false,
+                    ProviderAdapterKind::CommandCodeGoat => account.offering_id == GOAT_OFFERING_ID,
+                    ProviderAdapterKind::MiniMaxCn => account.offering_id == MINIMAX_CN_OFFERING_ID,
+                    ProviderAdapterKind::KimiCn => account.offering_id == KIMI_CN_OFFERING_ID,
+                    ProviderAdapterKind::OllamaCloud
+                    | ProviderAdapterKind::Cpa
+                    | ProviderAdapterKind::ConfigurableHttp => false,
                 }
                 && account_is_available_for_at(account, channel, &[], now)
         })
@@ -1203,8 +1254,6 @@ fn prepare_protocol_probe(
             "no eligible provider accounts are available for protocol probes",
         ));
     }
-    let scope = ContractScope::provider(provider_id);
-    ensure_probe_model_is_current(state, &scope, provider_id, model_id)?;
     let mut existing = HashMap::new();
     {
         let db = state.db.lock();
@@ -1319,6 +1368,7 @@ fn provider_catalog_from_state(state: &CoreState) -> ProviderCatalog {
     ProviderCatalog {
         entries: BUILTIN_PLANS
             .iter()
+            .filter(|plan| !plan.product_surface.is_external_integration())
             .map(|plan| {
                 catalog_entry(
                     plan,
@@ -1388,15 +1438,20 @@ fn catalog_entry(
                 immutable_after_create: field.immutable_after_create,
             })
             .collect(),
-        model_aliases: alias::routeable_aliases_for_with_sealed_catalogs(
+        model_aliases: alias::routeable_aliases_for_with_runtime_catalogs(
             plan.offering.provider_id,
             plan.offering.offering_id,
-            zen_models,
-            goat_models,
-            minimax_models,
-            kimi_models,
-            ollama_models,
-            ollama_pinned_models,
+            crate::alias::RuntimeCatalogs {
+                go: &[],
+                zen_free: &zen_models,
+                custom: &[],
+                command_code: &goat_models,
+                minimax: &minimax_models,
+                kimi: &kimi_models,
+                cpa: &[],
+                ollama: &ollama_models,
+                ollama_pinned: &ollama_pinned_models,
+            },
         ),
     }
 }
@@ -1560,37 +1615,34 @@ fn provider_contracts_from_state(
 ) -> ProviderContracts {
     let revision = ControlRevision::from_state(state);
     let mut providers = Vec::new();
-    for provider_id in provider_contracts::builtin_provider_scope_ids() {
-        let Some(contract) = contracts.providers.get(provider_id) else {
+    for scope_id in provider_contracts::builtin_provider_scope_ids() {
+        let Some(contract) = contracts.providers.get(scope_id) else {
             continue;
         };
-        let descriptor = ProviderRegistry::iter()
-            .find(|item| item.kind == contract.adapter_kind)
-            .expect("adapter has a catalog offering");
-        let offerings = BUILTIN_PLANS
-            .iter()
-            .filter(|plan| plan.offering.provider_id == provider_id)
-            .map(|plan| ProviderOfferingChoice {
-                offering_id: plan.offering.offering_id.to_string(),
-                display_name: plan.display_name.to_string(),
-                routable: plan.routable,
-                accounts: accounts
-                    .iter()
-                    .filter(|account| {
-                        account.provider_id == plan.offering.provider_id
-                            && account.offering_id == plan.offering.offering_id
-                    })
-                    .map(|account| account_choice(account, statuses))
-                    .collect(),
-            })
-            .collect();
+        let descriptor = provider_contracts::provider_scope_descriptor(scope_id)
+            .expect("provider contract scope has an exact descriptor");
+        let plan = crate::provider::builtin_plan(descriptor.provider_id, descriptor.offering_id)
+            .expect("provider contract descriptor has a catalog plan");
+        let offerings = vec![ProviderOfferingChoice {
+            offering_id: plan.offering.offering_id.to_string(),
+            display_name: plan.display_name.to_string(),
+            routable: plan.routable,
+            accounts: accounts
+                .iter()
+                .filter(|account| {
+                    account.provider_id == plan.offering.provider_id
+                        && account.offering_id == plan.offering.offering_id
+                })
+                .map(|account| account_choice(account, statuses))
+                .collect(),
+        }];
         let mut catalog = catalog_from_domain(&contract.catalog);
         let mut models: Vec<EffectiveModelContract> = contract
             .models
             .values()
-            .map(|model| model_contract_from_provider(provider_id, model, contracts))
+            .map(|model| model_contract_from_provider(descriptor.provider_id, model, contracts))
             .collect();
-        if provider_id == OPENCODE_PROVIDER_ID {
+        if descriptor.provider_id == OPENCODE_PROVIDER_ID {
             // Presentation-only filter: Zen Free owns every `-free` id, so the
             // Go scope must not project them even when a persisted catalog row
             // still contains them. The effective contract set used by gateway
@@ -1600,10 +1652,10 @@ fn provider_contracts_from_state(
         }
         providers.push(ProviderContractGroup {
             scope_kind: ContractScopeKind::Provider,
-            scope_id: provider_id.to_string(),
-            provider_id: provider_id.to_string(),
+            scope_id: scope_id.to_string(),
+            provider_id: descriptor.provider_id.to_string(),
             static_protocol_snapshot_date: provider_contracts::static_protocol_snapshot_date(
-                provider_id,
+                scope_id,
             )
             .map(str::to_string),
             offerings,

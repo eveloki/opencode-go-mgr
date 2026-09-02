@@ -6,7 +6,6 @@ use ocg_core::dashboard_v3::{
     ERROR_UNAUTHORIZED, ForwardLogKeys, ForwardLogModels, ForwardLogs, GatewayLogs, GatewayStatus,
     install_official_pricing_fetch_for_tests,
 };
-use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::gateway_keys::PRIMARY_KEY_ID;
 use ocg_core::models::{
     Account, AccountCustomConfigInput, AccountModelCapabilityInput, AccountSetupStep, AccountType,
@@ -261,8 +260,8 @@ async fn dashboard_summary_counts_routable_goat_and_custom_accounts() {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[tokio::test]

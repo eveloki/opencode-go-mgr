@@ -368,8 +368,8 @@ concurrent settings changes affect only later requests.
 | OpenCode Go | `opencode` / `go` | yes | Official keys only |
 | Zen Free | `opencode-zen-free` / `anonymous-free` | yes | Credentialless singleton, DB-owned |
 | Command Code GOAT | `command-code` / `goat` | yes | Fixed official origin; public Provider catalog; model supply controlled by the Provider matrix |
-| MiniMax CN Token Plan | `minimax` / `cn-token-plan` | yes | Fixed CN origin and Chat Completions protocol |
-| Kimi Code CN | `kimi-code` / `cn` | yes | Fixed CN origin and Chat Completions protocol |
+| MiniMax CN Token Plan | `minimax` / `cn-token-plan` | yes | Fixed CN Chat Completions and Anthropic Messages origins |
+| Kimi Code CN | `kimi-code` / `cn` | yes | Fixed CN Chat Completions and Anthropic Messages paths |
 | Custom API | `custom` / `api` | yes | Trusted-admin destination |
 
 Every persistent mutation path rejects `enabled=true` for a
@@ -403,7 +403,7 @@ The CLI calls the same mutation services without an argv CAS token. There
 is no Tauri `invoke` path.
 
 ```text
-  Vue 3  (seven views, KeepAlive)
+  Vue 3  (eight views, KeepAlive)
     Pinia: session / controlPlane / connection
            accounts / providers / settings
            |
@@ -424,7 +424,7 @@ is no Tauri `invoke` path.
   account_control / gateway_keys / settings / ...
            |
            v
-  SQLite schema v34
+  SQLite schema v35
            ^
            |
   ocg-manager-cli  same services, no argv CAS
@@ -435,13 +435,13 @@ mutation. CAS details: [Dashboard API](dashboard-api.md).
 
 ## Persistence map
 
-Authoritative schema is v32. `sub_gateway_keys` exists only in pre-v27
+Authoritative schema is v34. `sub_gateway_keys` exists only in pre-v27
 databases and is dropped by the migration. GUI data dir is
 `%USERPROFILE%\.ocg-mgr` on Windows and `~/.ocg-mgr` elsewhere; CLI
 defaults to `~/.ocg-mgr-cli`.
 
 ```text
-  data.sqlite                         CURRENT_SCHEMA_VERSION = 34
+  data.sqlite                         CURRENT_SCHEMA_VERSION = 35
     access_keys                       Primary id PRIMARY_KEY_ID
                                       cannot disable/delete Primary
                                       64 active sub-key cap

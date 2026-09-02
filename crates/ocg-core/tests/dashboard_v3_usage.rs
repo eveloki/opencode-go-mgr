@@ -7,7 +7,7 @@ use ocg_core::dashboard_v3::{
     ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, ProviderUsage, UsageWindow,
     install_official_pricing_fetch_error_for_tests,
 };
-use ocg_core::db::{AccountUsageCalibrationSnapshot, CURRENT_SCHEMA_VERSION};
+use ocg_core::db::AccountUsageCalibrationSnapshot;
 use ocg_core::models::UsageWindowKind;
 use ocg_core::models::{CreditBalance, ForwardLog};
 use ocg_core::provider::{
@@ -283,8 +283,8 @@ fn seed_credit_balance(harness: &V3Harness, account_id: &str) {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[test]

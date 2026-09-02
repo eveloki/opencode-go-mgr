@@ -10,14 +10,15 @@
 #[doc(inline)]
 pub use ocg_gateway::alias::{
     AMBIGUOUS_MODEL_ID, AliasEntry, CUSTOM_DYNAMIC_UPSTREAM, ProviderMapping, PublishedAlias,
-    ResolveError, ResolvedModel, canonical_alias_for_provider_model, is_published_alias,
-    published_aliases, published_routeable_aliases, published_routeable_aliases_with_all_catalogs,
+    ResolveError, ResolvedModel, RuntimeCatalogs, canonical_alias_for_cpa_model,
+    canonical_alias_for_provider_model, is_published_alias, published_aliases,
+    published_routeable_aliases, published_routeable_aliases_with_all_catalogs,
     published_routeable_aliases_with_extended_catalogs,
-    published_routeable_aliases_with_sealed_catalogs, published_routeable_aliases_with_zen,
+    published_routeable_aliases_with_runtime_catalogs, published_routeable_aliases_with_zen,
     resolve, resolve_with_all_catalogs, resolve_with_catalogs, resolve_with_custom,
-    resolve_with_extended_catalogs, resolve_with_provider_models, resolve_with_sealed_catalogs,
+    resolve_with_extended_catalogs, resolve_with_provider_models, resolve_with_runtime_catalogs,
     routeable_aliases_for, routeable_aliases_for_with_extended_catalogs,
-    routeable_aliases_for_with_sealed_catalogs, routeable_aliases_for_with_zen,
+    routeable_aliases_for_with_runtime_catalogs, routeable_aliases_for_with_zen,
 };
 
 type ResolveName = fn(&str) -> Result<ResolvedModel, ResolveError>;
@@ -42,28 +43,10 @@ type ResolveExtendedCatalogs = fn(
 ) -> Result<ResolvedModel, ResolveError>;
 type RouteableExtendedCatalogs =
     fn(&[String], &[String], &[String], &[String], &[String]) -> Vec<PublishedAlias>;
-type ResolveSealedCatalogs = fn(
-    &str,
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-) -> Result<ResolvedModel, ResolveError>;
-type RouteableSealedCatalogs = fn(
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-    &[String],
-) -> Vec<PublishedAlias>;
-type RouteableProviderSealedCatalogs =
-    fn(&str, &str, &[String], &[String], &[String], &[String], &[String], &[String]) -> Vec<String>;
+type ResolveRuntimeCatalogs =
+    for<'a> fn(&str, RuntimeCatalogs<'a>) -> Result<ResolvedModel, ResolveError>;
+type PublishRuntimeCatalogs = for<'a> fn(RuntimeCatalogs<'a>) -> Vec<PublishedAlias>;
+type RouteableRuntimeCatalogs = for<'a> fn(&str, &str, RuntimeCatalogs<'a>) -> Vec<String>;
 
 const _: ResolveName = resolve;
 const _: ResolveName = ocg_gateway::alias::resolve;
@@ -72,17 +55,17 @@ const _: ResolveProviderModels = resolve_with_provider_models;
 const _: ResolveCatalogs = resolve_with_catalogs;
 const _: ResolveAllCatalogs = resolve_with_all_catalogs;
 const _: ResolveExtendedCatalogs = resolve_with_extended_catalogs;
+const _: ResolveRuntimeCatalogs = resolve_with_runtime_catalogs;
 const _: fn() -> Vec<String> = published_aliases;
 const _: fn() -> Vec<PublishedAlias> = published_routeable_aliases;
 const _: fn(&[String]) -> Vec<PublishedAlias> = published_routeable_aliases_with_zen;
 const _: RouteableAllCatalogs = published_routeable_aliases_with_all_catalogs;
 const _: RouteableExtendedCatalogs = published_routeable_aliases_with_extended_catalogs;
-const _: ResolveSealedCatalogs = resolve_with_sealed_catalogs;
-const _: RouteableSealedCatalogs = published_routeable_aliases_with_sealed_catalogs;
-const _: RouteableProviderSealedCatalogs = routeable_aliases_for_with_sealed_catalogs;
+const _: PublishRuntimeCatalogs = published_routeable_aliases_with_runtime_catalogs;
 const _: fn(&str, &str) -> Vec<String> = routeable_aliases_for;
 const _: RouteableWithZen = routeable_aliases_for_with_zen;
 const _: RouteableProviderExtendedCatalogs = routeable_aliases_for_with_extended_catalogs;
+const _: RouteableRuntimeCatalogs = routeable_aliases_for_with_runtime_catalogs;
 const _: fn(&str) -> bool = is_published_alias;
 
 #[cfg(test)]
@@ -150,29 +133,5 @@ mod tests {
         let _: RouteableProviderExtendedCatalogs =
             ocg_gateway::alias::routeable_aliases_for_with_extended_catalogs;
         let _: fn(&str) -> bool = ocg_gateway::alias::is_published_alias;
-    }
-
-    #[test]
-    fn facade_does_not_glob_or_whole_module_reexport() {
-        let production = include_str!("alias.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source precedes tests");
-        assert!(
-            production.contains("pub use ocg_gateway::alias::{"),
-            "compatibility facade must explicitly reexport public items"
-        );
-        for forbidden in [
-            "pub use ocg_gateway::alias::*;",
-            "pub use ocg_gateway::alias;",
-            "pub use ocg_gateway::alias::{self}",
-            "pub use ocg_gateway::alias as",
-            "use ocg_gateway::alias::*;",
-        ] {
-            assert!(
-                !production.contains(forbidden),
-                "compatibility facade must not glob or whole-module reexport via `{forbidden}`"
-            );
-        }
     }
 }

@@ -39,7 +39,7 @@ Desktop, CLI, and Docker are just three ways to host the same `ocg-core` process
                    \                      /
                     \                    /
              +----------------+------------------+
-             |         SQLite schema v34         |
+             |         SQLite schema v35         |
              |  GUI  ~/.ocg-mgr                  |
              |  CLI  ~/.ocg-mgr-cli              |
              +-----------------------------------+
@@ -128,13 +128,13 @@ Zen Free has only an enable switch; turn the card off if you do not want it. Cat
 
 ## Dashboard, Key, and account cards
 
-The sidebar has seven views. `browser` is a hosted-session overlay, not a hidden eighth. The SPA reads and writes `/dashboard/api/v3`. Loopback listeners skip dashboard login unless forwarding headers are present; clients still need the Key for `/v1`.
+The sidebar has eight views. `browser` is a hosted-session overlay, not a hidden ninth. The SPA reads and writes `/dashboard/api/v3`. Loopback listeners skip dashboard login unless forwarding headers are present; clients still need the Key for `/v1`.
 
 ```text
-  Dashboard -> Access Keys -> Accounts -> Providers
-      ^                                      |
-      |                                      v
-  Settings <- Logs <- Applications <---------+
+  Dashboard -> Access Keys -> Accounts -> Providers -> Aliases
+      ^                                                   |
+      |                                                   v
+  Settings <- Logs <- Applications <----------------------+
 
   Connection Center (Dashboard, first screen)
     copy API root / Key / rotate the current Key
@@ -147,7 +147,7 @@ The sidebar has seven views. `browser` is a hosted-session overlay, not a hidden
 
     AI client --Key--> this node --account credential--> Plan
 
-    Key            access_keys (schema v34)
+    Key            access_keys (current schema v35)
                    Primary + optional sub keys (64 active cap)
     Account cred   Go key, Custom key, or Zen Free (none)
 ```

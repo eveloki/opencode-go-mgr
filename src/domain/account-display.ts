@@ -3,7 +3,7 @@ import { isCooling, isFreeCooling, isWindowCooling } from "./accounts-usage.ts";
 import type { UsageKey } from "./accounts-usage.ts";
 import { daysUntilDate, expiryTagType } from "./account-lifecycle.ts";
 import type { ExpiryTagType } from "./account-lifecycle.ts";
-import { isZenFreeAccount } from "./account-providers.ts";
+import { isCpaIntegrationAccount, isZenFreeAccount } from "./account-providers.ts";
 import { isCustomApiAccount } from "./custom-account.ts";
 import { t } from "../i18n/index.ts";
 import type { MessageKey } from "../i18n/index.ts";
@@ -192,6 +192,10 @@ export function usageRefreshTooltip(account: Account, now = Date.now()): string 
 
 export function accountMenuOptions(account: Account, now = Date.now()): AccountMenuOption[] {
   const options: AccountMenuOption[] = [];
+  // CPA is staged for dedicated testing and has no Accounts-page entry.
+  if (isCpaIntegrationAccount(account)) {
+    return options;
+  }
   // The built-in Zen Free singleton has no Key/profile/console actions.
   if (isZenFreeAccount(account)) return options;
   if (isCustomApiAccount(account)) {

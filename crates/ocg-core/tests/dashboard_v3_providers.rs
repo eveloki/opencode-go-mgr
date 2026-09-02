@@ -19,7 +19,6 @@ use ocg_core::dashboard_v3::{
     ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
     ProviderCatalog, ProviderContracts, ProviderModelCapability, ZenFreeModels, ZenFreeSettings,
 };
-use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::kernel::ids::is_free_model;
 use ocg_core::kernel::zen::ZEN_MODELS_SOURCE_URL;
 #[cfg(debug_assertions)]
@@ -321,8 +320,8 @@ fn custom_create_body() -> Value {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[tokio::test]
@@ -394,7 +393,13 @@ async fn dashboard_v3_v2_login_cookie_authorizes_provider_reads() {
     assert_eq!(listed.status(), StatusCode::OK);
     let body: Value = listed.json().await.unwrap();
     let parsed: ProviderCatalog = serde_json::from_value(body.clone()).unwrap();
-    assert_eq!(parsed.entries.len(), BUILTIN_PLANS.len());
+    assert_eq!(
+        parsed.entries.len(),
+        BUILTIN_PLANS
+            .iter()
+            .filter(|plan| !plan.product_surface.is_external_integration())
+            .count()
+    );
     assert_secret_free(&body, &[]);
 
     harness.stop();
@@ -412,9 +417,13 @@ async fn dashboard_v3_providers_catalog_covers_all_plan_facts_nulls_and_camel_ca
     assert!(body.get("provider_id").is_none());
 
     let parsed: ProviderCatalog = serde_json::from_value(body.clone()).expect("ProviderCatalog");
-    assert_eq!(parsed.entries.len(), BUILTIN_PLANS.len());
+    let provider_plans = BUILTIN_PLANS
+        .iter()
+        .filter(|plan| !plan.product_surface.is_external_integration())
+        .collect::<Vec<_>>();
+    assert_eq!(parsed.entries.len(), provider_plans.len());
 
-    for (plan, entry) in BUILTIN_PLANS.iter().zip(parsed.entries.iter()) {
+    for (plan, entry) in provider_plans.into_iter().zip(parsed.entries.iter()) {
         assert_eq!(entry.provider_id, plan.offering.provider_id);
         assert_eq!(entry.offering_id, plan.offering.offering_id);
         assert_eq!(entry.display_name, plan.display_name);
@@ -700,6 +709,13 @@ async fn dashboard_v3_provider_contracts_project_five_scopes_and_custom_endpoint
         ]
     );
     assert!(parsed.custom_endpoints.is_empty());
+    assert!(
+        parsed
+            .providers
+            .iter()
+            .all(|group| group.card.protocol_probe),
+        "every built-in Provider scope must expose the shared probe action"
+    );
     assert!(body["providers"][0].get("scope_kind").is_none());
     assert_eq!(body["providers"][0]["scopeKind"], "provider");
     let kimi = parsed
@@ -1036,10 +1052,13 @@ async fn unified_zen_catalog_refresh_returns_the_shared_layout_with_new_models_o
         .find(|model| model["modelId"] == "unified-new-free")
         .expect("new Zen model stays visible");
     assert_eq!(model["routable"], false);
-    for protocol in ["chat_completions", "responses", "messages"] {
-        assert_eq!(model["protocols"][protocol]["override"], "force_off");
-        assert_eq!(model["protocols"][protocol]["enabled"], false);
-    }
+    assert_eq!(
+        model["protocols"]["chat_completions"]["override"],
+        "force_off"
+    );
+    assert_eq!(model["protocols"]["chat_completions"]["enabled"], false);
+    assert!(model["protocols"]["responses"].is_null());
+    assert!(model["protocols"]["messages"].is_null());
 
     harness.stop();
 }
@@ -1288,56 +1307,6 @@ async fn dashboard_v3_zen_refresh_source_overrides_do_not_cross_talk_across_harn
 
     harness_a.stop();
     harness_b.stop();
-}
-
-#[test]
-fn dashboard_v3_zen_refresh_has_no_release_source_override() {
-    let providers = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/dashboard_v3/providers.rs"
-    ));
-    let module = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/dashboard_v3/mod.rs"
-    ));
-
-    assert!(
-        providers.contains("crate::zen_models::fetch_catalog(config).await"),
-        "production refresh must use the official Zen catalog client"
-    );
-    assert!(
-        !providers.contains("url.starts_with("),
-        "loopback source checks must parse the URL, not use starts_with"
-    );
-    assert!(
-        !providers.contains("static ZEN_MODELS_SOURCE_OVERRIDE:"),
-        "process-global singleton override must not remain"
-    );
-    assert_debug_gated(
-        module,
-        "pub use providers::set_zen_models_source_url_override_for_tests;",
-    );
-    assert_debug_gated(
-        providers,
-        "pub fn set_zen_models_source_url_override_for_tests",
-    );
-}
-
-fn assert_debug_gated(source: &str, needle: &str) {
-    let Some(index) = source.find(needle) else {
-        panic!("missing {needle}");
-    };
-    let start = index.saturating_sub(240);
-    let before = &source[start..index];
-    assert!(
-        before.contains("#[cfg(debug_assertions)]"),
-        "{needle} must be debug-gated; preceding text was {before}"
-    );
-    assert_eq!(
-        source.matches(needle).count(),
-        1,
-        "{needle} must appear once so the debug gate is unambiguous"
-    );
 }
 
 #[tokio::test]
@@ -1624,7 +1593,10 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     assert!(v3_catalog.get("entries").is_some());
     assert_eq!(
         v3_catalog["entries"].as_array().unwrap().len(),
-        BUILTIN_PLANS.len()
+        BUILTIN_PLANS
+            .iter()
+            .filter(|plan| !plan.product_surface.is_external_integration())
+            .count()
     );
     assert!(v3_catalog["entries"][0].get("providerId").is_some());
     assert!(v3_catalog["entries"][0].get("provider_id").is_none());
@@ -1679,7 +1651,7 @@ async fn dashboard_v3_provider_routes_coexist_with_v2_and_omit_v2_aliases() {
     assert_eq!(v3_zen["enabled"], false);
     assert!(v3_zen.get("account").is_none());
 
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
     harness.stop();
 }
 

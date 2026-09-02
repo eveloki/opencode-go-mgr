@@ -11,16 +11,18 @@ Under the hood it is a static Provider Registry plus a handful of
 capability-specific adapters. Custom API is a Configurable HTTP adapter, not a base class
 everyone inherits from. Scopes are split like this:
 
-- `Provider(provider_id)` for built-ins.
+- `Provider(contract_scope_id)` for one exact built-in Provider/Offering
+  contract. Existing scope IDs keep their historical Provider-shaped values.
 - `CustomEndpoint(account_id)` scopes keep Custom mappings account-owned and
   never editable from this page.
 
-The left rail lists the built-in Provider scopes. The main pane has three tabs:
-**Model catalog**, **Pricing**, and **Alias**. The old catalog and
-model-contract views are merged into one matrix on the Model catalog tab.
+The left rail lists the built-in Provider/Offering contract scopes. The main pane has two tabs:
+**Model catalog** and **Pricing**. The old catalog and model-contract views are
+merged into one matrix on the Model catalog tab.
 
-**Alias** is read-only. It aggregates the existing Provider contracts and
-account capabilities into public names, with
+**Aliases** is a separate core page because its read-only table spans every
+Provider contract and Custom account instead of the selected Provider. It
+aggregates existing contracts and account capabilities into public names with
 their routeability and exact upstream identities. It does not create a new
 Alias API, store, cache, or editor. A Custom mapping links to the one editor on
 **Accounts** with `?view=accounts&account_id=<id>`; loading that link opens the
@@ -42,14 +44,17 @@ reported and retained as evidence, but never pin the shared protocol
 `force_off`; only an explicit switch can do that.
 
 For the built-in **OpenCode Go**, **Zen Free**, **Command Code GOAT**,
-**MiniMax CN**, and **Kimi Code CN** scopes,
-the catalog header offers **Restore static
-protocol snapshot**. It makes no upstream request, keeps the current model
-catalog, clears manual switches and probe evidence, and restores the static
-protocol snapshot dated **2026-08-27**. Any current-catalog protocol pair absent
-from that static snapshot is left off, except MiniMax CN and Kimi Code CN rows:
-their sealed adapters declare Chat Completions as their only supported upstream
-protocol.
+**MiniMax CN**, and **Kimi Code CN** scopes, the catalog header offers
+**Restore official protocol baseline**. It makes no upstream request, keeps the
+current model catalog, clears manual switches and probe evidence, and restores
+the development-time official baseline reviewed on **2026-09-01**. OpenCode
+Go and known Zen rows default to the one upstream endpoint documented for each
+model. GOAT uses Messages for Anthropic model IDs and Chat Completions for the
+other Provider families, with newly discovered non-preset models still off by
+default. MiniMax CN and Kimi Code CN both default to Chat Completions and
+Messages; neither advertises Responses. Protocols absent from the official
+baseline remain off until an administrator explicitly enables a constructible
+path or a successful explicit probe records positive evidence.
 
 The compact source line, refresh action, and matrix share one content panel;
 there is no separate catalog-summary card and no refresh-account selector.
@@ -124,15 +129,16 @@ no route. Authenticated downstream `GET /v1/models` publishes only routeable
 public names. It omits raw-only identities and raw-name conflicts; an ambiguous
 raw identity fails as `ambiguous_model_id` without an upstream request.
 
-OpenCode Go and Zen Free rows have a **Test** button. It probes every protocol
-for that model without asking for an account. For each protocol the provider
-automatically tries its eligible accounts in saved routing order and stops at
-the first success. A Popconfirm warns that these real minimal requests may
-consume quota. Command Code GOAT, MiniMax CN, Kimi Code CN, Ollama Cloud, and Custom endpoint
-scopes do not show the Test button because their adapters do not expose this V3
-protocol-probe operation. Models must belong to the current
-provider catalog; all three requested protocol endpoints are then tested,
-including for newly fetched models not yet in the static table. Each protocol
+Every built-in Provider row has a **Test** button without asking for an account.
+For each probeable protocol the provider automatically tries its eligible
+accounts in saved routing order and stops at the first success. OpenCode Go and
+Zen Free use their constructable protocol set. GOAT tests only its sealed native
+family path: Messages for Anthropic IDs and Chat Completions otherwise. MiniMax
+CN and Kimi Code CN test their sealed Chat Completions path. None of these
+Providers submits an unsupported Responses or alternate-family probe. Custom
+endpoint tests remain account-owned. Models must belong to the current provider
+catalog, including newly fetched models not yet in the static table. A
+Popconfirm warns that these real minimal requests may consume quota. Each protocol
 result is shown above the matrix with its success, failure, or skipped state,
 HTTP status, readable upstream message, and a safe upstream help/billing link
 when one is supplied. Every actual account attempt is recorded as a

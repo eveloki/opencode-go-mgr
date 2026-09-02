@@ -16,8 +16,9 @@ use crate::kernel::zen::ZenFreeModelCatalog;
 use crate::models::Account;
 use crate::provider::{
     COMMAND_CODE_GOAT_BASE_URL, COMMAND_CODE_GOAT_INCLUDED_MODEL_IDS,
-    OPENCODE_CONSTRUCTABLE_PROTOCOLS, ProviderAdapterKind, ProviderRegistry,
-    StructuralProbeCeiling, UpstreamProtocolKind, command_code_goat_includes_model,
+    OPENCODE_CONSTRUCTABLE_PROTOCOLS, ProtocolProbeDescriptor, ProviderAdapterKind,
+    ProviderRegistry, StructuralProbeCeiling, UpstreamProtocolKind,
+    command_code_goat_includes_model,
 };
 use crate::redaction::sanitize_upstream_error_value_with_known_secret;
 use chrono::{DateTime, Utc};
@@ -43,21 +44,15 @@ pub const NO_ENABLED_UPSTREAM_PROTOCOL: &str =
 
 const MAX_PROBE_ERROR_CHARS: usize = 500;
 
-pub fn static_protocol_snapshot_date(provider_id: &str) -> Option<&'static str> {
+pub fn static_protocol_snapshot_date(scope_id: &str) -> Option<&'static str> {
+    let provider_id = provider_scope_descriptor(scope_id)?.provider_id;
     match provider_id {
-        OPENCODE_PROVIDER_ID => {
-            Some(crate::kernel::protocol::OPENCODE_GO_STATIC_PROTOCOL_SNAPSHOT_DATE)
-        }
-        OPENCODE_ZEN_FREE_PROVIDER_ID => {
-            Some(crate::kernel::protocol::ZEN_FREE_STATIC_PROTOCOL_SNAPSHOT_DATE)
-        }
-        COMMAND_CODE_PROVIDER_ID => {
-            Some(crate::kernel::protocol::COMMAND_CODE_GOAT_STATIC_PROTOCOL_SNAPSHOT_DATE)
-        }
-        MINIMAX_PROVIDER_ID | KIMI_PROVIDER_ID => Some("2026-08-27"),
-        OLLAMA_PROVIDER_ID => {
-            Some(crate::kernel::protocol::OLLAMA_CLOUD_STATIC_PROTOCOL_SNAPSHOT_DATE)
-        }
+        OPENCODE_PROVIDER_ID
+        | OPENCODE_ZEN_FREE_PROVIDER_ID
+        | COMMAND_CODE_PROVIDER_ID
+        | MINIMAX_PROVIDER_ID
+        | KIMI_PROVIDER_ID
+        | OLLAMA_PROVIDER_ID => Some(crate::kernel::protocol::OFFICIAL_PROTOCOL_BASELINE_DATE),
         _ => None,
     }
 }
@@ -128,7 +123,9 @@ impl ContractScope {
             return Err("contract scope id is required".to_string());
         }
         match ContractScopeKind::try_from(kind)? {
-            ContractScopeKind::Provider => Ok(Self::provider(id)),
+            ContractScopeKind::Provider => provider_scope_descriptor(id)
+                .map(|_| Self::provider(id))
+                .ok_or_else(|| format!("unknown provider contract scope `{id}`")),
             ContractScopeKind::CustomEndpoint => Ok(Self::custom_endpoint(id)),
         }
     }
@@ -150,24 +147,21 @@ impl ContractScope {
         offering_id: &str,
         account_id: Option<&str>,
     ) -> Option<Self> {
-        match ProviderAdapterKind::from_offering(provider_id, offering_id)? {
+        let descriptor = ProviderRegistry::get(provider_id, offering_id)?;
+        match descriptor.kind {
             ProviderAdapterKind::ConfigurableHttp => account_id
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .map(Self::custom_endpoint),
-            kind => kind.provider_scope_id().map(Self::provider),
+            _ => descriptor.contract_scope_id.map(Self::provider),
         }
     }
 }
 
 pub fn builtin_provider_scope_ids() -> Vec<&'static str> {
-    let mut ids = Vec::new();
-    for descriptor in ProviderRegistry::iter() {
-        if descriptor.kind.provider_scope_id().is_some() && !ids.contains(&descriptor.provider_id) {
-            ids.push(descriptor.provider_id);
-        }
-    }
-    ids
+    ProviderRegistry::iter()
+        .filter_map(|descriptor| descriptor.contract_scope_id)
+        .collect()
 }
 
 /// Ollama Cloud administrator pins: exact catalog ids whose Chat row carries
@@ -195,28 +189,12 @@ pub fn ollama_cloud_pinned_model_ids(contracts: &EffectiveContractSet) -> Vec<St
         .unwrap_or_default()
 }
 
-pub fn adapter_kind_for_provider_scope(provider_id: &str) -> Option<ProviderAdapterKind> {
-    if provider_id == CUSTOM_PROVIDER_ID {
-        // Custom has no provider-level contract, but callers use this lookup
-        // to return the more precise account-owned scope error.
-        return Some(ProviderAdapterKind::ConfigurableHttp);
-    }
-    provider_scope_descriptor(provider_id).map(|descriptor| descriptor.kind)
-}
-
-/// Resolve one provider-scoped descriptor without silently choosing a
-/// representative Offering. Provider scopes intentionally support exactly one
-/// non-Custom Offering today; a second Offering fails closed until persistence
-/// and the V3 contract become Offering-aware.
-fn provider_scope_descriptor(provider_id: &str) -> Option<crate::provider::ProviderDescriptor> {
-    let mut matches = ProviderRegistry::iter().filter(|descriptor| {
-        descriptor.provider_id == provider_id && descriptor.kind.provider_scope_id().is_some()
-    });
-    let descriptor = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    Some(descriptor)
+/// Resolve one exact, statically declared Provider contract scope. The opaque
+/// scope id is deliberately distinct from Provider identity so a future second
+/// Offering can declare its own scope without changing persistence or V3 wire
+/// shapes.
+pub fn provider_scope_descriptor(scope_id: &str) -> Option<crate::provider::ProviderDescriptor> {
+    ProviderRegistry::iter().find(|descriptor| descriptor.contract_scope_id == Some(scope_id))
 }
 
 pub fn parse_upstream_protocol(value: &str) -> Result<UpstreamProtocolKind, String> {
@@ -481,6 +459,15 @@ impl EffectiveContractSet {
         }
     }
 
+    pub fn provider_offering(
+        &self,
+        provider_id: &str,
+        offering_id: &str,
+    ) -> Option<&EffectiveScopeContract> {
+        let scope = ContractScope::from_offering(provider_id, offering_id, None)?;
+        self.scope(&scope)
+    }
+
     pub fn mapping_has_enabled_protocol(&self, mapping: &ProviderMapping) -> bool {
         let Some(scope) = ContractScope::from_mapping(mapping) else {
             return false;
@@ -594,20 +581,24 @@ pub fn select_upstream_protocol(
 }
 
 pub fn safety_ceiling_protocols(
-    adapter: ProviderAdapterKind,
+    probe: ProtocolProbeDescriptor,
     model_id: &str,
-    declared: &[(String, UpstreamProtocolKind)],
 ) -> Vec<UpstreamProtocolKind> {
-    let Some(descriptor) = representative_descriptor(adapter) else {
-        return Vec::new();
-    };
-    match descriptor.protocol_probe.structural_ceiling {
+    match probe.structural_ceiling {
         StructuralProbeCeiling::Unavailable => Vec::new(),
+        StructuralProbeCeiling::CommandCodeConstructable => {
+            ocg_domain::protocol::command_code_supported_formats(model_id)
+                .iter()
+                .copied()
+                .filter_map(protocol_from_api)
+                .collect()
+        }
+        StructuralProbeCeiling::Fixed(protocols) => protocols.to_vec(),
         StructuralProbeCeiling::OpenCodeConstructable => {
-            if is_known_model(model_id) {
-                OPENCODE_CONSTRUCTABLE_PROTOCOLS.to_vec()
-            } else {
+            if model_id.trim().is_empty() {
                 Vec::new()
+            } else {
+                OPENCODE_CONSTRUCTABLE_PROTOCOLS.to_vec()
             }
         }
         StructuralProbeCeiling::ZenFreeConstructable => {
@@ -619,11 +610,6 @@ pub fn safety_ceiling_protocols(
                 Vec::new()
             }
         }
-        StructuralProbeCeiling::AccountDeclared => declared
-            .iter()
-            .filter(|(id, _)| custom_model_id_matches(id, model_id))
-            .map(|(_, protocol)| *protocol)
-            .collect(),
     }
 }
 
@@ -640,17 +626,30 @@ pub fn static_verified_protocols(
             .collect();
     }
     match adapter {
-        ProviderAdapterKind::OpenCodeGo => {
-            crate::kernel::protocol::snapshot_protocols(OPENCODE_PROVIDER_ID, model_id)
-        }
-        ProviderAdapterKind::ZenFree => {
-            crate::kernel::protocol::snapshot_protocols(OPENCODE_ZEN_FREE_PROVIDER_ID, model_id)
+        ProviderAdapterKind::OpenCodeGo | ProviderAdapterKind::ZenFree => {
+            opencode_profile(model_id)
+                .map(|(_, supported)| supported.to_vec())
+                .unwrap_or_default()
         }
         ProviderAdapterKind::CommandCodeGoat => {
-            crate::kernel::protocol::snapshot_protocols(COMMAND_CODE_PROVIDER_ID, model_id)
+            if model_id.eq_ignore_ascii_case("stealth/ox-alpha") {
+                Vec::new()
+            } else {
+                ocg_domain::protocol::command_code_supported_formats(model_id).to_vec()
+            }
         }
         ProviderAdapterKind::MiniMaxCn | ProviderAdapterKind::KimiCn => {
-            return vec![UpstreamProtocolKind::ChatCompletions];
+            return vec![
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Messages,
+            ];
+        }
+        ProviderAdapterKind::Cpa => {
+            return vec![
+                UpstreamProtocolKind::ChatCompletions,
+                UpstreamProtocolKind::Responses,
+                UpstreamProtocolKind::Messages,
+            ];
         }
         ProviderAdapterKind::OllamaCloud => {
             // Family rule from the domain seed: fixed Chat for every
@@ -678,14 +677,11 @@ fn opencode_profile(model_id: &str) -> Option<(ApiFormat, &'static [ApiFormat])>
 }
 
 pub fn probe_may_add(
-    adapter: ProviderAdapterKind,
+    probe: ProtocolProbeDescriptor,
     model_id: &str,
     protocol: UpstreamProtocolKind,
-    declared: &[(String, UpstreamProtocolKind)],
 ) -> bool {
-    representative_descriptor(adapter)
-        .is_some_and(|descriptor| descriptor.protocol_probe.explicit_probe)
-        && safety_ceiling_protocols(adapter, model_id, declared).contains(&protocol)
+    probe.explicit_probe && safety_ceiling_protocols(probe, model_id).contains(&protocol)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -803,22 +799,21 @@ pub fn build_effective_contracts(
     persisted: PersistedContracts,
 ) -> EffectiveContractSet {
     let mut set = EffectiveContractSet::default();
-    for provider_id in builtin_provider_scope_ids() {
-        let scope = ContractScope::provider(provider_id);
-        let adapter = adapter_kind_for_provider_scope(provider_id)
-            .expect("builtin provider scopes map to adapters");
+    for scope_id in builtin_provider_scope_ids() {
+        let scope = ContractScope::provider(scope_id);
+        let descriptor = provider_scope_descriptor(scope_id)
+            .expect("builtin provider scopes map to exact descriptors");
         let persisted_scope = persisted.scopes.get(&scope);
         let evidence = persisted.evidence.get(&scope).cloned().unwrap_or_default();
         let overrides = persisted.overrides.get(&scope).cloned().unwrap_or_default();
         let contract = merge_provider_scope(
-            provider_id,
-            adapter,
+            descriptor,
             zen_catalog,
             persisted_scope,
             &evidence,
             &overrides,
         );
-        set.providers.insert(provider_id.to_string(), contract);
+        set.providers.insert(scope_id.to_string(), contract);
     }
     for runtime in custom_runtimes {
         let scope = ContractScope::custom_endpoint(&runtime.account_id);
@@ -832,28 +827,17 @@ pub fn build_effective_contracts(
     set
 }
 
-fn representative_descriptor(
-    adapter: ProviderAdapterKind,
-) -> Option<crate::provider::ProviderDescriptor> {
-    let mut matches = ProviderRegistry::iter().filter(|descriptor| descriptor.kind == adapter);
-    let descriptor = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    Some(descriptor)
-}
-
 fn merge_provider_scope(
-    provider_id: &str,
-    adapter: ProviderAdapterKind,
+    descriptor: crate::provider::ProviderDescriptor,
     zen_catalog: &ZenFreeModelCatalog,
     persisted: Option<&PersistedScopeRow>,
     evidence: &[PersistedModelProtocol],
     overrides: &[PersistedModelProtocolOverride],
 ) -> EffectiveScopeContract {
-    let descriptor = provider_scope_descriptor(provider_id)
-        .filter(|descriptor| descriptor.kind == adapter)
-        .expect("provider scope must identify exactly one registered offering");
+    let adapter = descriptor.kind;
+    let scope_id = descriptor
+        .contract_scope_id
+        .expect("provider contract descriptor must declare a scope id");
     let revision = persisted.map(|row| row.revision).unwrap_or(1);
     let (catalog, static_models) = match adapter {
         ProviderAdapterKind::OpenCodeGo => {
@@ -1011,6 +995,9 @@ fn merge_provider_scope(
                 models,
             )
         }
+        ProviderAdapterKind::Cpa => {
+            unreachable!("CPA is an external integration without a Provider contract scope")
+        }
         ProviderAdapterKind::ConfigurableHttp => unreachable!("custom uses merge_custom_scope"),
     };
 
@@ -1027,6 +1014,7 @@ fn merge_provider_scope(
             model_id.clone(),
             merge_model_contract(
                 adapter,
+                descriptor.protocol_probe,
                 model_id,
                 &[],
                 default_source,
@@ -1045,8 +1033,8 @@ fn merge_provider_scope(
     }
 
     EffectiveScopeContract {
-        scope: ContractScope::provider(provider_id),
-        provider_id: provider_id.to_string(),
+        scope: ContractScope::provider(scope_id),
+        provider_id: descriptor.provider_id.to_string(),
         offering_id: descriptor.offering_id.to_string(),
         adapter_kind: adapter,
         catalog_routable: descriptor.inference.catalog_routable,
@@ -1098,6 +1086,7 @@ fn merge_custom_scope(
             model_id.clone(),
             merge_model_contract(
                 ProviderAdapterKind::ConfigurableHttp,
+                descriptor.protocol_probe,
                 model_id,
                 &declared,
                 ContractEvidenceSource::Preset,
@@ -1110,6 +1099,7 @@ fn merge_custom_scope(
     overlay_probe_confirmed_models(
         &mut models,
         ProviderAdapterKind::ConfigurableHttp,
+        descriptor.protocol_probe,
         &declared,
         evidence,
         overrides,
@@ -1147,9 +1137,11 @@ fn preferred_protocol(
                 .and_then(protocol_from_api)
                 .unwrap_or(UpstreamProtocolKind::ChatCompletions)
         }
-        ProviderAdapterKind::MiniMaxCn
-        | ProviderAdapterKind::KimiCn
-        | ProviderAdapterKind::OllamaCloud => UpstreamProtocolKind::ChatCompletions,
+        ProviderAdapterKind::MiniMaxCn => UpstreamProtocolKind::Messages,
+        ProviderAdapterKind::KimiCn => UpstreamProtocolKind::ChatCompletions,
+        ProviderAdapterKind::OllamaCloud | ProviderAdapterKind::Cpa => {
+            UpstreamProtocolKind::ChatCompletions
+        }
         ProviderAdapterKind::ConfigurableHttp => {
             // A Custom endpoint binds every declared model to exactly one
             // upstream protocol; that protocol is also the conversion target.
@@ -1163,8 +1155,10 @@ fn preferred_protocol(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_model_contract(
     adapter: ProviderAdapterKind,
+    probe: ProtocolProbeDescriptor,
     model_id: &str,
     declared: &[(String, UpstreamProtocolKind)],
     default_source: ContractEvidenceSource,
@@ -1184,7 +1178,7 @@ fn merge_model_contract(
             .filter_map(protocol_from_api)
             .collect()
     } else {
-        safety_ceiling_protocols(adapter, model_id, declared)
+        safety_ceiling_protocols(probe, model_id)
     };
     let static_verified = static_verified_protocols(adapter, model_id, declared);
     let mut protocols = BTreeMap::new();
@@ -1199,8 +1193,9 @@ fn merge_model_contract(
             .find(|row| custom_or_case_match(&row.model_id, model_id) && row.protocol == protocol)
             .map(|row| row.state)
             .unwrap_or(ProtocolOverrideState::Auto);
-        let has_override = override_state != ProtocolOverrideState::Auto;
-        if persisted.is_none() && !in_ceiling && !statically_verified && !has_override {
+        // Persisted rows from an older or broader baseline must not resurrect a
+        // protocol outside the adapter's current sealed structural ceiling.
+        if adapter != ProviderAdapterKind::ConfigurableHttp && !in_ceiling && !statically_verified {
             continue;
         }
         let source = persisted
@@ -1216,21 +1211,15 @@ fn merge_model_contract(
         // through the explicit overrides the probe handler persists.
         let evidence_available = (statically_verified || source.confers_support()) && supported;
         let (available, enabled) = match override_state {
-            // Sealed and configurable HTTP adapters may force on only a
-            // protocol already admitted by their adapter safety ceiling.
-            ProtocolOverrideState::ForceOn
-                if matches!(
-                    adapter,
-                    ProviderAdapterKind::CommandCodeGoat | ProviderAdapterKind::ConfigurableHttp
-                ) =>
-            {
-                (supported, supported)
-            }
-            ProtocolOverrideState::ForceOn => (true, true),
+            // A manual switch may activate a constructible or documented
+            // protocol, but it cannot expand a sealed adapter beyond its
+            // registered safety ceiling.
+            ProtocolOverrideState::ForceOn => (supported, supported),
             ProtocolOverrideState::ForceOff => (evidence_available, false),
-            ProtocolOverrideState::Auto => {
-                (evidence_available, evidence_available && default_enabled)
-            }
+            ProtocolOverrideState::Auto => (
+                evidence_available,
+                evidence_available && (default_enabled || source == ContractEvidenceSource::Preset),
+            ),
         };
         protocols.insert(
             protocol.as_str().to_string(),
@@ -1288,6 +1277,7 @@ fn merge_model_contract(
 fn overlay_probe_confirmed_models(
     models: &mut BTreeMap<String, EffectiveModelContract>,
     adapter: ProviderAdapterKind,
+    probe: ProtocolProbeDescriptor,
     declared: &[(String, UpstreamProtocolKind)],
     evidence: &[PersistedModelProtocol],
     overrides: &[PersistedModelProtocolOverride],
@@ -1304,7 +1294,7 @@ fn overlay_probe_confirmed_models(
         {
             continue;
         }
-        if !probe_may_add(adapter, &row.model_id, row.protocol, declared) {
+        if !probe_may_add(probe, &row.model_id, row.protocol) {
             continue;
         }
         extra.insert(row.model_id.clone());
@@ -1314,6 +1304,7 @@ fn overlay_probe_confirmed_models(
             model_id.clone(),
             merge_model_contract(
                 adapter,
+                probe,
                 &model_id,
                 declared,
                 ContractEvidenceSource::ProbeConfirmed,
@@ -1330,611 +1321,4 @@ fn custom_or_case_match(left: &str, right: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::custom::CustomAccountRuntime;
-    use crate::kernel::ids::COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM;
-    use crate::models::{AccountCustomConfig, AccountModelCapability};
-    use crate::provider::{CUSTOM_API_OFFERING_ID, ConnectionVerificationStatus};
-
-    fn empty_persisted() -> PersistedContracts {
-        PersistedContracts::default()
-    }
-
-    fn zen_seed() -> ZenFreeModelCatalog {
-        ZenFreeModelCatalog::default()
-    }
-
-    fn go_contract() -> EffectiveScopeContract {
-        build_effective_contracts(&zen_seed(), &[], empty_persisted())
-            .providers
-            .remove(OPENCODE_PROVIDER_ID)
-            .unwrap()
-    }
-
-    #[test]
-    fn custom_endpoints_are_isolated_by_account() {
-        let left =
-            ContractScope::from_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID, Some("one"));
-        let right =
-            ContractScope::from_offering(CUSTOM_PROVIDER_ID, CUSTOM_API_OFFERING_ID, Some("two"));
-        assert_ne!(left, right);
-        assert!(matches!(left, Some(ContractScope::CustomEndpoint(id)) if id == "one"));
-    }
-
-    #[test]
-    fn provider_scopes_identify_one_exact_registered_offering() {
-        let set = build_effective_contracts(&zen_seed(), &[], empty_persisted());
-        assert_eq!(set.providers.len(), builtin_provider_scope_ids().len());
-        for (provider_id, contract) in &set.providers {
-            let descriptor = ProviderRegistry::get(provider_id, &contract.offering_id)
-                .expect("effective provider scope must identify a registered offering");
-            assert_eq!(descriptor.kind, contract.adapter_kind);
-            assert_eq!(descriptor.provider_id, contract.provider_id);
-        }
-    }
-
-    #[test]
-    fn probe_success_adds_inside_ceiling_and_failure_does_not_remove_static() {
-        let now = Utc::now();
-        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        let static_row = PersistedModelProtocol {
-            scope: scope.clone(),
-            model_id: "glm-5.2".into(),
-            protocol: UpstreamProtocolKind::ChatCompletions,
-            source: ContractEvidenceSource::Static,
-            verified_at: None,
-            observed_at: None,
-            last_probe_result: None,
-            last_probe_at: None,
-            last_probe_error: None,
-        };
-        let failed = apply_probe_observation(
-            Some(&static_row),
-            scope.clone(),
-            "glm-5.2",
-            UpstreamProtocolKind::ChatCompletions,
-            false,
-            Some("upstream 500".into()),
-            now,
-            true,
-        )
-        .unwrap();
-        assert_eq!(failed.source, ContractEvidenceSource::Static);
-        assert!(failed.source.confers_support());
-        assert_eq!(failed.last_probe_result, Some(ProbeResultKind::Failure));
-
-        let added = apply_probe_observation(
-            None,
-            scope,
-            "glm-5.2",
-            UpstreamProtocolKind::Messages,
-            true,
-            None,
-            now,
-            true,
-        )
-        .unwrap();
-        assert_eq!(added.source, ContractEvidenceSource::ProbeConfirmed);
-
-        let rejected = apply_probe_observation(
-            None,
-            ContractScope::provider(OPENCODE_PROVIDER_ID),
-            "not-a-catalog-model",
-            UpstreamProtocolKind::ChatCompletions,
-            true,
-            None,
-            now,
-            false,
-        );
-        assert!(rejected.is_err());
-    }
-
-    #[test]
-    fn opencode_ceiling_is_constructable_paths_not_static_model_protocols() {
-        let grok_ceiling =
-            safety_ceiling_protocols(ProviderAdapterKind::OpenCodeGo, "grok-4.5", &[]);
-        let grok_static =
-            static_verified_protocols(ProviderAdapterKind::OpenCodeGo, "grok-4.5", &[]);
-        assert!(grok_ceiling.contains(&UpstreamProtocolKind::ChatCompletions));
-        assert!(grok_ceiling.contains(&UpstreamProtocolKind::Responses));
-        assert!(grok_ceiling.contains(&UpstreamProtocolKind::Messages));
-        assert_eq!(grok_static, vec![UpstreamProtocolKind::Responses]);
-        assert!(probe_may_add(
-            ProviderAdapterKind::OpenCodeGo,
-            "grok-4.5",
-            UpstreamProtocolKind::ChatCompletions,
-            &[],
-        ));
-
-        let unknown_zen =
-            safety_ceiling_protocols(ProviderAdapterKind::ZenFree, "brand-new-promo-free", &[]);
-        assert_eq!(unknown_zen, vec![UpstreamProtocolKind::ChatCompletions]);
-        assert!(!probe_may_add(
-            ProviderAdapterKind::CommandCodeGoat,
-            COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM,
-            UpstreamProtocolKind::ChatCompletions,
-            &[],
-        ));
-    }
-
-    #[test]
-    fn probe_confirmed_opencode_extra_protocol_becomes_effective() {
-        let mut persisted = empty_persisted();
-        let now = Utc::now();
-        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        persisted.evidence.insert(
-            scope.clone(),
-            vec![PersistedModelProtocol {
-                scope,
-                model_id: "grok-4.5".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                source: ContractEvidenceSource::ProbeConfirmed,
-                verified_at: Some(now),
-                observed_at: Some(now),
-                last_probe_result: Some(ProbeResultKind::Success),
-                last_probe_at: Some(now),
-                last_probe_error: None,
-            }],
-        );
-        let go = build_effective_contracts(&zen_seed(), &[], persisted)
-            .providers
-            .remove(OPENCODE_PROVIDER_ID)
-            .unwrap();
-        let grok = go.model("grok-4.5").unwrap();
-        assert!(grok.protocols.get("chat_completions").unwrap().available);
-        assert!(grok.protocols.get("chat_completions").unwrap().enabled);
-        assert!(grok.protocols.get("responses").unwrap().available);
-        assert_eq!(
-            grok.protocols.get("chat_completions").unwrap().source,
-            ContractEvidenceSource::ProbeConfirmed
-        );
-    }
-
-    #[test]
-    fn probe_failure_does_not_add_or_remove_static_support() {
-        let mut persisted = empty_persisted();
-        let now = Utc::now();
-        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        persisted.evidence.insert(
-            scope.clone(),
-            vec![PersistedModelProtocol {
-                scope,
-                model_id: "grok-4.5".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                source: ContractEvidenceSource::ProbeObserved,
-                verified_at: None,
-                observed_at: Some(now),
-                last_probe_result: Some(ProbeResultKind::Failure),
-                last_probe_at: Some(now),
-                last_probe_error: Some("upstream 500".into()),
-            }],
-        );
-        let go = build_effective_contracts(&zen_seed(), &[], persisted)
-            .providers
-            .remove(OPENCODE_PROVIDER_ID)
-            .unwrap();
-        let grok = go.model("grok-4.5").unwrap();
-        assert!(!grok.protocols.get("chat_completions").unwrap().available);
-        assert!(grok.protocols.get("responses").unwrap().available);
-        assert!(grok.routable);
-    }
-
-    #[test]
-    fn override_force_off_disables_without_destroying_evidence() {
-        let mut persisted = empty_persisted();
-        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        persisted.overrides.insert(
-            scope.clone(),
-            vec![PersistedModelProtocolOverride {
-                scope: scope.clone(),
-                model_id: "glm-5.3".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                state: ProtocolOverrideState::ForceOff,
-                updated_at: Utc::now(),
-            }],
-        );
-        let set = build_effective_contracts(&zen_seed(), &[], persisted);
-        let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
-        let glm = go.model("glm-5.3").unwrap();
-        let chat = glm.protocols.get("chat_completions").unwrap();
-        assert!(chat.available);
-        assert!(!chat.enabled);
-        assert_eq!(chat.r#override, ProtocolOverrideState::ForceOff);
-        assert!(!glm.routable);
-
-        let grok = go.model("grok-4.5").unwrap();
-        assert!(grok.routable);
-        assert!(grok.protocols.get("responses").unwrap().enabled);
-    }
-
-    #[test]
-    fn override_force_on_enables_supported_protocol_without_evidence() {
-        let mut persisted = empty_persisted();
-        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        persisted.overrides.insert(
-            scope.clone(),
-            vec![PersistedModelProtocolOverride {
-                scope: scope.clone(),
-                model_id: "grok-4.5".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                state: ProtocolOverrideState::ForceOn,
-                updated_at: Utc::now(),
-            }],
-        );
-        let set = build_effective_contracts(&zen_seed(), &[], persisted);
-        let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
-        let grok = go.model("grok-4.5").unwrap();
-        let chat = grok.protocols.get("chat_completions").unwrap();
-        assert!(chat.available);
-        assert!(chat.enabled);
-        assert_eq!(chat.r#override, ProtocolOverrideState::ForceOn);
-        assert!(grok.routable);
-    }
-
-    #[test]
-    fn override_force_on_enables_protocol_beyond_static_and_ceiling() {
-        let mut persisted = empty_persisted();
-        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        let now = Utc::now();
-        // A refreshed Go catalog can carry models the static table does not
-        // know; those sit outside the safety ceiling for every protocol.
-        persisted.scopes.insert(
-            scope.clone(),
-            PersistedScopeRow {
-                scope: scope.clone(),
-                catalog_models: vec!["future-go-model".into()],
-                catalog_refreshed_at: Some(now),
-                catalog_source: CATALOG_SOURCE_OPENCODE_MODELS.into(),
-                catalog_source_url: "https://opencode.ai/zen/go/v1/models".into(),
-                revision: 1,
-                updated_at: now,
-            },
-        );
-        persisted.overrides.insert(
-            scope.clone(),
-            vec![PersistedModelProtocolOverride {
-                scope,
-                model_id: "future-go-model".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                state: ProtocolOverrideState::ForceOn,
-                updated_at: now,
-            }],
-        );
-        let set = build_effective_contracts(&zen_seed(), &[], persisted);
-        let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
-        let model = go
-            .model("future-go-model")
-            .expect("catalog model is present");
-        let chat = model.protocols.get("chat_completions").unwrap();
-        assert!(chat.available, "force_on wins beyond static/ceiling");
-        assert!(chat.enabled);
-        assert_eq!(chat.r#override, ProtocolOverrideState::ForceOn);
-        assert!(model.routable);
-    }
-
-    #[test]
-    fn refreshed_catalog_is_authoritative_and_new_models_can_start_fully_off() {
-        let mut persisted = empty_persisted();
-        let now = Utc::now();
-        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        persisted.scopes.insert(
-            scope.clone(),
-            PersistedScopeRow {
-                scope: scope.clone(),
-                catalog_models: vec!["future-go-model".into()],
-                catalog_refreshed_at: Some(now),
-                catalog_source: CATALOG_SOURCE_OPENCODE_MODELS.into(),
-                catalog_source_url: "https://opencode.ai/zen/go/v1/models".into(),
-                revision: 2,
-                updated_at: now,
-            },
-        );
-        persisted.evidence.insert(
-            scope.clone(),
-            vec![PersistedModelProtocol {
-                scope: scope.clone(),
-                model_id: "grok-4.5".into(),
-                protocol: UpstreamProtocolKind::Responses,
-                source: ContractEvidenceSource::ProbeConfirmed,
-                verified_at: Some(now),
-                observed_at: Some(now),
-                last_probe_result: Some(ProbeResultKind::Success),
-                last_probe_at: Some(now),
-                last_probe_error: None,
-            }],
-        );
-        persisted.overrides.insert(
-            scope.clone(),
-            [
-                UpstreamProtocolKind::ChatCompletions,
-                UpstreamProtocolKind::Responses,
-                UpstreamProtocolKind::Messages,
-            ]
-            .into_iter()
-            .map(|protocol| PersistedModelProtocolOverride {
-                scope: scope.clone(),
-                model_id: "future-go-model".into(),
-                protocol,
-                state: ProtocolOverrideState::ForceOff,
-                updated_at: now,
-            })
-            .collect(),
-        );
-
-        let set = build_effective_contracts(&zen_seed(), &[], persisted);
-        let go = set.providers.get(OPENCODE_PROVIDER_ID).unwrap();
-        assert_eq!(go.catalog.source, CATALOG_SOURCE_OPENCODE_MODELS);
-        assert_eq!(go.catalog.models, vec!["future-go-model"]);
-        assert!(
-            !go.models.contains_key("grok-4.5"),
-            "models removed by the official catalog must not be restored by stale probe evidence"
-        );
-        let future = go.model("future-go-model").unwrap();
-        assert!(!future.routable);
-        assert!(future.protocols.values().all(|protocol| {
-            !protocol.enabled && protocol.r#override == ProtocolOverrideState::ForceOff
-        }));
-    }
-
-    #[test]
-    fn stale_probe_failure_does_not_demote_static_support() {
-        let mut persisted = empty_persisted();
-        let now = Utc::now();
-        let scope = ContractScope::provider(OPENCODE_PROVIDER_ID);
-        persisted.evidence.insert(
-            scope.clone(),
-            vec![PersistedModelProtocol {
-                scope,
-                model_id: "glm-5.3".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                source: ContractEvidenceSource::ProbeObserved,
-                verified_at: None,
-                observed_at: Some(now),
-                last_probe_result: Some(ProbeResultKind::Failure),
-                last_probe_at: Some(now),
-                last_probe_error: Some("upstream 500".into()),
-            }],
-        );
-        let go = build_effective_contracts(&zen_seed(), &[], persisted)
-            .providers
-            .remove(OPENCODE_PROVIDER_ID)
-            .unwrap();
-        let glm = go.model("glm-5.3").unwrap();
-        let chat = glm.protocols.get("chat_completions").unwrap();
-        assert!(
-            chat.available,
-            "static support survives a stale probe-failure observation"
-        );
-        assert!(chat.enabled);
-        assert_eq!(chat.r#override, ProtocolOverrideState::Auto);
-        assert_eq!(chat.last_probe_result, Some(ProbeResultKind::Failure));
-        assert_eq!(
-            chat.last_probe_error.as_deref(),
-            Some("upstream 500"),
-            "failure detail stays visible as evidence"
-        );
-    }
-
-    #[test]
-    fn protocol_fallback_prefers_client_then_adapter_priority() {
-        let mut go = go_contract();
-        let glm = go.models.get_mut("glm-5.2").unwrap();
-        glm.protocols.get_mut("chat_completions").unwrap().enabled = false;
-        glm.protocols.get_mut("responses").unwrap().enabled = true;
-        glm.protocols.get_mut("messages").unwrap().enabled = true;
-        glm.routable = true;
-
-        let selected = select_upstream_protocol(&go, ApiFormat::Messages, "glm-5.2").unwrap();
-        assert_eq!(selected, ApiFormat::Messages);
-
-        let selected = select_upstream_protocol(&go, ApiFormat::Gemini, "glm-5.2").unwrap();
-        assert_eq!(selected, ApiFormat::Responses);
-    }
-
-    #[test]
-    fn no_valid_protocol_fails_locally() {
-        let mut go = go_contract();
-        for model in go.models.values_mut() {
-            for evidence in model.protocols.values_mut() {
-                evidence.enabled = false;
-            }
-            model.routable = false;
-        }
-        let error =
-            select_upstream_protocol(&go, ApiFormat::ChatCompletions, "glm-5.3").unwrap_err();
-        assert_eq!(error.message, NO_ENABLED_UPSTREAM_PROTOCOL);
-    }
-
-    #[test]
-    fn goat_is_production_routable_after_probe_success() {
-        let now = Utc::now();
-        let mut persisted = empty_persisted();
-        let goat_scope = ContractScope::provider(COMMAND_CODE_PROVIDER_ID);
-        persisted.scopes.insert(
-            goat_scope.clone(),
-            PersistedScopeRow {
-                scope: goat_scope.clone(),
-                catalog_models: vec![COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into()],
-                catalog_refreshed_at: Some(now),
-                catalog_source: CATALOG_SOURCE_COMMAND_CODE_MODELS.into(),
-                catalog_source_url: COMMAND_CODE_GOAT_BASE_URL.into(),
-                revision: 1,
-                updated_at: now,
-            },
-        );
-        persisted.evidence.insert(
-            goat_scope,
-            vec![PersistedModelProtocol {
-                scope: ContractScope::provider(COMMAND_CODE_PROVIDER_ID),
-                model_id: COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM.into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                source: ContractEvidenceSource::ProbeConfirmed,
-                verified_at: Some(now),
-                observed_at: Some(now),
-                last_probe_result: Some(ProbeResultKind::Success),
-                last_probe_at: Some(now),
-                last_probe_error: None,
-            }],
-        );
-        let set = build_effective_contracts(&zen_seed(), &[], persisted);
-        let goat = set.providers.get(COMMAND_CODE_PROVIDER_ID).unwrap();
-        assert!(goat.catalog_routable);
-        assert!(goat.production_inference);
-        assert!(
-            goat.model(COMMAND_CODE_GOAT_DEEPSEEK_V4_FLASH_UPSTREAM)
-                .unwrap()
-                .routable
-        );
-        assert!(!ProviderAdapterKind::CommandCodeGoat.protocol_probe_supported());
-    }
-
-    #[test]
-    fn custom_discovery_does_not_become_routable_without_declaration() {
-        let runtime = CustomAccountRuntime {
-            account_id: "custom-1".into(),
-            enabled: true,
-            verification_status: ConnectionVerificationStatus::Verified,
-            setup_ready: true,
-            has_key: true,
-            config: AccountCustomConfig {
-                account_id: "custom-1".into(),
-                endpoint_url: "https://api.example.com/v1/chat/completions".into(),
-                upstream_protocol: UpstreamProtocolKind::ChatCompletions,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            },
-            capabilities: vec![AccountModelCapability {
-                account_id: "custom-1".into(),
-                public_model: "declared-model".into(),
-                upstream_model: "declared-upstream".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                verified_at: None,
-                source: "manual".into(),
-            }],
-        };
-        let mut persisted = empty_persisted();
-        let scope = ContractScope::custom_endpoint("custom-1");
-        persisted.scopes.insert(
-            scope.clone(),
-            PersistedScopeRow {
-                scope: scope.clone(),
-                catalog_models: vec!["discovered-only".into()],
-                catalog_refreshed_at: Some(Utc::now()),
-                catalog_source: CATALOG_SOURCE_CUSTOM_DISCOVERY.into(),
-                catalog_source_url: String::new(),
-                revision: 1,
-                updated_at: Utc::now(),
-            },
-        );
-        let set = build_effective_contracts(&zen_seed(), &[runtime], persisted);
-        let custom = set.custom_endpoints.get("custom-1").unwrap();
-        assert_eq!(custom.catalog.source, CATALOG_SOURCE_DECLARED);
-        assert_eq!(custom.catalog.models, vec!["declared-model"]);
-        assert!(custom.model("declared-model").unwrap().routable);
-        assert!(custom.model("discovered-only").is_none());
-    }
-
-    #[test]
-    fn custom_declared_protocol_is_preferred_and_other_clients_fall_back_to_it() {
-        let declared = vec![("declared-model".to_string(), UpstreamProtocolKind::Messages)];
-        let runtime = CustomAccountRuntime {
-            account_id: "custom-single".into(),
-            enabled: true,
-            verification_status: ConnectionVerificationStatus::Verified,
-            setup_ready: true,
-            has_key: true,
-            config: AccountCustomConfig {
-                account_id: "custom-single".into(),
-                endpoint_url: "https://api.example.com/v1/messages".into(),
-                upstream_protocol: UpstreamProtocolKind::Messages,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            },
-            capabilities: declared
-                .iter()
-                .map(|(model_id, protocol)| AccountModelCapability {
-                    account_id: "custom-single".into(),
-                    public_model: model_id.clone(),
-                    upstream_model: model_id.clone(),
-                    protocol: *protocol,
-                    verified_at: None,
-                    source: "manual".into(),
-                })
-                .collect(),
-        };
-        let ceiling = safety_ceiling_protocols(
-            ProviderAdapterKind::ConfigurableHttp,
-            "declared-model",
-            &declared,
-        );
-        assert!(ceiling.contains(&UpstreamProtocolKind::Messages));
-        assert!(!ceiling.contains(&UpstreamProtocolKind::ChatCompletions));
-        assert!(!ceiling.contains(&UpstreamProtocolKind::Responses));
-
-        let set = build_effective_contracts(
-            &zen_seed(),
-            std::slice::from_ref(&runtime),
-            empty_persisted(),
-        );
-        let custom = set.custom_endpoints.get("custom-single").unwrap();
-        let model = custom.model("declared-model").unwrap();
-        assert!(model.routable);
-        assert_eq!(
-            model.preferred_protocol,
-            UpstreamProtocolKind::Messages,
-            "the account's only declared protocol is always preferred"
-        );
-        let scope = ContractScope::custom_endpoint("custom-single");
-        let selected = set
-            .select_upstream(&scope, ApiFormat::Messages, "declared-model")
-            .unwrap();
-        assert_eq!(selected, ApiFormat::Messages);
-        let selected = set
-            .select_upstream(&scope, ApiFormat::ChatCompletions, "declared-model")
-            .unwrap();
-        assert_eq!(selected, ApiFormat::Messages);
-        let selected = set
-            .select_upstream(&scope, ApiFormat::Responses, "declared-model")
-            .unwrap();
-        assert_eq!(
-            selected,
-            ApiFormat::Messages,
-            "an undeclared client protocol falls back to the preferred protocol"
-        );
-
-        let mut persisted = empty_persisted();
-        persisted.overrides.insert(
-            scope,
-            vec![PersistedModelProtocolOverride {
-                scope: ContractScope::custom_endpoint("custom-single"),
-                model_id: "declared-model".into(),
-                protocol: UpstreamProtocolKind::ChatCompletions,
-                state: ProtocolOverrideState::ForceOn,
-                updated_at: Utc::now(),
-            }],
-        );
-        let set = build_effective_contracts(&zen_seed(), &[runtime], persisted);
-        let chat = &set.custom_endpoints["custom-single"]
-            .model("declared-model")
-            .unwrap()
-            .protocols["chat_completions"];
-        assert!(!chat.available);
-        assert!(
-            !chat.enabled,
-            "force_on cannot enable an undeclared Custom protocol"
-        );
-    }
-
-    #[test]
-    fn sanitize_probe_error_strips_userinfo_and_truncates() {
-        let raw = format!(
-            "failed https://user:secret@api.example.com/v1 {}",
-            "x".repeat(600)
-        );
-        let sanitized = sanitize_probe_error(&raw, Some("secret"));
-        assert!(!sanitized.contains("user:secret"));
-        assert!(!sanitized.contains("secret"));
-        assert!(sanitized.chars().count() <= MAX_PROBE_ERROR_CHARS + 1);
-    }
-}
+mod tests;

@@ -33,7 +33,7 @@ Downgrades are not supported: never point an older binary at a migrated database
 
 ## Schema v27 and the pre-v3 snapshot
 
-`CURRENT_SCHEMA_VERSION = 34` (`crates/ocg-core/src/db.rs`). Opening a historical database first migrates canonically to v26, then the v27 rewrite copies the primary Key and every `sub_gateway_keys` row into one `access_keys` table (live primary id `00000000-0000-0000-0000-000000000001`), drops `sub_gateway_keys`, and drops the five legacy `accounts.usage_sync_*` columns (usage-sync metadata lives in `provider_usage_sync_state`). Later migrations do not change this snapshot semantics. Account `key_cipher` / `password_cipher` bytes are validated with the Host cipher and never re-encrypted.
+`CURRENT_SCHEMA_VERSION = 35` (`crates/ocg-core/src/db.rs`). Opening a historical database first migrates canonically to v26, then the v27 rewrite copies the primary Key and every `sub_gateway_keys` row into one `access_keys` table (live primary id `00000000-0000-0000-0000-000000000001`), drops `sub_gateway_keys`, and drops the five legacy `accounts.usage_sync_*` columns (usage-sync metadata lives in `provider_usage_sync_state`). v33 adds the exact Custom upstream model identity; v34 adds the singleton CPA configuration table without importing or exporting CPA state. Account `key_cipher` / `password_cipher` bytes are validated with the Host cipher and never re-encrypted.
 
 ## Schema v31 — per-model/per-protocol overrides
 
@@ -51,9 +51,9 @@ public-name = upstream-ID behavior exactly. New Custom mappings may retain a
 distinct public model name and exact upstream model ID; no suffix normalization
 or generated Alias is applied by this migration.
 
-## Schema v34 — Ollama Cloud usage state
+## Schema v35 — Ollama Cloud usage state
 
-v34 creates the `ollama_cloud_usage_state` table. One row per configured
+v35 creates the `ollama_cloud_usage_state` table. One row per configured
 account holds:
 
 - `cookie_cipher` — the obfuscated browser-session Cookie for the usage

@@ -1,15 +1,52 @@
-export const APP_VIEW_KEYS = [
-  "dashboard",
-  "keys",
-  "accounts",
-  "providers",
-  "apps",
-  "logs",
-  "settings",
-  "browser",
-] as const;
+import type { MessageKey } from "../i18n/index.ts";
 
-export type AppViewKey = (typeof APP_VIEW_KEYS)[number];
+export const APP_NAVIGATION_GROUPS = {
+  core: { key: "core" },
+  extensions: { key: "extensions", label: "扩展" },
+} as const satisfies Record<string, { key: string; label?: MessageKey }>;
+
+export type AppNavigationGroup = keyof typeof APP_NAVIGATION_GROUPS;
+export type AppNavigationIcon =
+  | "dashboard"
+  | "keys"
+  | "accounts"
+  | "providers"
+  | "aliases"
+  | "apps"
+  | "logs"
+  | "settings";
+
+export interface AppNavigationItem {
+  key: string;
+  label: MessageKey;
+  icon: AppNavigationIcon;
+  group: AppNavigationGroup;
+}
+
+// This is the single navigation registration source for desktop, mobile, and
+// the page title. Browser remains an overlay rather than a menu entry.
+export const APP_NAVIGATION = [
+  { key: "dashboard", label: "仪表盘", icon: "dashboard", group: "core" },
+  { key: "keys", label: "接入 Key", icon: "keys", group: "core" },
+  { key: "accounts", label: "账号", icon: "accounts", group: "core" },
+  { key: "providers", label: "供应商", icon: "providers", group: "core" },
+  { key: "aliases", label: "别名", icon: "aliases", group: "core" },
+  { key: "apps", label: "应用", icon: "apps", group: "core" },
+  { key: "logs", label: "日志", icon: "logs", group: "core" },
+  { key: "settings", label: "设置", icon: "settings", group: "core" },
+] as const satisfies readonly AppNavigationItem[];
+
+export type AppNavigationViewKey = (typeof APP_NAVIGATION)[number]["key"];
+export type AppViewKey = AppNavigationViewKey | "browser" | "cpa";
+
+export const APP_VIEW_KEYS: readonly AppViewKey[] = [
+  ...APP_NAVIGATION.map(({ key }) => key),
+  "cpa",
+  "browser",
+];
+
+export const CORE_APP_NAVIGATION = APP_NAVIGATION.filter(({ group }) => group === "core");
+export const EXTENSION_APP_NAVIGATION: readonly AppNavigationItem[] = [];
 
 export const LEGACY_PRICING_VIEW = "pricing";
 export const PROVIDERS_VIEW: AppViewKey = "providers";
@@ -42,6 +79,11 @@ export function readProviderScopeQuery(search: string): {
   };
 }
 
+export function readAccountDeepLink(search: string): string | null {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  return params.get("account_id");
+}
+
 export function applyAppViewSearchParams(
   url: URL,
   view: AppViewKey,
@@ -64,5 +106,11 @@ export function applyAppViewSearchParams(
   else url.searchParams.delete("scope_kind");
   if (scope.scope_id) url.searchParams.set("scope_id", scope.scope_id);
   else url.searchParams.delete("scope_id");
+  return url;
+}
+
+export function applyAccountViewSearchParams(url: URL, accountId: string): URL {
+  applyAppViewSearchParams(url, "accounts");
+  url.searchParams.set("account_id", accountId);
   return url;
 }

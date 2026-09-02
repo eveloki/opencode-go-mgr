@@ -6,7 +6,7 @@ use ocg_core::dashboard_v3::{
     ERROR_NOT_FOUND, ERROR_OUTBOUND_FAILED, ERROR_REVISION_CONFLICT, ERROR_THROTTLED,
     ERROR_UNAUTHORIZED, UsageRefresh, UsageRefreshThrottleError,
 };
-use ocg_core::db::{AccountUsageCalibrationSnapshot, CURRENT_SCHEMA_VERSION};
+use ocg_core::db::AccountUsageCalibrationSnapshot;
 use ocg_core::go_usage::{GoUsageError, GoUsageSnapshot, GoUsageWindowStatus};
 use ocg_core::provider::{COMMAND_CODE_PROVIDER_ID, GOAT_OFFERING_ID, ZEN_FREE_ACCOUNT_ID};
 use reqwest::{Method, StatusCode};
@@ -266,8 +266,8 @@ fn assert_no_inference_cooldown(harness: &V3Harness, account_id: &str) {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[tokio::test]

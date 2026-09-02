@@ -4,7 +4,6 @@ use ocg_core::dashboard_v3::{
     ConnectionInfo, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST, ERROR_MISSING_EXPECTED_REVISION,
     ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED, MutationAck,
 };
-use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::gateway_keys::PRIMARY_KEY_ID;
 use ocg_core::models::{Account, AccountSetupStep, AccountType, RoutingMode};
 use reqwest::{Method, StatusCode};
@@ -221,8 +220,8 @@ fn key_mutation_routes(id: &str) -> Vec<(Method, String)> {
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[test]

@@ -8,9 +8,9 @@
 
 - Core Gateway：Axum + Tokio + reqwest。同一端口暴露 OpenAI Chat Completions / Responses、Anthropic Messages、Gemini `generateContent` 客户端入口，以及 Claude Desktop 别名入口。
 - 已认证的 `GET /v1/models` 首先列出最早 OpenCode Go 静态协议表以及密封 MiniMax CN、Kimi CN 和选定 GOAT 长名称映射授权且当前可路由的 Alias，然后合并符合条件的 Custom 账号声明模型 ID（enabled+ready+非空 Key；验证为可选）。保存的 Zen 行只能加入 Go 已授权 Alias；保存的 Command 行可以加入任一代码持有的 Alias；保存的 MiniMax/Kimi 行只激活代码中精确列出的 CN 映射。无法匹配的内置行只保留精确 raw pin，不会作为新 Alias 公布。受保护的 `GET /dashboard/api/v3/application-models` 仍是 **Go 可路由别名 ∩ 当前定价快照**（highspeed 继承 base-price 行；空交集为 `[]`），不含 Custom 与 CN Plan。两条 GET 路径都不会请求上游；目录刷新只能由控制面显式触发。Custom ID 来自符合条件账号的声明能力。未知模型名在所有支持的客户端格式上返回 `400`。
-- Custom 第一阶段映射细化：合格 Custom 能力同时保存公开模型名与精确 `upstream_model`。`/v1/models` 只公布可路由公开名称，绝不形成第二份上游 ID 目录。发现只返回上游 ID，导入时精确写入 `public_model = upstream_model`；不剥离后缀，不合成 Alias。raw 冲突从公布列表排除，并以 `ambiguous_model_id` fail-closed。供应商 Alias 页只是既有合约与能力的只读聚合，不新增 Alias API、store、cache 或编辑面。
+- Custom 第一阶段映射细化：合格 Custom 能力同时保存公开模型名与精确 `upstream_model`。`/v1/models` 只公布可路由公开名称，绝不形成第二份上游 ID 目录。发现只返回上游 ID，导入时精确写入 `public_model = upstream_model`；不剥离后缀，不合成 Alias。raw 冲突从公布列表排除，并以 `ambiguous_model_id` fail-closed。独立的别名页只是既有合约与能力的只读聚合，不新增 Alias API、store、cache 或编辑面。
 - Gemini 客户端使用 `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent`（`/v1/models/...` 也接受），可以用 `x-goog-api-key` 认证；Gemini 只是一种客户端格式，Gateway 总是把请求转换成目标模型的推荐上游协议。未知模型名在 Chat / Responses / Messages / Gemini 上返回 `400`；禁止探测协议。
-- 模型协议能力硬编码在 `ocg_domain::protocol` 的 `MODEL_PROTOCOLS` 中（`ocg-core` 的 `kernel/protocol.rs` 与 `gateway/protocol.rs` 是 facade/host 转换）：`preferred` 与官方 Go 文档端点表一致，`supported` 来自测试账号探测结论。当客户端协议 ∈ supported 时直接透传，否则路由到 preferred；请求路径不得探测协议（避免重复计费）。`grok-4.5` 的 `supported` 只有 Responses（Chat 入口必须转换）。`gpt-5.6-luna` 的 preferred 仍是 Responses，但 Chat 现在可以透传。`MODEL_PROTOCOLS` 目前仍只服务于 OpenCode Go；Zen Free 刷新得到的新 `-free` ID 若表中未知，默认物化为 Chat，且不会使用计费请求探测协议。整篇 JSON 转换内核在 `ocg-gateway` 中。
+- 开发时协议默认值硬编码在 `ocg_domain::protocol::MODEL_PROTOCOLS` 中（`ocg-core` 的 `kernel/protocol.rs` 与 `gateway/protocol.rs` 是 facade/host 转换）：`preferred` 与 `supported` 都取自开发该版本时官方为模型列出的原生端点。客户端协议只有匹配该官方默认值或后续持久化的正面探测证据时才透传，否则转换到 effective preferred；运行时请求路径绝不探测。显式 Provider 探测只能在适配器已登记、可构造的官方上限内追加正面证据。未来未知 Zen Free 行默认关闭，直到后续版本补入官方基线或显式探测成功。整篇 JSON 转换内核在 `ocg-gateway` 中。
 
 一次逻辑客户端请求在入口捕获 `RequestSnapshots`（`crates/ocg-core/src/gateway/executor.rs`）。fallback 迭代重读实时账号状态，不会重新捕获冻结行。没有额外的 snapshot 服务或 trait。
 
@@ -40,7 +40,7 @@
 
 ## 持久化
 
-- 当前 schema 是 **v34**。本迁移创建 `ollama_cloud_usage_state`（Ollama Cloud Cookie 用量状态，详见 `storage-migration.zh-CN.md`）。前一版 v33 迁移新增非空 `account_model_capabilities.upstream_model` 并从 `model_id` 回填，保留全部既有路由；之后 Custom 可写入不同的公开与上游名称。迁移不做后缀规范化，也不生成 Alias。
+- 当前 schema 是 **v35**。v33 新增非空 `account_model_capabilities.upstream_model` 并从 `model_id` 回填；v34 新增单例 `cpa_integration` 行。CPA 推理凭证、启停与顺序仍归保留账号，模型快照仍在 `provider_model_catalogs`。v35 创建 `ollama_cloud_usage_state`（Ollama Cloud Cookie 用量状态，详见 `storage-migration.zh-CN.md`）两次迁移都不会合成 Alias。详见 `storage-migration.zh-CN.md`。
 - SQLite 到 **v32** 的迁移历史继续保留：v27 把主 Key 与 `sub_gateway_keys` 复制进 `access_keys`，并删除 `accounts` 上遗留的五个 `usage_sync_*` 列。v29 移除 SCNet Token Plans，v30 引入过渡期 Custom 多协议 JSON 集合，v31 新增按模型/按协议覆盖表。v32 将每条 Custom 配置替换为 `endpoint_url` 与单值 `upstream_protocol`；历史行按 Chat → Responses → Messages 选择协议并拼出标准推理路径，清理非所选协议的能力/证据/覆盖，同时把账号设为 disabled/pending。已有非空库在跨越主要 schema 边界前生成不覆盖的 `data.sqlite.pre-v3.<UTC>.bak` 与 `.sha256`；全新空库直接创建当前 schema。GUI 数据目录在 Windows 为 `%USERPROFILE%\.ocg-mgr`，macOS/Linux 为 `~/.ocg-mgr`；CLI 默认为 `~/.ocg-mgr-cli`。升级与回滚详见 `docs/maintainer/storage-migration.zh-CN.md`。
 - 下游访问根 URL 优先级：非空 `OCG_CLIENT_ROOT_URL` > SQLite 手动值 > 前端从生产 origin / 开发 Gateway 端口自动推导。环境变量覆盖是只读的，不得写回 SQLite。
 
@@ -56,9 +56,16 @@
 ## 套餐目录与 Custom API 边界
 
 - 套餐目录位于静态 `ocg_domain::provider` 的 `BUILTIN_PLANS`：OpenCode Go、Zen Free、Command Code GOAT、MiniMax CN Token Plan、Kimi Code CN 与 Custom API。内部身份是 `provider_id` + `offering_id`。Command Code GOAT 可路由；其官方公开 `GET /models` 是供应商目录发现，不是对已保存 Key 的验证。历史 GOAT 验证状态统一为 `not_required`，真实 Key 鉴权边界仍是推理请求返回的 401/403。账号只贡献 enabled+ready+非空 Key 的凭据与顺序，模型供应由供应商模型/协议合约控制：GOAT 内含预设默认开启，额外发现的模型默认关闭，必须显式 `force_on`；不再有账号级 GOAT/全部或 Max 权限模式。已验证的 GOAT 价格快照提供逐请求的价格与倍率核算，并绝不回退套用 Go 价格。Command Code 没有可机读的账号用量端点，因此 GOAT 的用量可用性为 `local_state`，绝不是权威值：面板把 OCG 内已定价请求日志投影到公开的 `$14 / $35 / $70` 三个窗口，并允许手工修正基线。未定价日志与 OCG 外流量不会计入；这套估算不影响推理资格，也不会启动自动同步。所有持久化变更路径仍会在写入、revision 或 timestamp 变更前拒绝启用真正 `routable=false` 的套餐；桌面 UI 只通过 Dashboard V3 HTTP 变更，没有单独的 invoke 变更路径。
-- MiniMax（`minimax`/`cn`）与 Kimi（`kimi`/`cn`）是两个独立密封适配器，不是 Custom 预设。两者都使用 Bearer Key、固定且禁止重定向的官方来源、Chat Completions 上游、需要鉴权的显式 `/models` 刷新、429 通用供应商冷却，以及 unpriced 转发。MiniMax 密封映射覆盖 `MiniMax-M3`、M2.7/M2.5/M2.1 的标准与 highspeed 变体，以及 `MiniMax-M2`，客户端使用对应的小写 kebab Alias。Kimi 映射为 `kimi-for-coding` → `kimi-k2.7-code`、`kimi-for-coding-highspeed` → `kimi-k2.7-code-highspeed`、`k3` → `kimi-k3`、`k3-256k` → `kimi-k3-256k`；转发始终保留精确上游 ID。MiniMax 手工读取 `https://api.minimaxi.com/v1/token_plan/remains`；Kimi 手工读取 `https://api.kimi.com/coding/v1/usages`。返回窗口经过大小限制后，在 V3 CAS 下只替换同账号同来源的快照。这些数据只用于展示：不自动同步，也不改变推理资格。其他 Kimi/GLM 普通或私有端点仍归 Custom API；GLM 没有内置 Plan。
+- MiniMax（`minimax`/`cn`）与 Kimi（`kimi`/`cn`）是两个独立密封适配器，不是 Custom 预设。两者都使用 Bearer Key、固定且禁止重定向的官方来源、需要鉴权的显式 `/models` 刷新、429 通用供应商冷却，以及 unpriced 转发。开发时官方协议上限都是 Chat Completions + Anthropic Messages，不存在 Responses 路径。MiniMax Chat 使用 `https://api.minimaxi.com/v1/chat/completions`，Messages 使用 `https://api.minimaxi.com/anthropic/v1/messages`；Kimi 使用 `https://api.kimi.com/coding/v1/chat/completions` 与 `/v1/messages`。MiniMax 密封映射覆盖 `MiniMax-M3`、M2.7/M2.5/M2.1 的标准与 highspeed 变体，以及 `MiniMax-M2`，客户端使用对应的小写 kebab Alias。Kimi 映射为 `kimi-for-coding` → `kimi-k2.7-code`、`kimi-for-coding-highspeed` → `kimi-k2.7-code-highspeed`、`k3` → `kimi-k3`、`k3-256k` → `kimi-k3-256k`；转发始终保留精确上游 ID。MiniMax 手工读取 `https://api.minimaxi.com/v1/token_plan/remains`；Kimi 手工读取 `https://api.kimi.com/coding/v1/usages`。返回窗口经过大小限制后，在 V3 CAS 下只替换同账号同来源的快照。这些数据只用于展示：不自动同步，也不改变推理资格。其他 Kimi/GLM 普通或私有端点仍归 Custom API；GLM 没有内置 Plan。
 - Custom API（`custom`/`api`，`routable=true`）是可信管理员目标：每张账号卡配置一个 HTTP/HTTPS API 地址和一个 `chat_completions` / `responses` / `messages` 协议；合法新账号默认启用。拒绝内嵌凭据、query、fragment 与重定向；不转发面板/客户端认证。Chat/Responses 只构造 Bearer，Messages 只构造 `x-api-key`，不存在鉴权覆盖或换头重试。根地址通过 `/v1` 加所选协议路径解析；已经以 `/v1` 结尾的基址不会重复该段。现有标准或非标准完整 Endpoint 继续原样使用，其中非标准路径保留手工模型。唯一协议对全部声明模型统一生效，也是 effective preferred protocol：同协议请求透传，其他受支持客户端格式（包括 Gemini）转换到它。Custom 配置与完整模型能力列表通过一次 V3 CAS 原子替换。模型发现对根地址/版本基址使用 `/v1/models`，对标准完整 Endpoint 使用同级 `/models`；不从非标准完整路径猜测。Custom 覆盖只能指向账号声明协议，`force_on` 不能扩张到未声明协议；`force_off` 后模型不可路由且没有固定顺序回退。符合条件的账号动态路由声明模型 ID。Custom 成本/用量未定价/未知。多端点供应商应以后新增静态 Provider Adapter，而不是扩张通用 Custom 路由。
-- Custom 第一阶段仍保持静态、密封的 Provider Registry。账号页是唯一映射编辑器：它原子保存一个账号级协议及公开名称 → 精确上游 ID 各行。供应商仅展示只读聚合；其 Custom 编辑深链为 `?view=accounts&account_id=<id>`。关闭时清除 `account_id`；失效 ID 会提示并清除。不会增加动态 Provider、Alias 注册表、插件点、服务或请求时发现。
+- Custom 第一阶段仍保持静态、密封的 Provider Registry。账号页是唯一映射编辑器：它原子保存一个账号级协议及公开名称 → 精确上游 ID 各行。别名页只展示聚合；其 Custom 编辑深链为 `?view=accounts&account_id=<id>`。关闭时清除 `account_id`；失效 ID 会提示并清除。不会增加动态 Provider、Alias 注册表、插件点、运行时适配器加载或请求时发现。
+
+## 外部接入
+
+- 外部接入是静态产品能力，不是 Provider/Plan 插件。CPA 实现目前暂留给独立验证：常规导航入口隐藏、目录 Plan 不可路由、持久化层强制关闭单例路由账号；typed V3 控制面仍保留供隔离测试。OCG 不会内嵌、启动、升级或读取该服务的私有 auth 文件。
+- 桌面/CLI 的 CPA 地址只允许 loopback；Compose profile 只允许固定环境覆盖 `http://cpa:8317`。禁止重定向、内嵌凭证、query/fragment、远程/LAN 主机和转发客户端 Key。CPA 推理强制直连，并与全局出站代理隔离。
+- 保留的 CPA 账号只是一张进入现有账号顺序与 selector 状态机的路由卡。CPA 内部 OAuth 账号只是实时投影；日志只归因到 CPA 订阅池，不虚构内部账号。Management 与 Inference Key 在本地加密，OAuth Token 始终留在 CPA，节点迁移排除全部 CPA 状态。
+- CPA 目录只能加入代码持有的 Alias；其他保存 ID 仍是精确 raw pin，冲突 fail closed。已知 ID 使用 OCG 协议表，未知 ID 默认 Chat Completions，禁止计费探测。CPA 成本/用量保持 unpriced/unknown；任何 CPA 故障只参与普通候选 fallback，不得影响既有路由。
 
 ## 别名
 
@@ -90,7 +97,7 @@
 ## Ollama Cloud
 
 - 家族密封且固定源：`https://ollama.com`，仅 Chat Completions，Bearer，不跟随重定向，`ProcessWideNoRedirect` 代理语义（方向默认段；本家族模型 id 不参与按模型例外段匹配）。协议事实存于 `ocg_domain::protocol` 的家族独立种子（`OLLAMA_CLOUD_*`）；`MODEL_PROTOCOLS` 必须保持无 Ollama 专属 id——该表派生 Go 已发布别名。adapter 标记 `WireNormalization::OllamaCloud`；forwarder 按尝试改写请求字节（assistant `reasoning_content` 缺失时补 `reasoning`，`max_tokens`/`max_completion_tokens` 钳制到 65535），并对响应/SSE 帧做规范化（`reasoning`/`thinking` → 补 `reasoning_content`）。混合候选链中非 Ollama 尝试的请求字节必须逐字节不变；`upstream_body_bytes` 记录实际发送字节；面向客户端的归因保留请求名。
-- Cookie 用量为 opt-in 且仅手动：存储的网页会话 Cookie（与 Key 同级混淆设施，非 AEAD）仅用于抓取固定 `https://ollama.com/settings` 页（不重定向，15 秒超时，512KB 上限，进程级出站默认段）。解析锚定 `data-usage-track`/`data-usage-segment`/`data-model`/`data-requests`/`data-time`/`data-usage-window`；快照仅持久化脱敏 JSON，失败只更新状态/退避且不动上次成功快照，`unauthorized` 表示会话过期。手动刷新 30 秒限速（成败都计），固定退避 5 分钟 → 15 分钟 → 1 小时 → 6 小时；**用量路径的任何失败绝不写推理冷却、绝不改变账号启用状态、绝不影响路由资格**。状态存于 `ollama_cloud_usage_state`（schema v34，随账号级联删除）。Cookie 与用量快照不进导出载荷；载荷结构与版本不变。
+- Cookie 用量为 opt-in 且仅手动：存储的网页会话 Cookie（与 Key 同级混淆设施，非 AEAD）仅用于抓取固定 `https://ollama.com/settings` 页（不重定向，15 秒超时，512KB 上限，进程级出站默认段）。解析锚定 `data-usage-track`/`data-usage-segment`/`data-model`/`data-requests`/`data-time`/`data-usage-window`；快照仅持久化脱敏 JSON，失败只更新状态/退避且不动上次成功快照，`unauthorized` 表示会话过期。手动刷新 30 秒限速（成败都计），固定退避 5 分钟 → 15 分钟 → 1 小时 → 6 小时；**用量路径的任何失败绝不写推理冷却、绝不改变账号启用状态、绝不影响路由资格**。状态存于 `ollama_cloud_usage_state`（schema v35，随账号级联删除）。Cookie 与用量快照不进导出载荷；载荷结构与版本不变。
 - 别名追加守卫：目录刷新仅在剥除 `:` 标签后恰好命中一个目录 id 时，向 Go 拥有的别名（如共享词干）追加一个可路由 Ollama 映射；同词干多快照并存时该映射退出，别名仍由既有家族服务，管理员矩阵钉定会被后续刷新尊重。带日期标签的快照 id 是运行时目录数据，严禁写进代码。
 
 ## 用量同步

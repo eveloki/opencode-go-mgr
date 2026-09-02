@@ -16,7 +16,6 @@ use ocg_core::dashboard_v3::{
     AccountMutation, AccountVerificationStatus, ERROR_INVALID_JSON, ERROR_INVALID_REQUEST,
     ERROR_MISSING_EXPECTED_REVISION, ERROR_NOT_FOUND, ERROR_REVISION_CONFLICT, ERROR_UNAUTHORIZED,
 };
-use ocg_core::db::CURRENT_SCHEMA_VERSION;
 use ocg_core::gateway::provider_adapter::install_goat_verify_origin_for_test;
 use ocg_core::models::ProxyMode;
 use ocg_core::provider::{
@@ -479,8 +478,8 @@ async fn create_custom_account(
 }
 
 #[test]
-fn dashboard_v3_schema_version_stays_at_v34() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 34);
+fn dashboard_v3_schema_version_stays_at_v35() {
+    assert_eq!(ocg_core::db::CURRENT_SCHEMA_VERSION, 35);
 }
 
 #[test]

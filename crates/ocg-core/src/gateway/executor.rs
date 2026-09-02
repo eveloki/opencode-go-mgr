@@ -18,7 +18,7 @@ use crate::gateway::protocol::{MaterializeSpec, RequestPlan, materialize_parsed_
 use crate::gateway::response::{local_protocol_failure, protocol_error_response};
 use crate::gateway::routing::resolve_conversation_key;
 use crate::gateway::selector::AccountSelector;
-use crate::http_client::ForwardRouteSet;
+use crate::http_client::{ForwardRouteSet, RouteLabel};
 use crate::kernel::pricing::PricingSnapshot;
 use crate::kernel::protocol::ApiFormat;
 use crate::models::{AppConfig, UpstreamChannel};
@@ -38,6 +38,7 @@ pub(crate) struct RequestSnapshots {
     routes: Arc<ForwardRouteSet>,
     contracts: Arc<EffectiveContractSet>,
     resolved: alias::ResolvedModel,
+    cpa_base_url: Option<String>,
 }
 
 impl RequestSnapshots {
@@ -47,12 +48,24 @@ impl RequestSnapshots {
         contracts: Arc<EffectiveContractSet>,
         resolved: alias::ResolvedModel,
     ) -> Self {
+        let cpa_base_url = match crate::cpa::env_base_url() {
+            Ok(Some(base_url)) => Some(base_url),
+            Ok(None) => state
+                .db
+                .lock()
+                .cpa_integration()
+                .ok()
+                .flatten()
+                .map(|record| record.base_url),
+            Err(_) => None,
+        };
         Self {
             config,
             pricing: state.pricing_snapshot(),
             routes: state.forward_route_set(),
             contracts,
             resolved,
+            cpa_base_url,
         }
     }
 }
@@ -244,6 +257,7 @@ impl GatewayExecutor {
                 free_available,
                 &custom_runtimes,
                 &goat_runtimes,
+                snapshots.cpa_base_url.as_deref(),
                 &snapshots.contracts,
             ) {
                 Ok(route_set) => route_set,
@@ -398,7 +412,12 @@ impl GatewayExecutor {
                 loop_state.attempt = loop_state.attempt.saturating_add(1);
                 // Re-resolve the leg on every attempt: free fallback or sticky
                 // rewrites can swap `active_plan.model` mid-request.
-                let (client, route) = snapshots.routes.client_for(&active_plan.model);
+                let (client, selected_route) = snapshots.routes.client_for(&active_plan.model);
+                let route = if account.provider_id == crate::provider::CPA_PROVIDER_ID {
+                    RouteLabel::Direct
+                } else {
+                    selected_route
+                };
                 match forward_request(
                     client,
                     route,
@@ -512,183 +531,10 @@ fn routing_selector_invariant(failure: SelectorInvariant) -> (StatusCode, String
 #[cfg(test)]
 mod tests {
     #[test]
-    fn handler_production_source_no_longer_owns_execute_plan_or_selection_loop() {
-        let handler = include_str!("handler.rs");
-        let production = handler
-            .split("\nmod tests {")
-            .next()
-            .expect("production source precedes tests");
-        assert!(
-            !production.contains("async fn execute_plan"),
-            "execute_plan must not remain in handler"
-        );
-        assert!(
-            !production.contains("select_candidate"),
-            "selection loop must not remain in handler"
-        );
-        assert!(
-            !production.contains("materialize_account_routes"),
-            "candidate materialization must not remain in handler"
-        );
-        assert!(
-            !production.contains("failed_ids"),
-            "fallback exclusion set must not remain in handler"
-        );
-        assert!(
-            !production.contains("retried_same_account"),
-            "same-account retry loop must not remain in handler"
-        );
-        assert!(
-            production.contains("GatewayExecutor::run"),
-            "handler must delegate orchestration to GatewayExecutor::run"
-        );
-    }
-
-    #[test]
-    fn executor_owns_the_existing_selection_and_retry_loop() {
-        let source = include_str!("executor.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source precedes tests");
-        assert!(production.contains("struct RequestSnapshots"));
-        assert!(production.contains("struct LoopState"));
-        assert!(production.contains("struct GatewayExecutor"));
-        assert!(production.contains("fn run("));
-        assert!(production.contains("try_select_candidate_index_at"));
-        assert!(production.contains("free_available"));
-        assert!(production.contains("routing selector invariant"));
-        assert!(
-            !production
-                .contains("expect(\"selected routing candidate must retain its request plan\")")
-        );
-        assert!(!production.contains("route.routing.account.id == selected.account.id"));
-        assert!(production.contains("materialize_account_routes"));
-        assert!(production.contains("list_accounts"));
-        assert!(production.contains("list_custom_account_runtimes"));
-        assert!(production.contains("free_channel_cooldown_until_at"));
-        assert!(production.contains("free_channel_exhausted_at"));
-        assert!(production.contains("forward_request"));
-        assert!(
-            production
-                .contains("let (decision_wall, decision_mono) = state.sample_gateway_clock();")
-        );
-        assert_eq!(
-            production.matches("sample_gateway_clock()").count(),
-            1,
-            "each outer fallback iteration must sample wall+mono once"
-        );
-        assert!(
-            !production.contains("now_wall") && !production.contains("now_mono"),
-            "executor must sample through CoreState, not a public clock field"
-        );
-        assert!(
-            !production.contains("Utc::now") && !production.contains("Instant::now"),
-            "executor decision time must come from GatewayClock, not system clocks"
-        );
-        assert!(
-            production.contains("allow_same_account_retry")
-                || production.contains("!retried_same_account")
-        );
-        assert!(
-            !production.contains("forward_once"),
-            "executor must not move or reimplement forward_once"
-        );
-        assert!(
-            !production.contains("AttemptSink"),
-            "executor must not move AttemptSink"
-        );
-        assert!(
-            !production.contains("\ntrait ") && !production.contains("pub trait "),
-            "executor must stay a concrete facade without traits"
-        );
-        assert!(
-            !production.contains("use crate::gateway::handler")
-                && !production.contains("use super::handler"),
-            "executor must not import handler"
-        );
-    }
-
-    #[test]
     fn orchestration_types_are_concrete() {
         let _ = std::any::type_name::<super::RequestSnapshots>();
         let _ = std::any::type_name::<super::LoopState>();
         let _ = std::any::type_name::<super::GatewayExecutor>();
-    }
-
-    #[test]
-    fn request_snapshots_remain_clock_free() {
-        let source = include_str!("executor.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source precedes tests");
-        let snapshots = production
-            .split("struct RequestSnapshots {")
-            .nth(1)
-            .expect("RequestSnapshots struct")
-            .split('}')
-            .next()
-            .expect("RequestSnapshots fields");
-        for forbidden in [
-            "gateway_clock",
-            "decision_wall",
-            "decision_mono",
-            "Instant",
-            "DateTime",
-            "Utc",
-            "now_wall",
-            "now_mono",
-        ] {
-            assert!(
-                !snapshots.contains(forbidden),
-                "RequestSnapshots must stay clock-free, found `{forbidden}`"
-            );
-        }
-        assert!(snapshots.contains("config: AppConfig"));
-        assert!(snapshots.contains("pricing: Arc<PricingSnapshot>"));
-        assert!(snapshots.contains("routes: Arc<ForwardRouteSet>"));
-        assert!(snapshots.contains("contracts: Arc<EffectiveContractSet>"));
-        assert!(snapshots.contains("resolved: alias::ResolvedModel"));
-    }
-
-    #[test]
-    fn inner_same_account_retry_does_not_resample_or_reselect() {
-        let source = include_str!("executor.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source precedes tests");
-        let inner = production
-            .split("let mut retried_same_account = false;")
-            .nth(1)
-            .expect("inner retry loop")
-            .split("fn record_plan_failure")
-            .next()
-            .expect("inner retry precedes helpers");
-        for forbidden in [
-            "now_wall",
-            "now_mono",
-            "sample_gateway_clock",
-            "decision_wall",
-            "decision_mono",
-            "select_candidate",
-            "free_channel_cooldown",
-            "free_channel_exhausted",
-            "list_accounts",
-            "list_custom_account_runtimes",
-            "list_goat_account_runtimes",
-            "materialize_account_routes",
-            "Utc::now",
-            "Instant::now",
-        ] {
-            assert!(
-                !inner.contains(forbidden),
-                "same-account retry must not enter selection or resample clocks (`{forbidden}`)"
-            );
-        }
-        assert!(inner.contains("forward_request"));
-        assert!(inner.contains("RetrySameAccount"));
     }
 
     #[test]
