@@ -366,6 +366,8 @@ const openingBrowserTarget = ref<BrowserTarget | null>(null);
 const busy = ref(false);
 const now = ref(Date.now());
 const planFilter = ref<AccountPlanFilter>("all");
+const OLLAMA_WEBSITE_URL = "https://ollama.com";
+
 const statusFilter = ref<AccountStatusFilter>("all");
 const providerCatalog = ref<ProviderCatalogEntry[] | null>(null);
 const catalogLoading = ref(false);
@@ -475,6 +477,8 @@ const statusFilterOptions = computed(() => [
 function handleMenuSelect(key: string | number, accountId: string) {
   if (key === "open-console") {
     void openAccountBrowser(accountId, "console");
+  } else if (key === "open-site") {
+    window.open(OLLAMA_WEBSITE_URL, "_blank", "noopener,noreferrer");
   } else if (key === "continue-setup") {
     openManagedWizard(accountId);
   } else if (key === "edit") {

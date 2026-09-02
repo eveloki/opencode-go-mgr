@@ -105,7 +105,7 @@ test("account menu keeps OpenCode-only actions off other sealed families", () =>
     enabled: true,
   } as unknown as Parameters<typeof accountMenuOptions>[0];
   const keys = accountMenuOptions(ollama, now).map((option) => option.key);
-  assert.deepEqual(keys, ["edit", "delete"]);
+  assert.deepEqual(keys, ["open-site", "edit", "delete"]);
 
   const opencodeGo = {
     ...base,
